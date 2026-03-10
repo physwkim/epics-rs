@@ -4,16 +4,11 @@ pub mod opcodes;
 pub mod postfix;
 pub mod token;
 
-#[cfg(feature = "string")]
 pub mod value;
-#[cfg(feature = "string")]
 pub mod string;
-#[cfg(feature = "string")]
 pub mod checksum;
 
-#[cfg(feature = "array")]
 pub mod array_value;
-#[cfg(feature = "array")]
 pub mod array;
 
 use error::CalcError;
@@ -24,9 +19,7 @@ pub type CalcResult<T> = Result<T, CalcError>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Numeric,
-    #[cfg(feature = "string")]
     String,
-    #[cfg(feature = "array")]
     Array,
 }
 
@@ -58,14 +51,12 @@ impl Default for NumericInputs {
     }
 }
 
-#[cfg(feature = "string")]
 #[derive(Debug, Clone)]
 pub struct StringInputs {
     pub num_vars: [f64; 16],     // A..P
     pub str_vars: [String; 12],  // AA..LL
 }
 
-#[cfg(feature = "string")]
 impl StringInputs {
     pub fn new() -> Self {
         StringInputs {
@@ -75,14 +66,12 @@ impl StringInputs {
     }
 }
 
-#[cfg(feature = "string")]
 impl Default for StringInputs {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "array")]
 #[derive(Debug, Clone)]
 pub struct ArrayInputs {
     pub num_vars: [f64; 16],
@@ -90,7 +79,6 @@ pub struct ArrayInputs {
     pub array_size: usize,
 }
 
-#[cfg(feature = "array")]
 impl ArrayInputs {
     pub fn new(array_size: usize) -> Self {
         ArrayInputs {
@@ -101,7 +89,6 @@ impl ArrayInputs {
     }
 }
 
-#[cfg(feature = "array")]
 impl Default for ArrayInputs {
     fn default() -> Self {
         Self::new(1)

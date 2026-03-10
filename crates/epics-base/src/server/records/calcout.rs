@@ -120,13 +120,19 @@ impl Record for CalcoutRecord {
         self.prev_val = self.val;
         if !self.calc.is_empty() {
             let vars = self.get_vars();
-            self.val = crate::server::calc_engine::evaluate(&self.calc, &vars)?;
+            let mut inputs = crate::calc::NumericInputs::new();
+            inputs.vars[..12].copy_from_slice(&vars);
+            self.val = crate::calc::calc(&self.calc, &mut inputs)
+                .map_err(|e| CaError::CalcError(e.to_string()))?;
         }
 
         if self.should_output() {
             if self.dopt == 1 && !self.ocal.is_empty() {
                 let vars = self.get_vars();
-                self.oval = crate::server::calc_engine::evaluate(&self.ocal, &vars)?;
+                let mut inputs = crate::calc::NumericInputs::new();
+                inputs.vars[..12].copy_from_slice(&vars);
+                self.oval = crate::calc::calc(&self.ocal, &mut inputs)
+                    .map_err(|e| CaError::CalcError(e.to_string()))?;
             } else {
                 self.oval = self.val;
             }

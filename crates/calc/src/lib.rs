@@ -1,82 +1,24 @@
-pub mod engine;
+pub use epics_base_rs::calc::engine;
+pub use epics_base_rs::calc::math;
 
-#[cfg(feature = "math")]
-pub mod math;
+pub use epics_base_rs::calc::CalcError;
+pub use epics_base_rs::calc::{CoreOp, Opcode};
+pub use epics_base_rs::calc::{CalcResult, CompiledExpr, ExprKind, NumericInputs};
 
-#[cfg(feature = "epics")]
-pub mod record;
+pub use epics_base_rs::calc::StringOp;
+pub use epics_base_rs::calc::StackValue;
+pub use epics_base_rs::calc::StringInputs;
 
-pub use engine::error::CalcError;
-pub use engine::opcodes::{CoreOp, Opcode};
-pub use engine::{CalcResult, CompiledExpr, ExprKind, NumericInputs};
+pub use epics_base_rs::calc::ArrayOp;
+pub use epics_base_rs::calc::ArrayStackValue;
+pub use epics_base_rs::calc::ArrayInputs;
 
-#[cfg(feature = "string")]
-pub use engine::opcodes::StringOp;
-#[cfg(feature = "string")]
-pub use engine::value::StackValue;
-#[cfg(feature = "string")]
-pub use engine::StringInputs;
+pub use epics_base_rs::calc::{compile, eval, calc};
+pub use epics_base_rs::calc::{scalc_compile, scalc_eval, scalc};
+pub use epics_base_rs::calc::{acalc_compile, acalc_eval, acalc};
 
-#[cfg(feature = "array")]
-pub use engine::opcodes::ArrayOp;
-#[cfg(feature = "array")]
-pub use engine::array_value::ArrayStackValue;
-#[cfg(feature = "array")]
-pub use engine::ArrayInputs;
-
-/// Compile an infix expression string into a postfix `CompiledExpr`.
-pub fn compile(expr: &str) -> CalcResult<CompiledExpr> {
-    let tokens = engine::token::tokenize(expr)?;
-    engine::postfix::compile(&tokens)
-}
-
-/// Evaluate a compiled expression with the given inputs.
-pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> CalcResult<f64> {
-    engine::numeric::eval(expr, inputs)
-}
-
-/// Compile and evaluate an expression in one step.
-pub fn calc(expr: &str, inputs: &mut NumericInputs) -> CalcResult<f64> {
-    let compiled = compile(expr)?;
-    eval(&compiled, inputs)
-}
-
-#[cfg(feature = "string")]
-pub fn scalc_compile(expr: &str) -> CalcResult<CompiledExpr> {
-    let tokens = engine::token::tokenize(expr)?;
-    engine::postfix::compile(&tokens)
-}
-
-#[cfg(feature = "string")]
-pub fn scalc_eval(
-    expr: &CompiledExpr,
-    inputs: &mut StringInputs,
-) -> CalcResult<StackValue> {
-    engine::string::eval(expr, inputs)
-}
-
-#[cfg(feature = "string")]
-pub fn scalc(expr: &str, inputs: &mut StringInputs) -> CalcResult<StackValue> {
-    let compiled = scalc_compile(expr)?;
-    scalc_eval(&compiled, inputs)
-}
-
-#[cfg(feature = "array")]
-pub fn acalc_compile(expr: &str) -> CalcResult<CompiledExpr> {
-    let tokens = engine::token::tokenize(expr)?;
-    engine::postfix::compile(&tokens)
-}
-
-#[cfg(feature = "array")]
-pub fn acalc_eval(
-    expr: &CompiledExpr,
-    inputs: &mut ArrayInputs,
-) -> CalcResult<ArrayStackValue> {
-    engine::array::eval(expr, inputs)
-}
-
-#[cfg(feature = "array")]
-pub fn acalc(expr: &str, inputs: &mut ArrayInputs) -> CalcResult<ArrayStackValue> {
-    let compiled = acalc_compile(expr)?;
-    acalc_eval(&compiled, inputs)
+pub mod record {
+    pub use epics_base_rs::server::records::scalcout::ScalcoutRecord;
+    pub use epics_base_rs::server::records::sseq::SseqRecord;
+    pub use epics_base_rs::server::records::transform::TransformRecord;
 }

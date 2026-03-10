@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::error::{AutosaveError, AutosaveResult};
-use crate::format::MAX_INCLUDE_DEPTH;
-use crate::macros::MacroContext;
+use super::error::{AutosaveError, AutosaveResult};
+use super::format::MAX_INCLUDE_DEPTH;
+use super::macros::MacroContext;
 
 /// A single entry parsed from a .req file.
 #[derive(Debug, Clone)]

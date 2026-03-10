@@ -1,7 +1,7 @@
-use crate::engine::error::CalcError;
-use crate::engine::opcodes::{CoreOp, Opcode};
-use crate::engine::token::{ConstName, FuncName, Token};
-use crate::engine::{CompiledExpr, ExprKind};
+use super::error::CalcError;
+use super::opcodes::{CoreOp, Opcode};
+use super::token::{ConstName, FuncName, Token};
+use super::{CompiledExpr, ExprKind};
 
 // Operator precedence levels (matching sCalcPostfix.c)
 //  2: ||, |, OR, XOR
@@ -82,9 +82,8 @@ fn token_to_binary_opcode(token: &Token) -> Opcode {
         Token::Shr => CoreOp::Shr,
         Token::MaxOp => CoreOp::MaxVal,
         Token::MinOp => CoreOp::MinVal,
-        #[cfg(feature = "string")]
         Token::PipeMinus => {
-            return Opcode::String(crate::engine::opcodes::StringOp::SubLast);
+            return Opcode::String(super::opcodes::StringOp::SubLast);
         }
         _ => unreachable!(),
     };
@@ -125,86 +124,46 @@ fn func_to_opcode(func: &FuncName, nargs: u8) -> Opcode {
         FuncName::Max => CoreOp::Max(nargs),
         FuncName::Min => CoreOp::Min(nargs),
         FuncName::Not => CoreOp::BitNot,
-        #[cfg(feature = "string")]
-        FuncName::Dbl => return Opcode::String(crate::engine::opcodes::StringOp::ToDouble),
-        #[cfg(feature = "string")]
-        FuncName::Str => return Opcode::String(crate::engine::opcodes::StringOp::ToString),
-        #[cfg(feature = "string")]
-        FuncName::Len => return Opcode::String(crate::engine::opcodes::StringOp::Len),
-        #[cfg(feature = "string")]
-        FuncName::Byte => return Opcode::String(crate::engine::opcodes::StringOp::Byte),
-        #[cfg(feature = "string")]
-        FuncName::TrEsc => return Opcode::String(crate::engine::opcodes::StringOp::TrEsc),
-        #[cfg(feature = "string")]
-        FuncName::Esc => return Opcode::String(crate::engine::opcodes::StringOp::Esc),
-        #[cfg(feature = "string")]
-        FuncName::Printf => return Opcode::String(crate::engine::opcodes::StringOp::Printf),
-        #[cfg(feature = "string")]
-        FuncName::Sscanf => return Opcode::String(crate::engine::opcodes::StringOp::Sscanf),
-        #[cfg(feature = "string")]
-        FuncName::BinRead => return Opcode::String(crate::engine::opcodes::StringOp::BinRead),
-        #[cfg(feature = "string")]
-        FuncName::BinWrite => return Opcode::String(crate::engine::opcodes::StringOp::BinWrite),
-        #[cfg(feature = "string")]
-        FuncName::Crc16 => return Opcode::String(crate::engine::opcodes::StringOp::Crc16),
-        #[cfg(feature = "string")]
-        FuncName::ModBus => return Opcode::String(crate::engine::opcodes::StringOp::Crc16Append),
-        #[cfg(feature = "string")]
-        FuncName::Lrc => return Opcode::String(crate::engine::opcodes::StringOp::Lrc),
-        #[cfg(feature = "string")]
-        FuncName::AModBus => return Opcode::String(crate::engine::opcodes::StringOp::LrcAppend),
-        #[cfg(feature = "string")]
-        FuncName::Xor8 => return Opcode::String(crate::engine::opcodes::StringOp::Xor8),
-        #[cfg(feature = "string")]
-        FuncName::AddXor8 => return Opcode::String(crate::engine::opcodes::StringOp::Xor8Append),
-        #[cfg(feature = "array")]
-        FuncName::Avg => return Opcode::Array(crate::engine::opcodes::ArrayOp::Average),
-        #[cfg(feature = "array")]
-        FuncName::Std => return Opcode::Array(crate::engine::opcodes::ArrayOp::StdDev),
-        #[cfg(feature = "array")]
-        FuncName::FwhmFunc => return Opcode::Array(crate::engine::opcodes::ArrayOp::Fwhm),
-        #[cfg(feature = "array")]
-        FuncName::Sum => return Opcode::Array(crate::engine::opcodes::ArrayOp::ArraySum),
-        #[cfg(feature = "array")]
-        FuncName::AMax => return Opcode::Array(crate::engine::opcodes::ArrayOp::ArrayMax),
-        #[cfg(feature = "array")]
-        FuncName::AMin => return Opcode::Array(crate::engine::opcodes::ArrayOp::ArrayMin),
-        #[cfg(feature = "array")]
-        FuncName::IxMax => return Opcode::Array(crate::engine::opcodes::ArrayOp::IndexMax),
-        #[cfg(feature = "array")]
-        FuncName::IxMin => return Opcode::Array(crate::engine::opcodes::ArrayOp::IndexMin),
-        #[cfg(feature = "array")]
-        FuncName::IxZ => return Opcode::Array(crate::engine::opcodes::ArrayOp::IndexZero),
-        #[cfg(feature = "array")]
-        FuncName::IxNz => return Opcode::Array(crate::engine::opcodes::ArrayOp::IndexNonZero),
-        #[cfg(feature = "array")]
-        FuncName::Arr => return Opcode::Array(crate::engine::opcodes::ArrayOp::ToArray),
-        #[cfg(feature = "array")]
-        FuncName::Ix => return Opcode::Array(crate::engine::opcodes::ArrayOp::ConstIndex),
-        #[cfg(feature = "array")]
-        FuncName::AToD => return Opcode::Array(crate::engine::opcodes::ArrayOp::ToDouble),
-        #[cfg(feature = "array")]
-        FuncName::Smoo => return Opcode::Array(crate::engine::opcodes::ArrayOp::Smooth),
-        #[cfg(feature = "array")]
-        FuncName::NSmoo => return Opcode::Array(crate::engine::opcodes::ArrayOp::NSmooth),
-        #[cfg(feature = "array")]
-        FuncName::Deriv => return Opcode::Array(crate::engine::opcodes::ArrayOp::Deriv),
-        #[cfg(feature = "array")]
-        FuncName::NDeriv => return Opcode::Array(crate::engine::opcodes::ArrayOp::NDeriv),
-        #[cfg(feature = "array")]
-        FuncName::FitPoly => return Opcode::Array(crate::engine::opcodes::ArrayOp::FitPoly),
-        #[cfg(feature = "array")]
-        FuncName::FitMPoly => return Opcode::Array(crate::engine::opcodes::ArrayOp::FitMPoly),
-        #[cfg(feature = "array")]
-        FuncName::FitQ => return Opcode::Array(crate::engine::opcodes::ArrayOp::FitQ),
-        #[cfg(feature = "array")]
-        FuncName::FitMQ => return Opcode::Array(crate::engine::opcodes::ArrayOp::FitMQ),
-        #[cfg(feature = "array")]
-        FuncName::Cum => return Opcode::Array(crate::engine::opcodes::ArrayOp::Cum),
-        #[cfg(feature = "array")]
-        FuncName::Cat => return Opcode::Array(crate::engine::opcodes::ArrayOp::Cat),
-        #[cfg(feature = "array")]
-        FuncName::ARndm => return Opcode::Array(crate::engine::opcodes::ArrayOp::ArrayRandom),
+        FuncName::Dbl => return Opcode::String(super::opcodes::StringOp::ToDouble),
+        FuncName::Str => return Opcode::String(super::opcodes::StringOp::ToString),
+        FuncName::Len => return Opcode::String(super::opcodes::StringOp::Len),
+        FuncName::Byte => return Opcode::String(super::opcodes::StringOp::Byte),
+        FuncName::TrEsc => return Opcode::String(super::opcodes::StringOp::TrEsc),
+        FuncName::Esc => return Opcode::String(super::opcodes::StringOp::Esc),
+        FuncName::Printf => return Opcode::String(super::opcodes::StringOp::Printf),
+        FuncName::Sscanf => return Opcode::String(super::opcodes::StringOp::Sscanf),
+        FuncName::BinRead => return Opcode::String(super::opcodes::StringOp::BinRead),
+        FuncName::BinWrite => return Opcode::String(super::opcodes::StringOp::BinWrite),
+        FuncName::Crc16 => return Opcode::String(super::opcodes::StringOp::Crc16),
+        FuncName::ModBus => return Opcode::String(super::opcodes::StringOp::Crc16Append),
+        FuncName::Lrc => return Opcode::String(super::opcodes::StringOp::Lrc),
+        FuncName::AModBus => return Opcode::String(super::opcodes::StringOp::LrcAppend),
+        FuncName::Xor8 => return Opcode::String(super::opcodes::StringOp::Xor8),
+        FuncName::AddXor8 => return Opcode::String(super::opcodes::StringOp::Xor8Append),
+        FuncName::Avg => return Opcode::Array(super::opcodes::ArrayOp::Average),
+        FuncName::Std => return Opcode::Array(super::opcodes::ArrayOp::StdDev),
+        FuncName::FwhmFunc => return Opcode::Array(super::opcodes::ArrayOp::Fwhm),
+        FuncName::Sum => return Opcode::Array(super::opcodes::ArrayOp::ArraySum),
+        FuncName::AMax => return Opcode::Array(super::opcodes::ArrayOp::ArrayMax),
+        FuncName::AMin => return Opcode::Array(super::opcodes::ArrayOp::ArrayMin),
+        FuncName::IxMax => return Opcode::Array(super::opcodes::ArrayOp::IndexMax),
+        FuncName::IxMin => return Opcode::Array(super::opcodes::ArrayOp::IndexMin),
+        FuncName::IxZ => return Opcode::Array(super::opcodes::ArrayOp::IndexZero),
+        FuncName::IxNz => return Opcode::Array(super::opcodes::ArrayOp::IndexNonZero),
+        FuncName::Arr => return Opcode::Array(super::opcodes::ArrayOp::ToArray),
+        FuncName::Ix => return Opcode::Array(super::opcodes::ArrayOp::ConstIndex),
+        FuncName::AToD => return Opcode::Array(super::opcodes::ArrayOp::ToDouble),
+        FuncName::Smoo => return Opcode::Array(super::opcodes::ArrayOp::Smooth),
+        FuncName::NSmoo => return Opcode::Array(super::opcodes::ArrayOp::NSmooth),
+        FuncName::Deriv => return Opcode::Array(super::opcodes::ArrayOp::Deriv),
+        FuncName::NDeriv => return Opcode::Array(super::opcodes::ArrayOp::NDeriv),
+        FuncName::FitPoly => return Opcode::Array(super::opcodes::ArrayOp::FitPoly),
+        FuncName::FitMPoly => return Opcode::Array(super::opcodes::ArrayOp::FitMPoly),
+        FuncName::FitQ => return Opcode::Array(super::opcodes::ArrayOp::FitQ),
+        FuncName::FitMQ => return Opcode::Array(super::opcodes::ArrayOp::FitMQ),
+        FuncName::Cum => return Opcode::Array(super::opcodes::ArrayOp::Cum),
+        FuncName::Cat => return Opcode::Array(super::opcodes::ArrayOp::Cat),
+        FuncName::ARndm => return Opcode::Array(super::opcodes::ArrayOp::ArrayRandom),
     };
     Opcode::Core(core)
 }
@@ -274,11 +233,8 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
     let mut has_string_ops = false;
     #[allow(unused_mut)]
     let mut has_array_ops = false;
-    #[cfg(feature = "string")]
     let mut bracket_depth: i32 = 0;
-    #[cfg(feature = "string")]
     let mut brace_depth: i32 = 0;
-    #[cfg(feature = "string")]
     let mut until_stack: Vec<usize> = Vec::new();
 
     while pos < tokens.len() {
@@ -322,10 +278,9 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                     operand_needed = false;
                 }
 
-                #[cfg(feature = "string")]
                 Token::StringLiteral(s) => {
                     output.push(Opcode::String(
-                        crate::engine::opcodes::StringOp::PushString(s.clone()),
+                        super::opcodes::StringOp::PushString(s.clone()),
                     ));
                     runtime_depth += 1;
                     operand_needed = false;
@@ -359,14 +314,13 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                     stack.push(StackEntry::LParen);
                 }
 
-                #[cfg(feature = "string")]
                 Token::UntilKeyword => {
                     // UNTIL marks the start of a loop.
                     // Record the current output position as the loop start.
                     // Emit placeholder Until opcode (will be patched).
                     let until_pc = output.len();
                     output.push(Opcode::Control(
-                        crate::engine::opcodes::ControlOp::Until(0), // placeholder
+                        super::opcodes::ControlOp::Until(0), // placeholder
                     ));
                     until_stack.push(until_pc);
                     has_string_ops = true;
@@ -486,15 +440,14 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                         flush_stack_entry(&entry, &mut output);
                     }
                     // If there's a pending UNTIL, close it
-                    #[cfg(feature = "string")]
                     if let Some(until_pc) = until_stack.pop() {
                         let end_pc = output.len();
                         output.push(Opcode::Control(
-                            crate::engine::opcodes::ControlOp::UntilEnd(until_pc),
+                            super::opcodes::ControlOp::UntilEnd(until_pc),
                         ));
                         // Patch the Until opcode with the end_pc
                         output[until_pc] = Opcode::Control(
-                            crate::engine::opcodes::ControlOp::Until(end_pc),
+                            super::opcodes::ControlOp::Until(end_pc),
                         );
                     }
                     operand_needed = true;
@@ -538,7 +491,6 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                 }
 
                 // Bracket subrange: expr[start,end] → Subrange
-                #[cfg(feature = "string")]
                 Token::LBracket => {
                     // Flush pending operators
                     pop_higher_or_equal(&mut stack, 11, &mut output, &mut runtime_depth);
@@ -550,7 +502,6 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                 }
 
                 // Brace replace: expr{find,replace} → Replace
-                #[cfg(feature = "string")]
                 Token::LBrace => {
                     pop_higher_or_equal(&mut stack, 11, &mut output, &mut runtime_depth);
                     stack.push(StackEntry::LParen);
@@ -559,7 +510,6 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                     brace_depth += 1;
                 }
 
-                #[cfg(feature = "string")]
                 Token::RBracket => {
                     if bracket_depth == 0 {
                         return Err(CalcError::BracketNotOpen);
@@ -581,12 +531,11 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                         }
                     }
                     output.push(Opcode::String(
-                        crate::engine::opcodes::StringOp::Subrange,
+                        super::opcodes::StringOp::Subrange,
                     ));
                     runtime_depth -= 2; // consumes string + 2 args, pushes 1
                 }
 
-                #[cfg(feature = "string")]
                 Token::RBrace => {
                     if brace_depth == 0 {
                         return Err(CalcError::BraceNotOpen);
@@ -607,12 +556,11 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                         }
                     }
                     output.push(Opcode::String(
-                        crate::engine::opcodes::StringOp::Replace,
+                        super::opcodes::StringOp::Replace,
                     ));
                     runtime_depth -= 2; // consumes string + 2 args, pushes 1
                 }
 
-                #[cfg(feature = "string")]
                 Token::PipeMinus => {
                     pop_higher_or_equal(&mut stack, 6, &mut output, &mut runtime_depth);
                     stack.push(StackEntry::Op {
@@ -655,15 +603,9 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
     output.push(Opcode::Core(CoreOp::End));
 
     let kind = if has_array_ops {
-        #[cfg(feature = "array")]
-        { ExprKind::Array }
-        #[cfg(not(feature = "array"))]
-        { ExprKind::Numeric }
+        ExprKind::Array
     } else if has_string_ops {
-        #[cfg(feature = "string")]
-        { ExprKind::String }
-        #[cfg(not(feature = "string"))]
-        { ExprKind::Numeric }
+        ExprKind::String
     } else {
         ExprKind::Numeric
     };

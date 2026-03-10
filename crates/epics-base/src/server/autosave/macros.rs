@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::error::{AutosaveError, AutosaveResult};
+use super::error::{AutosaveError, AutosaveResult};
 
 /// Macro expansion context for `$(KEY)` and `${KEY}` patterns.
 #[derive(Debug, Clone, Default)]

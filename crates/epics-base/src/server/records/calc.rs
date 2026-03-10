@@ -153,7 +153,10 @@ impl Record for CalcRecord {
     fn process(&mut self) -> CaResult<RecordProcessResult> {
         if !self.calc.is_empty() {
             let vars = self.get_vars();
-            self.val = crate::server::calc_engine::evaluate(&self.calc, &vars)?;
+            let mut inputs = crate::calc::NumericInputs::new();
+            inputs.vars[..12].copy_from_slice(&vars);
+            self.val = crate::calc::calc(&self.calc, &mut inputs)
+                .map_err(|e| CaError::CalcError(e.to_string()))?;
         }
         // Save current values to LA-LL for next cycle
         self.la = self.a; self.lb = self.b; self.lc = self.c; self.ld = self.d;

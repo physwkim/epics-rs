@@ -1,3 +1,4 @@
+pub mod calc;
 pub mod channel;
 pub mod client;
 pub mod error;

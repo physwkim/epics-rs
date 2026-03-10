@@ -1,5 +1,2 @@
-pub mod record;
-pub mod types;
-
-pub use record::BusyRecord;
-pub use types::{AlarmSevr, Ivoa, Omsl};
+pub use epics_base_rs::server::records::busy::BusyRecord;
+pub use epics_base_rs::server::records::busy::{AlarmSevr, Ivoa, Omsl};

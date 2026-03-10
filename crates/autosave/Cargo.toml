@@ -2,13 +2,11 @@
 name = "autosave-rs"
 version = "0.2.1"
 edition = "2021"
-description = "EPICS autosave ported to Rust"
+description = "EPICS autosave ported to Rust — thin wrapper over epics-base-rs"
 
 [dependencies]
 epics-base-rs = { path = "../epics-base" }
-tokio = { version = "1", features = ["full"] }
-thiserror = "2"
-chrono = "0.4"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs"] }
 tempfile = "3"

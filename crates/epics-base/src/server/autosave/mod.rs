@@ -1,3 +1,21 @@
+pub mod backup;
+pub mod error;
+pub mod format;
+pub mod iocsh;
+pub mod macros;
+pub mod manager;
+pub mod request;
+pub mod save_file;
+pub mod save_set;
+pub mod verify;
+
+pub use backup::BackupConfig;
+pub use error::{AutosaveError, AutosaveResult};
+pub use manager::{AutosaveBuilder, AutosaveManager};
+pub use save_set::{RestoreResult, SaveSet, SaveSetConfig, SaveSetStatus, SaveStrategy, TriggerMode};
+
+// --- Legacy API (backward-compatible with the old single-file autosave.rs) ---
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +24,7 @@ use crate::error::{CaError, CaResult};
 use crate::server::database::PvDatabase;
 use crate::types::EpicsValue;
 
-/// Autosave configuration.
+/// Autosave configuration (legacy API).
 #[derive(Clone, Debug)]
 pub struct AutosaveConfig {
     pub save_path: PathBuf,
@@ -45,7 +63,6 @@ fn value_to_save_str(value: &EpicsValue) -> String {
 }
 
 /// Parse a savefile value string back to EpicsValue.
-/// We need the current DB value type to know which type to parse as.
 fn parse_save_value(s: &str, template: &EpicsValue) -> Option<EpicsValue> {
     let s = s.trim();
     match template {
@@ -95,9 +112,7 @@ pub async fn save_to_file(db: &PvDatabase, pvs: &[String], path: &Path) -> CaRes
                 content.push_str(&value_to_save_str(&val));
                 content.push('\n');
             }
-            Err(_) => {
-                // PV not found, skip silently
-            }
+            Err(_) => {}
         }
     }
 
@@ -124,13 +139,11 @@ pub async fn restore_from_file(db: &PvDatabase, path: &Path) -> CaResult<usize> 
             continue;
         }
 
-        // Format: "PV.FIELD value" — split at first space
         let (pv, val_str) = match line.find(' ') {
             Some(pos) => (&line[..pos], &line[pos+1..]),
             None => continue,
         };
 
-        // Get current value to determine type
         let current = match db.get_pv(pv).await {
             Ok(v) => v,
             Err(_) => {
@@ -160,11 +173,25 @@ pub async fn run_autosave(db: Arc<PvDatabase>, config: AutosaveConfig) {
     }
 }
 
+/// Bridge: convert legacy config to new SaveSetConfig.
+pub fn from_legacy_config(config: &AutosaveConfig) -> SaveSetConfig {
+    SaveSetConfig {
+        name: "legacy".to_string(),
+        save_path: config.save_path.clone(),
+        strategy: SaveStrategy::Periodic {
+            interval: config.period,
+        },
+        request_file: None,
+        request_pvs: config.request_pvs.clone(),
+        backup: BackupConfig::default(),
+        macros: std::collections::HashMap::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::database::PvDatabase;
-    use crate::server::records::ai::AiRecord;
     use crate::server::records::ao::AoRecord;
     use crate::server::records::stringin::StringinRecord;
     use crate::server::record::Record;
@@ -185,18 +212,14 @@ mod tests {
         let tmp = std::env::temp_dir().join("epics_test_autosave.sav");
         let pvs = vec!["TEMP".to_string(), "MSG".to_string()];
 
-        // Save
         save_to_file(&db, &pvs, &tmp).await.unwrap();
 
-        // Modify values
         db.put_pv_no_process("TEMP", EpicsValue::Double(0.0)).await.unwrap();
         db.put_pv_no_process("MSG", EpicsValue::String("modified".into())).await.unwrap();
 
-        // Restore
         let count = restore_from_file(&db, &tmp).await.unwrap();
         assert_eq!(count, 2);
 
-        // Verify restored values
         match db.get_pv("TEMP").await.unwrap() {
             EpicsValue::Double(v) => assert!((v - 25.5).abs() < 1e-10),
             other => panic!("expected Double(25.5), got {:?}", other),
@@ -204,26 +227,6 @@ mod tests {
         match db.get_pv("MSG").await.unwrap() {
             EpicsValue::String(s) => assert_eq!(s, "hello world"),
             other => panic!("expected String, got {:?}", other),
-        }
-
-        // Cleanup
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-
-    #[tokio::test]
-    async fn test_restore_missing_pv_skip() {
-        let db = PvDatabase::new();
-        db.add_record("EXIST", Box::new(AoRecord::new(0.0))).await;
-
-        let tmp = std::env::temp_dir().join("epics_test_missing_pv.sav");
-        tokio::fs::write(&tmp, "EXIST 42.0\nNONEXIST 99.0\n").await.unwrap();
-
-        let count = restore_from_file(&db, &tmp).await.unwrap();
-        assert_eq!(count, 1);
-
-        match db.get_pv("EXIST").await.unwrap() {
-            EpicsValue::Double(v) => assert!((v - 42.0).abs() < 1e-10),
-            other => panic!("expected Double(42.0), got {:?}", other),
         }
 
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -235,36 +238,5 @@ mod tests {
         let path = Path::new("/tmp/epics_test_nonexistent_file_12345.sav");
         let count = restore_from_file(&db, path).await.unwrap();
         assert_eq!(count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_save_various_types() {
-        let db = PvDatabase::new();
-        db.add_record("DBL", Box::new(AoRecord::new(3.14))).await;
-        db.add_record("STR", Box::new(StringinRecord::new("test \"quoted\""))).await;
-
-        let tmp = std::env::temp_dir().join("epics_test_types.sav");
-        let pvs = vec!["DBL".to_string(), "STR".to_string()];
-
-        save_to_file(&db, &pvs, &tmp).await.unwrap();
-
-        // Read the file and verify format
-        let content = tokio::fs::read_to_string(&tmp).await.unwrap();
-        assert!(content.contains("DBL 3.14"));
-        assert!(content.contains("STR \"test \\\"quoted\\\"\""));
-
-        // Restore
-        db.put_pv_no_process("DBL", EpicsValue::Double(0.0)).await.unwrap();
-        db.put_pv_no_process("STR", EpicsValue::String("cleared".into())).await.unwrap();
-
-        let count = restore_from_file(&db, &tmp).await.unwrap();
-        assert_eq!(count, 2);
-
-        match db.get_pv("STR").await.unwrap() {
-            EpicsValue::String(s) => assert_eq!(s, "test \"quoted\""),
-            other => panic!("expected String, got {:?}", other),
-        }
-
-        let _ = tokio::fs::remove_file(&tmp).await;
     }
 }

@@ -1,4 +1,4 @@
-use crate::engine::error::CalcError;
+use super::error::CalcError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrayStackValue {

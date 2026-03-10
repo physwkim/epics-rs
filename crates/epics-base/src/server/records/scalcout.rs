@@ -1,10 +1,10 @@
-use epics_base_rs::error::{CaError, CaResult};
-use epics_base_rs::server::record::{FieldDesc, Record, RecordProcessResult};
-use epics_base_rs::types::{DbFieldType, EpicsValue};
+use crate::error::{CaError, CaResult};
+use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::types::{DbFieldType, EpicsValue};
 
-use crate::engine::StringInputs;
-use crate::engine::value::StackValue;
-use crate::{scalc_compile, scalc_eval, CompiledExpr};
+use crate::calc::StringInputs;
+use crate::calc::engine::value::StackValue;
+use crate::calc::{scalc_compile, scalc_eval, CompiledExpr};
 
 /// Scalcout record — string calc with output.
 ///

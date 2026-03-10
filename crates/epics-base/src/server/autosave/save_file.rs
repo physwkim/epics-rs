@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use chrono::Local;
-use epics_base_rs::types::EpicsValue;
+use crate::types::EpicsValue;
 
-use crate::error::{AutosaveError, AutosaveResult};
-use crate::format::{ARRAY_MARKER, END_MARKER, VERSION};
+use super::error::{AutosaveError, AutosaveResult};
+use super::format::{ARRAY_MARKER, END_MARKER, VERSION};
 
 /// A single PV entry in a .sav file.
 #[derive(Debug, Clone)]

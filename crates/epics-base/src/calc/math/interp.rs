@@ -1,4 +1,4 @@
-use crate::CalcError;
+use crate::calc::CalcError;
 
 /// Polynomial interpolation using Neville's algorithm.
 /// `order` is the polynomial order (1=linear, 2=quadratic, etc.).

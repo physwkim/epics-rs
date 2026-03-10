@@ -1,4 +1,4 @@
-use crate::engine::error::CalcError;
+use super::error::CalcError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FuncName {
@@ -31,88 +31,48 @@ pub enum FuncName {
     Min,
     Not, // bitwise NOT as function
     // String functions (Phase 2A)
-    #[cfg(feature = "string")]
     Dbl,
-    #[cfg(feature = "string")]
     Str,
-    #[cfg(feature = "string")]
     Len,
-    #[cfg(feature = "string")]
     Byte,
     // String functions (Phase 2B)
-    #[cfg(feature = "string")]
     TrEsc,
-    #[cfg(feature = "string")]
     Esc,
-    #[cfg(feature = "string")]
     Printf,
-    #[cfg(feature = "string")]
     Sscanf,
-    #[cfg(feature = "string")]
     BinRead,
-    #[cfg(feature = "string")]
     BinWrite,
-    #[cfg(feature = "string")]
     Crc16,
-    #[cfg(feature = "string")]
     ModBus,
-    #[cfg(feature = "string")]
     Lrc,
-    #[cfg(feature = "string")]
     AModBus,
-    #[cfg(feature = "string")]
     Xor8,
-    #[cfg(feature = "string")]
     AddXor8,
     // Array functions (Phase 3A)
-    #[cfg(feature = "array")]
     Avg,
-    #[cfg(feature = "array")]
     Std,
-    #[cfg(feature = "array")]
     FwhmFunc,
-    #[cfg(feature = "array")]
     Sum,
-    #[cfg(feature = "array")]
     AMax,
-    #[cfg(feature = "array")]
     AMin,
-    #[cfg(feature = "array")]
     IxMax,
-    #[cfg(feature = "array")]
     IxMin,
-    #[cfg(feature = "array")]
     IxZ,
-    #[cfg(feature = "array")]
     IxNz,
-    #[cfg(feature = "array")]
     Arr,
-    #[cfg(feature = "array")]
     Ix,
-    #[cfg(feature = "array")]
     AToD,
     // Array functions (Phase 3B)
-    #[cfg(feature = "array")]
     Smoo,
-    #[cfg(feature = "array")]
     NSmoo,
-    #[cfg(feature = "array")]
     Deriv,
-    #[cfg(feature = "array")]
     NDeriv,
-    #[cfg(feature = "array")]
     FitPoly,
-    #[cfg(feature = "array")]
     FitMPoly,
-    #[cfg(feature = "array")]
     FitQ,
-    #[cfg(feature = "array")]
     FitMQ,
-    #[cfg(feature = "array")]
     Cum,
-    #[cfg(feature = "array")]
     Cat,
-    #[cfg(feature = "array")]
     ARndm,
 }
 
@@ -131,7 +91,6 @@ pub enum Token {
     Rndm,
     Nrndm,
 
-    #[cfg(feature = "string")]
     StringLiteral(String),
 
     Plus,
@@ -167,15 +126,10 @@ pub enum Token {
     Comma,
     Semicolon,
 
-    #[cfg(feature = "string")]
     LBracket,
-    #[cfg(feature = "string")]
     RBracket,
-    #[cfg(feature = "string")]
     LBrace,
-    #[cfg(feature = "string")]
     RBrace,
-    #[cfg(feature = "string")]
     PipeMinus, // |-
 
     Func(FuncName),
@@ -189,7 +143,6 @@ pub enum Token {
     AndKeyword,  // AND
     OrKeyword,   // OR
 
-    #[cfg(feature = "string")]
     UntilKeyword,
 }
 
@@ -226,7 +179,6 @@ impl<'a> Tokenizer<'a> {
         self.input[self.pos..].iter().map(|b| b.to_ascii_uppercase()).collect()
     }
 
-    #[cfg(feature = "string")]
     fn read_string_literal(&mut self, quote: u8) -> Result<String, CalcError> {
         let mut result = String::new();
         loop {
@@ -306,7 +258,6 @@ impl<'a> Tokenizer<'a> {
         ];
 
         // String function keywords
-        #[cfg(feature = "string")]
         {
             keywords.extend_from_slice(&[
                 (b"BIN_READ" as &[u8], Token::Func(FuncName::BinRead)),
@@ -330,7 +281,6 @@ impl<'a> Tokenizer<'a> {
         }
 
         // Array function keywords
-        #[cfg(feature = "array")]
         {
             keywords.extend_from_slice(&[
                 (b"FITMPOLY" as &[u8], Token::Func(FuncName::FitMPoly)),
@@ -452,7 +402,6 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CalcError> {
         }
 
         // String literals
-        #[cfg(feature = "string")]
         if b == b'"' || b == b'\'' {
             tokenizer.advance();
             let s = tokenizer.read_string_literal(b)?;
@@ -484,13 +433,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CalcError> {
             b';' => tokens.push(Token::Semicolon),
             b'?' => tokens.push(Token::Question),
             b'#' => tokens.push(Token::Ne),
-            #[cfg(feature = "string")]
             b'[' => tokens.push(Token::LBracket),
-            #[cfg(feature = "string")]
             b']' => tokens.push(Token::RBracket),
-            #[cfg(feature = "string")]
             b'{' => tokens.push(Token::LBrace),
-            #[cfg(feature = "string")]
             b'}' => tokens.push(Token::RBrace),
             b'*' => {
                 if tokenizer.peek() == Some(b'*') {
@@ -551,7 +496,6 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CalcError> {
                 }
             }
             b'|' => {
-                #[cfg(feature = "string")]
                 if tokenizer.peek() == Some(b'-') {
                     tokenizer.advance();
                     tokens.push(Token::PipeMinus);

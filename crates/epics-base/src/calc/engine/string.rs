@@ -1,7 +1,7 @@
-use crate::engine::error::CalcError;
-use crate::engine::opcodes::{CoreOp, Opcode, StringOp};
-use crate::engine::value::StackValue;
-use crate::engine::{CompiledExpr, StringInputs};
+use super::error::CalcError;
+use super::opcodes::{CoreOp, Opcode, StringOp};
+use super::value::StackValue;
+use super::{CompiledExpr, StringInputs};
 
 pub fn eval(
     expr: &CompiledExpr,
@@ -560,14 +560,14 @@ pub fn eval(
                 StringOp::Crc16 => {
                     let v = pop1(&mut stack)?;
                     let s = v.as_str_ref()?;
-                    let crc = crate::engine::checksum::crc16(s.as_bytes());
+                    let crc = super::checksum::crc16(s.as_bytes());
                     stack.push(StackValue::Double(crc as f64));
                 }
                 StringOp::Crc16Append => {
                     // MODBUS: append CRC16 as two bytes (little-endian)
                     let v = pop1(&mut stack)?;
                     let s = v.as_str_ref()?;
-                    let crc = crate::engine::checksum::crc16(s.as_bytes());
+                    let crc = super::checksum::crc16(s.as_bytes());
                     let mut result = s.to_string();
                     result.push((crc & 0xFF) as u8 as char);
                     result.push(((crc >> 8) & 0xFF) as u8 as char);
@@ -576,7 +576,7 @@ pub fn eval(
                 StringOp::Lrc => {
                     let v = pop1(&mut stack)?;
                     let s = v.as_str_ref()?;
-                    match crate::engine::checksum::lrc(s) {
+                    match super::checksum::lrc(s) {
                         Some(lrc_str) => {
                             stack.push(StackValue::Str(lrc_str));
                         }
@@ -587,7 +587,7 @@ pub fn eval(
                     // AMODBUS: append LRC hex string
                     let v = pop1(&mut stack)?;
                     let s = v.as_str_ref()?;
-                    match crate::engine::checksum::lrc(s) {
+                    match super::checksum::lrc(s) {
                         Some(lrc_str) => {
                             let mut result = s.to_string();
                             result.push_str(&lrc_str);
@@ -599,14 +599,14 @@ pub fn eval(
                 StringOp::Xor8 => {
                     let v = pop1(&mut stack)?;
                     let s = v.as_str_ref()?;
-                    let xor = crate::engine::checksum::xor8(s.as_bytes());
+                    let xor = super::checksum::xor8(s.as_bytes());
                     stack.push(StackValue::Double(xor as f64));
                 }
                 StringOp::Xor8Append => {
                     // ADD_XOR8: append XOR8 as one byte
                     let v = pop1(&mut stack)?;
                     let s = v.as_str_ref()?;
-                    let xor = crate::engine::checksum::xor8(s.as_bytes());
+                    let xor = super::checksum::xor8(s.as_bytes());
                     let mut result = s.to_string();
                     result.push(xor as char);
                     stack.push(StackValue::Str(result));
@@ -661,11 +661,11 @@ pub fn eval(
             },
 
             Opcode::Control(ctrl) => match ctrl {
-                crate::engine::opcodes::ControlOp::Until(_end_pc) => {
+                super::opcodes::ControlOp::Until(_end_pc) => {
                     // UNTIL is just a loop start marker - no-op during execution.
                     // The actual loop jump happens at UntilEnd.
                 }
-                crate::engine::opcodes::ControlOp::UntilEnd(start_pc) => {
+                super::opcodes::ControlOp::UntilEnd(start_pc) => {
                     // Pop condition from stack: if false (0), jump back to loop start
                     let cond = pop1_f64(&mut stack)?;
                     if cond == 0.0 {

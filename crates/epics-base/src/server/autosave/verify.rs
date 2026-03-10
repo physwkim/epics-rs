@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use epics_base_rs::server::database::PvDatabase;
+use crate::server::database::PvDatabase;
 
-use crate::error::AutosaveResult;
-use crate::save_file::{self, read_save_file};
+use super::error::AutosaveResult;
+use super::save_file::{self, read_save_file};
 
 /// Result of comparing one PV.
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
-use epics_base_rs::error::{CaError, CaResult};
-use epics_base_rs::server::record::{FieldDesc, Record, RecordProcessResult};
-use epics_base_rs::types::{DbFieldType, EpicsValue};
+use crate::error::{CaError, CaResult};
+use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::types::{DbFieldType, EpicsValue};
 
 const NUM_STEPS: usize = 10;
 

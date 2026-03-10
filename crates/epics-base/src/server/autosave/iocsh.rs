@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use epics_base_rs::server::iocsh::registry::{
+use crate::server::iocsh::registry::{
     ArgDesc, ArgType, ArgValue, CommandContext, CommandDef, CommandOutcome,
 };
 
-use crate::manager::AutosaveManager;
-use crate::verify;
+use super::manager::AutosaveManager;
+use super::verify;
 
 /// Create iocsh command definitions for autosave.
 pub fn autosave_commands(manager: Arc<AutosaveManager>) -> Vec<CommandDef> {
@@ -94,9 +94,9 @@ pub fn autosave_commands(manager: Arc<AutosaveManager>) -> Vec<CommandDef> {
                     let statuses = mgr.status_all().await;
                     for (name, status) in statuses {
                         let status_str = match status {
-                            crate::save_set::SaveSetStatus::Idle => "idle".to_string(),
-                            crate::save_set::SaveSetStatus::Saving => "saving".to_string(),
-                            crate::save_set::SaveSetStatus::Error(e) => format!("error: {e}"),
+                            super::save_set::SaveSetStatus::Idle => "idle".to_string(),
+                            super::save_set::SaveSetStatus::Saving => "saving".to_string(),
+                            super::save_set::SaveSetStatus::Error(e) => format!("error: {e}"),
                         };
                         eprintln!("  {name}: {status_str}");
                     }
@@ -202,9 +202,9 @@ pub fn autosave_commands(manager: Arc<AutosaveManager>) -> Vec<CommandDef> {
                     eprintln!("Autosave status:");
                     for (name, status) in statuses {
                         let status_str = match status {
-                            crate::save_set::SaveSetStatus::Idle => "OK",
-                            crate::save_set::SaveSetStatus::Saving => "SAVING",
-                            crate::save_set::SaveSetStatus::Error(_) => "ERROR",
+                            super::save_set::SaveSetStatus::Idle => "OK",
+                            super::save_set::SaveSetStatus::Saving => "SAVING",
+                            super::save_set::SaveSetStatus::Error(_) => "ERROR",
                         };
                         eprintln!("  {name}: {status_str}");
                     }

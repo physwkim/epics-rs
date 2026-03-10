@@ -1,8 +1,8 @@
-use crate::engine::array_value::{zip_map, ArrayStackValue};
-use crate::engine::error::CalcError;
-use crate::engine::opcodes::{ArrayOp, CoreOp, Opcode};
-use crate::engine::{ArrayInputs, CompiledExpr};
-use crate::math::{derivative, fitting, stats};
+use super::array_value::{zip_map, ArrayStackValue};
+use super::error::CalcError;
+use super::opcodes::{ArrayOp, CoreOp, Opcode};
+use super::{ArrayInputs, CompiledExpr};
+use crate::calc::math::{derivative, fitting, stats};
 
 pub fn eval(
     expr: &CompiledExpr,

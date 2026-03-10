@@ -1,6 +1,6 @@
 use std::fmt;
 
-use epics_base_rs::error::CaError;
+use crate::error::CaError;
 
 /// Result type for autosave operations.
 pub type AutosaveResult<T> = Result<T, AutosaveError>;

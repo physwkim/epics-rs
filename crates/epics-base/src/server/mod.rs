@@ -1,7 +1,6 @@
 pub mod access_security;
 pub mod autosave;
 pub mod beacon;
-pub mod calc_engine;
 pub mod database;
 pub mod db_loader;
 pub mod device_support;

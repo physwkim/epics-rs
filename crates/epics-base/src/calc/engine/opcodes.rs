@@ -91,7 +91,6 @@ pub enum CoreOp {
     End,
 }
 
-#[cfg(feature = "string")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum StringOp {
     // Phase 2A: Core
@@ -120,14 +119,12 @@ pub enum StringOp {
     SubLast,                // |- last substring removal
 }
 
-#[cfg(feature = "string")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlOp {
     Until(usize),        // jump target = UntilEnd pc
     UntilEnd(usize),     // jump target = Until pc
 }
 
-#[cfg(feature = "array")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrayOp {
     ConstIndex,          // IX: [0,1,...,n-1]
@@ -162,10 +159,7 @@ pub enum ArrayOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Opcode {
     Core(CoreOp),
-    #[cfg(feature = "string")]
     String(StringOp),
-    #[cfg(feature = "string")]
     Control(ControlOp),
-    #[cfg(feature = "array")]
     Array(ArrayOp),
 }

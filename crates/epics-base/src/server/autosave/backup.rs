@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use chrono::Local;
 
-use crate::error::AutosaveResult;
-use crate::save_file::validate_save_file;
+use super::error::AutosaveResult;
+use super::save_file::validate_save_file;
 
 /// Backup policy configuration.
 #[derive(Debug, Clone)]

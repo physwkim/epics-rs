@@ -1,6 +1,6 @@
-use crate::engine::error::CalcError;
-use crate::engine::opcodes::{CoreOp, Opcode};
-use crate::engine::{CompiledExpr, NumericInputs};
+use super::error::CalcError;
+use super::opcodes::{CoreOp, Opcode};
+use super::{CompiledExpr, NumericInputs};
 
 pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, CalcError> {
     let mut stack: Vec<f64> = Vec::with_capacity(20);
