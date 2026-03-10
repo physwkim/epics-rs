@@ -1,11 +1,10 @@
-#!../../target/debug/examples/scope_ioc
 #============================================================
 # st.cmd — Scope Simulator IOC startup script
 #
 # Port of EPICS testAsynPortDriver IOC.
 #
 # Usage:
-#   cargo run --example scope_ioc --features epics -- ioc/st.cmd
+#   cargo run --release -p scope-ioc --features ioc --bin scope_ioc -- ioc/st.cmd
 #============================================================
 
 # Environment
@@ -17,7 +16,7 @@ epicsEnvSet("PORT",   "scopeSim")
 scopeSimulatorConfig("$(PORT)")
 
 # Load the scope database
-dbLoadRecords("$(ASYN)/Db/scopeSimulator.db", "P=$(PREFIX),R=$(PORT):")
+dbLoadRecords("$(SCOPE_IOC)/db/scopeSimulator.db", "P=$(PREFIX),R=$(PORT):")
 
 # iocInit is called automatically by IocApplication after this script completes.
 iocInit()

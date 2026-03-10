@@ -1,24 +1,19 @@
-//! Digital oscilloscope simulator — asyn-rs port of EPICS testAsynPortDriver.
+//! Digital oscilloscope simulator — port of EPICS testAsynPortDriver.
 //!
 //! Demonstrates the asynPortDriver pattern:
 //!   1. Define parameters (scalars, enums, arrays)
 //!   2. Override write_int32/write_float64 for control logic
 //!   3. Run a background task that computes waveforms and pushes updates
 
-/// Path to the asyn-rs Db/ directory containing scope simulator databases.
-/// IOC binaries set this as `$(ASYN)` env var so st.cmd can use
-/// `dbLoadRecords("$(ASYN)/Db/scopeSimulator.db", ...)`.
-pub const DB_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Db");
-
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::error::AsynResult;
-use crate::param::{EnumEntry, ParamType};
-use crate::port::{PortDriver, PortDriverBase, PortFlags};
-use crate::user::AsynUser;
+use asyn_rs::error::AsynResult;
+use asyn_rs::param::{EnumEntry, ParamType};
+use asyn_rs::port::{PortDriver, PortDriverBase, PortFlags};
+use asyn_rs::user::AsynUser;
 
 // --- Constants (matching original testAsynPortDriver) ---
 

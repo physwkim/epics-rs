@@ -1,10 +1,9 @@
 //! Scope Simulator IOC — st.cmd-style startup using IocApplication.
 //!
 //! Port of EPICS testAsynPortDriver as an IOC with Channel Access.
-//! Driver code lives in `asyn_rs::drivers::scope_simulator`.
 //!
 //! Usage:
-//!   cargo run --example scope_ioc --features epics -- ioc/st.cmd
+//!   cargo run --release -p scope-ioc --features ioc --bin scope_ioc -- ioc/st.cmd
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +11,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use asyn_rs::drivers::scope_simulator::*;
+use scope_ioc::driver::*;
 use asyn_rs::interrupt::{InterruptFilter, InterruptSubscription};
 use asyn_rs::port::PortDriver;
 use asyn_rs::user::AsynUser;
@@ -177,7 +176,6 @@ impl DeviceSupport for ScopeDeviceSupport {
         let drv = self.driver.lock();
         match info.param_type {
             ScopeParamType::Enum => {
-                // Try real Enum param first; fall back to Int32 (bi/bo use Int32 params)
                 if let Ok((idx, choices)) = drv.base.params.get_enum(info.param_index, 0) {
                     record.set_val(EpicsValue::Enum(idx as u16))?;
                     push_enum_choices(record, &choices);
@@ -344,20 +342,14 @@ impl CommandHandler for ReportHandler {
 async fn main() -> CaResult<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    // Set module paths as env vars (like C++ EPICS envPaths)
-    unsafe {
-        std::env::set_var("ASYN", asyn_rs::drivers::scope_simulator::DB_DIR.trim_end_matches("/Db"));
+    if std::env::var_os("SCOPE_IOC").is_none() {
+        unsafe { std::env::set_var("SCOPE_IOC", env!("CARGO_MANIFEST_DIR")) };
     }
 
     let script = if args.len() > 1 && !args[1].starts_with('-') {
         args[1].clone()
     } else {
         eprintln!("Usage: scope_ioc <st.cmd>");
-        eprintln!();
-        eprintln!("The st.cmd script should contain:");
-        eprintln!(r#"  epicsEnvSet("PREFIX", "SCOPE:")"#);
-        eprintln!(r#"  scopeSimulatorConfig("scopeSim")"#);
-        eprintln!(r#"  dbLoadRecords("$(ASYN)/Db/scopeSimulator.db", "P=$(PREFIX),R=scopeSim:")"#);
         std::process::exit(1);
     };
 

@@ -29,12 +29,3 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "throughput"
 harness = false
-
-[[example]]
-name = "scope_simulator"
-path = "examples/scope_simulator.rs"
-
-[[example]]
-name = "scope_ioc"
-path = "examples/scope_ioc.rs"
-required-features = ["epics"]

@@ -1,16 +1,15 @@
 //! Digital oscilloscope simulator — standalone demo (no EPICS IOC).
 //!
-//! Demonstrates the asynPortDriver pattern using the shared driver
-//! from `asyn_rs::drivers::scope_simulator`.
+//! Demonstrates the asynPortDriver pattern using the shared driver.
 //!
-//! Run: `cargo run --example scope_simulator`
+//! Run: `cargo run -p scope-ioc --example scope_sim`
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use asyn_rs::drivers::scope_simulator::*;
+use scope_ioc::driver::*;
 use asyn_rs::manager::PortManager;
 use asyn_rs::port::PortDriver;
 use asyn_rs::user::AsynUser;

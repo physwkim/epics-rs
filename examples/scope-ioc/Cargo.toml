@@ -1,0 +1,23 @@
+[package]
+name = "scope-ioc"
+version = "0.1.0"
+edition = "2021"
+description = "Scope simulator IOC — port of EPICS testAsynPortDriver"
+
+[features]
+ioc = ["dep:epics-base-rs", "asyn-rs/epics"]
+
+[dependencies]
+asyn-rs = { workspace = true }
+parking_lot = "0.12"
+tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }
+epics-base-rs = { workspace = true, optional = true }
+
+[[bin]]
+name = "scope_ioc"
+path = "src/bin/scope_ioc.rs"
+required-features = ["ioc"]
+
+[[example]]
+name = "scope_sim"
+path = "examples/scope_sim.rs"
