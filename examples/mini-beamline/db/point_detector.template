@@ -1,0 +1,65 @@
+# Point detector template
+# Macros: P, R, MTR, DTYP
+
+# Motor position fed from motor RBV via CP link
+record(ao, "$(P)$(R)MotorPos") {
+    field(DTYP, "$(DTYP)")
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(P)$(MTR).RBV CP")
+    field(PREC, "4")
+}
+
+# Beam current fed via CP link
+record(ao, "$(P)$(R)BeamCurrent") {
+    field(DTYP, "$(DTYP)")
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(P)current CP")
+    field(EGU,  "mA")
+    field(PREC, "2")
+}
+
+# User-settable exposure time
+record(ao, "$(P)$(R)ExposureTime") {
+    field(DTYP, "$(DTYP)")
+    field(VAL,  "1.0")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+
+record(ai, "$(P)$(R)ExposureTime_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+
+# Computed detector value (read-only, I/O Intr)
+record(ai, "$(P)$(R)DetValue_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "2")
+}
+
+# Detector sigma (configurable)
+record(ao, "$(P)$(R)DetSigma") {
+    field(DTYP, "$(DTYP)")
+    field(PREC, "3")
+}
+
+record(ai, "$(P)$(R)DetSigma_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "3")
+}
+
+# Detector center (configurable)
+record(ao, "$(P)$(R)DetCenter") {
+    field(DTYP, "$(DTYP)")
+    field(PREC, "3")
+}
+
+record(ai, "$(P)$(R)DetCenter_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "3")
+}

@@ -1,0 +1,220 @@
+# MovingDot area detector template
+# Macros: P, R, PORT, DTYP
+# Includes ADBase-equivalent records + MovingDot-specific records.
+
+# ===== Acquire control =====
+
+record(bo, "$(P)$(R)Acquire") {
+    field(DTYP, "$(DTYP)")
+    field(ZNAM, "Done")
+    field(ONAM, "Acquire")
+}
+
+record(bi, "$(P)$(R)Acquire_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(ZNAM, "Done")
+    field(ONAM, "Acquire")
+}
+
+record(mbbo, "$(P)$(R)ImageMode") {
+    field(DTYP, "$(DTYP)")
+    field(ZRST, "Single")
+    field(ONST, "Multiple")
+    field(TWST, "Continuous")
+}
+
+record(mbbi, "$(P)$(R)ImageMode_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(ZRST, "Single")
+    field(ONST, "Multiple")
+    field(TWST, "Continuous")
+}
+
+record(longout, "$(P)$(R)NumImages") {
+    field(DTYP, "$(DTYP)")
+}
+
+record(longin, "$(P)$(R)NumImages_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+record(longin, "$(P)$(R)NumImagesCounter_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+record(ao, "$(P)$(R)AcquireTime") {
+    field(DTYP, "$(DTYP)")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+
+record(ai, "$(P)$(R)AcquireTime_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+
+record(ao, "$(P)$(R)AcquirePeriod") {
+    field(DTYP, "$(DTYP)")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+
+record(ai, "$(P)$(R)AcquirePeriod_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+
+# ===== Status =====
+
+record(mbbi, "$(P)$(R)DetectorState_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(ZRST, "Idle")
+    field(ONST, "Acquire")
+    field(TWST, "Readout")
+    field(THST, "Correct")
+    field(FRST, "Saving")
+    field(FVST, "Aborting")
+    field(SXST, "Error")
+    field(SVST, "Waiting")
+    field(EIST, "Initializing")
+    field(NIST, "Disconnected")
+    field(TEST, "Aborted")
+}
+
+record(bi, "$(P)$(R)AcquireBusy_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(ZNAM, "Done")
+    field(ONAM, "Busy")
+}
+
+# ===== Array info =====
+
+record(longin, "$(P)$(R)ArrayCounter_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+record(longout, "$(P)$(R)ArrayCounter") {
+    field(DTYP, "$(DTYP)")
+}
+
+record(bo, "$(P)$(R)ArrayCallbacks") {
+    field(DTYP, "$(DTYP)")
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+}
+
+record(bi, "$(P)$(R)ArrayCallbacks_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+}
+
+# ===== Size =====
+
+record(longin, "$(P)$(R)MaxSizeX_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+record(longin, "$(P)$(R)MaxSizeY_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+record(longout, "$(P)$(R)SizeX") {
+    field(DTYP, "$(DTYP)")
+}
+
+record(longin, "$(P)$(R)SizeX_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+record(longout, "$(P)$(R)SizeY") {
+    field(DTYP, "$(DTYP)")
+}
+
+record(longin, "$(P)$(R)SizeY_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+# ===== MovingDot-specific: Motor positions + beam current + shutter =====
+
+record(ao, "$(P)$(R)MotorXPos") {
+    field(DTYP, "$(DTYP)")
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(P)dot:mtrx.RBV CP")
+    field(PREC, "4")
+}
+
+record(ai, "$(P)$(R)MotorXPos_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+}
+
+record(ao, "$(P)$(R)MotorYPos") {
+    field(DTYP, "$(DTYP)")
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(P)dot:mtry.RBV CP")
+    field(PREC, "4")
+}
+
+record(ai, "$(P)$(R)MotorYPos_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+}
+
+record(ao, "$(P)$(R)BeamCurrent") {
+    field(DTYP, "$(DTYP)")
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(P)current CP")
+    field(EGU,  "mA")
+    field(PREC, "2")
+}
+
+record(ai, "$(P)$(R)BeamCurrent_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(EGU,  "mA")
+    field(PREC, "2")
+}
+
+record(bo, "$(P)$(R)ShutterOpen") {
+    field(DTYP, "$(DTYP)")
+    field(ZNAM, "Closed")
+    field(ONAM, "Open")
+}
+
+record(bi, "$(P)$(R)ShutterOpen_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+    field(ZNAM, "Closed")
+    field(ONAM, "Open")
+}
+
+# ===== Info strings =====
+
+record(stringin, "$(P)$(R)Manufacturer_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}
+
+record(stringin, "$(P)$(R)Model_RBV") {
+    field(DTYP, "$(DTYP)")
+    field(SCAN, "I/O Intr")
+}

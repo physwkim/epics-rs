@@ -1,0 +1,24 @@
+[package]
+name = "mini-beamline"
+version = "0.1.0"
+edition = "2021"
+description = "Mini beamline IOC: beam current, point detectors, and moving dot area detector"
+
+[features]
+ioc = ["dep:epics-base-rs", "dep:tokio", "dep:ad-plugins", "asyn-rs/epics", "dep:motor-rs"]
+
+[dependencies]
+ad-core = { workspace = true }
+ad-plugins = { workspace = true, optional = true }
+asyn-rs = { workspace = true }
+motor-rs = { workspace = true, optional = true }
+rand = "0.8"
+parking_lot = "0.12"
+libm = "0.2"
+epics-base-rs = { workspace = true, optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+[[bin]]
+name = "mini_ioc"
+path = "src/bin/mini_ioc.rs"
+required-features = ["ioc"]

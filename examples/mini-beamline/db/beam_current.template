@@ -1,0 +1,6 @@
+record(ai, "$(P)current") {
+    field(DTYP, "miniBeamCurrent")
+    field(SCAN, "I/O Intr")
+    field(EGU,  "mA")
+    field(PREC, "2")
+}
