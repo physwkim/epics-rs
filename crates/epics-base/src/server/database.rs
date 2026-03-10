@@ -1489,14 +1489,33 @@ impl PvDatabase {
                         }
                     }
                 }
-                // Check DOL link for output records (ao, longout, bo, mbbo, etc.)
-                if let Some(EpicsValue::String(dol_str)) = instance.record.get_field("DOL") {
-                    if !dol_str.is_empty() {
-                        let parsed = super::record::parse_link_v2(&dol_str);
-                        if let super::record::ParsedLink::Db(ref db) = parsed {
-                            if db.policy == super::record::LinkProcessPolicy::ChannelProcess {
-                                links_to_register.push((db.record.clone(), target_name.clone()));
+                // Check additional input link fields that may use CP:
+                // DOL (ao/bo/longout/mbbo), DOL1-DOLA (seq/sseq),
+                // NVL (sel), SELL (sseq), SDIS (common), SGNL (histogram)
+                const CP_INPUT_LINK_FIELDS: &[&str] = &[
+                    "DOL",
+                    "DOL1","DOL2","DOL3","DOL4","DOL5","DOL6","DOL7","DOL8","DOL9","DOLA",
+                    "NVL", "SELL", "SGNL",
+                ];
+                for field_name in CP_INPUT_LINK_FIELDS {
+                    if let Some(EpicsValue::String(link_str)) = instance.record.get_field(field_name) {
+                        if !link_str.is_empty() {
+                            let parsed = super::record::parse_link_v2(&link_str);
+                            if let super::record::ParsedLink::Db(ref db) = parsed {
+                                if db.policy == super::record::LinkProcessPolicy::ChannelProcess {
+                                    links_to_register.push((db.record.clone(), target_name.clone()));
+                                }
                             }
+                        }
+                    }
+                }
+                // Check SDIS in common fields
+                let sdis_str = &instance.common.sdis;
+                if !sdis_str.is_empty() {
+                    let parsed = super::record::parse_link_v2(sdis_str);
+                    if let super::record::ParsedLink::Db(ref db) = parsed {
+                        if db.policy == super::record::LinkProcessPolicy::ChannelProcess {
+                            links_to_register.push((db.record.clone(), target_name.clone()));
                         }
                     }
                 }
@@ -2698,5 +2717,56 @@ mod tests {
             EpicsValue::Double(v) => assert!((v - 10.0).abs() < 1e-10),
             other => panic!("expected Double(10.0), got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_seq_dol_cp_link_registration() {
+        use crate::server::records::seq::SeqRecord;
+
+        let db = PvDatabase::new();
+        db.add_record("SENSOR", Box::new(AoRecord::new(0.0))).await;
+
+        let mut seq = SeqRecord::default();
+        seq.dol1 = "SENSOR CP".to_string();
+        db.add_record("MY_SEQ", Box::new(seq)).await;
+
+        db.setup_cp_links().await;
+
+        let targets = db.get_cp_targets("SENSOR").await;
+        assert_eq!(targets, vec!["MY_SEQ"]);
+    }
+
+    #[tokio::test]
+    async fn test_sel_nvl_cp_link_registration() {
+        use crate::server::records::sel::SelRecord;
+
+        let db = PvDatabase::new();
+        db.add_record("INDEX_SRC", Box::new(AoRecord::new(0.0))).await;
+
+        let mut sel = SelRecord::default();
+        sel.nvl = "INDEX_SRC CP".to_string();
+        db.add_record("MY_SEL", Box::new(sel)).await;
+
+        db.setup_cp_links().await;
+
+        let targets = db.get_cp_targets("INDEX_SRC").await;
+        assert_eq!(targets, vec!["MY_SEL"]);
+    }
+
+    #[tokio::test]
+    async fn test_sdis_cp_link_registration() {
+        let db = PvDatabase::new();
+        db.add_record("DISABLE_SRC", Box::new(AoRecord::new(0.0))).await;
+        db.add_record("GUARDED", Box::new(AoRecord::new(0.0))).await;
+
+        // Set SDIS CP link on the record's common fields
+        if let Some(rec_arc) = db.get_record("GUARDED").await {
+            rec_arc.write().await.common.sdis = "DISABLE_SRC CP".to_string();
+        }
+
+        db.setup_cp_links().await;
+
+        let targets = db.get_cp_targets("DISABLE_SRC").await;
+        assert_eq!(targets, vec!["GUARDED"]);
     }
 }
