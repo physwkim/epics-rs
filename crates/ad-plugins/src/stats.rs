@@ -510,6 +510,8 @@ pub struct StatsProcessor {
     params: NDStatsParams,
     /// Shared cell to export params after register_params is called.
     params_out: Arc<Mutex<NDStatsParams>>,
+    /// Optional sender to push time series data to the TS port driver.
+    ts_sender: Option<crate::time_series::TimeSeriesSender>,
 }
 
 impl StatsProcessor {
@@ -528,6 +530,7 @@ impl StatsProcessor {
             hist_max: 255.0,
             params: NDStatsParams::default(),
             params_out: Arc::new(Mutex::new(NDStatsParams::default())),
+            ts_sender: None,
         }
     }
 
@@ -539,6 +542,11 @@ impl StatsProcessor {
     /// Get a shared handle to the params (populated after register_params is called).
     pub fn params_handle(&self) -> Arc<Mutex<NDStatsParams>> {
         self.params_out.clone()
+    }
+
+    /// Set the time series sender for pushing data to the TS port driver.
+    pub fn set_ts_sender(&mut self, sender: crate::time_series::TimeSeriesSender) {
+        self.ts_sender = Some(sender);
     }
 }
 
@@ -624,6 +632,38 @@ impl NDPluginProcess for StatsProcessor {
             ParamUpdate::Float64(p.hist_above, result.hist_above),
             ParamUpdate::Float64(p.hist_entropy, result.hist_entropy),
         ];
+
+        // Send time series data to TS port driver (if configured)
+        if let Some(ref sender) = self.ts_sender {
+            let ts_data = crate::time_series::TimeSeriesData {
+                values: vec![
+                    result.min,
+                    result.min_x as f64,
+                    result.min_y as f64,
+                    result.max,
+                    result.max_x as f64,
+                    result.max_y as f64,
+                    result.mean,
+                    result.sigma,
+                    result.total,
+                    result.net,
+                    centroid.centroid_total,
+                    centroid.centroid_x,
+                    centroid.centroid_y,
+                    centroid.sigma_x,
+                    centroid.sigma_y,
+                    centroid.sigma_xy,
+                    centroid.skewness_x,
+                    centroid.skewness_y,
+                    centroid.kurtosis_x,
+                    centroid.kurtosis_y,
+                    centroid.eccentricity,
+                    centroid.orientation,
+                    array.timestamp.as_f64(),
+                ],
+            };
+            let _ = sender.try_send(ts_data);
+        }
 
         *self.latest_stats.lock() = result;
         ProcessResult::sink(updates)
@@ -784,14 +824,35 @@ pub fn build_stats_registry(h: &PluginRuntimeHandle, sp: &NDStatsParams) -> Para
     map
 }
 
-/// Create a stats plugin runtime. Returns the handle, stats accessor, stats params, and thread handle.
+/// Create a stats plugin runtime with an integrated time series port.
+///
+/// Returns:
+/// - Plugin runtime handle (for the stats plugin)
+/// - Stats result accessor
+/// - Stats params (for building stats registry)
+/// - TS port runtime handle (for registering as a separate port)
+/// - TS params (for building TS registry)
+/// - Thread join handles (stats data, TS actor, TS data)
 pub fn create_stats_runtime(
     port_name: &str,
     pool: Arc<NDArrayPool>,
     queue_size: usize,
     ndarray_port: &str,
-) -> (PluginRuntimeHandle, Arc<Mutex<StatsResult>>, NDStatsParams, std::thread::JoinHandle<()>) {
-    let processor = StatsProcessor::new();
+) -> (
+    PluginRuntimeHandle,
+    Arc<Mutex<StatsResult>>,
+    NDStatsParams,
+    asyn_rs::runtime::port::PortRuntimeHandle,
+    crate::time_series::TSParams,
+    std::thread::JoinHandle<()>,
+    std::thread::JoinHandle<()>,
+    std::thread::JoinHandle<()>,
+) {
+    // Create TS channel
+    let (ts_tx, ts_rx) = tokio::sync::mpsc::channel(256);
+
+    let mut processor = StatsProcessor::new();
+    processor.set_ts_sender(ts_tx);
     let stats_handle = processor.stats_handle();
     let params_handle = processor.params_handle();
 
@@ -807,7 +868,17 @@ pub fn create_stats_runtime(
     // and exported via the shared params_out handle.
     let stats_params = *params_handle.lock();
 
-    (plugin_handle, stats_handle, stats_params, data_jh)
+    // Create TS port with stats-specific channel names
+    let ts_port_name = format!("{port_name}_TS");
+    let (ts_runtime, ts_params, ts_actor_jh, ts_data_jh) =
+        crate::time_series::create_ts_port_runtime(
+            &ts_port_name,
+            &crate::time_series::STATS_TS_CHANNEL_NAMES,
+            2048,
+            ts_rx,
+        );
+
+    (plugin_handle, stats_handle, stats_params, ts_runtime, ts_params, data_jh, ts_actor_jh, ts_data_jh)
 }
 
 #[cfg(test)]
@@ -1105,7 +1176,8 @@ mod tests {
     #[test]
     fn test_stats_runtime_end_to_end() {
         let pool = Arc::new(NDArrayPool::new(1_000_000));
-        let (handle, stats, _params, _jh) = create_stats_runtime("STATS_RT", pool, 10, "");
+        let (handle, stats, _params, _ts_runtime, _ts_params, _jh, _ts_actor_jh, _ts_data_jh) =
+            create_stats_runtime("STATS_RT", pool, 10, "");
 
         let mut arr = NDArray::new(
             vec![NDDimension::new(4), NDDimension::new(4)],

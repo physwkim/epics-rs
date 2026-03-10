@@ -12,7 +12,8 @@ use ad_plugins::std_arrays::create_std_arrays_runtime;
 #[test]
 fn test_driver_to_stats_pipeline() {
     let pool = Arc::new(ad_core::ndarray_pool::NDArrayPool::new(10_000_000));
-    let (stats_handle, stats_data, _params, _jh) = create_stats_runtime("STATS1", pool.clone(), 10, "SIM1");
+    let (stats_handle, stats_data, _params, _ts_runtime, _ts_params, _jh, _ts_actor_jh, _ts_data_jh) =
+        create_stats_runtime("STATS1", pool.clone(), 10, "SIM1");
 
     let mut driver = ADDriverBase::new("SIM1", 64, 64, 10_000_000).unwrap();
     driver.connect_downstream(stats_handle.array_sender().clone());

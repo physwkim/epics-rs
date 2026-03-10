@@ -15,6 +15,7 @@ use crate::params::ndarray_driver::NDArrayDriverParams;
 pub enum RegistryParamType {
     Int32,
     Float64,
+    Float64Array,
     OctetString,
 }
 
@@ -32,6 +33,9 @@ impl ParamInfo {
     }
     pub fn float64(index: usize, drv_info: &str) -> Self {
         Self { param_index: index, param_type: RegistryParamType::Float64, drv_info: drv_info.to_string() }
+    }
+    pub fn float64_array(index: usize, drv_info: &str) -> Self {
+        Self { param_index: index, param_type: RegistryParamType::Float64Array, drv_info: drv_info.to_string() }
     }
     pub fn string(index: usize, drv_info: &str) -> Self {
         Self { param_index: index, param_type: RegistryParamType::OctetString, drv_info: drv_info.to_string() }

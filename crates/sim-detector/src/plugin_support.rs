@@ -88,6 +88,7 @@ impl DeviceSupport for PluginDeviceSupport {
             let iface = match info.param_type {
                 RegistryParamType::Int32 => "asynInt32",
                 RegistryParamType::Float64 => "asynFloat64",
+                RegistryParamType::Float64Array => "asynFloat64Array",
                 RegistryParamType::OctetString => "asynOctet",
             };
             self.inner.set_iface_type(iface);

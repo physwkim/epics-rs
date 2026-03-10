@@ -197,11 +197,29 @@ fn register_all_plugins(mut app: IocApplication, holder: &Arc<DriverHolder>) -> 
                 let rt = h._runtime.lock().unwrap();
                 let rt = rt.as_ref().ok_or("simDetectorConfig must be called first")?;
                 let pool = rt.pool().clone();
-                let (handle, _stats, stats_params, _jh) = create_stats_runtime(&port_name, pool, queue_size, &ndarray_port);
+                let (handle, _stats, stats_params, ts_runtime, ts_params, _jh, _ts_actor_jh, _ts_data_jh) =
+                    create_stats_runtime(&port_name, pool, queue_size, &ndarray_port);
                 rt.connect_downstream(handle.array_sender().clone());
                 println!("NDStatsConfigure: port={port_name}");
+
+                // Register stats plugin port
                 let registry = Arc::new(build_stats_registry(&handle, &stats_params));
                 h.add_plugin_with_registry(&dtyp, &handle, registry, None);
+
+                // Register TS port as a separate asyn port
+                let ts_port_name = format!("{port_name}_TS");
+                let ts_dtyp = dtyp_from_port(&ts_port_name);
+                let ts_registry = Arc::new(ad_plugins::time_series::build_ts_registry(&ts_params));
+                let ts_port_handle = ts_runtime.port_handle().clone();
+                h.plugins.lock().unwrap().push(PluginInfo {
+                    dtyp_name: ts_dtyp.clone(),
+                    port_handle: ts_port_handle.clone(),
+                    registry: ts_registry,
+                    array_data: None,
+                });
+                asyn_rs::asyn_record::register_port(&ts_port_name, ts_port_handle, h.trace.clone());
+                println!("  TimeSeries port: {ts_port_name} (DTYP: {ts_dtyp})");
+
                 Ok(CommandOutcome::Continue)
             },
         ));

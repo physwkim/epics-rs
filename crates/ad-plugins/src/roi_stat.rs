@@ -8,6 +8,8 @@ use ad_core::ndarray::{NDArray, NDDataBuffer};
 use ad_core::ndarray_pool::NDArrayPool;
 use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
 
+use crate::time_series::{TimeSeriesData, TimeSeriesSender};
+
 /// Configuration for a single ROI region.
 #[derive(Debug, Clone)]
 pub struct ROIStatROI {
@@ -52,6 +54,21 @@ pub enum TSMode {
 /// Number of statistics tracked per ROI (min, max, mean, total, net).
 const NUM_STATS: usize = 5;
 
+/// Per-ROI stat names used for time series channel naming.
+const ROI_STAT_NAMES: [&str; NUM_STATS] = ["MinValue", "MaxValue", "MeanValue", "Total", "Net"];
+
+/// Generate time series channel names for ROIStat with the given number of ROIs.
+/// Produces names like "TS1:MinValue", "TS1:MaxValue", ..., "TS2:MinValue", etc.
+pub fn roi_stat_ts_channel_names(num_rois: usize) -> Vec<String> {
+    let mut names = Vec::with_capacity(num_rois * NUM_STATS);
+    for roi_idx in 0..num_rois {
+        for stat_name in &ROI_STAT_NAMES {
+            names.push(format!("TS{}:{}", roi_idx + 1, stat_name));
+        }
+    }
+    names
+}
+
 /// Processor that computes ROI statistics on 2D arrays.
 pub struct ROIStatProcessor {
     rois: Vec<ROIStatROI>,
@@ -61,6 +78,8 @@ pub struct ROIStatProcessor {
     ts_buffers: Vec<Vec<Vec<f64>>>,
     ts_num_points: usize,
     ts_current: usize,
+    /// Optional sender to push flattened stats to a TimeSeriesPortDriver.
+    ts_sender: Option<TimeSeriesSender>,
 }
 
 impl ROIStatProcessor {
@@ -76,6 +95,7 @@ impl ROIStatProcessor {
             ts_buffers,
             ts_num_points,
             ts_current: 0,
+            ts_sender: None,
         }
     }
 
@@ -116,6 +136,11 @@ impl ROIStatProcessor {
         } else {
             &[]
         }
+    }
+
+    /// Set the sender for pushing time series data to a TimeSeriesPortDriver.
+    pub fn set_ts_sender(&mut self, sender: TimeSeriesSender) {
+        self.ts_sender = Some(sender);
     }
 
     /// Compute statistics for a single ROI on a 2D data buffer.
@@ -259,6 +284,19 @@ impl NDPluginProcess for ROIStatProcessor {
                 }
             }
             self.ts_current += 1;
+        }
+
+        // Send flattened stats to TimeSeriesPortDriver if connected
+        if let Some(ref sender) = self.ts_sender {
+            let mut values = Vec::with_capacity(self.results.len() * NUM_STATS);
+            for result in &self.results {
+                values.push(result.min);
+                values.push(result.max);
+                values.push(result.mean);
+                values.push(result.total);
+                values.push(result.net);
+            }
+            let _ = sender.try_send(TimeSeriesData { values });
         }
 
         ProcessResult::sink(vec![])
@@ -522,5 +560,44 @@ mod tests {
         let r = &proc.results()[0];
         assert!((r.min - 1.0).abs() < 1e-10);
         assert!((r.max - 16.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_ts_channel_names() {
+        let names = roi_stat_ts_channel_names(2);
+        assert_eq!(names.len(), 10); // 2 ROIs * 5 stats
+        assert_eq!(names[0], "TS1:MinValue");
+        assert_eq!(names[1], "TS1:MaxValue");
+        assert_eq!(names[4], "TS1:Net");
+        assert_eq!(names[5], "TS2:MinValue");
+        assert_eq!(names[9], "TS2:Net");
+    }
+
+    #[test]
+    fn test_ts_sender_integration() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<TimeSeriesData>(16);
+
+        let rois = vec![
+            ROIStatROI { enabled: true, offset: [0, 0], size: [4, 4], bgd_width: 0 },
+            ROIStatROI { enabled: true, offset: [0, 0], size: [2, 2], bgd_width: 0 },
+        ];
+
+        let mut proc = ROIStatProcessor::new(rois, 0);
+        proc.set_ts_sender(tx);
+
+        let pool = NDArrayPool::new(1_000_000);
+        let arr = make_2d_array(4, 4, |_, _| 7.0);
+        proc.process_array(&arr, &pool);
+
+        let data = rx.try_recv().unwrap();
+        // 2 ROIs * 5 stats = 10 values
+        assert_eq!(data.values.len(), 10);
+        // ROI1: min=7, max=7, mean=7, total=112 (4*4*7), net=112
+        assert!((data.values[0] - 7.0).abs() < 1e-10); // min
+        assert!((data.values[1] - 7.0).abs() < 1e-10); // max
+        assert!((data.values[2] - 7.0).abs() < 1e-10); // mean
+        assert!((data.values[3] - 112.0).abs() < 1e-10); // total
+        // ROI2: 2x2 region, total=28 (2*2*7)
+        assert!((data.values[8] - 28.0).abs() < 1e-10); // total
     }
 }
