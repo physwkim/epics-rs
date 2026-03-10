@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
 use crate::error::CaResult;
@@ -12,7 +13,13 @@ pub async fn run_udp_search_responder(
     port: u16,
     tcp_port: u16,
 ) -> CaResult<()> {
-    let socket = UdpSocket::bind(("0.0.0.0", port)).await?;
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(target_os = "macos")]
+    sock.set_reuse_port(true)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, port).into())?;
+    let socket = UdpSocket::from_std(sock.into())?;
     socket.set_broadcast(true)?;
 
     let mut buf = [0u8; 4096];

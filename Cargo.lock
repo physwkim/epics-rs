@@ -434,6 +434,7 @@ dependencies = [
  "epics-macros",
  "hostname",
  "rustyline",
+ "socket2 0.5.10",
  "tempfile",
  "thiserror",
  "tokio",

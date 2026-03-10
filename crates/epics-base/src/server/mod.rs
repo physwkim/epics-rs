@@ -413,18 +413,33 @@ impl CaServer {
         };
 
 
-        eprintln!("CA server starting on port {port}");
+        let (tcp_tx, tcp_rx) = tokio::sync::oneshot::channel();
+
+        let tcp_handle = crate::runtime::task::spawn(async move {
+            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx).await
+        });
+
+        let tcp_port = tcp_rx.await.map_err(|_| CaError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, "TCP listener failed to start")
+        ))?;
+
+        eprintln!("CA server: UDP search on port {port}, TCP on port {tcp_port}");
 
         let result = tokio::select! {
-            r = udp::run_udp_search_responder(db_udp, port, port) => {
+            r = udp::run_udp_search_responder(db_udp, port, tcp_port) => {
                 eprintln!("UDP responder exited: {r:?}");
                 r
             }
-            r = tcp::run_tcp_listener(db_tcp, port, acf) => {
+            r = tcp_handle => {
                 eprintln!("TCP listener exited: {r:?}");
-                r
+                match r {
+                    Ok(inner) => inner,
+                    Err(e) => Err(CaError::Io(
+                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                    )),
+                }
             }
-            r = beacon::run_beacon_emitter(port) => {
+            r = beacon::run_beacon_emitter(tcp_port) => {
                 eprintln!("Beacon emitter exited: {r:?}");
                 r
             }

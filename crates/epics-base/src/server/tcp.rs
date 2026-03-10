@@ -108,19 +108,30 @@ impl ClientState {
 }
 
 /// Run the TCP listener for CA connections.
+/// Tries to bind to the configured port first; falls back to an ephemeral port
+/// (port 0) if the configured port is already in use.
 pub async fn run_tcp_listener(
     db: Arc<PvDatabase>,
     port: u16,
     acf: Arc<Option<AccessSecurityConfig>>,
+    tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
 ) -> CaResult<()> {
-    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            TcpListener::bind(("0.0.0.0", 0)).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let actual_port = listener.local_addr()?.port();
+    let _ = tcp_port_tx.send(actual_port);
 
     loop {
         let (stream, peer) = listener.accept().await?;
         let db = db.clone();
         let acf = acf.clone();
         crate::runtime::task::spawn(async move {
-            if let Err(e) = handle_client(stream, db, acf, port).await {
+            if let Err(e) = handle_client(stream, db, acf, actual_port).await {
                 eprintln!("client {peer} error: {e}");
             }
         });
