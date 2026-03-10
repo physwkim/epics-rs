@@ -55,6 +55,10 @@ pub enum RequestOp {
     Float64ArrayWrite { data: Vec<f64> },
     /// Flush changed parameters as interrupt notifications (callParamCallbacks).
     CallParamCallbacks { addr: i32 },
+    /// Get a port/driver option by key.
+    GetOption { key: String },
+    /// Set a port/driver option by key.
+    SetOption { key: String, value: String },
 }
 
 /// Result returned by the worker after executing a request.
@@ -82,6 +86,8 @@ pub struct RequestResult {
     pub alarm_severity: u16,
     /// Timestamp from the driver param store (populated on reads).
     pub timestamp: Option<SystemTime>,
+    /// Option value string (from GetOption).
+    pub option_value: Option<String>,
 }
 
 impl RequestResult {
@@ -102,6 +108,7 @@ impl RequestResult {
             alarm_status: 0,
             alarm_severity: 0,
             timestamp: None,
+            option_value: None,
         }
     }
 
@@ -143,6 +150,10 @@ impl RequestResult {
 
     pub fn float64_array_read(data: Vec<f64>) -> Self {
         Self { float64_array: Some(data), ..Self::base() }
+    }
+
+    pub fn option_read(value: String) -> Self {
+        Self { option_value: Some(value), ..Self::base() }
     }
 
     /// Attach alarm/timestamp metadata to this result.

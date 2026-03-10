@@ -321,6 +321,14 @@ impl PortActor {
                 self.driver.base_mut().call_param_callbacks(*addr)?;
                 Ok(RequestResult::write_ok())
             }
+            RequestOp::GetOption { key } => {
+                let val = self.driver.get_option(key)?;
+                Ok(RequestResult::option_read(val))
+            }
+            RequestOp::SetOption { key, value } => {
+                self.driver.set_option(key, value)?;
+                Ok(RequestResult::write_ok())
+            }
         };
 
         // Attach alarm/timestamp metadata on successful reads

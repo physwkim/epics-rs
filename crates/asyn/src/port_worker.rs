@@ -304,6 +304,14 @@ fn dispatch_io_inline(
             port.base_mut().call_param_callbacks(*addr)?;
             Ok(RequestResult::write_ok())
         }
+        RequestOp::GetOption { key } => {
+            let val = port.get_option(key)?;
+            Ok(RequestResult::option_read(val))
+        }
+        RequestOp::SetOption { key, value } => {
+            port.set_option(key, value)?;
+            Ok(RequestResult::write_ok())
+        }
     }
 }
 
@@ -540,6 +548,14 @@ fn dispatch_io(
         }
         RequestOp::CallParamCallbacks { addr } => {
             port.base_mut().call_param_callbacks(*addr)?;
+            Ok(RequestResult::write_ok())
+        }
+        RequestOp::GetOption { key } => {
+            let val = port.get_option(key)?;
+            Ok(RequestResult::option_read(val))
+        }
+        RequestOp::SetOption { key, value } => {
+            port.set_option(key, value)?;
             Ok(RequestResult::write_ok())
         }
     }

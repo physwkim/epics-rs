@@ -21,3 +21,5 @@ pub mod runtime;
 
 #[cfg(feature = "epics")]
 pub mod adapter;
+#[cfg(feature = "epics")]
+pub mod asyn_record;

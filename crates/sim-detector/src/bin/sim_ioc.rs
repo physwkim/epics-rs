@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use asyn_rs::port_handle::PortHandle;
+use asyn_rs::trace::TraceManager;
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::ioc_app::IocApplication;
 use epics_base_rs::server::iocsh::registry::*;
@@ -40,6 +41,8 @@ struct PluginInfo {
 struct DriverHolder {
     port_handle: std::sync::Mutex<Option<PortHandle>>,
     registry: std::sync::Mutex<Option<Arc<ParamRegistry>>>,
+    /// Shared trace manager for all ports in this IOC
+    trace: Arc<TraceManager>,
     /// Keep runtime alive to prevent shutdown
     _runtime: std::sync::Mutex<Option<SimDetectorRuntime>>,
     /// Plugin info for device support registration
@@ -53,6 +56,7 @@ impl DriverHolder {
         Arc::new(Self {
             port_handle: std::sync::Mutex::new(None),
             registry: std::sync::Mutex::new(None),
+            trace: Arc::new(TraceManager::new()),
             _runtime: std::sync::Mutex::new(None),
             plugins: std::sync::Mutex::new(Vec::new()),
             _plugin_handles: std::sync::Mutex::new(Vec::new()),
@@ -61,14 +65,17 @@ impl DriverHolder {
 
     fn add_plugin(&self, dtyp: &str, handle: &PluginRuntimeHandle, array_data: Option<ArrayDataHandle>) {
         let port_handle = handle.port_runtime().port_handle().clone();
+        let port_name = port_handle.port_name().to_string();
         let registry = Arc::new(build_plugin_base_registry(handle));
         self.plugins.lock().unwrap().push(PluginInfo {
             dtyp_name: dtyp.to_string(),
-            port_handle,
+            port_handle: port_handle.clone(),
             registry,
             array_data,
         });
         self._plugin_handles.lock().unwrap().push(handle.clone());
+        // Register plugin port for asynRecord access
+        asyn_rs::asyn_record::register_port(&port_name, port_handle, self.trace.clone());
     }
 }
 
@@ -105,6 +112,9 @@ impl CommandHandler for SimDetectorConfigHandler {
 
         let registry = Arc::new(build_param_registry_from_params(&runtime.ad_params, &runtime.sim_params));
         let port_handle = runtime.port_handle().clone();
+
+        // Register port for asynRecord access
+        asyn_rs::asyn_record::register_port(&port_name, port_handle.clone(), self.holder.trace.clone());
 
         *self.holder.port_handle.lock().unwrap() = Some(port_handle);
         *self.holder.registry.lock().unwrap() = Some(registry);
@@ -307,6 +317,9 @@ async fn main() -> CaResult<()> {
         eprintln!(r#"  dbLoadRecords("$(ADSIMDETECTOR)/db/simDetector.template", "P=$(PREFIX),R=cam1:,PORT=SIM1,DTYP=asynSimDetector")"#);
         std::process::exit(1);
     };
+
+    // Register the full asynRecord type (overrides the minimal stub)
+    asyn_rs::asyn_record::register_asyn_record_type();
 
     let holder = DriverHolder::new();
     let holder_for_config = holder.clone();

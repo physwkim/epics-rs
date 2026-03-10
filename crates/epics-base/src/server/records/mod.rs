@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod ao;
+pub mod asyn_record;
 pub mod bi;
 pub mod bo;
 pub mod busy;

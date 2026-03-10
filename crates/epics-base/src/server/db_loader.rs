@@ -1,9 +1,30 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::{CaError, CaResult};
 use crate::server::record::Record;
 use crate::types::EpicsValue;
+
+/// Factory function that creates a record instance.
+pub type RecordFactory = Box<dyn Fn() -> Box<dyn Record> + Send + Sync>;
+
+/// Global registry of external record type factories.
+/// External crates (e.g., asyn-rs) can register their own record types
+/// to override built-in stubs.
+static RECORD_FACTORY_REGISTRY: OnceLock<Mutex<HashMap<String, RecordFactory>>> = OnceLock::new();
+
+fn get_registry() -> &'static Mutex<HashMap<String, RecordFactory>> {
+    RECORD_FACTORY_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register an external record type factory.
+/// This allows external crates to override built-in record stubs.
+/// The factory is checked FIRST in `create_record()`, so it takes priority.
+pub fn register_record_type(name: &str, factory: RecordFactory) {
+    let mut reg = get_registry().lock().unwrap();
+    reg.insert(name.to_string(), factory);
+}
 
 /// A record definition parsed from a .db file.
 pub struct DbRecordDef {
@@ -464,7 +485,15 @@ fn expect_char(chars: &[char], pos: &mut usize, col: &mut usize, expected: char,
 }
 
 /// Create a record from a type name.
+/// Checks the external factory registry first, then falls back to built-in types.
 pub fn create_record(record_type: &str) -> CaResult<Box<dyn Record>> {
+    // Check external registry first (allows overrides from e.g. asyn-rs)
+    if let Ok(reg) = get_registry().lock() {
+        if let Some(factory) = reg.get(record_type) {
+            return Ok(factory());
+        }
+    }
+
     use crate::server::records::*;
 
     match record_type {
@@ -473,7 +502,8 @@ pub fn create_record(record_type: &str) -> CaResult<Box<dyn Record>> {
         "bi" => Ok(Box::new(bi::BiRecord::default())),
         "bo" => Ok(Box::new(bo::BoRecord::default())),
         "busy" => Ok(Box::new(busy::BusyRecord::default())),
-        "stringin" | "asyn" => Ok(Box::new(stringin::StringinRecord::default())),
+        "stringin" => Ok(Box::new(stringin::StringinRecord::default())),
+        "asyn" => Ok(Box::new(asyn_record::AsynRecord::default())),
         "stringout" => Ok(Box::new(stringout::StringoutRecord::default())),
         "longin" => Ok(Box::new(longin::LonginRecord::default())),
         "longout" => Ok(Box::new(longout::LongoutRecord::default())),

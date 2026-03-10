@@ -51,6 +51,11 @@ impl From<&RequestOp> for PortCommand {
                 drv_info: drv_info.clone(),
             },
             RequestOp::CallParamCallbacks { addr } => Self::CallParamCallbacks { addr: *addr },
+            RequestOp::GetOption { key } => Self::GetOption { key: key.clone() },
+            RequestOp::SetOption { key, value } => Self::SetOption {
+                key: key.clone(),
+                value: value.clone(),
+            },
         }
     }
 }
@@ -100,6 +105,11 @@ impl From<&PortCommand> for RequestOp {
                 drv_info: drv_info.clone(),
             },
             PortCommand::CallParamCallbacks { addr } => Self::CallParamCallbacks { addr: *addr },
+            PortCommand::GetOption { key } => Self::GetOption { key: key.clone() },
+            PortCommand::SetOption { key, value } => Self::SetOption {
+                key: key.clone(),
+                value: value.clone(),
+            },
         }
     }
 }
@@ -144,6 +154,12 @@ pub fn result_to_reply(result: &RequestResult, request_id: u64) -> PortReply {
     } else if let Some(v) = result.reason {
         // DrvUserCreate returns reason index
         ReplyPayload::Value(ParamValue::Int32(v as i32))
+    } else if let Some(ref v) = result.option_value {
+        // GetOption returns a string value
+        ReplyPayload::OctetData {
+            data: v.as_bytes().to_vec(),
+            nbytes: v.len(),
+        }
     } else {
         ReplyPayload::Ack
     };
@@ -211,6 +227,8 @@ mod tests {
             RequestOp::BlockProcess,
             RequestOp::UnblockProcess,
             RequestOp::DrvUserCreate { drv_info: "INFO".into() },
+            RequestOp::GetOption { key: "baud".into() },
+            RequestOp::SetOption { key: "baud".into(), value: "9600".into() },
         ];
         for op in ops {
             let cmd = PortCommand::from(&op);

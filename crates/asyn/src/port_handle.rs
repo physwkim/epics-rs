@@ -403,6 +403,50 @@ impl PortHandle {
         let user = AsynUser::new(reason).with_addr(addr);
         self.submit_no_wait(RequestOp::Int32Write { value }, user);
     }
+
+    // --- Option convenience methods ---
+
+    pub fn get_option_blocking(&self, key: &str) -> AsynResult<String> {
+        let user = AsynUser::default();
+        let result = self.submit_blocking(
+            RequestOp::GetOption { key: key.to_string() },
+            user,
+        )?;
+        result.option_value.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Error,
+            message: "get_option returned no value".into(),
+        })
+    }
+
+    pub fn set_option_blocking(&self, key: &str, value: &str) -> AsynResult<()> {
+        let user = AsynUser::default();
+        self.submit_blocking(
+            RequestOp::SetOption { key: key.to_string(), value: value.to_string() },
+            user,
+        )?;
+        Ok(())
+    }
+
+    pub async fn get_option(&self, key: &str) -> AsynResult<String> {
+        let user = AsynUser::default();
+        let result = self.submit(
+            RequestOp::GetOption { key: key.to_string() },
+            user,
+        ).await?;
+        result.option_value.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Error,
+            message: "get_option returned no value".into(),
+        })
+    }
+
+    pub async fn set_option(&self, key: &str, value: &str) -> AsynResult<()> {
+        let user = AsynUser::default();
+        self.submit(
+            RequestOp::SetOption { key: key.to_string(), value: value.to_string() },
+            user,
+        ).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

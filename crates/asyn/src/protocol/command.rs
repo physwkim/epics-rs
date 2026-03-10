@@ -27,6 +27,8 @@ pub enum PortCommand {
     UnblockProcess,
     DrvUserCreate { drv_info: String },
     CallParamCallbacks { addr: i32 },
+    GetOption { key: String },
+    SetOption { key: String, value: String },
 }
 
 #[cfg(test)]
@@ -60,6 +62,8 @@ mod tests {
             PortCommand::UnblockProcess,
             PortCommand::DrvUserCreate { drv_info: "MOTOR_STATUS".into() },
             PortCommand::CallParamCallbacks { addr: 0 },
+            PortCommand::GetOption { key: "baud".into() },
+            PortCommand::SetOption { key: "baud".into(), value: "9600".into() },
         ];
         for cmd in commands {
             let json = serde_json::to_string(&cmd).unwrap();
