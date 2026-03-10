@@ -110,6 +110,7 @@ pub struct SimConfigSnapshot {
     pub image_mode: ImageMode,
     pub num_images: i32,
     pub array_callbacks: bool,
+    pub wait_for_plugins: bool,
 }
 
 impl SimConfigSnapshot {
@@ -188,6 +189,7 @@ impl SimConfigSnapshot {
             image_mode: ImageMode::from_i32(handle.read_int32_blocking(ad.image_mode, 0)?),
             num_images: handle.read_int32_blocking(ad.num_images, 0)?,
             array_callbacks: handle.read_int32_blocking(ad.base.array_callbacks, 0)? != 0,
+            wait_for_plugins: handle.read_int32_blocking(ad.base.wait_for_plugins, 0).unwrap_or(0) != 0,
         })
     }
 
@@ -265,6 +267,7 @@ impl SimConfigSnapshot {
             image_mode: ImageMode::from_i32(base.get_int32_param(ad.image_mode, 0)?),
             num_images: base.get_int32_param(ad.num_images, 0)?,
             array_callbacks: base.get_int32_param(ad.base.array_callbacks, 0)? != 0,
+            wait_for_plugins: base.get_int32_param(ad.base.wait_for_plugins, 0).unwrap_or(0) != 0,
         })
     }
 }

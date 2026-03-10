@@ -233,7 +233,12 @@ fn acquisition_loop(
             let _ = port_handle.call_param_callbacks_blocking(0);
 
             if config.array_callbacks {
-                array_output.lock().publish(Arc::new(frame));
+                let output = array_output.lock();
+                if config.wait_for_plugins {
+                    output.publish_and_wait(Arc::new(frame));
+                } else {
+                    output.publish(Arc::new(frame));
+                }
             }
 
             // Check stop conditions

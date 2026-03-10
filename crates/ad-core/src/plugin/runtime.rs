@@ -379,14 +379,15 @@ fn plugin_data_loop<P: NDPluginProcess>(
     rt.block_on(async {
         loop {
             tokio::select! {
-                array = array_rx.recv() => {
-                    match array {
-                        Some(arr) => {
+                msg = array_rx.recv_msg() => {
+                    match msg {
+                        Some(msg) => {
                             // In blocking mode, arrays are processed inline by the caller.
                             // Skip processing here to avoid double-processing.
                             if !blocking_mode.load(Ordering::Acquire) {
-                                shared.lock().process_and_publish(&arr);
+                                shared.lock().process_and_publish(&msg.array);
                             }
+                            // msg dropped here → completion signaled (if tracked)
                         }
                         None => break,
                     }

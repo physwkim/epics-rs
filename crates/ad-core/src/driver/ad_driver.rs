@@ -122,7 +122,12 @@ impl ADDriverBase {
                 array.clone() as Arc<dyn std::any::Any + Send + Sync>,
             )?;
 
-            self.array_output.publish(array);
+            let wait = self.port_base.get_int32_param(self.params.base.wait_for_plugins, 0).unwrap_or(0) != 0;
+            if wait {
+                self.array_output.publish_and_wait(array);
+            } else {
+                self.array_output.publish(array);
+            }
         }
 
         self.port_base.call_param_callbacks(0)?;

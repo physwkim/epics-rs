@@ -80,6 +80,9 @@ pub struct NDArrayDriverParams {
 
     // Queue
     pub num_queued_arrays: usize,
+
+    // WaitForPlugins
+    pub wait_for_plugins: usize,
 }
 
 impl NDArrayDriverParams {
@@ -160,6 +163,9 @@ impl NDArrayDriverParams {
 
             // Queue
             num_queued_arrays: base.create_param("NUM_QUEUED_ARRAYS", ParamType::Int32)?,
+
+            // WaitForPlugins
+            wait_for_plugins: base.create_param("WAIT_FOR_PLUGINS", ParamType::Int32)?,
         })
     }
 }

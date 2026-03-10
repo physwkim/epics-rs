@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::ndarray::NDArray;
 
@@ -8,10 +9,72 @@ pub(crate) trait BlockingProcessFn: Send + Sync {
     fn process_and_publish(&self, array: &NDArray);
 }
 
+/// Tracks completion of array processing across multiple non-blocking plugins.
+pub struct ArrayCompletion {
+    remaining: AtomicUsize,
+    done: std::sync::Mutex<bool>,
+    condvar: std::sync::Condvar,
+}
+
+impl ArrayCompletion {
+    /// Create a new tracker expecting `count` completions.
+    pub fn new(count: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(count),
+            done: std::sync::Mutex::new(count == 0),
+            condvar: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Signal that one plugin has finished processing (or the message was dropped).
+    pub fn signal_one(&self) {
+        let prev = self.remaining.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            let mut done = self.done.lock().unwrap();
+            *done = true;
+            self.condvar.notify_all();
+        }
+    }
+
+    /// Block until all plugins have signaled completion, or timeout expires.
+    /// Returns `true` if all completed, `false` on timeout.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let done = self.done.lock().unwrap();
+        if *done {
+            return true;
+        }
+        let result = self.condvar.wait_timeout_while(done, timeout, |d| !*d).unwrap();
+        *result.0
+    }
+
+    /// Block until all plugins have signaled completion (no timeout).
+    pub fn wait_forever(&self) {
+        let mut done = self.done.lock().unwrap();
+        while !*done {
+            done = self.condvar.wait(done).unwrap();
+        }
+    }
+}
+
+/// Array message with optional completion tracking.
+/// When dropped, signals the completion tracker (if present).
+pub struct ArrayMessage {
+    pub array: Arc<NDArray>,
+    pub(crate) completion: Option<Arc<ArrayCompletion>>,
+}
+
+impl Drop for ArrayMessage {
+    fn drop(&mut self) {
+        if let Some(c) = self.completion.take() {
+            c.signal_one();
+        }
+    }
+}
+
 /// Sender held by upstream. Supports blocking and non-blocking modes.
 #[derive(Clone)]
 pub struct NDArraySender {
-    tx: tokio::sync::mpsc::Sender<Arc<NDArray>>,
+    tx: tokio::sync::mpsc::Sender<ArrayMessage>,
     port_name: String,
     dropped_count: Arc<AtomicU64>,
     enabled: Arc<AtomicBool>,
@@ -35,13 +98,38 @@ impl NDArraySender {
             }
         }
         // Non-blocking path
-        match self.tx.try_send(array) {
+        let msg = ArrayMessage { array, completion: None };
+        match self.tx.try_send(msg) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
         }
+    }
+
+    /// Send an array message with completion tracking. Used by `publish_and_wait`.
+    pub(crate) fn send_msg(&self, msg: ArrayMessage) {
+        match self.tx.try_send(msg) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // msg is dropped here → Drop fires → completion signaled
+                self.dropped_count.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                // msg is dropped here → Drop fires → completion signaled
+            }
+        }
+    }
+
+    /// Whether this sender's plugin has callbacks enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    /// Whether this sender's plugin is in blocking mode.
+    pub fn is_blocking(&self) -> bool {
+        self.blocking_mode.load(Ordering::Acquire)
     }
 
     pub fn port_name(&self) -> &str {
@@ -70,17 +158,23 @@ impl NDArraySender {
 
 /// Receiver held by downstream plugin.
 pub struct NDArrayReceiver {
-    rx: tokio::sync::mpsc::Receiver<Arc<NDArray>>,
+    rx: tokio::sync::mpsc::Receiver<ArrayMessage>,
 }
 
 impl NDArrayReceiver {
     /// Blocking receive (for use in std::thread data processing loops).
     pub fn blocking_recv(&mut self) -> Option<Arc<NDArray>> {
-        self.rx.blocking_recv()
+        self.rx.blocking_recv().map(|msg| msg.array.clone())
     }
 
     /// Async receive.
     pub async fn recv(&mut self) -> Option<Arc<NDArray>> {
+        self.rx.recv().await.map(|msg| msg.array.clone())
+    }
+
+    /// Receive the full ArrayMessage (crate-internal). The message's Drop
+    /// will signal completion when the caller is done with it.
+    pub(crate) async fn recv_msg(&mut self) -> Option<ArrayMessage> {
         self.rx.recv().await
     }
 }
@@ -125,6 +219,46 @@ impl NDArrayOutput {
     pub fn publish(&self, array: Arc<NDArray>) {
         for sender in &self.senders {
             sender.send(array.clone());
+        }
+    }
+
+    /// Publish an array and wait for all non-blocking plugins to finish processing.
+    /// Blocking plugins are processed inline on the caller's thread.
+    /// Returns immediately if no non-blocking plugins are connected.
+    pub fn publish_and_wait(&self, array: Arc<NDArray>) {
+        // Count non-blocking, enabled senders
+        let nb_count = self.senders.iter()
+            .filter(|s| s.is_enabled() && !s.is_blocking())
+            .count();
+
+        let completion = if nb_count > 0 {
+            Some(Arc::new(ArrayCompletion::new(nb_count)))
+        } else {
+            None
+        };
+
+        for sender in &self.senders {
+            if !sender.is_enabled() {
+                continue;
+            }
+            if sender.is_blocking() {
+                // Process inline (no tracker needed)
+                if let Some(ref bp) = sender.blocking_processor {
+                    bp.process_and_publish(&array);
+                }
+            } else {
+                // Non-blocking: send with completion tracker
+                let msg = ArrayMessage {
+                    array: array.clone(),
+                    completion: completion.clone(),
+                };
+                sender.send_msg(msg);
+            }
+        }
+
+        // Wait for all non-blocking plugins to finish
+        if let Some(c) = completion {
+            c.wait_forever();
         }
     }
 
@@ -261,5 +395,101 @@ mod tests {
         // Sending to closed channel should not panic
         sender.send(make_test_array(1));
         assert_eq!(sender.dropped_count(), 0); // closed, not "dropped"
+    }
+
+    #[test]
+    fn test_publish_and_wait_basic() {
+        // Verify publish_and_wait returns after receivers consume the message
+        let (s1, mut r1) = ndarray_channel("P1", 10);
+        let (s2, mut r2) = ndarray_channel("P2", 10);
+
+        let mut output = NDArrayOutput::new();
+        output.add(s1);
+        output.add(s2);
+
+        // Spawn consumers that drain after a short delay
+        let h1 = std::thread::spawn(move || {
+            let arr = r1.blocking_recv().unwrap();
+            assert_eq!(arr.unique_id, 7);
+        });
+        let h2 = std::thread::spawn(move || {
+            let arr = r2.blocking_recv().unwrap();
+            assert_eq!(arr.unique_id, 7);
+        });
+
+        output.publish_and_wait(make_test_array(7));
+        // If we get here, both plugins have finished
+        h1.join().unwrap();
+        h2.join().unwrap();
+    }
+
+    #[test]
+    fn test_publish_and_wait_queue_full() {
+        // When queue is full, dropped message signals completion → no deadlock
+        let (s1, _r1) = ndarray_channel("P1", 1);
+
+        let mut output = NDArrayOutput::new();
+        output.add(s1);
+
+        // Fill the channel
+        output.publish(make_test_array(1));
+
+        // This should not deadlock: queue full → msg dropped → completion signaled
+        output.publish_and_wait(make_test_array(2));
+    }
+
+    #[test]
+    fn test_publish_and_wait_no_plugins() {
+        let output = NDArrayOutput::new();
+        // Should return immediately with no senders
+        output.publish_and_wait(make_test_array(1));
+    }
+
+    #[test]
+    fn test_publish_and_wait_disabled_plugin() {
+        let (s1, _r1) = ndarray_channel("P1", 10);
+
+        let mut output = NDArrayOutput::new();
+        output.add(s1);
+
+        // Disable the sender
+        output.senders[0].enabled.store(false, Ordering::Release);
+
+        // Should return immediately since the only plugin is disabled
+        output.publish_and_wait(make_test_array(1));
+    }
+
+    #[test]
+    fn test_array_completion_signal() {
+        let completion = Arc::new(ArrayCompletion::new(2));
+        let c1 = completion.clone();
+        let c2 = completion.clone();
+
+        let h = std::thread::spawn(move || {
+            completion.wait(Duration::from_secs(5))
+        });
+
+        c1.signal_one();
+        c2.signal_one();
+
+        assert!(h.join().unwrap());
+    }
+
+    #[test]
+    fn test_array_completion_zero_count() {
+        let completion = ArrayCompletion::new(0);
+        // Should return immediately
+        assert!(completion.wait(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn test_array_message_drop_signals() {
+        let completion = Arc::new(ArrayCompletion::new(1));
+        let msg = ArrayMessage {
+            array: make_test_array(1),
+            completion: Some(completion.clone()),
+        };
+        drop(msg);
+        assert!(completion.wait(Duration::from_millis(1)));
     }
 }
