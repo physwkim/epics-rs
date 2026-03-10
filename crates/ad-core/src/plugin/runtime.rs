@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -13,7 +14,7 @@ use crate::ndarray::NDArray;
 use crate::ndarray_pool::NDArrayPool;
 use crate::params::ndarray_driver::NDArrayDriverParams;
 
-use super::channel::{ndarray_channel, NDArrayOutput, NDArrayReceiver, NDArraySender};
+use super::channel::{ndarray_channel, BlockingProcessFn, NDArrayOutput, NDArrayReceiver, NDArraySender};
 use super::params::PluginBaseParams;
 
 /// Value sent through the param change channel from control plane to data plane.
@@ -94,6 +95,77 @@ pub struct PluginParamSnapshot {
     pub value: ParamChangeValue,
 }
 
+/// Shared processor state protected by a mutex, accessible from both
+/// the data thread (non-blocking mode) and the caller thread (blocking mode).
+struct SharedProcessorInner<P: NDPluginProcess> {
+    processor: P,
+    output: Arc<parking_lot::Mutex<NDArrayOutput>>,
+    pool: Arc<NDArrayPool>,
+    ndarray_params: NDArrayDriverParams,
+    plugin_params: PluginBaseParams,
+    port_handle: PortHandle,
+    array_counter: i32,
+}
+
+impl<P: NDPluginProcess> SharedProcessorInner<P> {
+    fn process_and_publish(&mut self, array: &NDArray) {
+        let t0 = std::time::Instant::now();
+        let result = self.processor.process_array(array, &self.pool);
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Publish output arrays to downstream plugins
+        let output = self.output.lock();
+        for out in &result.output_arrays {
+            output.publish(out.clone());
+        }
+        drop(output);
+
+        // Update base NDArrayDriver params from array metadata
+        self.array_counter += 1;
+        let info = array.info();
+        let color_mode = if array.dims.len() <= 2 { 0 } else { 2 };
+        self.port_handle.write_int32_no_wait(self.ndarray_params.array_counter, 0, self.array_counter);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.unique_id, 0, array.unique_id);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.n_dimensions, 0, array.dims.len() as i32);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_x, 0, info.x_size as i32);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_y, 0, info.y_size as i32);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.data_type, 0, array.data.data_type() as i32);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.color_mode, 0, color_mode);
+
+        let ts_f64 = array.timestamp.as_f64();
+        self.port_handle.write_float64_no_wait(self.ndarray_params.timestamp_rbv, 0, ts_f64);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.epics_ts_sec, 0, array.timestamp.sec as i32);
+        self.port_handle.write_int32_no_wait(self.ndarray_params.epics_ts_nsec, 0, array.timestamp.nsec as i32);
+
+        self.port_handle.write_float64_no_wait(self.plugin_params.execution_time, 0, elapsed_ms);
+
+        for update in &result.param_updates {
+            match update {
+                ParamUpdate::Int32(reason, value) => {
+                    self.port_handle.write_int32_no_wait(*reason, 0, *value);
+                }
+                ParamUpdate::Float64(reason, value) => {
+                    self.port_handle.write_float64_no_wait(*reason, 0, *value);
+                }
+            }
+        }
+
+        let _ = self.port_handle.call_param_callbacks_blocking(0);
+    }
+}
+
+/// Type-erased handle for blocking mode: allows NDArraySender to call
+/// process_and_publish without knowing the concrete processor type.
+struct BlockingProcessorHandle<P: NDPluginProcess> {
+    inner: Arc<parking_lot::Mutex<SharedProcessorInner<P>>>,
+}
+
+impl<P: NDPluginProcess> BlockingProcessFn for BlockingProcessorHandle<P> {
+    fn process_and_publish(&self, array: &NDArray) {
+        self.inner.lock().process_and_publish(array);
+    }
+}
+
 /// PortDriver implementation for a plugin's control plane.
 #[allow(dead_code)]
 pub struct PluginPortDriver {
@@ -124,8 +196,8 @@ impl PluginPortDriver {
         let ndarray_params = NDArrayDriverParams::create(&mut base)?;
         let plugin_params = PluginBaseParams::create(&mut base)?;
 
-        // Set defaults (EnableCallbacks=0 matches C default: Disable)
-        base.set_int32_param(plugin_params.enable_callbacks, 0, 0)?;
+        // Set defaults (EnableCallbacks=1: Enable by default)
+        base.set_int32_param(plugin_params.enable_callbacks, 0, 1)?;
         base.set_int32_param(plugin_params.blocking_callbacks, 0, 0)?;
         base.set_int32_param(plugin_params.queue_size, 0, queue_size as i32)?;
         base.set_int32_param(plugin_params.dropped_arrays, 0, 0)?;
@@ -225,6 +297,7 @@ pub fn create_plugin_runtime<P: NDPluginProcess>(
         .expect("failed to create plugin port driver");
 
     let enable_callbacks_reason = driver.plugin_params.enable_callbacks;
+    let blocking_callbacks_reason = driver.plugin_params.blocking_callbacks;
     let ndarray_params = driver.ndarray_params;
     let plugin_params = driver.plugin_params;
 
@@ -238,24 +311,43 @@ pub fn create_plugin_runtime<P: NDPluginProcess>(
     // Array channel (data plane)
     let (array_sender, array_rx) = ndarray_channel(port_name, queue_size);
 
-    // Output fan-out (initially empty; downstream wired later)
+    // Shared mode flags
+    let enabled = Arc::new(AtomicBool::new(true));
+    let blocking_mode = Arc::new(AtomicBool::new(false));
+
+    // Shared processor (accessible from both data thread and caller thread)
     let array_output = Arc::new(parking_lot::Mutex::new(NDArrayOutput::new()));
-    let data_output = array_output.clone();
+    let shared = Arc::new(parking_lot::Mutex::new(SharedProcessorInner {
+        processor,
+        output: array_output,
+        pool,
+        ndarray_params,
+        plugin_params,
+        port_handle,
+        array_counter: 0,
+    }));
+
+    // Type-erased handle for blocking mode
+    let bp: Arc<dyn BlockingProcessFn> = Arc::new(BlockingProcessorHandle {
+        inner: shared.clone(),
+    });
+
+    let data_enabled = enabled.clone();
+    let data_blocking = blocking_mode.clone();
+    let array_sender = array_sender.with_blocking_support(enabled, blocking_mode, bp);
 
     // Spawn data processing thread
     let data_jh = thread::Builder::new()
         .name(format!("plugin-data-{port_name}"))
         .spawn(move || {
             plugin_data_loop(
-                processor,
+                shared,
                 array_rx,
                 param_rx,
-                data_output,
-                pool,
                 enable_callbacks_reason,
-                ndarray_params,
-                plugin_params,
-                port_handle,
+                blocking_callbacks_reason,
+                data_enabled,
+                data_blocking,
             );
         })
         .expect("failed to spawn plugin data thread");
@@ -272,90 +364,55 @@ pub fn create_plugin_runtime<P: NDPluginProcess>(
 }
 
 fn plugin_data_loop<P: NDPluginProcess>(
-    mut processor: P,
+    shared: Arc<parking_lot::Mutex<SharedProcessorInner<P>>>,
     mut array_rx: NDArrayReceiver,
     mut param_rx: tokio::sync::mpsc::Receiver<(usize, ParamChangeValue)>,
-    array_output: Arc<parking_lot::Mutex<NDArrayOutput>>,
-    pool: Arc<NDArrayPool>,
     enable_callbacks_reason: usize,
-    ndarray_params: NDArrayDriverParams,
-    plugin_params: PluginBaseParams,
-    port_handle: PortHandle,
+    blocking_callbacks_reason: usize,
+    enabled: Arc<AtomicBool>,
+    blocking_mode: Arc<AtomicBool>,
 ) {
-    let enabled = true;
-    let mut array_counter: i32 = 0;
-
-    loop {
-        match array_rx.blocking_recv() {
-            Some(array) => {
-                // Drain pending param changes
-                while let Ok((reason, value)) = param_rx.try_recv() {
-                    let snapshot = PluginParamSnapshot {
-                        enable_callbacks: enabled,
-                        reason,
-                        value,
-                    };
-                    if reason == enable_callbacks_reason {
-                        // We can't read from port handle here easily,
-                        // so we toggle based on the notification
-                    }
-                    processor.on_param_change(reason, &snapshot);
-                }
-
-                if !enabled {
-                    continue;
-                }
-
-                let t0 = std::time::Instant::now();
-                let result = processor.process_array(&array, &pool);
-                let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-                // Publish output arrays to downstream plugins
-                let output = array_output.lock();
-                for out in &result.output_arrays {
-                    output.publish(out.clone());
-                }
-                drop(output);
-
-                // Update base NDArrayDriver params from array metadata
-                array_counter += 1;
-                let info = array.info();
-                let color_mode = if array.dims.len() <= 2 { 0 } else { 2 }; // Mono or RGB1
-                port_handle.write_int32_no_wait(ndarray_params.array_counter, 0, array_counter);
-                port_handle.write_int32_no_wait(ndarray_params.unique_id, 0, array.unique_id);
-                port_handle.write_int32_no_wait(ndarray_params.n_dimensions, 0, array.dims.len() as i32);
-                port_handle.write_int32_no_wait(ndarray_params.array_size_x, 0, info.x_size as i32);
-                port_handle.write_int32_no_wait(ndarray_params.array_size_y, 0, info.y_size as i32);
-                port_handle.write_int32_no_wait(ndarray_params.data_type, 0, array.data.data_type() as i32);
-                port_handle.write_int32_no_wait(ndarray_params.color_mode, 0, color_mode);
-
-                // Publish timestamp from array
-                let ts_f64 = array.timestamp.as_f64();
-                port_handle.write_float64_no_wait(ndarray_params.timestamp_rbv, 0, ts_f64);
-                port_handle.write_int32_no_wait(ndarray_params.epics_ts_sec, 0, array.timestamp.sec as i32);
-                port_handle.write_int32_no_wait(ndarray_params.epics_ts_nsec, 0, array.timestamp.nsec as i32);
-
-                // Publish execution time (ms)
-                port_handle.write_float64_no_wait(plugin_params.execution_time, 0, elapsed_ms);
-
-                // Write plugin-specific param updates
-                for update in &result.param_updates {
-                    match update {
-                        ParamUpdate::Int32(reason, value) => {
-                            port_handle.write_int32_no_wait(*reason, 0, *value);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        loop {
+            tokio::select! {
+                array = array_rx.recv() => {
+                    match array {
+                        Some(arr) => {
+                            // In blocking mode, arrays are processed inline by the caller.
+                            // Skip processing here to avoid double-processing.
+                            if !blocking_mode.load(Ordering::Acquire) {
+                                shared.lock().process_and_publish(&arr);
+                            }
                         }
-                        ParamUpdate::Float64(reason, value) => {
-                            port_handle.write_float64_no_wait(*reason, 0, *value);
-                        }
+                        None => break,
                     }
                 }
-
-                // Flush all dirty params as I/O Intr notifications
-                let _ = port_handle.call_param_callbacks_blocking(0);
+                param = param_rx.recv() => {
+                    match param {
+                        Some((reason, value)) => {
+                            if reason == enable_callbacks_reason {
+                                enabled.store(value.as_i32() != 0, Ordering::Release);
+                            }
+                            if reason == blocking_callbacks_reason {
+                                blocking_mode.store(value.as_i32() != 0, Ordering::Release);
+                            }
+                            let snapshot = PluginParamSnapshot {
+                                enable_callbacks: enabled.load(Ordering::Acquire),
+                                reason,
+                                value,
+                            };
+                            shared.lock().processor.on_param_change(reason, &snapshot);
+                        }
+                        None => break,
+                    }
+                }
             }
-            None => break, // channel closed = shutdown
         }
-    }
+    });
 }
 
 /// Connect a downstream plugin's sender to a plugin runtime's output.
@@ -385,6 +442,7 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
         .expect("failed to create plugin port driver");
 
     let enable_callbacks_reason = driver.plugin_params.enable_callbacks;
+    let blocking_callbacks_reason = driver.plugin_params.blocking_callbacks;
     let ndarray_params = driver.ndarray_params;
     let plugin_params = driver.plugin_params;
 
@@ -395,21 +453,38 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
 
     let (array_sender, array_rx) = ndarray_channel(port_name, queue_size);
 
-    let data_output = Arc::new(parking_lot::Mutex::new(output));
+    let enabled = Arc::new(AtomicBool::new(true));
+    let blocking_mode = Arc::new(AtomicBool::new(false));
+
+    let shared = Arc::new(parking_lot::Mutex::new(SharedProcessorInner {
+        processor,
+        output: Arc::new(parking_lot::Mutex::new(output)),
+        pool,
+        ndarray_params,
+        plugin_params,
+        port_handle,
+        array_counter: 0,
+    }));
+
+    let bp: Arc<dyn BlockingProcessFn> = Arc::new(BlockingProcessorHandle {
+        inner: shared.clone(),
+    });
+
+    let data_enabled = enabled.clone();
+    let data_blocking = blocking_mode.clone();
+    let array_sender = array_sender.with_blocking_support(enabled, blocking_mode, bp);
 
     let data_jh = thread::Builder::new()
         .name(format!("plugin-data-{port_name}"))
         .spawn(move || {
             plugin_data_loop(
-                processor,
+                shared,
                 array_rx,
                 param_rx,
-                data_output,
-                pool,
                 enable_callbacks_reason,
-                ndarray_params,
-                plugin_params,
-                port_handle,
+                blocking_callbacks_reason,
+                data_enabled,
+                data_blocking,
             );
         })
         .expect("failed to spawn plugin data thread");
@@ -587,5 +662,214 @@ mod tests {
 
         // Some should have been dropped
         assert!(handle.array_sender().dropped_count() > 0);
+    }
+
+    #[test]
+    fn test_blocking_callbacks_basic() {
+        let pool = Arc::new(NDArrayPool::new(1_000_000));
+        let (downstream_sender, mut downstream_rx) = ndarray_channel("DOWNSTREAM", 10);
+        let mut output = NDArrayOutput::new();
+        output.add(downstream_sender);
+
+        let (handle, _data_jh) = create_plugin_runtime_with_output(
+            "BLOCK_TEST",
+            PassthroughProcessor,
+            pool,
+            10,
+            output,
+            "",
+        );
+
+        // Enable blocking mode
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.blocking_callbacks, 0, 1)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // In blocking mode, send() processes inline and returns synchronously
+        handle.array_sender().send(make_test_array(42));
+
+        // Array should already be in the downstream channel
+        let received = downstream_rx.blocking_recv().unwrap();
+        assert_eq!(received.unique_id, 42);
+    }
+
+    #[test]
+    fn test_blocking_to_nonblocking_switch() {
+        let pool = Arc::new(NDArrayPool::new(1_000_000));
+        let (downstream_sender, mut downstream_rx) = ndarray_channel("DOWNSTREAM", 10);
+        let mut output = NDArrayOutput::new();
+        output.add(downstream_sender);
+
+        let (handle, _data_jh) = create_plugin_runtime_with_output(
+            "SWITCH_TEST",
+            PassthroughProcessor,
+            pool,
+            10,
+            output,
+            "",
+        );
+
+        // Start in blocking mode
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.blocking_callbacks, 0, 1)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        handle.array_sender().send(make_test_array(1));
+        let received = downstream_rx.blocking_recv().unwrap();
+        assert_eq!(received.unique_id, 1);
+
+        // Switch back to non-blocking
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.blocking_callbacks, 0, 0)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Send in non-blocking mode — goes through channel to data thread
+        handle.array_sender().send(make_test_array(2));
+        let received = downstream_rx.blocking_recv().unwrap();
+        assert_eq!(received.unique_id, 2);
+    }
+
+    #[test]
+    fn test_enable_callbacks_disables_processing() {
+        let pool = Arc::new(NDArrayPool::new(1_000_000));
+        let (downstream_sender, mut downstream_rx) = ndarray_channel("DOWNSTREAM", 10);
+        let mut output = NDArrayOutput::new();
+        output.add(downstream_sender);
+
+        let (handle, _data_jh) = create_plugin_runtime_with_output(
+            "ENABLE_TEST",
+            PassthroughProcessor,
+            pool,
+            10,
+            output,
+            "",
+        );
+
+        // Disable callbacks
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.enable_callbacks, 0, 0)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Send array — should be silently dropped by sender
+        handle.array_sender().send(make_test_array(99));
+
+        // Verify nothing received (with timeout)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                downstream_rx.recv(),
+            )
+            .await
+        });
+        assert!(
+            result.is_err(),
+            "should not receive array when callbacks disabled"
+        );
+    }
+
+    #[test]
+    fn test_blocking_downstream_receives() {
+        let pool = Arc::new(NDArrayPool::new(1_000_000));
+
+        let (ds1, mut rx1) = ndarray_channel("DS1", 10);
+        let (ds2, mut rx2) = ndarray_channel("DS2", 10);
+        let mut output = NDArrayOutput::new();
+        output.add(ds1);
+        output.add(ds2);
+
+        let (handle, _data_jh) = create_plugin_runtime_with_output(
+            "BLOCK_DS_TEST",
+            PassthroughProcessor,
+            pool,
+            10,
+            output,
+            "",
+        );
+
+        // Enable blocking mode
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.blocking_callbacks, 0, 1)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        handle.array_sender().send(make_test_array(77));
+
+        // Both downstream receivers should have the array
+        let r1 = rx1.blocking_recv().unwrap();
+        let r2 = rx2.blocking_recv().unwrap();
+        assert_eq!(r1.unique_id, 77);
+        assert_eq!(r2.unique_id, 77);
+    }
+
+    #[test]
+    fn test_blocking_param_updates() {
+        let pool = Arc::new(NDArrayPool::new(1_000_000));
+
+        struct ParamTracker;
+        impl NDPluginProcess for ParamTracker {
+            fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
+                ProcessResult::arrays(vec![Arc::new(array.clone())])
+            }
+            fn plugin_type(&self) -> &str {
+                "ParamTracker"
+            }
+        }
+
+        let (downstream_sender, mut downstream_rx) = ndarray_channel("DOWNSTREAM", 10);
+        let mut output = NDArrayOutput::new();
+        output.add(downstream_sender);
+
+        let (handle, _data_jh) = create_plugin_runtime_with_output(
+            "PARAM_TEST",
+            ParamTracker,
+            pool,
+            10,
+            output,
+            "",
+        );
+
+        // Enable blocking mode
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.blocking_callbacks, 0, 1)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Send array in blocking mode
+        handle.array_sender().send(make_test_array(1));
+        let received = downstream_rx.blocking_recv().unwrap();
+        assert_eq!(received.unique_id, 1);
+
+        // Write enable_callbacks while in blocking mode — should not crash
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.enable_callbacks, 0, 1)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Still works after param update
+        handle.array_sender().send(make_test_array(2));
+        let received = downstream_rx.blocking_recv().unwrap();
+        assert_eq!(received.unique_id, 2);
     }
 }

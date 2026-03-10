@@ -1,19 +1,40 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::ndarray::NDArray;
 
-/// Sender held by upstream. Non-blocking send with drop-newest policy.
+/// Type-erased blocking processor for inline array processing.
+pub(crate) trait BlockingProcessFn: Send + Sync {
+    fn process_and_publish(&self, array: &NDArray);
+}
+
+/// Sender held by upstream. Supports blocking and non-blocking modes.
 #[derive(Clone)]
 pub struct NDArraySender {
     tx: tokio::sync::mpsc::Sender<Arc<NDArray>>,
     port_name: String,
     dropped_count: Arc<AtomicU64>,
+    enabled: Arc<AtomicBool>,
+    blocking_mode: Arc<AtomicBool>,
+    blocking_processor: Option<Arc<dyn BlockingProcessFn>>,
 }
 
 impl NDArraySender {
-    /// Try to send an array. If the channel is full, increment dropped_count and discard.
+    /// Send an array downstream. Behavior depends on mode:
+    /// - Disabled (`enable_callbacks=0`): silently dropped
+    /// - Blocking (`blocking_callbacks=1`): processed inline on caller's thread
+    /// - Non-blocking (default): queued for data thread (dropped if full)
     pub fn send(&self, array: Arc<NDArray>) {
+        if !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        if self.blocking_mode.load(Ordering::Acquire) {
+            if let Some(ref bp) = self.blocking_processor {
+                bp.process_and_publish(&array);
+                return;
+            }
+        }
+        // Non-blocking path
         match self.tx.try_send(array) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -29,6 +50,21 @@ impl NDArraySender {
 
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count.load(Ordering::Relaxed)
+    }
+
+    /// Configure blocking callback support. Used by plugin runtime.
+    pub(crate) fn with_blocking_support(
+        self,
+        enabled: Arc<AtomicBool>,
+        blocking_mode: Arc<AtomicBool>,
+        blocking_processor: Arc<dyn BlockingProcessFn>,
+    ) -> Self {
+        Self {
+            enabled,
+            blocking_mode,
+            blocking_processor: Some(blocking_processor),
+            ..self
+        }
     }
 }
 
@@ -57,6 +93,9 @@ pub fn ndarray_channel(port_name: &str, queue_size: usize) -> (NDArraySender, ND
             tx,
             port_name: port_name.to_string(),
             dropped_count: Arc::new(AtomicU64::new(0)),
+            enabled: Arc::new(AtomicBool::new(true)),
+            blocking_mode: Arc::new(AtomicBool::new(false)),
+            blocking_processor: None,
         },
         NDArrayReceiver { rx },
     )
