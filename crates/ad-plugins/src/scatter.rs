@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ad_core::ndarray::NDArray;
 use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::NDPluginProcess;
+use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// Scatter processor: passes through arrays. Round-robin distribution is handled
 /// by wiring multiple NDArraySender instances downstream.
@@ -21,8 +21,8 @@ impl Default for ScatterProcessor {
 }
 
 impl NDPluginProcess for ScatterProcessor {
-    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
-        vec![Arc::new(array.clone())]
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
+        ProcessResult::arrays(vec![Arc::new(array.clone())])
     }
 
     fn plugin_type(&self) -> &str {
@@ -43,8 +43,8 @@ mod tests {
         let mut arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
         arr.unique_id = 42;
 
-        let outputs = proc.process_array(&arr, &pool);
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].unique_id, 42);
+        let result = proc.process_array(&arr, &pool);
+        assert_eq!(result.output_arrays.len(), 1);
+        assert_eq!(result.output_arrays[0].unique_id, 42);
     }
 }

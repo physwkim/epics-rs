@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ad_core::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::NDPluginProcess;
+use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// Per-dimension ROI configuration.
 #[derive(Debug, Clone)]
@@ -12,12 +12,22 @@ pub struct ROIDimConfig {
     pub bin: usize,
     pub reverse: bool,
     pub enable: bool,
+    /// If true, size is computed as src_dim - min.
+    pub auto_size: bool,
 }
 
 impl Default for ROIDimConfig {
     fn default() -> Self {
-        Self { min: 0, size: 0, bin: 1, reverse: false, enable: true }
+        Self { min: 0, size: 0, bin: 1, reverse: false, enable: true, auto_size: false }
     }
+}
+
+/// Auto-centering mode for ROI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoCenter {
+    None,
+    CenterOfMass,
+    PeakPosition,
 }
 
 /// ROI plugin configuration.
@@ -28,6 +38,7 @@ pub struct ROIConfig {
     pub enable_scale: bool,
     pub scale: f64,
     pub collapse_dims: bool,
+    pub autocenter: AutoCenter,
 }
 
 impl Default for ROIConfig {
@@ -38,8 +49,47 @@ impl Default for ROIConfig {
             enable_scale: false,
             scale: 1.0,
             collapse_dims: false,
+            autocenter: AutoCenter::None,
         }
     }
+}
+
+/// Compute the centroid (center of mass) of a 2D image.
+fn find_centroid_2d(data: &NDDataBuffer, x_size: usize, y_size: usize) -> (usize, usize) {
+    let mut cx = 0.0f64;
+    let mut cy = 0.0f64;
+    let mut total = 0.0f64;
+    for iy in 0..y_size {
+        for ix in 0..x_size {
+            let val = data.get_as_f64(iy * x_size + ix).unwrap_or(0.0);
+            total += val;
+            cx += val * ix as f64;
+            cy += val * iy as f64;
+        }
+    }
+    if total > 0.0 {
+        ((cx / total) as usize, (cy / total) as usize)
+    } else {
+        (x_size / 2, y_size / 2)
+    }
+}
+
+/// Find the position of the maximum value in a 2D image.
+fn find_peak_2d(data: &NDDataBuffer, x_size: usize, y_size: usize) -> (usize, usize) {
+    let mut max_val = f64::NEG_INFINITY;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    for iy in 0..y_size {
+        for ix in 0..x_size {
+            let val = data.get_as_f64(iy * x_size + ix).unwrap_or(0.0);
+            if val > max_val {
+                max_val = val;
+                max_x = ix;
+                max_y = iy;
+            }
+        }
+    }
+    (max_x, max_y)
 }
 
 /// Extract ROI sub-region from a 2D array.
@@ -51,10 +101,50 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
     let src_x = src.dims[0].size;
     let src_y = src.dims[1].size;
 
-    let roi_x_min = config.dims[0].min.min(src_x);
-    let roi_x_size = config.dims[0].size.min(src_x - roi_x_min);
-    let roi_y_min = config.dims[1].min.min(src_y);
-    let roi_y_size = config.dims[1].size.min(src_y - roi_y_min);
+    // Resolve effective min/size for X dimension
+    let (eff_x_min, eff_x_size) = if !config.dims[0].enable {
+        (0, src_x)
+    } else if config.dims[0].auto_size {
+        let min = config.dims[0].min.min(src_x);
+        (min, src_x.saturating_sub(min))
+    } else {
+        let min = config.dims[0].min.min(src_x);
+        let size = config.dims[0].size.min(src_x - min);
+        (min, size)
+    };
+
+    // Resolve effective min/size for Y dimension
+    let (eff_y_min, eff_y_size) = if !config.dims[1].enable {
+        (0, src_y)
+    } else if config.dims[1].auto_size {
+        let min = config.dims[1].min.min(src_y);
+        (min, src_y.saturating_sub(min))
+    } else {
+        let min = config.dims[1].min.min(src_y);
+        let size = config.dims[1].size.min(src_y - min);
+        (min, size)
+    };
+
+    // Apply autocenter: shift ROI min so that the ROI is centered on the
+    // centroid or peak, keeping the effective size the same.
+    let (roi_x_min, roi_y_min) = match config.autocenter {
+        AutoCenter::None => (eff_x_min, eff_y_min),
+        AutoCenter::CenterOfMass => {
+            let (cx, cy) = find_centroid_2d(&src.data, src_x, src_y);
+            let mx = cx.saturating_sub(eff_x_size / 2).min(src_x.saturating_sub(eff_x_size));
+            let my = cy.saturating_sub(eff_y_size / 2).min(src_y.saturating_sub(eff_y_size));
+            (mx, my)
+        }
+        AutoCenter::PeakPosition => {
+            let (px, py) = find_peak_2d(&src.data, src_x, src_y);
+            let mx = px.saturating_sub(eff_x_size / 2).min(src_x.saturating_sub(eff_x_size));
+            let my = py.saturating_sub(eff_y_size / 2).min(src_y.saturating_sub(eff_y_size));
+            (mx, my)
+        }
+    };
+
+    let roi_x_size = eff_x_size;
+    let roi_y_size = eff_y_size;
 
     if roi_x_size == 0 || roi_y_size == 0 {
         return None;
@@ -155,10 +245,10 @@ impl ROIProcessor {
 }
 
 impl NDPluginProcess for ROIProcessor {
-    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         match extract_roi_2d(array, &self.config) {
-            Some(roi_arr) => vec![Arc::new(roi_arr)],
-            None => vec![],
+            Some(roi_arr) => ProcessResult::arrays(vec![Arc::new(roi_arr)]),
+            None => ProcessResult::empty(),
         }
     }
 
@@ -186,8 +276,8 @@ mod tests {
     fn test_extract_sub_region() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true };
-        config.dims[1] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true };
+        config.dims[0] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         assert_eq!(roi.dims[0].size, 2);
@@ -205,8 +295,8 @@ mod tests {
     fn test_binning_2x2() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 2, reverse: false, enable: true };
-        config.dims[1] = ROIDimConfig { min: 0, size: 4, bin: 2, reverse: false, enable: true };
+        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 2, reverse: false, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 0, size: 4, bin: 2, reverse: false, enable: true, auto_size: false };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         assert_eq!(roi.dims[0].size, 2);
@@ -221,8 +311,8 @@ mod tests {
     fn test_reverse() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: true, enable: true };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true };
+        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: true, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         if let NDDataBuffer::U8(ref v) = roi.data {
@@ -237,8 +327,8 @@ mod tests {
     fn test_collapse_dims() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true };
+        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
         config.collapse_dims = true;
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
@@ -250,8 +340,8 @@ mod tests {
     fn test_scale() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 2, bin: 1, reverse: false, enable: true };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true };
+        config.dims[0] = ROIDimConfig { min: 0, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
         config.enable_scale = true;
         config.scale = 2.0;
 
@@ -266,8 +356,8 @@ mod tests {
     fn test_type_convert() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 2, bin: 1, reverse: false, enable: true };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true };
+        config.dims[0] = ROIDimConfig { min: 0, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
         config.data_type = Some(NDDataType::UInt16);
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
@@ -279,16 +369,84 @@ mod tests {
     #[test]
     fn test_roi_processor() {
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true };
-        config.dims[1] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true };
+        config.dims[0] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
 
         let mut proc = ROIProcessor::new(config);
         let pool = NDArrayPool::new(1_000_000);
 
         let arr = make_4x4_u8();
-        let outputs = proc.process_array(&arr, &pool);
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].dims[0].size, 2);
-        assert_eq!(outputs[0].dims[1].size, 2);
+        let result = proc.process_array(&arr, &pool);
+        assert_eq!(result.output_arrays.len(), 1);
+        assert_eq!(result.output_arrays[0].dims[0].size, 2);
+        assert_eq!(result.output_arrays[0].dims[1].size, 2);
+    }
+
+    // --- Auto-size / dim-disable / autocenter tests ---
+
+    #[test]
+    fn test_auto_size() {
+        // 4x4 image, min_x=1 with auto_size => size_x = 4-1 = 3
+        let arr = make_4x4_u8();
+        let mut config = ROIConfig::default();
+        config.dims[0] = ROIDimConfig { min: 1, size: 0, bin: 1, reverse: false, enable: true, auto_size: true };
+        config.dims[1] = ROIDimConfig { min: 0, size: 0, bin: 1, reverse: false, enable: true, auto_size: true };
+
+        let roi = extract_roi_2d(&arr, &config).unwrap();
+        assert_eq!(roi.dims[0].size, 3); // 4 - 1 = 3
+        assert_eq!(roi.dims[1].size, 4); // 4 - 0 = 4
+
+        if let NDDataBuffer::U8(ref v) = roi.data {
+            // First row (y=0): pixels at x=1,2,3 => values 1,2,3
+            assert_eq!(v[0], 1);
+            assert_eq!(v[1], 2);
+            assert_eq!(v[2], 3);
+        }
+    }
+
+    #[test]
+    fn test_dim_disable() {
+        // Disabled dim uses full range: min=0, size=src_dim
+        let arr = make_4x4_u8();
+        let mut config = ROIConfig::default();
+        config.dims[0] = ROIDimConfig { min: 2, size: 1, bin: 1, reverse: false, enable: false, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
+
+        let roi = extract_roi_2d(&arr, &config).unwrap();
+        // X dim disabled, so full range: size=4
+        assert_eq!(roi.dims[0].size, 4);
+        assert_eq!(roi.dims[1].size, 4);
+    }
+
+    #[test]
+    fn test_autocenter_peak() {
+        // Create 8x8 image with a peak at (6, 5)
+        let mut arr = NDArray::new(
+            vec![NDDimension::new(8), NDDimension::new(8)],
+            NDDataType::UInt8,
+        );
+        if let NDDataBuffer::U8(ref mut v) = arr.data {
+            for i in 0..64 { v[i] = 1; }
+            // Place peak at x=6, y=5
+            v[5 * 8 + 6] = 255;
+        }
+
+        let mut config = ROIConfig::default();
+        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[1] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.autocenter = AutoCenter::PeakPosition;
+
+        let roi = extract_roi_2d(&arr, &config).unwrap();
+        assert_eq!(roi.dims[0].size, 4);
+        assert_eq!(roi.dims[1].size, 4);
+
+        // ROI should be centered on peak (6,5) with size 4x4
+        // min_x = 6 - 4/2 = 4, clamped to min(4, 8-4)=4
+        // min_y = 5 - 4/2 = 3, clamped to min(3, 8-4)=3
+        // So ROI covers x=[4..8), y=[3..7) and the peak at (6,5) should be inside
+        // In the ROI, the peak is at local (6-4, 5-3) = (2, 2)
+        if let NDDataBuffer::U8(ref v) = roi.data {
+            assert_eq!(v[2 * 4 + 2], 255); // peak at local (2,2)
+        }
     }
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ad_core::ndarray::{NDArray, NDDataBuffer, NDDimension};
 use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::NDPluginProcess;
+use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// Transform types matching C++ NDPluginTransform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,9 +121,9 @@ impl TransformProcessor {
 }
 
 impl NDPluginProcess for TransformProcessor {
-    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         let out = apply_transform(array, self.transform);
-        vec![Arc::new(out)]
+        ProcessResult::arrays(vec![Arc::new(out)])
     }
 
     fn plugin_type(&self) -> &str {
@@ -259,10 +259,10 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
 
         let arr = make_3x2();
-        let outputs = proc.process_array(&arr, &pool);
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].dims[0].size, 2); // swapped
-        assert_eq!(outputs[0].dims[1].size, 3);
-        assert_eq!(get_u8(&outputs[0]), &[4, 1, 5, 2, 6, 3]);
+        let result = proc.process_array(&arr, &pool);
+        assert_eq!(result.output_arrays.len(), 1);
+        assert_eq!(result.output_arrays[0].dims[0].size, 2); // swapped
+        assert_eq!(result.output_arrays[0].dims[1].size, 3);
+        assert_eq!(get_u8(&result.output_arrays[0]), &[4, 1, 5, 2, 6, 3]);
     }
 }

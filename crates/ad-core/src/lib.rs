@@ -9,4 +9,7 @@ pub mod color;
 pub mod params;
 pub mod driver;
 pub mod plugin;
+pub mod pixel_cast;
+pub mod color_layout;
+pub mod roi;
 

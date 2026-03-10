@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ad_core::ndarray::NDArray;
 use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::NDPluginProcess;
+use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// Pure gather processing logic (passthrough — gathers from multiple senders into one stream).
 pub struct GatherProcessor {
@@ -26,9 +26,9 @@ impl Default for GatherProcessor {
 }
 
 impl NDPluginProcess for GatherProcessor {
-    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         self.count += 1;
-        vec![Arc::new(array.clone())]
+        ProcessResult::arrays(vec![Arc::new(array.clone())])
     }
 
     fn plugin_type(&self) -> &str {
@@ -49,11 +49,11 @@ mod tests {
         let arr1 = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
         let arr2 = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
 
-        let out1 = proc.process_array(&arr1, &pool);
-        let out2 = proc.process_array(&arr2, &pool);
+        let result1 = proc.process_array(&arr1, &pool);
+        let result2 = proc.process_array(&arr2, &pool);
 
-        assert_eq!(out1.len(), 1);
-        assert_eq!(out2.len(), 1);
+        assert_eq!(result1.output_arrays.len(), 1);
+        assert_eq!(result2.output_arrays.len(), 1);
         assert_eq!(proc.total_received(), 2);
     }
 }

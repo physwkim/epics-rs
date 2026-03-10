@@ -7,6 +7,8 @@ use asyn_rs::runtime::config::RuntimeConfig;
 use asyn_rs::runtime::port::{create_port_runtime, PortRuntimeHandle};
 use asyn_rs::user::AsynUser;
 
+use asyn_rs::port_handle::PortHandle;
+
 use crate::ndarray::NDArray;
 use crate::ndarray_pool::NDArrayPool;
 use crate::params::ndarray_driver::NDArrayDriverParams;
@@ -14,13 +16,47 @@ use crate::params::ndarray_driver::NDArrayDriverParams;
 use super::channel::{ndarray_channel, NDArrayOutput, NDArrayReceiver, NDArraySender};
 use super::params::PluginBaseParams;
 
+/// A single parameter update produced by a plugin's process_array.
+pub enum ParamUpdate {
+    Int32(usize, i32),
+    Float64(usize, f64),
+}
+
+/// Result of processing one array: output arrays + param updates to write back.
+pub struct ProcessResult {
+    pub output_arrays: Vec<Arc<NDArray>>,
+    pub param_updates: Vec<ParamUpdate>,
+}
+
+impl ProcessResult {
+    /// Convenience: sink plugin with only param updates, no output arrays.
+    pub fn sink(param_updates: Vec<ParamUpdate>) -> Self {
+        Self { output_arrays: vec![], param_updates }
+    }
+
+    /// Convenience: passthrough/transform plugin with output arrays but no param updates.
+    pub fn arrays(output_arrays: Vec<Arc<NDArray>>) -> Self {
+        Self { output_arrays, param_updates: vec![] }
+    }
+
+    /// Convenience: no outputs, no param updates.
+    pub fn empty() -> Self {
+        Self { output_arrays: vec![], param_updates: vec![] }
+    }
+}
+
 /// Pure processing logic. No threading concerns.
 pub trait NDPluginProcess: Send + 'static {
-    /// Process one array. Return output arrays (empty = sink-only plugin like Stats).
-    fn process_array(&mut self, array: &NDArray, pool: &NDArrayPool) -> Vec<Arc<NDArray>>;
+    /// Process one array. Return output arrays and param updates.
+    fn process_array(&mut self, array: &NDArray, pool: &NDArrayPool) -> ProcessResult;
 
     /// Plugin type name for PLUGIN_TYPE param.
     fn plugin_type(&self) -> &str;
+
+    /// Register plugin-specific params on the base. Called once during construction.
+    fn register_params(&mut self, _base: &mut PortDriverBase) -> Result<(), asyn_rs::error::AsynError> {
+        Ok(())
+    }
 
     /// Called when a param changes. Reason is the param index.
     fn on_param_change(&mut self, _reason: usize, _params: &PluginParamSnapshot) {}
@@ -41,12 +77,13 @@ pub struct PluginPortDriver {
 }
 
 impl PluginPortDriver {
-    fn new(
+    fn new<P: NDPluginProcess>(
         port_name: &str,
         plugin_type_name: &str,
         queue_size: usize,
         ndarray_port: &str,
         param_change_tx: tokio::sync::mpsc::Sender<usize>,
+        processor: &mut P,
     ) -> AsynResult<Self> {
         let mut base = PortDriverBase::new(
             port_name,
@@ -74,6 +111,9 @@ impl PluginPortDriver {
         if !ndarray_port.is_empty() {
             base.set_string_param(plugin_params.nd_array_port, 0, ndarray_port.into())?;
         }
+
+        // Let the processor register its plugin-specific params
+        processor.register_params(&mut base)?;
 
         Ok(Self {
             base,
@@ -142,7 +182,7 @@ impl PluginRuntimeHandle {
 /// - `JoinHandle` for the data processing thread
 pub fn create_plugin_runtime<P: NDPluginProcess>(
     port_name: &str,
-    processor: P,
+    mut processor: P,
     pool: Arc<NDArrayPool>,
     queue_size: usize,
     ndarray_port: &str,
@@ -150,8 +190,11 @@ pub fn create_plugin_runtime<P: NDPluginProcess>(
     // Param change channel (control plane -> data plane)
     let (param_tx, param_rx) = tokio::sync::mpsc::channel::<usize>(64);
 
+    // Capture plugin type before mutable borrow
+    let plugin_type_name = processor.plugin_type().to_string();
+
     // Create the port driver for control plane
-    let driver = PluginPortDriver::new(port_name, processor.plugin_type(), queue_size, ndarray_port, param_tx)
+    let driver = PluginPortDriver::new(port_name, &plugin_type_name, queue_size, ndarray_port, param_tx, &mut processor)
         .expect("failed to create plugin port driver");
 
     let enable_callbacks_reason = driver.plugin_params.enable_callbacks;
@@ -161,6 +204,9 @@ pub fn create_plugin_runtime<P: NDPluginProcess>(
     // Create port runtime (actor thread for param I/O)
     let (port_runtime, _actor_jh) =
         create_port_runtime(driver, RuntimeConfig::default());
+
+    // Clone port handle for the data thread to write params back
+    let port_handle = port_runtime.port_handle().clone();
 
     // Array channel (data plane)
     let (array_sender, array_rx) = ndarray_channel(port_name, queue_size);
@@ -180,6 +226,8 @@ pub fn create_plugin_runtime<P: NDPluginProcess>(
                 data_output,
                 pool,
                 enable_callbacks_reason,
+                ndarray_params,
+                port_handle,
             );
         })
         .expect("failed to spawn plugin data thread");
@@ -202,8 +250,11 @@ fn plugin_data_loop<P: NDPluginProcess>(
     array_output: Arc<parking_lot::Mutex<NDArrayOutput>>,
     pool: Arc<NDArrayPool>,
     enable_callbacks_reason: usize,
+    ndarray_params: NDArrayDriverParams,
+    port_handle: PortHandle,
 ) {
     let enabled = true;
+    let mut array_counter: i32 = 0;
 
     loop {
         match array_rx.blocking_recv() {
@@ -224,11 +275,41 @@ fn plugin_data_loop<P: NDPluginProcess>(
                     continue;
                 }
 
-                let outputs = processor.process_array(&array, &pool);
+                let result = processor.process_array(&array, &pool);
+
+                // Publish output arrays to downstream plugins
                 let output = array_output.lock();
-                for out in outputs {
-                    output.publish(out);
+                for out in &result.output_arrays {
+                    output.publish(out.clone());
                 }
+                drop(output);
+
+                // Update base NDArrayDriver params from array metadata
+                array_counter += 1;
+                let info = array.info();
+                let color_mode = if array.dims.len() <= 2 { 0 } else { 2 }; // Mono or RGB1
+                port_handle.write_int32_no_wait(ndarray_params.array_counter, 0, array_counter);
+                port_handle.write_int32_no_wait(ndarray_params.unique_id, 0, array.unique_id);
+                port_handle.write_int32_no_wait(ndarray_params.n_dimensions, 0, array.dims.len() as i32);
+                port_handle.write_int32_no_wait(ndarray_params.array_size_x, 0, info.x_size as i32);
+                port_handle.write_int32_no_wait(ndarray_params.array_size_y, 0, info.y_size as i32);
+                port_handle.write_int32_no_wait(ndarray_params.data_type, 0, array.data.data_type() as i32);
+                port_handle.write_int32_no_wait(ndarray_params.color_mode, 0, color_mode);
+
+                // Write plugin-specific param updates
+                for update in &result.param_updates {
+                    match update {
+                        ParamUpdate::Int32(reason, value) => {
+                            port_handle.write_int32_no_wait(*reason, 0, *value);
+                        }
+                        ParamUpdate::Float64(reason, value) => {
+                            port_handle.write_float64_no_wait(*reason, 0, *value);
+                        }
+                    }
+                }
+
+                // Flush all dirty params as I/O Intr notifications
+                let _ = port_handle.call_param_callbacks_blocking(0);
             }
             None => break, // channel closed = shutdown
         }
@@ -249,7 +330,7 @@ pub fn wire_downstream(
 /// Create a plugin runtime with a pre-wired output (for testing and direct wiring).
 pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
     port_name: &str,
-    processor: P,
+    mut processor: P,
     pool: Arc<NDArrayPool>,
     queue_size: usize,
     output: NDArrayOutput,
@@ -257,7 +338,8 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
 ) -> (PluginRuntimeHandle, thread::JoinHandle<()>) {
     let (param_tx, param_rx) = tokio::sync::mpsc::channel::<usize>(64);
 
-    let driver = PluginPortDriver::new(port_name, processor.plugin_type(), queue_size, ndarray_port, param_tx)
+    let plugin_type_name = processor.plugin_type().to_string();
+    let driver = PluginPortDriver::new(port_name, &plugin_type_name, queue_size, ndarray_port, param_tx, &mut processor)
         .expect("failed to create plugin port driver");
 
     let enable_callbacks_reason = driver.plugin_params.enable_callbacks;
@@ -266,6 +348,8 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
 
     let (port_runtime, _actor_jh) =
         create_port_runtime(driver, RuntimeConfig::default());
+
+    let port_handle = port_runtime.port_handle().clone();
 
     let (array_sender, array_rx) = ndarray_channel(port_name, queue_size);
 
@@ -281,6 +365,8 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
                 data_output,
                 pool,
                 enable_callbacks_reason,
+                ndarray_params,
+                port_handle,
             );
         })
         .expect("failed to spawn plugin data thread");
@@ -306,8 +392,8 @@ mod tests {
     struct PassthroughProcessor;
 
     impl NDPluginProcess for PassthroughProcessor {
-        fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
-            vec![Arc::new(array.clone())]
+        fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
+            ProcessResult::arrays(vec![Arc::new(array.clone())])
         }
         fn plugin_type(&self) -> &str {
             "Passthrough"
@@ -320,9 +406,9 @@ mod tests {
     }
 
     impl NDPluginProcess for SinkProcessor {
-        fn process_array(&mut self, _array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
+        fn process_array(&mut self, _array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
             self.count += 1;
-            vec![]
+            ProcessResult::empty()
         }
         fn plugin_type(&self) -> &str {
             "Sink"
@@ -434,9 +520,9 @@ mod tests {
                 &mut self,
                 _array: &NDArray,
                 _pool: &NDArrayPool,
-            ) -> Vec<Arc<NDArray>> {
+            ) -> ProcessResult {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                vec![]
+                ProcessResult::empty()
             }
             fn plugin_type(&self) -> &str {
                 "Slow"

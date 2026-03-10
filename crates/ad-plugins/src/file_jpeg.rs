@@ -2,14 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ad_core::error::{ADError, ADResult};
-use ad_core::ndarray::{NDArray, NDDataType};
+use ad_core::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core::ndarray_pool::NDArrayPool;
 use ad_core::plugin::file_base::{NDFileMode, NDFileWriter, NDPluginFileBase};
-use ad_core::plugin::runtime::NDPluginProcess;
+use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
 
-/// JPEG file writer.
-/// Production version would use the `image` crate's JpegEncoder.
-/// This writes raw data with a JFIF marker for testing.
+use jpeg_encoder::{Encoder as JpegEncoder, ColorType as JpegColorType};
+
+/// JPEG file writer using `jpeg-encoder` for encoding and `jpeg-decoder` for decoding.
 pub struct JpegWriter {
     current_path: Option<PathBuf>,
     quality: u8,
@@ -43,18 +43,69 @@ impl NDFileWriter for JpegWriter {
         let path = self.current_path.as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
-        // Write a minimal JFIF file (placeholder for real JPEG encoding)
-        let raw = array.data.as_u8_slice();
         let info = array.info();
+        let width = info.x_size;
+        let height = info.y_size;
 
-        write_placeholder_jpeg(path, raw, info.x_size, info.y_size, self.quality)?;
+        let data = match &array.data {
+            NDDataBuffer::U8(v) => v.as_slice(),
+            _ => {
+                return Err(ADError::UnsupportedConversion(
+                    "JPEG only supports UInt8".into(),
+                ))
+            }
+        };
+
+        let color_type = if info.color_size == 3 {
+            JpegColorType::Rgb
+        } else {
+            JpegColorType::Luma
+        };
+
+        let mut buf = Vec::new();
+        let encoder = JpegEncoder::new(&mut buf, self.quality);
+        encoder
+            .encode(data, width as u16, height as u16, color_type)
+            .map_err(|e| ADError::UnsupportedConversion(format!("JPEG encode error: {}", e)))?;
+
+        std::fs::write(path, &buf)?;
         Ok(())
     }
 
     fn read_file(&mut self) -> ADResult<NDArray> {
-        Err(ADError::UnsupportedConversion(
-            "JPEG read not implemented (requires image crate)".into(),
-        ))
+        let path = self.current_path.as_ref()
+            .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
+
+        let file_data = std::fs::read(path)?;
+        let mut decoder = jpeg_decoder::Decoder::new(&file_data[..]);
+        let pixels = decoder
+            .decode()
+            .map_err(|e| ADError::UnsupportedConversion(format!("JPEG decode error: {}", e)))?;
+        let info = decoder.info().unwrap();
+
+        let (width, height) = (info.width as usize, info.height as usize);
+
+        let dims = match info.pixel_format {
+            jpeg_decoder::PixelFormat::L8 => {
+                vec![NDDimension::new(width), NDDimension::new(height)]
+            }
+            jpeg_decoder::PixelFormat::RGB24 => {
+                vec![
+                    NDDimension::new(3),
+                    NDDimension::new(width),
+                    NDDimension::new(height),
+                ]
+            }
+            _ => {
+                return Err(ADError::UnsupportedConversion(
+                    "unsupported JPEG pixel format".into(),
+                ))
+            }
+        };
+
+        let mut arr = NDArray::new(dims, NDDataType::UInt8);
+        arr.data = NDDataBuffer::U8(pixels);
+        Ok(arr)
     }
 
     fn close_file(&mut self) -> ADResult<()> {
@@ -65,51 +116,6 @@ impl NDFileWriter for JpegWriter {
     fn supports_multiple_arrays(&self) -> bool {
         false
     }
-}
-
-fn write_placeholder_jpeg(
-    path: &Path,
-    data: &[u8],
-    _width: usize,
-    _height: usize,
-    quality: u8,
-) -> ADResult<()> {
-    use std::io::Write;
-
-    let mut file = std::fs::File::create(path)?;
-
-    // JPEG SOI marker
-    file.write_all(&[0xFF, 0xD8])?;
-
-    // APP0 JFIF marker (minimal)
-    file.write_all(&[0xFF, 0xE0])?;
-    let app0_len: u16 = 16;
-    file.write_all(&app0_len.to_be_bytes())?;
-    file.write_all(b"JFIF\0")?;
-    file.write_all(&[1, 1])?; // version
-    file.write_all(&[0])?; // units
-    file.write_all(&1u16.to_be_bytes())?; // x density
-    file.write_all(&1u16.to_be_bytes())?; // y density
-    file.write_all(&[0, 0])?; // thumbnail
-
-    // Quality marker as comment (non-standard, for testing)
-    file.write_all(&[0xFF, 0xFE])?; // COM marker
-    let comment = format!("quality={}", quality);
-    let com_len = (comment.len() + 2) as u16;
-    file.write_all(&com_len.to_be_bytes())?;
-    file.write_all(comment.as_bytes())?;
-
-    // Raw data (not real JPEG scan data, just for file size testing)
-    // Scale data by quality to simulate compression
-    let scale = quality as f64 / 100.0;
-    let output_size = (data.len() as f64 * scale) as usize;
-    let truncated = &data[..output_size.min(data.len())];
-    file.write_all(truncated)?;
-
-    // JPEG EOI marker
-    file.write_all(&[0xFF, 0xD9])?;
-
-    Ok(())
 }
 
 /// JPEG file processor wrapping NDPluginFileBase + JpegWriter.
@@ -138,11 +144,11 @@ impl Default for JpegFileProcessor {
 }
 
 impl NDPluginProcess for JpegFileProcessor {
-    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         let _ = self
             .file_base
             .process_array(Arc::new(array.clone()), &mut self.writer);
-        vec![] // file plugins are sinks
+        ProcessResult::empty() // file plugins are sinks
     }
 
     fn plugin_type(&self) -> &str {
@@ -184,7 +190,7 @@ mod tests {
         // Check JPEG SOI marker
         assert_eq!(&data[0..2], &[0xFF, 0xD8]);
         // Check JPEG EOI marker at end
-        assert_eq!(&data[data.len()-2..], &[0xFF, 0xD9]);
+        assert_eq!(&data[data.len() - 2..], &[0xFF, 0xD9]);
 
         std::fs::remove_file(&path).ok();
     }
@@ -228,9 +234,39 @@ mod tests {
 
         let size_high = std::fs::metadata(&path_high).unwrap().len();
         let size_low = std::fs::metadata(&path_low).unwrap().len();
-        assert!(size_high > size_low);
+        assert!(size_high > size_low, "high quality ({}) should be larger than low quality ({})", size_high, size_low);
 
         std::fs::remove_file(&path_high).ok();
         std::fs::remove_file(&path_low).ok();
+    }
+
+    #[test]
+    fn test_roundtrip_luma() {
+        let path = temp_path("jpeg_rt");
+        let mut writer = JpegWriter::new(100);
+
+        let mut arr = NDArray::new(
+            vec![NDDimension::new(8), NDDimension::new(8)],
+            NDDataType::UInt8,
+        );
+        if let NDDataBuffer::U8(ref mut v) = arr.data {
+            // Use uniform value so JPEG compression is lossless at quality 100
+            for i in 0..64 { v[i] = 128; }
+        }
+
+        writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
+        writer.write_file(&arr).unwrap();
+
+        let read_back = writer.read_file().unwrap();
+        assert_eq!(read_back.data.data_type(), NDDataType::UInt8);
+        if let NDDataBuffer::U8(ref v) = read_back.data {
+            // With uniform input at max quality, decoded values should be close
+            for &px in v.iter() {
+                assert!((px as i16 - 128).unsigned_abs() < 5, "pixel {} too far from 128", px);
+            }
+        }
+
+        writer.close_file().unwrap();
+        std::fs::remove_file(&path).ok();
     }
 }

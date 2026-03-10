@@ -4,8 +4,8 @@ use std::f64::consts::PI;
 
 use ad_core::ndarray::NDDataBuffer;
 
-use crate::color_layout::ColorLayout;
-use crate::pixel_cast::{with_buffer, with_buffer_mut, PixelCast};
+use ad_core::color_layout::ColorLayout;
+use ad_core::pixel_cast::{with_buffer, with_buffer_mut, PixelCast};
 use crate::types::{SimMode, SineOperation};
 
 const MAX_PEAK_SIGMA: i32 = 4;

@@ -56,48 +56,50 @@ impl PixelCast for f64 {
 
 /// Dispatch on NDDataBuffer variant, binding the inner Vec to `$v`.
 /// The body `$body` is monomorphized for each type.
+#[macro_export]
 macro_rules! with_buffer {
     ($buffer:expr, |$v:ident| $body:expr) => {
         match $buffer {
-            ad_core::ndarray::NDDataBuffer::I8($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U8($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::I16($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U16($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::I32($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U32($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::I64($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U64($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::F32($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::F64($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I8($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U8($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I16($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U16($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I32($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U32($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I64($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U64($v) => { $body }
+            $crate::ndarray::NDDataBuffer::F32($v) => { $body }
+            $crate::ndarray::NDDataBuffer::F64($v) => { $body }
         }
     };
 }
 
 /// Same as with_buffer! but gives mutable access.
+#[macro_export]
 macro_rules! with_buffer_mut {
     ($buffer:expr, |$v:ident| $body:expr) => {
         match $buffer {
-            ad_core::ndarray::NDDataBuffer::I8($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U8($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::I16($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U16($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::I32($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U32($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::I64($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::U64($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::F32($v) => { $body }
-            ad_core::ndarray::NDDataBuffer::F64($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I8($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U8($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I16($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U16($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I32($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U32($v) => { $body }
+            $crate::ndarray::NDDataBuffer::I64($v) => { $body }
+            $crate::ndarray::NDDataBuffer::U64($v) => { $body }
+            $crate::ndarray::NDDataBuffer::F32($v) => { $body }
+            $crate::ndarray::NDDataBuffer::F64($v) => { $body }
         }
     };
 }
 
-pub(crate) use with_buffer;
-pub(crate) use with_buffer_mut;
+pub use with_buffer;
+pub use with_buffer_mut;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::NDDataBuffer;
+    use crate::ndarray::NDDataBuffer;
 
     #[test]
     fn test_u8_from_f64_normal() {

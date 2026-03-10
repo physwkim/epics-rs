@@ -11,10 +11,11 @@ use ad_core::ndarray::{NDArray, NDDataBuffer};
 use ad_core::params::ADBaseParams;
 use ad_core::plugin::channel::NDArrayOutput;
 
-use crate::color_layout::ColorLayout;
+use ad_core::color_layout::ColorLayout;
+use ad_core::roi::crop_roi;
+
 use crate::compute::{self, SineState};
 use crate::params::{SimConfigSnapshot, SimDetectorParams};
-use crate::roi::crop_roi;
 use crate::types::DirtyFlags;
 
 const MIN_DELAY_SECS: f64 = 1e-5;

@@ -11,3 +11,17 @@ epics-base-rs = { path = "../epics-base" }
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 parking_lot = "0.12"
+rustfft = "6"
+lz4_flex = "0.11"
+jpeg-encoder = "0.6"
+jpeg-decoder = "0.3"
+tiff = "0.9"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dependencies.hdf5]
+version = "0.8"
+optional = true
+
+[features]
+hdf5 = ["dep:hdf5"]

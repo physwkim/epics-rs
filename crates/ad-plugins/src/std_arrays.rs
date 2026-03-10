@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ad_core::ndarray::NDArray;
 use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, PluginRuntimeHandle};
+use ad_core::plugin::runtime::{NDPluginProcess, PluginRuntimeHandle, ProcessResult};
 use parking_lot::Mutex;
 
 /// Pure processing logic: stores the latest array and passes it through.
@@ -30,10 +30,10 @@ impl Default for StdArraysProcessor {
 }
 
 impl NDPluginProcess for StdArraysProcessor {
-    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         let out = Arc::new(array.clone());
         *self.latest_data.lock() = Some(out.clone());
-        vec![out]
+        ProcessResult::arrays(vec![out])
     }
 
     fn plugin_type(&self) -> &str {
@@ -78,8 +78,8 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
 
         let arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
-        let outputs = proc.process_array(&arr, &pool);
-        assert_eq!(outputs.len(), 1);
+        let result = proc.process_array(&arr, &pool);
+        assert_eq!(result.output_arrays.len(), 1);
 
         let latest = proc.data_handle().lock().clone();
         assert!(latest.is_some());

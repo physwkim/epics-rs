@@ -20,7 +20,9 @@ use ad_core::plugin::runtime::{PluginRuntimeHandle, create_plugin_runtime};
 use ad_plugins::std_arrays::create_std_arrays_runtime;
 use ad_plugins::stats::create_stats_runtime;
 use sim_detector::driver::{create_sim_detector, SimDetectorRuntime};
-use sim_detector::ioc_support::{build_param_registry_from_params, ParamRegistry, SimDeviceSupport};
+use ad_core::plugin::registry::ParamRegistry;
+use ad_plugins::stats::build_stats_registry;
+use sim_detector::ioc_support::{build_param_registry_from_params, SimDeviceSupport};
 use sim_detector::plugin_support::{build_plugin_base_registry, ArrayDataHandle, PluginDeviceSupport};
 
 /// Info about a configured plugin (stored for device support wiring).
@@ -54,9 +56,13 @@ impl DriverHolder {
     }
 
     fn add_plugin(&self, dtyp: &str, handle: &PluginRuntimeHandle, array_data: Option<ArrayDataHandle>) {
+        let registry = Arc::new(build_plugin_base_registry(handle));
+        self.add_plugin_with_registry(dtyp, handle, registry, array_data);
+    }
+
+    fn add_plugin_with_registry(&self, dtyp: &str, handle: &PluginRuntimeHandle, registry: Arc<ParamRegistry>, array_data: Option<ArrayDataHandle>) {
         let port_handle = handle.port_runtime().port_handle().clone();
         let port_name = port_handle.port_name().to_string();
-        let registry = Arc::new(build_plugin_base_registry(handle));
         self.plugins.lock().unwrap().push(PluginInfo {
             dtyp_name: dtyp.to_string(),
             port_handle: port_handle.clone(),
@@ -191,10 +197,11 @@ fn register_all_plugins(mut app: IocApplication, holder: &Arc<DriverHolder>) -> 
                 let rt = h._runtime.lock().unwrap();
                 let rt = rt.as_ref().ok_or("simDetectorConfig must be called first")?;
                 let pool = rt.pool().clone();
-                let (handle, _stats, _jh) = create_stats_runtime(&port_name, pool, queue_size, &ndarray_port);
+                let (handle, _stats, stats_params, _jh) = create_stats_runtime(&port_name, pool, queue_size, &ndarray_port);
                 rt.connect_downstream(handle.array_sender().clone());
                 println!("NDStatsConfigure: port={port_name}");
-                h.add_plugin(&dtyp, &handle, None);
+                let registry = Arc::new(build_stats_registry(&handle, &stats_params));
+                h.add_plugin_with_registry(&dtyp, &handle, registry, None);
                 Ok(CommandOutcome::Continue)
             },
         ));
@@ -284,7 +291,7 @@ fn register_all_plugins(mut app: IocApplication, holder: &Arc<DriverHolder>) -> 
                 let pool = rt.pool().clone();
                 use ad_plugins::color_convert::{ColorConvertConfig, ColorConvertProcessor};
                 use ad_core::color::{NDColorMode, NDBayerPattern};
-                let config = ColorConvertConfig { target_mode: NDColorMode::Mono, bayer_pattern: NDBayerPattern::RGGB };
+                let config = ColorConvertConfig { target_mode: NDColorMode::Mono, bayer_pattern: NDBayerPattern::RGGB, false_color: false };
                 let (handle, _jh) = create_plugin_runtime(&port_name, ColorConvertProcessor::new(config), pool, queue_size, &ndarray_port);
                 rt.connect_downstream(handle.array_sender().clone());
                 println!("NDColorConvertConfigure: port={port_name}");
@@ -377,7 +384,8 @@ fn register_all_plugins(mut app: IocApplication, holder: &Arc<DriverHolder>) -> 
                 let rt = rt.as_ref().ok_or("simDetectorConfig must be called first")?;
                 let pool = rt.pool().clone();
                 use ad_plugins::codec::{CodecMode, CodecProcessor};
-                let (handle, _jh) = create_plugin_runtime(&port_name, CodecProcessor::new(CodecMode::CompressLZ4), pool, queue_size, &ndarray_port);
+                use ad_core::codec::CodecName;
+                let (handle, _jh) = create_plugin_runtime(&port_name, CodecProcessor::new(CodecMode::Compress { codec: CodecName::LZ4, quality: 90 }), pool, queue_size, &ndarray_port);
                 rt.connect_downstream(handle.array_sender().clone());
                 println!("NDCodecConfigure: port={port_name}");
                 h.add_plugin(&dtyp, &handle, None);

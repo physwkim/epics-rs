@@ -404,6 +404,11 @@ impl PortHandle {
         self.submit_no_wait(RequestOp::Int32Write { value }, user);
     }
 
+    pub fn write_float64_no_wait(&self, reason: usize, addr: i32, value: f64) {
+        let user = AsynUser::new(reason).with_addr(addr);
+        self.submit_no_wait(RequestOp::Float64Write { value }, user);
+    }
+
     // --- Option convenience methods ---
 
     pub fn get_option_blocking(&self, key: &str) -> AsynResult<String> {

@@ -1,4 +1,4 @@
-use ad_core::ndarray::{NDArray, NDDataBuffer};
+use crate::ndarray::{NDArray, NDDataBuffer};
 
 use crate::color_layout::ColorLayout;
 use crate::pixel_cast::{with_buffer, PixelCast};
@@ -55,7 +55,7 @@ pub fn crop_roi(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::driver::ColorMode;
+    use crate::driver::ColorMode;
 
     #[test]
     fn test_crop_identity_mono() {

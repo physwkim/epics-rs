@@ -1,5 +1,5 @@
-use ad_core::driver::ColorMode;
-use ad_core::ndarray::NDDimension;
+use crate::driver::ColorMode;
+use crate::ndarray::NDDimension;
 
 /// Describes the color layout and provides pixel indexing.
 #[derive(Debug, Clone)]
@@ -57,8 +57,8 @@ impl ColorLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::NDArray;
-    use ad_core::ndarray::NDDataType;
+    use crate::ndarray::NDArray;
+    use crate::ndarray::NDDataType;
 
     #[test]
     fn test_mono_index() {

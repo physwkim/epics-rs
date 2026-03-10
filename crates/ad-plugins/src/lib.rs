@@ -15,3 +15,8 @@ pub mod file_tiff;
 pub mod file_jpeg;
 pub mod file_hdf5;
 pub mod passthrough;
+pub mod attribute;
+pub mod roi_stat;
+pub mod bad_pixel;
+pub mod attr_plot;
+pub mod pos_plugin;

@@ -8,37 +8,12 @@ use epics_base_rs::server::device_support::{DeviceSupport, WriteCompletion};
 use epics_base_rs::server::record::{Record, ScanType};
 
 use ad_core::params::ADBaseParams;
+use ad_core::plugin::registry::{ParamInfo, RegistryParamType};
 use crate::params::SimDetectorParams;
 use crate::SimDetector;
 
-#[derive(Clone, Copy)]
-pub enum ParamType {
-    Int32,
-    Float64,
-    OctetString,
-}
-
-#[derive(Clone)]
-pub struct ParamInfo {
-    pub param_index: usize,
-    pub param_type: ParamType,
-    pub drv_info: String,
-}
-
-impl ParamInfo {
-    pub fn int32(index: usize, drv_info: &str) -> Self {
-        Self { param_index: index, param_type: ParamType::Int32, drv_info: drv_info.to_string() }
-    }
-    pub fn float64(index: usize, drv_info: &str) -> Self {
-        Self { param_index: index, param_type: ParamType::Float64, drv_info: drv_info.to_string() }
-    }
-    pub fn string(index: usize, drv_info: &str) -> Self {
-        Self { param_index: index, param_type: ParamType::OctetString, drv_info: drv_info.to_string() }
-    }
-}
-
-/// Registry mapping record name suffixes to sim-detector parameters.
-pub type ParamRegistry = HashMap<String, ParamInfo>;
+// Re-export for public API compatibility.
+pub use ad_core::plugin::registry::{ParamRegistry, self};
 
 /// Build the parameter registry from a SimDetector instance.
 pub fn build_param_registry(det: &SimDetector) -> ParamRegistry {
@@ -375,9 +350,9 @@ impl DeviceSupport for SimDeviceSupport {
             self.inner.set_drv_info(&info.drv_info);
             self.inner.set_reason(info.param_index);
             let iface = match info.param_type {
-                ParamType::Int32 => "asynInt32",
-                ParamType::Float64 => "asynFloat64",
-                ParamType::OctetString => "asynOctet",
+                RegistryParamType::Int32 => "asynInt32",
+                RegistryParamType::Float64 => "asynFloat64",
+                RegistryParamType::OctetString => "asynOctet",
             };
             self.inner.set_iface_type(iface);
         } else {

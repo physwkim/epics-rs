@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ad_core::error::{ADError, ADResult};
-use ad_core::ndarray::{NDArray, NDDataType, NDDimension};
+use ad_core::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core::ndarray_pool::NDArrayPool;
 use ad_core::plugin::file_base::{NDFileMode, NDFileWriter, NDPluginFileBase};
-use ad_core::plugin::runtime::NDPluginProcess;
+use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
 
-/// TIFF file writer.
-/// Production version would use the `image` crate's TiffEncoder.
-/// This implementation writes raw data with a minimal TIFF header.
+use tiff::encoder::colortype;
+use tiff::encoder::TiffEncoder;
+
+/// TIFF file writer using the `tiff` crate for proper encoding/decoding.
 pub struct TiffWriter {
     current_path: Option<PathBuf>,
 }
@@ -31,21 +32,110 @@ impl NDFileWriter for TiffWriter {
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
         let info = array.info();
-        let raw_data = array.data.as_u8_slice();
+        let width = info.x_size as u32;
+        let height = info.y_size as u32;
 
-        // Write minimal TIFF (for testing; production would use image crate)
-        write_minimal_tiff(path, raw_data, info.x_size, info.y_size, array.data.data_type())?;
+        let file = std::fs::File::create(path)?;
+        let mut encoder = TiffEncoder::new(file)
+            .map_err(|e| ADError::UnsupportedConversion(format!("TIFF encoder error: {}", e)))?;
+
+        match &array.data {
+            NDDataBuffer::U8(v) => {
+                if info.color_size == 3 {
+                    encoder.write_image::<colortype::RGB8>(width, height, v)
+                } else {
+                    encoder.write_image::<colortype::Gray8>(width, height, v)
+                }
+            }
+            NDDataBuffer::U16(v) => {
+                if info.color_size == 3 {
+                    encoder.write_image::<colortype::RGB16>(width, height, v)
+                } else {
+                    encoder.write_image::<colortype::Gray16>(width, height, v)
+                }
+            }
+            NDDataBuffer::I32(v) => {
+                // No signed Gray32 in tiff crate; reinterpret as u32
+                let u32_data: Vec<u32> = v.iter().map(|&x| x as u32).collect();
+                encoder.write_image::<colortype::Gray32>(width, height, &u32_data)
+            }
+            NDDataBuffer::U32(v) => {
+                encoder.write_image::<colortype::Gray32>(width, height, v)
+            }
+            NDDataBuffer::F32(_) => {
+                // Write as raw gray bytes via U8 fallback
+                let raw = array.data.as_u8_slice();
+                let raw_width = (info.x_size * 4) as u32;
+                encoder.write_image::<colortype::Gray8>(raw_width, height, raw)
+            }
+            NDDataBuffer::F64(_) => {
+                let raw = array.data.as_u8_slice();
+                let raw_width = (info.x_size * 8) as u32;
+                encoder.write_image::<colortype::Gray8>(raw_width, height, raw)
+            }
+            _ => {
+                // Fallback: write as raw bytes with Gray8
+                let raw = array.data.as_u8_slice();
+                encoder.write_image::<colortype::Gray8>(
+                    raw.len() as u32 / height.max(1),
+                    height,
+                    raw,
+                )
+            }
+        }
+        .map_err(|e| ADError::UnsupportedConversion(format!("TIFF write error: {}", e)))?;
+
         Ok(())
     }
 
     fn read_file(&mut self) -> ADResult<NDArray> {
+        use tiff::decoder::Decoder;
+
         let path = self.current_path.as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
-        let data = std::fs::read(path)?;
-        // Simple: just read raw data back (skip header for testing)
-        let arr = NDArray::new(vec![NDDimension::new(data.len())], NDDataType::UInt8);
-        Ok(arr)
+        let file = std::fs::File::open(path)?;
+        let mut decoder = Decoder::new(file)
+            .map_err(|e| ADError::UnsupportedConversion(format!("TIFF decode error: {}", e)))?;
+
+        let (width, height) = decoder.dimensions()
+            .map_err(|e| ADError::UnsupportedConversion(format!("TIFF dimensions error: {}", e)))?;
+
+        let result = decoder.read_image()
+            .map_err(|e| ADError::UnsupportedConversion(format!("TIFF read error: {}", e)))?;
+
+        match result {
+            tiff::decoder::DecodingResult::U8(data) => {
+                let dims = vec![
+                    NDDimension::new(width as usize),
+                    NDDimension::new(height as usize),
+                ];
+                let mut arr = NDArray::new(dims, NDDataType::UInt8);
+                arr.data = NDDataBuffer::U8(data);
+                Ok(arr)
+            }
+            tiff::decoder::DecodingResult::U16(data) => {
+                let dims = vec![
+                    NDDimension::new(width as usize),
+                    NDDimension::new(height as usize),
+                ];
+                let mut arr = NDArray::new(dims, NDDataType::UInt16);
+                arr.data = NDDataBuffer::U16(data);
+                Ok(arr)
+            }
+            tiff::decoder::DecodingResult::U32(data) => {
+                let dims = vec![
+                    NDDimension::new(width as usize),
+                    NDDimension::new(height as usize),
+                ];
+                let mut arr = NDArray::new(dims, NDDataType::UInt32);
+                arr.data = NDDataBuffer::U32(data);
+                Ok(arr)
+            }
+            _ => Err(ADError::UnsupportedConversion(
+                "unsupported TIFF pixel format".into(),
+            )),
+        }
     }
 
     fn close_file(&mut self) -> ADResult<()> {
@@ -56,54 +146,6 @@ impl NDFileWriter for TiffWriter {
     fn supports_multiple_arrays(&self) -> bool {
         false
     }
-}
-
-fn write_minimal_tiff(path: &Path, data: &[u8], width: usize, height: usize, _dtype: NDDataType) -> ADResult<()> {
-    use std::io::Write;
-
-    let mut file = std::fs::File::create(path)?;
-
-    // Minimal TIFF header (little-endian)
-    let ifd_offset: u32 = 8;
-    file.write_all(&[0x49, 0x49])?; // Little-endian
-    file.write_all(&42u16.to_le_bytes())?; // Magic
-    file.write_all(&ifd_offset.to_le_bytes())?;
-
-    // IFD with minimal entries
-    let num_entries: u16 = 6;
-    let data_offset: u32 = 8 + 2 + num_entries as u32 * 12 + 4;
-
-    file.write_all(&num_entries.to_le_bytes())?;
-
-    // ImageWidth (tag 256)
-    write_ifd_entry(&mut file, 256, 3, 1, width as u32)?;
-    // ImageLength (tag 257)
-    write_ifd_entry(&mut file, 257, 3, 1, height as u32)?;
-    // BitsPerSample (tag 258)
-    write_ifd_entry(&mut file, 258, 3, 1, 8)?;
-    // Compression (tag 259) - none
-    write_ifd_entry(&mut file, 259, 3, 1, 1)?;
-    // StripOffsets (tag 273)
-    write_ifd_entry(&mut file, 273, 4, 1, data_offset)?;
-    // StripByteCounts (tag 279)
-    write_ifd_entry(&mut file, 279, 4, 1, data.len() as u32)?;
-
-    // Next IFD = 0 (none)
-    file.write_all(&0u32.to_le_bytes())?;
-
-    // Image data
-    file.write_all(data)?;
-
-    Ok(())
-}
-
-fn write_ifd_entry(file: &mut std::fs::File, tag: u16, dtype: u16, count: u32, value: u32) -> ADResult<()> {
-    use std::io::Write;
-    file.write_all(&tag.to_le_bytes())?;
-    file.write_all(&dtype.to_le_bytes())?;
-    file.write_all(&count.to_le_bytes())?;
-    file.write_all(&value.to_le_bytes())?;
-    Ok(())
 }
 
 /// TIFF file processor wrapping NDPluginFileBase + TiffWriter.
@@ -132,11 +174,11 @@ impl Default for TiffFileProcessor {
 }
 
 impl NDPluginProcess for TiffFileProcessor {
-    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> Vec<Arc<NDArray>> {
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         let _ = self
             .file_base
             .process_array(Arc::new(array.clone()), &mut self.writer);
-        vec![] // file plugins are sinks
+        ProcessResult::empty() // file plugins are sinks
     }
 
     fn plugin_type(&self) -> &str {
@@ -177,8 +219,11 @@ mod tests {
         // Verify file exists and has content
         let data = std::fs::read(&path).unwrap();
         assert!(data.len() > 16); // header + data
-        // Check TIFF magic
-        assert_eq!(&data[0..2], &[0x49, 0x49]);
+        // Check TIFF magic (little-endian II or big-endian MM)
+        assert!(
+            &data[0..2] == &[0x49, 0x49] || &data[0..2] == &[0x4D, 0x4D],
+            "Expected TIFF magic bytes"
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -200,6 +245,65 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         assert!(data.len() > 32); // 16 elements * 2 bytes + header
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_roundtrip_u8() {
+        let path = temp_path("tiff_rt_u8");
+        let mut writer = TiffWriter::new();
+
+        let mut arr = NDArray::new(
+            vec![NDDimension::new(4), NDDimension::new(4)],
+            NDDataType::UInt8,
+        );
+        if let NDDataBuffer::U8(ref mut v) = arr.data {
+            for i in 0..16 { v[i] = (i * 10) as u8; }
+        }
+
+        writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
+        writer.write_file(&arr).unwrap();
+
+        // Read it back
+        let read_back = writer.read_file().unwrap();
+        if let (NDDataBuffer::U8(ref orig), NDDataBuffer::U8(ref read)) =
+            (&arr.data, &read_back.data)
+        {
+            assert_eq!(orig, read);
+        } else {
+            panic!("data type mismatch on roundtrip");
+        }
+
+        writer.close_file().unwrap();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_roundtrip_u16() {
+        let path = temp_path("tiff_rt_u16");
+        let mut writer = TiffWriter::new();
+
+        let mut arr = NDArray::new(
+            vec![NDDimension::new(4), NDDimension::new(4)],
+            NDDataType::UInt16,
+        );
+        if let NDDataBuffer::U16(ref mut v) = arr.data {
+            for i in 0..16 { v[i] = (i * 1000) as u16; }
+        }
+
+        writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
+        writer.write_file(&arr).unwrap();
+
+        let read_back = writer.read_file().unwrap();
+        if let (NDDataBuffer::U16(ref orig), NDDataBuffer::U16(ref read)) =
+            (&arr.data, &read_back.data)
+        {
+            assert_eq!(orig, read);
+        } else {
+            panic!("data type mismatch on roundtrip");
+        }
+
+        writer.close_file().unwrap();
         std::fs::remove_file(&path).ok();
     }
 }
