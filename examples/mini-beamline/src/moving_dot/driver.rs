@@ -15,7 +15,7 @@ use ad_core::plugin::channel::{NDArrayOutput, NDArraySender, QueuedArrayCounter}
 use crate::physics::MovingDotImageConfig;
 
 use super::params::MovingDotParams;
-use super::task::{AcqCommand, start_acquisition_task};
+use super::task::{AcqCommand, AcquisitionContext, start_acquisition_task};
 use super::types::DirtyFlags;
 
 /// MovingDot area detector driver.
@@ -194,17 +194,16 @@ pub fn create_moving_dot_with_config(
     let shared_output = Arc::new(parking_lot::Mutex::new(array_output));
     let queued_counter = Arc::new(QueuedArrayCounter::new());
 
-    let port_handle = runtime_handle.port_handle().clone();
-    let task_handle = start_acquisition_task(
+    let task_handle = start_acquisition_task(AcquisitionContext {
         acq_rx,
-        port_handle,
-        shared_output.clone(),
+        port_handle: runtime_handle.port_handle().clone(),
+        array_output: shared_output.clone(),
         dirty,
-        ad_params,
-        dot_params,
+        ad: ad_params,
+        dot: dot_params,
         image_config,
-        queued_counter.clone(),
-    );
+        queued_counter: queued_counter.clone(),
+    });
 
     Ok(MovingDotRuntime {
         runtime_handle,

@@ -13,7 +13,7 @@ use ad_core::params::ADBaseParams;
 use ad_core::plugin::channel::{NDArrayOutput, NDArraySender, QueuedArrayCounter};
 
 use crate::params::SimDetectorParams;
-use crate::task::{AcqCommand, start_acquisition_task};
+use crate::task::{AcqCommand, AcquisitionContext, start_acquisition_task};
 use crate::types::DirtyFlags;
 
 pub struct SimDetector {
@@ -274,16 +274,15 @@ pub fn create_sim_detector(
     let shared_output = Arc::new(parking_lot::Mutex::new(array_output));
     let queued_counter = Arc::new(QueuedArrayCounter::new());
 
-    let port_handle = runtime_handle.port_handle().clone();
-    let task_handle = start_acquisition_task(
+    let task_handle = start_acquisition_task(AcquisitionContext {
         acq_rx,
-        port_handle,
-        shared_output.clone(),
+        port_handle: runtime_handle.port_handle().clone(),
+        array_output: shared_output.clone(),
         dirty,
-        ad_params,
-        sim_params,
-        queued_counter.clone(),
-    );
+        ad: ad_params,
+        sim: sim_params,
+        queued_counter: queued_counter.clone(),
+    });
 
     Ok(SimDetectorRuntime {
         runtime_handle,

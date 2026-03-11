@@ -9,10 +9,9 @@ use asyn_rs::port_handle::PortHandle;
 use ad_core::driver::{ADStatus, ImageMode};
 use ad_core::ndarray::{NDArray, NDDataBuffer};
 use ad_core::params::ADBaseParams;
-use ad_core::plugin::channel::NDArrayOutput;
 
 use ad_core::color_layout::ColorLayout;
-use ad_core::plugin::channel::QueuedArrayCounter;
+use ad_core::plugin::channel::{NDArrayOutput, QueuedArrayCounter};
 use ad_core::roi::crop_roi;
 
 use crate::compute::{self, SineState};
@@ -25,6 +24,30 @@ const MIN_DELAY_SECS: f64 = 1e-5;
 pub enum AcqCommand {
     Start,
     Stop,
+}
+
+/// Bundled state for the acquisition task thread.
+pub(crate) struct AcquisitionContext {
+    pub acq_rx: std::sync::mpsc::Receiver<AcqCommand>,
+    pub port_handle: PortHandle,
+    pub array_output: Arc<parking_lot::Mutex<NDArrayOutput>>,
+    pub dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
+    pub ad: ADBaseParams,
+    pub sim: SimDetectorParams,
+    pub queued_counter: Arc<QueuedArrayCounter>,
+}
+
+impl AcquisitionContext {
+    /// Drain in-flight arrays (if configured) and transition to Idle.
+    fn end_acquisition(&self, wait_for_plugins: bool) {
+        if wait_for_plugins {
+            self.queued_counter.wait_until_zero(Duration::from_secs(5));
+        }
+        let _ = self.port_handle.write_int32_blocking(self.ad.acquire_busy, 0, 0);
+        let _ = self.port_handle.write_int32_blocking(self.ad.status, 0, ADStatus::Idle as i32);
+        let _ = self.port_handle.write_int32_blocking(self.ad.acquire, 0, 0);
+        let _ = self.port_handle.call_param_callbacks_blocking(0);
+    }
 }
 
 struct TaskState {
@@ -136,56 +159,34 @@ fn wait_for_stop(acq_rx: &std::sync::mpsc::Receiver<AcqCommand>, duration: Durat
 }
 
 /// Start the acquisition task thread.
-///
-/// The task reads config via `PortHandle` (blocking), computes frames,
-/// and publishes via `NDArrayOutput`. Dirty flags are shared with the driver
-/// via `Arc<parking_lot::Mutex<DirtyFlags>>`.
-pub fn start_acquisition_task(
-    acq_rx: std::sync::mpsc::Receiver<AcqCommand>,
-    port_handle: PortHandle,
-    array_output: Arc<parking_lot::Mutex<NDArrayOutput>>,
-    dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
-    ad_params: ADBaseParams,
-    sim_params: SimDetectorParams,
-    queued_counter: Arc<QueuedArrayCounter>,
-) -> std::thread::JoinHandle<()> {
+pub(crate) fn start_acquisition_task(ctx: AcquisitionContext) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("SimDetTask".into())
-        .spawn(move || {
-            acquisition_loop(acq_rx, port_handle, array_output, dirty, ad_params, sim_params, queued_counter);
-        })
+        .spawn(move || acquisition_loop(ctx))
         .expect("failed to spawn SimDetTask thread")
 }
 
-fn acquisition_loop(
-    acq_rx: std::sync::mpsc::Receiver<AcqCommand>,
-    port_handle: PortHandle,
-    array_output: Arc<parking_lot::Mutex<NDArrayOutput>>,
-    dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
-    ad: ADBaseParams,
-    sim: SimDetectorParams,
-    queued_counter: Arc<QueuedArrayCounter>,
-) {
+fn acquisition_loop(ctx: AcquisitionContext) {
     let mut task_state = TaskState::new();
 
     loop {
         // Wait for Start command
-        match acq_rx.recv() {
+        match ctx.acq_rx.recv() {
             Ok(AcqCommand::Start) => {}
             Ok(AcqCommand::Stop) => continue, // stale stop, ignore
             Err(_) => break,                  // channel closed = shutdown
         }
 
         // Initialize counters via PortHandle
-        let _ = port_handle.write_int32_blocking(ad.num_images_counter, 0, 0);
-        let _ = port_handle.write_int32_blocking(ad.status, 0, ADStatus::Acquire as i32);
-        let _ = port_handle.write_int32_blocking(ad.acquire_busy, 0, 1);
+        let _ = ctx.port_handle.write_int32_blocking(ctx.ad.num_images_counter, 0, 0);
+        let _ = ctx.port_handle.write_int32_blocking(ctx.ad.status, 0, ADStatus::Acquire as i32);
+        let _ = ctx.port_handle.write_int32_blocking(ctx.ad.acquire_busy, 0, 1);
 
         let mut num_counter = 0;
-        let mut array_counter = port_handle.read_int32_blocking(ad.base.array_counter, 0).unwrap_or(0);
+        let mut array_counter = ctx.port_handle.read_int32_blocking(ctx.ad.base.array_counter, 0).unwrap_or(0);
 
         // Read initial config
-        let mut config = match SimConfigSnapshot::read_via_handle(&port_handle, &ad, &sim) {
+        let mut config = match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim) {
             Ok(cfg) => cfg,
             Err(_) => continue,
         };
@@ -194,12 +195,12 @@ fn acquisition_loop(
             let start_time = Instant::now();
 
             // Take dirty flags (shared with driver)
-            let dirty_flags = dirty.lock().take();
+            let dirty_flags = ctx.dirty.lock().take();
             let reset = dirty_flags.any();
 
             // Only re-read config when parameters changed
             if reset {
-                config = match SimConfigSnapshot::read_via_handle(&port_handle, &ad, &sim) {
+                config = match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim) {
                     Ok(cfg) => cfg,
                     Err(_) => break,
                 };
@@ -211,17 +212,11 @@ fn acquisition_loop(
             // Exposure time sleep with stop interruption
             let elapsed = start_time.elapsed().as_secs_f64();
             let delay = (config.acquire_time - elapsed).max(MIN_DELAY_SECS);
-            if wait_for_stop(&acq_rx, Duration::from_secs_f64(delay)) {
-                // External stop received
-                if config.wait_for_plugins {
-                    queued_counter.wait_until_zero(Duration::from_secs(5));
-                }
-                let _ = port_handle.write_int32_blocking(ad.acquire_busy, 0, 0);
-                let _ = port_handle.write_int32_blocking(ad.status, 0, ADStatus::Idle as i32);
-                let _ = port_handle.write_int32_blocking(ad.acquire, 0, 0);
-                let _ = port_handle.call_param_callbacks_blocking(0);
+            if wait_for_stop(&ctx.acq_rx, Duration::from_secs_f64(delay)) {
+                ctx.end_acquisition(config.wait_for_plugins);
                 break;
             }
+
             // Update counters (local to avoid blocking round-trips)
             num_counter += 1;
             array_counter += 1;
@@ -231,15 +226,15 @@ fn acquisition_loop(
 
             // Counter updates + callParamCallbacks always run (like C EPICS).
             // Only doCallbacksGenericPointer (publish) is gated by array_callbacks.
-            port_handle.write_int32_no_wait(ad.base.array_counter, 0, array_counter);
-            port_handle.write_int32_no_wait(ad.num_images_counter, 0, num_counter);
-            port_handle.write_float64_no_wait(ad.base.timestamp_rbv, 0, frame.timestamp.as_f64());
-            port_handle.write_int32_no_wait(ad.base.epics_ts_sec, 0, frame.timestamp.sec as i32);
-            port_handle.write_int32_no_wait(ad.base.epics_ts_nsec, 0, frame.timestamp.nsec as i32);
-            let _ = port_handle.call_param_callbacks_blocking(0);
+            ctx.port_handle.write_int32_no_wait(ctx.ad.base.array_counter, 0, array_counter);
+            ctx.port_handle.write_int32_no_wait(ctx.ad.num_images_counter, 0, num_counter);
+            ctx.port_handle.write_float64_no_wait(ctx.ad.base.timestamp_rbv, 0, frame.timestamp.as_f64());
+            ctx.port_handle.write_int32_no_wait(ctx.ad.base.epics_ts_sec, 0, frame.timestamp.sec as i32);
+            ctx.port_handle.write_int32_no_wait(ctx.ad.base.epics_ts_nsec, 0, frame.timestamp.nsec as i32);
+            let _ = ctx.port_handle.call_param_callbacks_blocking(0);
 
             if config.array_callbacks {
-                array_output.lock().publish(Arc::new(frame));
+                ctx.array_output.lock().publish(Arc::new(frame));
             }
 
             // Check stop conditions
@@ -248,13 +243,7 @@ fn acquisition_loop(
             if image_mode == ImageMode::Single
                 || (image_mode == ImageMode::Multiple && num_counter >= num_images)
             {
-                if config.wait_for_plugins {
-                    queued_counter.wait_until_zero(Duration::from_secs(5));
-                }
-                let _ = port_handle.write_int32_blocking(ad.acquire_busy, 0, 0);
-                let _ = port_handle.write_int32_blocking(ad.status, 0, ADStatus::Idle as i32);
-                let _ = port_handle.write_int32_blocking(ad.acquire, 0, 0);
-                let _ = port_handle.call_param_callbacks_blocking(0);
+                ctx.end_acquisition(config.wait_for_plugins);
                 break;
             }
 
@@ -262,14 +251,8 @@ fn acquisition_loop(
             let total_elapsed = start_time.elapsed().as_secs_f64();
             let period_delay = config.acquire_period - total_elapsed;
             if period_delay > 0.0 {
-                if wait_for_stop(&acq_rx, Duration::from_secs_f64(period_delay)) {
-                    if config.wait_for_plugins {
-                        queued_counter.wait_until_zero(Duration::from_secs(5));
-                    }
-                    let _ = port_handle.write_int32_blocking(ad.acquire_busy, 0, 0);
-                    let _ = port_handle.write_int32_blocking(ad.status, 0, ADStatus::Idle as i32);
-                    let _ = port_handle.write_int32_blocking(ad.acquire, 0, 0);
-                    let _ = port_handle.call_param_callbacks_blocking(0);
+                if wait_for_stop(&ctx.acq_rx, Duration::from_secs_f64(period_delay)) {
+                    ctx.end_acquisition(config.wait_for_plugins);
                     break;
                 }
             }

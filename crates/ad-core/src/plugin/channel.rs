@@ -13,8 +13,8 @@ pub(crate) trait BlockingProcessFn: Send + Sync {
 /// Used by drivers to perform a bounded wait at end of acquisition.
 pub struct QueuedArrayCounter {
     count: AtomicUsize,
-    mutex: std::sync::Mutex<()>,
-    condvar: std::sync::Condvar,
+    mutex: parking_lot::Mutex<()>,
+    condvar: parking_lot::Condvar,
 }
 
 impl QueuedArrayCounter {
@@ -22,8 +22,8 @@ impl QueuedArrayCounter {
     pub fn new() -> Self {
         Self {
             count: AtomicUsize::new(0),
-            mutex: std::sync::Mutex::new(()),
-            condvar: std::sync::Condvar::new(),
+            mutex: parking_lot::Mutex::new(()),
+            condvar: parking_lot::Condvar::new(),
         }
     }
 
@@ -36,7 +36,7 @@ impl QueuedArrayCounter {
     pub fn decrement(&self) {
         let prev = self.count.fetch_sub(1, Ordering::AcqRel);
         if prev == 1 {
-            let _guard = self.mutex.lock().unwrap();
+            let _guard = self.mutex.lock();
             self.condvar.notify_all();
         }
     }
@@ -49,17 +49,16 @@ impl QueuedArrayCounter {
     /// Wait until count reaches zero, or timeout expires.
     /// Returns `true` if count is zero, `false` on timeout.
     pub fn wait_until_zero(&self, timeout: Duration) -> bool {
-        let guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         if self.count.load(Ordering::Acquire) == 0 {
             return true;
         }
-        let result = self
+        !self
             .condvar
-            .wait_timeout_while(guard, timeout, |_| {
+            .wait_while_for(&mut guard, |_| {
                 self.count.load(Ordering::Acquire) != 0
-            })
-            .unwrap();
-        !result.1.timed_out()
+            }, timeout)
+            .timed_out()
     }
 }
 
