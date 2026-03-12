@@ -270,13 +270,12 @@ IocApplication::new()
     .await?;
 ```
 
-st.cmd uses **the same syntax as C++ EPICS**:
+st.cmd uses **the same syntax as C++ EPICS** (`iocInit()` is called automatically after the script completes):
 
 ```bash
 epicsEnvSet("PREFIX", "SIM1:")
 myDriverConfig("SIM1", 256, 256, 50000000)
 dbLoadRecords("$(MY_DRIVER)/Db/myDriver.db", "P=$(PREFIX)")
-iocInit()
 ```
 
 #### CA Client Library
