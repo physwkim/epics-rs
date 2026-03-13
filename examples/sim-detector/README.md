@@ -72,7 +72,7 @@ The driver uses a dirty flag system to avoid recomputing caches unnecessarily. C
 cargo build -p sim-detector
 
 # Full IOC with plugins
-cargo build -p sim-detector --features ioc --bin sim_ioc
+cargo build --release -p sim-detector --features ioc --bin sim_ioc
 
 # Run IOC
 ./target/release/sim_ioc examples/sim-detector/ioc/st.cmd
