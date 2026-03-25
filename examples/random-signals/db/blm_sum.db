@@ -1,0 +1,11 @@
+record(calc, "$(P)SUM:All") {
+    field(DESC, "Sum of A+B+C+D")
+    field(INPA, "$(P)$(ChA) NPP MS")
+    field(INPB, "$(P)$(ChB) NPP MS")
+    field(INPC, "$(P)$(ChC) NPP MS")
+    field(INPD, "$(P)$(ChD) CP MS")
+    field(CALC, "A+B+C+D")
+    field(EGU,  "counts")
+    field(PREC, "0")
+    field(SCAN, "Passive")
+}

@@ -1212,6 +1212,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "random-signals"
+version = "0.4.2"
+dependencies = [
+ "epics-base-rs",
+ "rand",
+ "tokio",
+]
+
+[[package]]
 name = "rawpointer"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

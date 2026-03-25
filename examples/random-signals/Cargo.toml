@@ -1,0 +1,11 @@
+[package]
+name = "random-signals"
+version.workspace = true
+edition = "2021"
+description = "Four random signal PVs updating at 10ms (100 Hz)"
+publish = false
+
+[dependencies]
+epics-base-rs = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+rand = { version = "0.8", features = ["small_rng"] }
