@@ -586,7 +586,10 @@ impl MotorRecord {
                 self.sync_positions();
             }
             CommandSource::Set => {
-                // SET mode: issue SetPosition without entering motion phase
+                // SET mode: recalculate RBV from new offset, then issue SetPosition
+                self.pos.rbv = coordinate::dial_to_user(self.pos.drbv, self.conv.dir, self.pos.off);
+                self.pos.diff = self.pos.dval - self.pos.drbv;
+                self.pos.rdif = self.pos.val - self.pos.rbv;
                 let raw_pos = self.pos.dval;
                 effects.commands.push(MotorCommand::SetPosition {
                     position: raw_pos,
@@ -1025,6 +1028,10 @@ impl Record for MotorRecord {
 
     fn can_device_write(&self) -> bool {
         true
+    }
+
+    fn is_put_complete(&self) -> bool {
+        self.stat.dmov
     }
 
     fn process(&mut self) -> CaResult<RecordProcessResult> {

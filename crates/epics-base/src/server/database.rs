@@ -244,7 +244,7 @@ impl PvDatabase {
         record_name: &str,
         field: &str,
         value: EpicsValue,
-    ) -> CaResult<()> {
+    ) -> CaResult<Option<crate::runtime::sync::oneshot::Receiver<()>>> {
         let field = field.to_ascii_uppercase();
 
         // Get record Arc
@@ -277,9 +277,9 @@ impl PvDatabase {
                     drop(instance);
                     let mut visited = HashSet::new();
                     let _ = self.process_record_with_links(record_name, &mut visited, 0).await;
-                    return Ok(());
+                    return Ok(None);
                 }
-                return Ok(());
+                return Ok(None);
             }
 
             // DISP check: block CA puts to non-DISP fields when DISP=1
@@ -347,16 +347,41 @@ impl PvDatabase {
             crate::server::record::CommonFieldPutResult::NoChange => {}
         }
 
+        // Set up put_notify completion channel BEFORE processing.
+        // If process returns AsyncPendingNotify, the handler will take
+        // the sender and hold it until processing truly completes.
+        let (completion_tx, completion_rx) = crate::runtime::sync::oneshot::channel();
+        {
+            let rec = self.inner.records.read().await;
+            if let Some(rec_arc) = rec.get(record_name) {
+                rec_arc.write().await.put_notify_tx = Some(completion_tx);
+            }
+        }
+
         // Process the record after field put.
-        // C EPICS processes on Passive scan or when the field has "process passive" (pp)
-        // attribute. For simplicity, always process — the record's do_process() will
-        // decide whether to act based on last_write and pending events.
         {
             let mut visited = HashSet::new();
             let _ = self.process_record_with_links(record_name, &mut visited, 0).await;
         }
 
-        Ok(())
+        // Check if sender is still in the record (async processing pending)
+        // or was already fired (synchronous completion in Complete path).
+        let pending = {
+            let rec = self.inner.records.read().await;
+            if let Some(rec_arc) = rec.get(record_name) {
+                // If sender is still present, async processing is pending.
+                // Leave it — it will be fired when processing completes.
+                rec_arc.read().await.put_notify_tx.is_some()
+            } else {
+                false
+            }
+        };
+
+        if pending {
+            Ok(Some(completion_rx))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Process a record by name (process_local + notify).
@@ -1070,6 +1095,14 @@ impl PvDatabase {
             } else {
                 None
             };
+
+            // Fire deferred put_notify completion when the record reports
+            // that async work is done (e.g. motor: DMOV=1).
+            if instance.put_notify_tx.is_some() && instance.record.is_put_complete() {
+                if let Some(tx) = instance.put_notify_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
 
             (snapshot, out_info, flnk_name)
         };

@@ -477,6 +477,14 @@ pub trait Record: Send + Sync + 'static {
         matches!(self.record_type(), "ao" | "bo" | "longout" | "mbbo" | "stringout")
     }
 
+    /// Whether async processing has completed and put_notify can respond.
+    /// Records that return AsyncPendingNotify should return false while
+    /// async work is in progress, and true when done.
+    /// Default: true (synchronous records are always complete).
+    fn is_put_complete(&self) -> bool {
+        true
+    }
+
     /// Whether this record should fire its forward link after processing.
     fn should_fire_forward_link(&self) -> bool {
         true
@@ -544,6 +552,8 @@ pub struct RecordInstance {
     pub subroutine: Option<Arc<SubroutineFn>>,
     // Re-entrancy guard
     pub processing: AtomicBool,
+    // Deferred put_notify completion (fires when async processing completes)
+    pub put_notify_tx: Option<crate::runtime::sync::oneshot::Sender<()>>,
 }
 
 impl RecordInstance {
@@ -573,7 +583,13 @@ impl RecordInstance {
             device: None,
             subroutine: None,
             processing: AtomicBool::new(false),
+            put_notify_tx: None,
         }
+    }
+
+    /// Check if the record is currently processing (PACT equivalent).
+    pub fn is_processing(&self) -> bool {
+        self.processing.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Unified field resolution: record fields → common fields → virtual fields.
@@ -652,6 +668,30 @@ impl RecordInstance {
                     lower_alarm_limit: lolo,
                 });
             }
+            "motor" => {
+                let egu = self.record.get_field("EGU")
+                    .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                    .unwrap_or_default();
+                let prec = self.record.get_field("PREC")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0) as i16;
+                let hlm = self.record.get_field("HLM")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
+                let llm = self.record.get_field("LLM")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
+                snap.display = Some(super::snapshot::DisplayInfo {
+                    units: egu,
+                    precision: prec,
+                    upper_disp_limit: hlm,
+                    lower_disp_limit: llm,
+                    upper_alarm_limit: 0.0,
+                    upper_warning_limit: 0.0,
+                    lower_warning_limit: 0.0,
+                    lower_alarm_limit: 0.0,
+                });
+            }
             _ => {}
         }
     }
@@ -669,6 +709,15 @@ impl RecordInstance {
                 snap.control = Some(super::snapshot::ControlInfo {
                     upper_ctrl_limit: drvh.unwrap_or(hopr),
                     lower_ctrl_limit: drvl.unwrap_or(lopr),
+                });
+            }
+            "motor" => {
+                // Motor records use HLM/LLM as control limits
+                let hlm = self.record.get_field("HLM").and_then(|v| v.to_f64()).unwrap_or(0.0);
+                let llm = self.record.get_field("LLM").and_then(|v| v.to_f64()).unwrap_or(0.0);
+                snap.control = Some(super::snapshot::ControlInfo {
+                    upper_ctrl_limit: hlm,
+                    lower_ctrl_limit: llm,
                 });
             }
             "ai" | "longin" | "calc" | "calcout" => {

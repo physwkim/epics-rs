@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::registry::*;
+use crate::error::CaResult;
 use crate::server::database::parse_pv_name;
 use crate::server::db_loader;
 use crate::types::EpicsValue;
@@ -162,10 +163,10 @@ fn cmd_dbpf() -> CommandDef {
 
             // Use put_record_field_from_ca for records (triggers process like CA put).
             // Fall back to put_pv for simple PVs.
-            let put_result = ctx.block_on(async {
+            let put_result: CaResult<()> = ctx.block_on(async {
                 let db = ctx.db();
                 if db.get_record(base).await.is_some() {
-                    db.put_record_field_from_ca(base, &field, value).await
+                    db.put_record_field_from_ca(base, &field, value).await.map(|_| ())
                 } else {
                     db.put_pv(name, value).await
                 }

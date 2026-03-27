@@ -281,6 +281,10 @@ impl Record for BusyRecord {
         true
     }
 
+    fn is_put_complete(&self) -> bool {
+        self.val == 0
+    }
+
     fn get_field(&self, name: &str) -> Option<EpicsValue> {
         match name {
             "VAL" => Some(EpicsValue::Enum(self.val)),

@@ -6,7 +6,7 @@ use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpListener;
 use crate::runtime::sync::{Mutex, RwLock};
 
-use crate::error::{CaError, CaResult};
+use crate::error::CaResult;
 use crate::protocol::*;
 use crate::server::access_security::{AccessLevel, AccessSecurityConfig};
 use crate::server::database::{parse_pv_name, PvDatabase, PvEntry};
@@ -444,10 +444,10 @@ async fn dispatch_message(
                 }
             };
 
-            let write_result: Result<(), CaError> = match &entry.target {
+            let write_result = match &entry.target {
                 ChannelTarget::SimplePv(pv) => {
                     pv.set(new_value).await;
-                    Ok(())
+                    Ok(None)
                 }
                 ChannelTarget::RecordField { record, field } => {
                     let name = record.read().await.name.clone();
@@ -457,8 +457,19 @@ async fn dispatch_message(
 
             // F1: CA_PROTO_WRITE (cmd=4) is fire-and-forget — no response
             if is_notify {
-                let eca_status = match &write_result {
-                    Ok(()) => ECA_NORMAL,
+                let eca_status = match write_result {
+                    Ok(completion_rx) => {
+                        // If async processing started (e.g. motor move), wait
+                        // for completion callback before sending write_notify.
+                        // This matches C EPICS ca_put_callback behavior.
+                        if let Some(rx) = completion_rx {
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                rx,
+                            ).await;
+                        }
+                        ECA_NORMAL
+                    }
                     Err(e) => e.to_eca_status(),
                 };
 
