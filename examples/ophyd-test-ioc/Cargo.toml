@@ -1,0 +1,25 @@
+[package]
+name = "ophyd-test-ioc"
+version.workspace = true
+edition.workspace = true
+description = "EPICS IOC for ophyd test suite — replaces Docker-based epics-services-for-ophyd"
+publish = false
+
+[features]
+ioc = ["dep:epics-base-rs", "dep:tokio", "dep:ad-plugins", "ad-plugins/ioc", "ad-core/ioc", "asyn-rs/epics", "dep:motor-rs"]
+
+[dependencies]
+ad-core = { workspace = true }
+ad-plugins = { workspace = true, optional = true }
+asyn-rs = { workspace = true }
+motor-rs = { workspace = true, optional = true }
+parking_lot = "0.12"
+rand = "0.9"
+libm = "0.2"
+epics-base-rs = { workspace = true, optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+[[bin]]
+name = "ophyd_test_ioc"
+path = "src/bin/ophyd_test_ioc.rs"
+required-features = ["ioc"]

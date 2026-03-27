@@ -97,7 +97,8 @@ impl SimMotorHolder {
         self: &Arc<Self>,
     ) -> impl Fn(&epics_base_rs::server::ioc_app::DeviceSupportContext) -> Option<Box<dyn epics_base_rs::server::device_support::DeviceSupport>>
            + Send
-           + Sync {
+           + Sync
+           + 'static {
         let holder = self.clone();
         move |ctx: &epics_base_rs::server::ioc_app::DeviceSupportContext| {
             let mut motors = holder.motors.lock().unwrap();

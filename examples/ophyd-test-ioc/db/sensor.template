@@ -1,0 +1,10 @@
+record(ai, "$(P)$(R)") {
+    field(DESC, "Simulated sensor")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(VAL,  "0.0")
+    field(EGU,  "mA")
+    field(PREC, "3")
+    field(HOPR, "1000")
+    field(LOPR, "-1000")
+}
