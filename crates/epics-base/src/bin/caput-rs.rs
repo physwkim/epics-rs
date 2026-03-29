@@ -1,5 +1,6 @@
 use clap::Parser;
 use epics_base_rs::client::CaClient;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "rcaput", about = "Write a value to an EPICS PV")]
@@ -24,9 +25,23 @@ async fn main() {
     let args = Args::parse();
     let client = CaClient::new().await.expect("failed to create CA client");
 
-    // Read old value before writing
-    let old_value = match client.caget(&args.pv_name).await {
-        Ok((_type, val)) => val,
+    let ch = client.create_channel(&args.pv_name);
+    if let Err(e) = ch.wait_connected(Duration::from_secs(3)).await {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+
+    // Read old value and get native type in one call
+    let (native_type, old_value) = match ch.get().await {
+        Ok((t, val)) => (t, val.to_string()),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let value = match epics_base_rs::types::EpicsValue::parse(native_type, &args.value) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
@@ -34,9 +49,9 @@ async fn main() {
     };
 
     let result = if args.callback {
-        client.caput_callback(&args.pv_name, &args.value, args.timeout).await
+        ch.put_with_timeout(&value, Duration::from_secs_f64(args.timeout)).await
     } else {
-        client.caput(&args.pv_name, &args.value).await
+        ch.put_nowait(&value).await
     };
 
     match result {
