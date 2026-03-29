@@ -1,13 +1,19 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::sync::Notify;
+use std::sync::Arc;
 
 use crate::error::CaResult;
 use crate::protocol::*;
 
 /// Run the beacon emitter. Broadcasts CA_PROTO_RSRV_IS_UP at exponentially
 /// increasing intervals (starting at 20ms, doubling up to 15 seconds).
-pub async fn run_beacon_emitter(server_port: u16) -> CaResult<()> {
+///
+/// When `reset` is notified (e.g. on TCP connect/disconnect), the interval
+/// resets to the initial 20ms, matching C EPICS behavior. This lets clients
+/// detect server state changes quickly via beacon anomaly detection.
+pub async fn run_beacon_emitter(server_port: u16, reset: Arc<Notify>) -> CaResult<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
 
@@ -17,8 +23,9 @@ pub async fn run_beacon_emitter(server_port: u16) -> CaResult<()> {
     let server_ip: u32 = 0;
 
     let mut beacon_id: u32 = 0;
-    let mut interval = Duration::from_millis(20);
+    let initial_interval = Duration::from_millis(20);
     let max_interval = Duration::from_secs(15);
+    let mut interval = initial_interval;
 
     loop {
         // Build beacon message: CA_PROTO_RSRV_IS_UP
@@ -32,10 +39,15 @@ pub async fn run_beacon_emitter(server_port: u16) -> CaResult<()> {
 
         beacon_id = beacon_id.wrapping_add(1);
 
-        crate::runtime::task::sleep(interval).await;
-
-        if interval < max_interval {
-            interval = (interval * 2).min(max_interval);
+        tokio::select! {
+            () = crate::runtime::task::sleep(interval) => {
+                if interval < max_interval {
+                    interval = (interval * 2).min(max_interval);
+                }
+            }
+            () = reset.notified() => {
+                interval = initial_interval;
+            }
         }
     }
 }

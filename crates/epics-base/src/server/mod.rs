@@ -431,9 +431,11 @@ impl CaServer {
 
 
         let (tcp_tx, tcp_rx) = tokio::sync::oneshot::channel();
+        let beacon_reset = std::sync::Arc::new(tokio::sync::Notify::new());
+        let beacon_reset_tcp = beacon_reset.clone();
 
         let tcp_handle = crate::runtime::task::spawn(async move {
-            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx).await
+            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp).await
         });
 
         let tcp_port = tcp_rx.await.map_err(|_| CaError::Io(
@@ -456,7 +458,7 @@ impl CaServer {
                     )),
                 }
             }
-            r = beacon::run_beacon_emitter(tcp_port) => {
+            r = beacon::run_beacon_emitter(tcp_port, beacon_reset) => {
                 eprintln!("Beacon emitter exited: {r:?}");
                 r
             }

@@ -37,7 +37,8 @@ async fn setup(
     let db_tcp = db.clone();
     let acf_clone = acf.clone();
     tokio::spawn(async move {
-        let _ = epics_base_rs::server::tcp::run_tcp_listener(db_tcp, 0, acf_clone, tcp_tx).await;
+        let beacon_reset = std::sync::Arc::new(tokio::sync::Notify::new());
+        let _ = epics_base_rs::server::tcp::run_tcp_listener(db_tcp, 0, acf_clone, tcp_tx, beacon_reset).await;
     });
     let tcp_port = tcp_rx.await.expect("TCP listener started");
 

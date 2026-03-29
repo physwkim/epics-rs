@@ -222,6 +222,9 @@ pub struct CommonFields {
     // Process control
     pub putf: bool,
     pub rpro: bool,
+    // Fallback monitor/archive last-sent values for records without MLST/ALST fields
+    pub mlst: Option<f64>,
+    pub alst: Option<f64>,
 }
 
 impl Default for CommonFields {
@@ -262,6 +265,8 @@ impl Default for CommonFields {
             disp: false,
             putf: false,
             rpro: false,
+            mlst: None,
+            alst: None,
         }
     }
 }
@@ -1301,19 +1306,23 @@ impl RecordInstance {
                 changed_fields.push(("VAL".to_string(), val));
             }
         }
-        changed_fields.push(("SEVR".to_string(), EpicsValue::Short(self.common.sevr as i16)));
-        changed_fields.push(("STAT".to_string(), EpicsValue::Short(self.common.stat as i16)));
-        changed_fields.push(("UDF".to_string(), EpicsValue::Char(if self.common.udf { 1 } else { 0 })));
+        if alarm_result.alarm_changed {
+            changed_fields.push(("SEVR".to_string(), EpicsValue::Short(self.common.sevr as i16)));
+            changed_fields.push(("STAT".to_string(), EpicsValue::Short(self.common.stat as i16)));
+        }
 
-        // Add subscribed fields not already included
+        // Add subscribed fields that have active subscribers.
+        // These are auxiliary fields (RBV, DMOV, etc.) that may change each cycle.
+        let mut has_subscribed_fields = false;
         for (field, subs) in &self.subscribers {
-            if !subs.is_empty() && field != "VAL" && field != "SEVR" && field != "STAT" && field != "UDF" {
+            if !subs.is_empty() && field != "VAL" && field != "SEVR" && field != "STAT" {
                 if let Some(val) = self.resolve_field(field) {
                     changed_fields.push((field.clone(), val));
+                    has_subscribed_fields = true;
                 }
             }
         }
-        if !changed_fields.is_empty() {
+        if has_subscribed_fields {
             event_mask |= EventMask::VALUE;
         }
 
@@ -1323,27 +1332,37 @@ impl RecordInstance {
     /// Check deadband (MDEL/ADEL) for VAL monitor/archive filtering.
     /// Returns (monitor_trigger, archive_trigger).
     /// Updates ALST/MLST in the record when triggered.
+    /// For records without MDEL/ADEL fields (e.g. motor), defaults to MDEL=0
+    /// (trigger on any actual change) and uses CommonFields.mlst/alst as fallback.
     pub fn check_deadband_ext(&mut self) -> (bool, bool) {
-        let mdel = match self.record.get_field("MDEL") {
-            Some(v) => match v.to_f64() { Some(f) => f, None => return (true, true) },
-            None => return (true, true),
-        };
-        let adel = self.record.get_field("ADEL").and_then(|v| v.to_f64()).unwrap_or(0.0);
-        let mlst = self.record.get_field("MLST").and_then(|v| v.to_f64()).unwrap_or(0.0);
-        let alst = self.record.get_field("ALST").and_then(|v| v.to_f64()).unwrap_or(0.0);
         let val = match self.record.val().and_then(|v| v.to_f64()) {
             Some(v) => v,
             None => return (true, true),
         };
 
-        let monitor_trigger = mdel < 0.0 || (val - mlst).abs() > mdel;
-        let archive_trigger = adel < 0.0 || (val - alst).abs() > adel;
+        let mdel = self.record.get_field("MDEL").and_then(|v| v.to_f64()).unwrap_or(0.0);
+        let adel = self.record.get_field("ADEL").and_then(|v| v.to_f64()).unwrap_or(0.0);
+
+        // Use record's MLST/ALST fields if available, otherwise fall back to CommonFields
+        let mlst = self.record.get_field("MLST").and_then(|v| v.to_f64())
+            .or(self.common.mlst)
+            .unwrap_or(f64::NAN);
+        let alst = self.record.get_field("ALST").and_then(|v| v.to_f64())
+            .or(self.common.alst)
+            .unwrap_or(f64::NAN);
+
+        let monitor_trigger = mdel < 0.0 || mlst.is_nan() || (val - mlst).abs() > mdel;
+        let archive_trigger = adel < 0.0 || alst.is_nan() || (val - alst).abs() > adel;
 
         if archive_trigger {
-            let _ = self.record.put_field("ALST", EpicsValue::Double(val));
+            if self.record.put_field("ALST", EpicsValue::Double(val)).is_err() {
+                self.common.alst = Some(val);
+            }
         }
         if monitor_trigger {
-            let _ = self.record.put_field("MLST", EpicsValue::Double(val));
+            if self.record.put_field("MLST", EpicsValue::Double(val)).is_err() {
+                self.common.mlst = Some(val);
+            }
         }
 
         (monitor_trigger, archive_trigger)

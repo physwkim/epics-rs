@@ -110,11 +110,15 @@ impl ClientState {
 /// Run the TCP listener for CA connections.
 /// Tries to bind to the configured port first; falls back to an ephemeral port
 /// (port 0) if the configured port is already in use.
+///
+/// Notifies `beacon_reset` on each client connect/disconnect so the beacon
+/// emitter restarts its fast beacon cycle (matching C EPICS behavior).
 pub async fn run_tcp_listener(
     db: Arc<PvDatabase>,
     port: u16,
     acf: Arc<Option<AccessSecurityConfig>>,
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
+    beacon_reset: std::sync::Arc<tokio::sync::Notify>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -130,8 +134,12 @@ pub async fn run_tcp_listener(
         let (stream, peer) = listener.accept().await?;
         let db = db.clone();
         let acf = acf.clone();
+        let beacon_reset = beacon_reset.clone();
+        beacon_reset.notify_one();
         crate::runtime::task::spawn(async move {
-            if let Err(e) = handle_client(stream, db, acf, actual_port).await {
+            let result = handle_client(stream, db, acf, actual_port).await;
+            beacon_reset.notify_one();
+            if let Err(e) = result {
                 // Suppress normal disconnection errors (client closed connection)
                 let is_disconnect = matches!(
                     e,
