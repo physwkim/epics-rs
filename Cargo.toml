@@ -15,6 +15,7 @@ default-members = [
     "crates/seq",
     "crates/snc",
     "crates/epics-pva",
+    "crates/epics-rs",
     "crates/snc-core",
 ]
 resolver = "3"
@@ -37,3 +38,7 @@ epics-macros-rs = { path = "crates/epics-macros", version = "0.6.1" }
 snc-core-rs = { path = "crates/snc-core", version = "0.6.1" }
 epics-seq-rs = { path = "crates/seq", version = "0.6.1" }
 motor-rs = { path = "crates/motor", version = "0.6.1" }
+epics-calc-rs = { path = "crates/calc", version = "0.6.1" }
+autosave-rs = { path = "crates/autosave", version = "0.6.1" }
+busy-rs = { path = "crates/busy", version = "0.6.1" }
+msi-rs = { path = "crates/msi", version = "0.6.1" }

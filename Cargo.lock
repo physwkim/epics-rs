@@ -478,6 +478,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "epics-rs"
+version = "0.6.1"
+dependencies = [
+ "ad-core-rs",
+ "ad-plugins-rs",
+ "asyn-rs",
+ "autosave-rs",
+ "busy-rs",
+ "epics-base-rs",
+ "epics-ca-rs",
+ "epics-calc-rs",
+ "epics-pva-rs",
+ "epics-seq-rs",
+ "motor-rs",
+ "msi-rs",
+]
+
+[[package]]
 name = "epics-seq-rs"
 version = "0.6.1"
 dependencies = [

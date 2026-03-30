@@ -1,0 +1,36 @@
+[package]
+name = "epics-rs"
+version.workspace = true
+edition.workspace = true
+description = "Pure Rust EPICS control system framework"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+epics-base-rs = { workspace = true }
+epics-ca-rs = { workspace = true, optional = true }
+epics-pva-rs = { workspace = true, optional = true }
+asyn-rs = { workspace = true, optional = true }
+motor-rs = { workspace = true, optional = true }
+ad-core-rs = { workspace = true, optional = true }
+ad-plugins-rs = { workspace = true, optional = true }
+epics-calc-rs = { workspace = true, optional = true }
+autosave-rs = { workspace = true, optional = true }
+busy-rs = { workspace = true, optional = true }
+epics-seq-rs = { workspace = true, optional = true }
+msi-rs = { workspace = true, optional = true }
+
+[features]
+default = ["ca"]
+ca = ["dep:epics-ca-rs"]
+pva = ["dep:epics-pva-rs"]
+asyn = ["dep:asyn-rs"]
+motor = ["dep:asyn-rs", "dep:motor-rs"]
+ad = ["dep:asyn-rs", "dep:ad-core-rs", "dep:ad-plugins-rs"]
+calc = ["dep:epics-calc-rs"]
+autosave = ["dep:autosave-rs"]
+busy = ["dep:busy-rs"]
+seq = ["dep:epics-seq-rs"]
+msi = ["dep:msi-rs"]
+full = ["ca", "pva", "asyn", "motor", "ad", "calc", "autosave", "busy", "seq", "msi"]
