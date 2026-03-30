@@ -1,21 +1,21 @@
 [workspace]
 members = ["crates/*", "examples/*"]
 default-members = [
-    "crates/ad-core",
-    "crates/ad-plugins",
-    "crates/asyn",
-    "crates/autosave",
-    "crates/busy",
-    "crates/calc",
-    "crates/epics-base",
-    "crates/epics-ca",
-    "crates/epics-macros",
-    "crates/motor",
-    "crates/seq",
-    "crates/snc",
-    "crates/epics-pva",
+    "crates/ad-core-rs",
+    "crates/ad-plugins-rs",
+    "crates/asyn-rs",
+    "crates/autosave-rs",
+    "crates/busy-rs",
+    "crates/epics-base-rs",
+    "crates/epics-ca-rs",
+    "crates/epics-calc-rs",
+    "crates/epics-macros-rs",
+    "crates/epics-pva-rs",
     "crates/epics-rs",
-    "crates/snc-core",
+    "crates/epics-seq-rs",
+    "crates/motor-rs",
+    "crates/snc-core-rs",
+    "crates/snc-rs",
 ]
 resolver = "3"
 
@@ -27,17 +27,16 @@ license = "MIT"
 repository = "https://github.com/epics-rs/epics-rs"
 
 [workspace.dependencies]
-ad-core-rs = { path = "crates/ad-core", version = "0.7.0" }
-ad-plugins-rs = { path = "crates/ad-plugins", version = "0.7.0" }
-asyn-rs = { path = "crates/asyn", version = "0.7.0" }
-epics-base-rs = { path = "crates/epics-base", version = "0.7.0" }
-epics-ca-rs = { path = "crates/epics-ca", version = "0.7.0" }
-epics-pva-rs = { path = "crates/epics-pva", version = "0.7.0" }
-epics-macros-rs = { path = "crates/epics-macros", version = "0.7.0" }
-snc-core-rs = { path = "crates/snc-core", version = "0.7.0" }
-epics-seq-rs = { path = "crates/seq", version = "0.7.0" }
-motor-rs = { path = "crates/motor", version = "0.7.0" }
-epics-calc-rs = { path = "crates/calc", version = "0.7.0" }
-autosave-rs = { path = "crates/autosave", version = "0.7.0" }
-busy-rs = { path = "crates/busy", version = "0.7.0" }
-
+ad-core-rs = { path = "crates/ad-core-rs", version = "0.7.0" }
+ad-plugins-rs = { path = "crates/ad-plugins-rs", version = "0.7.0" }
+asyn-rs = { path = "crates/asyn-rs", version = "0.7.0" }
+autosave-rs = { path = "crates/autosave-rs", version = "0.7.0" }
+busy-rs = { path = "crates/busy-rs", version = "0.7.0" }
+epics-base-rs = { path = "crates/epics-base-rs", version = "0.7.0" }
+epics-ca-rs = { path = "crates/epics-ca-rs", version = "0.7.0" }
+epics-calc-rs = { path = "crates/epics-calc-rs", version = "0.7.0" }
+epics-macros-rs = { path = "crates/epics-macros-rs", version = "0.7.0" }
+epics-pva-rs = { path = "crates/epics-pva-rs", version = "0.7.0" }
+epics-seq-rs = { path = "crates/epics-seq-rs", version = "0.7.0" }
+motor-rs = { path = "crates/motor-rs", version = "0.7.0" }
+snc-core-rs = { path = "crates/snc-core-rs", version = "0.7.0" }

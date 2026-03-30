@@ -82,20 +82,20 @@ epics-rs = { git = "https://github.com/epics-rs/epics-rs", features = ["full"] }
 epics-rs/
 ├── crates/
 │   ├── epics-rs/         # Umbrella crate (feature-gated re-exports)
-│   ├── epics-base/       # Core: IOC runtime, 20 record types, iocsh, db loader
-│   ├── epics-ca/         # Channel Access protocol (client + server)
-│   ├── epics-pva/        # pvAccess protocol (experimental)
-│   ├── epics-macros/     # #[derive(EpicsRecord)] proc macro
-│   ├── asyn/             # Async device I/O framework (port driver model)
-│   ├── motor/            # Motor record + SimMotor
-│   ├── ad-core/          # areaDetector core (NDArray, NDArrayPool, driver base)
-│   ├── ad-plugins/       # 23 NDPlugins (Stats, ROI, FFT, TIFF, JPEG, HDF5, etc.)
-│   ├── calc/             # Calc expression engine (numeric, string, array, math)
-│   ├── seq/              # Sequencer runtime (state machine execution)
-│   ├── snc-core/         # SNL compiler library (lexer, parser, codegen)
-│   ├── snc/              # SNL compiler CLI
-│   ├── autosave/         # PV automatic save/restore
-│   └── busy/             # Busy record
+│   ├── epics-base-rs/    # Core: IOC runtime, 20 record types, iocsh, db loader
+│   ├── epics-ca-rs/      # Channel Access protocol (client + server)
+│   ├── epics-pva-rs/     # pvAccess protocol (experimental)
+│   ├── epics-macros-rs/  # #[derive(EpicsRecord)] proc macro
+│   ├── asyn-rs/          # Async device I/O framework (port driver model)
+│   ├── motor-rs/         # Motor record + SimMotor
+│   ├── ad-core-rs/       # areaDetector core (NDArray, NDArrayPool, driver base)
+│   ├── ad-plugins-rs/    # 23 NDPlugins (Stats, ROI, FFT, TIFF, JPEG, HDF5, etc.)
+│   ├── epics-calc-rs/    # Calc expression engine (numeric, string, array, math)
+│   ├── epics-seq-rs/     # Sequencer runtime (state machine execution)
+│   ├── snc-core-rs/      # SNL compiler library (lexer, parser, codegen)
+│   ├── snc-rs/           # SNL compiler CLI
+│   ├── autosave-rs/      # PV automatic save/restore
+│   └── busy-rs/          # Busy record
 └── examples/
     ├── scope-ioc/        # Digital oscilloscope simulator
     ├── mini-beamline/    # Beamline simulator with 5 motors + detectors
