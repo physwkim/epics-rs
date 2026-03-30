@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 
 use epics_calc_rs::{scalc, CalcError, StackValue, StringInputs};
 

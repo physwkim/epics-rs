@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant, clippy::manual_range_contains)]
 
 use epics_calc_rs::{acalc, ArrayInputs, ArrayStackValue};
 
