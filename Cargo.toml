@@ -14,6 +14,7 @@ default-members = [
     "crates/msi",
     "crates/seq",
     "crates/snc",
+    "crates/epics-pva",
     "crates/snc-core",
 ]
 resolver = "3"
@@ -31,6 +32,7 @@ ad-plugins = { path = "crates/ad-plugins", version = "0.6.1" }
 asyn-rs = { path = "crates/asyn", version = "0.6.1" }
 epics-base-rs = { path = "crates/epics-base", version = "0.6.1" }
 epics-ca-rs = { path = "crates/epics-ca", version = "0.6.1" }
+epics-pva-rs = { path = "crates/epics-pva", version = "0.6.1" }
 epics-macros = { path = "crates/epics-macros", version = "0.6.1" }
 snc-core = { path = "crates/snc-core", version = "0.6.1" }
 epics-seq = { path = "crates/seq", version = "0.6.1" }

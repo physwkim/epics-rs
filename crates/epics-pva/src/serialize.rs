@@ -1,5 +1,5 @@
-use crate::pva::error::{PvaError, PvaResult};
-use crate::pva::pvdata::*;
+use crate::error::{PvaError, PvaResult};
+use crate::pvdata::*;
 
 // ─── Size encoding ───────────────────────────────────────────────────────────
 

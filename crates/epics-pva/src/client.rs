@@ -4,11 +4,11 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
-use crate::pva::codec::PvaCodec;
-use crate::pva::error::{PvaError, PvaResult};
-use crate::pva::protocol::*;
-use crate::pva::pvdata::*;
-use crate::pva::serialize::*;
+use crate::codec::PvaCodec;
+use crate::error::{PvaError, PvaResult};
+use crate::protocol::*;
+use crate::pvdata::*;
+use crate::serialize::*;
 
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,9 +44,9 @@ impl PvaClient {
     pub fn new() -> PvaResult<Self> {
         let mut addrs = Vec::new();
 
-        let broadcast_port: u16 = crate::runtime::net::pva_broadcast_port();
+        let broadcast_port: u16 = epics_base_rs::runtime::net::pva_broadcast_port();
 
-        if let Some(list) = crate::runtime::env::get("EPICS_PVA_ADDR_LIST") {
+        if let Some(list) = epics_base_rs::runtime::env::get("EPICS_PVA_ADDR_LIST") {
             for entry in list.split_whitespace() {
                 let addr = if entry.contains(':') {
                     entry
@@ -62,7 +62,7 @@ impl PvaClient {
             }
         }
 
-        let auto_addr = crate::runtime::env::get_or("EPICS_PVA_AUTO_ADDR_LIST", "YES");
+        let auto_addr = epics_base_rs::runtime::env::get_or("EPICS_PVA_AUTO_ADDR_LIST", "YES");
 
         if auto_addr.eq_ignore_ascii_case("YES") || addrs.is_empty() {
             addrs.push(SocketAddr::V4(SocketAddrV4::new(

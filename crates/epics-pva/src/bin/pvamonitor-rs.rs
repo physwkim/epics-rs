@@ -1,5 +1,5 @@
 use clap::Parser;
-use epics_base_rs::pva::client::PvaClient;
+use epics_pva_rs::client::PvaClient;
 
 #[derive(Parser)]
 #[command(name = "rpvamonitor", about = "Monitor EPICS PVs via pvAccess")]

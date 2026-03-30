@@ -467,6 +467,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "epics-pva-rs"
+version = "0.6.1"
+dependencies = [
+ "chrono",
+ "clap",
+ "epics-base-rs",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "epics-seq"
 version = "0.6.1"
 dependencies = [

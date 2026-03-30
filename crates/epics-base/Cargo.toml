@@ -2,7 +2,7 @@
 name = "epics-base-rs"
 version.workspace = true
 edition.workspace = true
-description = "Pure Rust EPICS Channel Access client"
+description = "Pure Rust EPICS IOC core — record system, database, iocsh, calc engine"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -23,18 +23,3 @@ epics-ca-rs = { workspace = true }
 tempfile = "3"
 serial_test = "3"
 
-[[bin]]
-name = "pvaget-rs"
-path = "src/bin/pvaget-rs.rs"
-
-[[bin]]
-name = "pvaput-rs"
-path = "src/bin/pvaput-rs.rs"
-
-[[bin]]
-name = "pvamonitor-rs"
-path = "src/bin/pvamonitor-rs.rs"
-
-[[bin]]
-name = "pvainfo-rs"
-path = "src/bin/pvainfo-rs.rs"

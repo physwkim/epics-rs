@@ -1,5 +1,5 @@
-use crate::pva::protocol::*;
-use crate::pva::serialize::*;
+use crate::protocol::*;
+use crate::serialize::*;
 
 /// PVA message codec — manages byte order and provides message building helpers
 pub struct PvaCodec {

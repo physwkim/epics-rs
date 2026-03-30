@@ -5,7 +5,9 @@ use super::env;
 // CA port constants (originally from protocol.rs, now in epics-ca-rs)
 pub const CA_SERVER_PORT: u16 = 5064;
 pub const CA_REPEATER_PORT: u16 = 5065;
-pub use crate::pva::protocol::{PVA_BROADCAST_PORT, PVA_SERVER_PORT};
+// PVA port constants (originally from pva/protocol.rs, now in epics-pva-rs)
+pub const PVA_SERVER_PORT: u16 = 5075;
+pub const PVA_BROADCAST_PORT: u16 = 5076;
 
 /// Returns the CA server port, allowing override via `EPICS_CA_SERVER_PORT`.
 pub fn ca_server_port() -> u16 {

@@ -1,4 +1,4 @@
-use crate::pva::error::{PvaError, PvaResult};
+use crate::error::{PvaError, PvaResult};
 
 // PVA protocol constants
 pub const PVA_MAGIC: u8 = 0xCA;
