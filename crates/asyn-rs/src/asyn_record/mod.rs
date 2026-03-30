@@ -1,5 +1,5 @@
 pub mod registry;
-pub use registry::{register_port, register_asyn_record_type, asyn_record_factory, get_port, PortEntry};
+pub use registry::{register_port, register_asyn_record_type, asyn_record_factory, get_port, PortEntry, PortRegistry};
 
 use std::sync::Arc;
 
