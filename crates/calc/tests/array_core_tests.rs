@@ -1,4 +1,3 @@
-#![cfg(feature = "array")]
 
 use epics_calc_rs::{acalc, ArrayInputs, ArrayStackValue, CalcError};
 
