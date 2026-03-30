@@ -38,8 +38,13 @@ pub fn get_port(name: &str) -> Option<PortEntry> {
     reg.get(name).cloned()
 }
 
-/// Register the "asyn" record type factory with the epics-base db_loader.
-/// Call this at application startup before loading .db files.
+/// Return the asyn record type factory for injection into IocBuilder.
+pub fn asyn_record_factory() -> (&'static str, epics_base_rs::server::RecordFactory) {
+    ("asyn", Box::new(|| Box::new(super::AsynRecord::default())))
+}
+
+/// Register the "asyn" record type via the global registry (legacy).
+/// Prefer `asyn_record_factory()` with `IocBuilder::register_record_type()`.
 pub fn register_asyn_record_type() {
     epics_base_rs::server::db_loader::register_record_type(
         "asyn",

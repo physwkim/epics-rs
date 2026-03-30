@@ -74,13 +74,16 @@ async fn main() -> CaResult<()> {
         std::process::exit(1);
     };
 
-    asyn_rs::asyn_record::register_asyn_record_type();
-    motor_rs::register_motor_record_type();
     let trace = Arc::new(TraceManager::new());
     let mgr = PluginManager::new(trace.clone());
     let holder = AdHolder::new(trace.clone());
 
+    let (asyn_name, asyn_factory) = asyn_rs::asyn_record::asyn_record_factory();
+    let (motor_name, motor_factory) = motor_rs::motor_record_factory();
+
     let mut app = IocApplication::new();
+    app = app.register_record_type(asyn_name, move || asyn_factory());
+    app = app.register_record_type(motor_name, move || motor_factory());
     app = app.port(
         std::env::var("EPICS_CA_SERVER_PORT")
             .ok()

@@ -64,6 +64,7 @@ pub struct IocApplication {
     port: u16,
     device_factories: HashMap<String, DeviceSupportFactory>,
     dynamic_device_factory: Option<DynamicDeviceSupportFactory>,
+    record_factories: HashMap<String, super::RecordFactory>,
     subroutine_registry: HashMap<String, Arc<SubroutineFn>>,
     acf: Option<access_security::AccessSecurityConfig>,
     autosave_config: Option<autosave::SaveSetConfig>,
@@ -81,6 +82,7 @@ impl IocApplication {
             port: CA_SERVER_PORT,
             device_factories: HashMap::new(),
             dynamic_device_factory: None,
+            record_factories: HashMap::new(),
             subroutine_registry: HashMap::new(),
             acf: None,
             autosave_config: None,
@@ -146,6 +148,16 @@ impl IocApplication {
     /// Set the startup script path (executed before iocInit).
     pub fn startup_script(mut self, path: &str) -> Self {
         self.startup_script = Some(path.to_string());
+        self
+    }
+
+    /// Register a record type factory (e.g., "motor", "asyn").
+    /// Avoids the global registry — factories are passed to IocBuilder.
+    pub fn register_record_type<F>(mut self, type_name: &str, factory: F) -> Self
+    where
+        F: Fn() -> Box<dyn Record> + Send + Sync + 'static,
+    {
+        self.record_factories.insert(type_name.to_string(), Box::new(factory));
         self
     }
 
@@ -221,6 +233,7 @@ impl IocApplication {
             port,
             device_factories,
             dynamic_device_factory,
+            record_factories,
             subroutine_registry,
             acf,
             autosave_config,
@@ -230,6 +243,13 @@ impl IocApplication {
             startup_script,
             inline_records,
         } = self;
+
+        // Register record type factories with global registry so dbLoadRecords
+        // (called from st.cmd) can find them. This bridges the injected factories
+        // to the global registry that the iocsh dbLoadRecords command uses.
+        for (name, factory) in record_factories {
+            super::db_loader::register_record_type(&name, factory);
+        }
 
         // Register autosave startup commands if configured
         if let Some(ref config) = autosave_startup {
