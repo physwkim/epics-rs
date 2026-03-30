@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.7.1
+
+### Architecture
+- Extract `IocBuilder` from `CaServerBuilder` into epics-base-rs (protocol-agnostic IOC bootstrap)
+- Move `IocApplication` to epics-base-rs with pluggable protocol runner closure
+- Split `database.rs` into modules: field_io, processing, links, scan_index
+- Split `record.rs` into modules: alarm, scan, link, common_fields, record_trait, record_instance
+- Split `types.rs` into modules: value, dbr, codec
+- Split `db_loader.rs` into parser + include expander modules
+- Split `asyn_record.rs` registry into separate module
+- Extract motor field dispatch to `field_access.rs`
+- Remove thin wrapper crates (autosave-rs, busy-rs, epics-calc-rs) — now re-exported from epics-base-rs
+- Remove legacy autosave API, migrate to SaveSetConfig/AutosaveManager
+- Remove unused calc feature flags
+- Crate directory names now match crate names (crates/motor → crates/motor-rs, etc.)
+
+### API
+- Reduce public API surface: 7 internal modules → pub(crate) (recgbl, scan_event, exception, interpose, protocol, transport, channel)
+- Motor lib.rs: fields, coordinate → pub(crate); remove pub use fields::*, flags::*
+- Add `create_record_with_factories()` for dependency injection (avoids global registry)
+- `IocApplication::run()` now accepts a protocol runner: `.run(run_ca_ioc).await`
+
+### Testing
+- Move large inline test blocks to tests/ directory (3,337 lines)
+- Add autosave integration test with mini-beamline (save + restore on restart)
+
+### Fixes
+- Fix ad-core path references after directory rename
+- Fix remaining old crate directory references in README and examples
+- Clean all clippy warnings
+
 ## v0.7.0
 
 - **Breaking**: Separate Channel Access into `epics-ca-rs` crate

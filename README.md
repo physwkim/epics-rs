@@ -669,7 +669,7 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 ## Testing
 
 ```bash
-# All tests (1,550+)
+# All tests (1,750+)
 cargo test --workspace
 ```
 
