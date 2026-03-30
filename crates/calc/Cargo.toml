@@ -8,13 +8,6 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 
-[features]
-default = ["numeric"]
-numeric = []
-string = []
-array = ["math"]
-math = []
-epics = ["string", "array"]
 
 [dependencies]
 epics-base-rs = { workspace = true }

@@ -659,11 +659,6 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 | Crate | Feature | Default | Description |
 |-------|---------|---------|-------------|
 | `asyn-rs` | `epics` | no | Enable epics-base adapter bridge |
-| `epics-calc-rs` | `numeric` | yes | Numeric expression engine |
-| `epics-calc-rs` | `string` | no | String expressions |
-| `epics-calc-rs` | `array` | no | Array expressions |
-| `epics-calc-rs` | `math` | no | Advanced math functions (diff, fitting, interpolation) |
-| `epics-calc-rs` | `epics` | no | EPICS record integration (transform, scalcout, sseq) |
 | `ad-core` | `ioc` | no | IOC support (includes epics-base) |
 | `ad-plugins` | `parallel` | yes | Rayon data-parallelism for CPU-heavy plugins |
 | `ad-plugins` | `ioc` | no | Plugin IOC support |
