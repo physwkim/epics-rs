@@ -659,10 +659,10 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 | Crate | Feature | Default | Description |
 |-------|---------|---------|-------------|
 | `asyn-rs` | `epics` | no | Enable epics-base adapter bridge |
-| `ad-core` | `ioc` | no | IOC support (includes epics-base) |
-| `ad-plugins` | `parallel` | yes | Rayon data-parallelism for CPU-heavy plugins |
-| `ad-plugins` | `ioc` | no | Plugin IOC support |
-| `ad-plugins` | `hdf5` | no | HDF5 file plugin (HDF5 2.0 built from bundled source, requires cmake) |
+| `ad-core-rs` | `ioc` | no | IOC support (includes epics-base) |
+| `ad-plugins-rs` | `parallel` | yes | Rayon data-parallelism for CPU-heavy plugins |
+| `ad-plugins-rs` | `ioc` | no | Plugin IOC support |
+| `ad-plugins-rs` | `hdf5` | no | HDF5 file plugin (HDF5 2.0 built from bundled source, requires cmake) |
 
 ## Testing
 
@@ -670,8 +670,8 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 # All tests (1,550+)
 cargo test --workspace
 
-# With optional features
-cargo test --workspace --features epics-calc-rs/epics,asyn-rs/epics
+# With all features
+cargo test --workspace
 ```
 
 Test coverage: protocol encoding, wire format golden packets, snapshot generation, GR/CTRL metadata serialization, record processing, link chains, calc engine, .db parsing, access security, autosave, iocsh, IOC builder, event scheduling, motor state machine, asyn port driver, etc.
@@ -685,7 +685,7 @@ Test coverage: protocol encoding, wire format golden packets, snapshot generatio
 
 | Feature | Library | Installation |
 |---------|---------|--------------|
-| `ad-plugins/hdf5` | cmake | `brew install cmake` (macOS) / `apt install cmake` (Debian) / `winget install Kitware.CMake` (Windows) |
+| `ad-plugins-rs/hdf5` | cmake | `brew install cmake` (macOS) / `apt install cmake` (Debian) / `winget install Kitware.CMake` (Windows) |
 
 The `hdf5` feature builds HDF5 2.0 from bundled source (via `hdf5-metno-src`), so no separate HDF5 installation is needed — only cmake is required. All other crates are pure Rust and require no system libraries.
 
