@@ -6,13 +6,13 @@
 
 use std::sync::Arc;
 
-use ad_core::ndarray::{NDArray, NDDataBuffer};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::registry::{build_plugin_base_registry, ParamInfo, ParamRegistry};
-use ad_core::plugin::runtime::{
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::registry::{build_plugin_base_registry, ParamInfo, ParamRegistry};
+use ad_core_rs::plugin::runtime::{
     NDPluginProcess, ParamUpdate, PluginParamSnapshot, PluginRuntimeHandle, ProcessResult,
 };
-use ad_core::plugin::wiring::WiringRegistry;
+use ad_core_rs::plugin::wiring::WiringRegistry;
 use asyn_rs::param::ParamType;
 use asyn_rs::port::PortDriverBase;
 use parking_lot::Mutex;
@@ -501,7 +501,7 @@ pub fn create_roi_stat_runtime(
     let processor = ROIStatProcessor::new(rois, 2048);
     let params_handle = processor.params_handle();
 
-    let (handle, jh) = ad_core::plugin::runtime::create_plugin_runtime_multi_addr(
+    let (handle, jh) = ad_core_rs::plugin::runtime::create_plugin_runtime_multi_addr(
         port_name,
         processor,
         pool,
@@ -564,7 +564,7 @@ pub fn build_roi_stat_registry(h: &PluginRuntimeHandle, rp: &ROIStatParams) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::{NDDataType, NDDimension};
+    use ad_core_rs::ndarray::{NDDataType, NDDimension};
 
     fn make_2d_array(x: usize, y: usize, fill: impl Fn(usize, usize) -> f64) -> NDArray {
         let mut arr = NDArray::new(

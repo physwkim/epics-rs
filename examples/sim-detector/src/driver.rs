@@ -7,10 +7,10 @@ use asyn_rs::runtime::config::RuntimeConfig;
 use asyn_rs::runtime::port::{PortRuntimeHandle, create_port_runtime};
 use asyn_rs::user::AsynUser;
 
-use ad_core::driver::{ADDriver, ADDriverBase, ImageMode};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::params::ADBaseParams;
-use ad_core::plugin::channel::{NDArrayOutput, NDArraySender, QueuedArrayCounter};
+use ad_core_rs::driver::{ADDriver, ADDriverBase, ImageMode};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::params::ADBaseParams;
+use ad_core_rs::plugin::channel::{NDArrayOutput, NDArraySender, QueuedArrayCounter};
 
 use crate::params::SimDetectorParams;
 use crate::task::{AcqCommand, AcquisitionContext, start_acquisition_task};
@@ -298,7 +298,7 @@ pub fn create_sim_detector(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::channel::NDArrayOutput;
 
     #[test]
     fn test_new_default_values() {

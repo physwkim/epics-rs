@@ -2,10 +2,10 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use std::f64::consts::PI;
 
-use ad_core::ndarray::NDDataBuffer;
+use ad_core_rs::ndarray::NDDataBuffer;
 
-use ad_core::color_layout::ColorLayout;
-use ad_core::pixel_cast::{with_buffer, with_buffer_mut, PixelCast};
+use ad_core_rs::color_layout::ColorLayout;
+use ad_core_rs::pixel_cast::{with_buffer, with_buffer_mut, PixelCast};
 use crate::types::{SimMode, SineOperation};
 
 const MAX_PEAK_SIGMA: i32 = 4;
@@ -159,7 +159,7 @@ pub fn accumulate_linear_ramp(
         if reset {
             for y in 0..size_y {
                 match layout.color_mode {
-                    ad_core::driver::ColorMode::Mono => {
+                    ad_core_rs::driver::ColorMode::Mono => {
                         for x in 0..size_x {
                             data[layout.index(x, y, 0)] = T::from_f64(inc_mono * (gain_x * x as f64 + gain_y * y as f64));
                         }
@@ -176,7 +176,7 @@ pub fn accumulate_linear_ramp(
             }
         } else {
             match layout.color_mode {
-                ad_core::driver::ColorMode::Mono => {
+                ad_core_rs::driver::ColorMode::Mono => {
                     for elem in data.iter_mut() {
                         *elem = T::from_f64(T::to_f64(*elem) + inc_mono);
                     }
@@ -282,7 +282,7 @@ pub fn accumulate_peaks(
                         let pv = peak_f64[peak_idx];
 
                         match layout.color_mode {
-                            ad_core::driver::ColorMode::Mono => {
+                            ad_core_rs::driver::ColorMode::Mono => {
                                 let raw_idx = layout.index(x_out as usize, y_out as usize, 0);
                                 raw_v[raw_idx] = PixelCast::from_f64(
                                     PixelCast::to_f64(raw_v[raw_idx]) + gain_variation * pv,
@@ -352,7 +352,7 @@ pub fn accumulate_sine(
 
     // Combine sine waves for Mono mode
     match layout.color_mode {
-        ad_core::driver::ColorMode::Mono => {
+        ad_core_rs::driver::ColorMode::Mono => {
             // Combine x sines
             match sine.x_op {
                 SineOperation::Add => {
@@ -387,7 +387,7 @@ pub fn accumulate_sine(
     with_buffer_mut!(raw, |data| {
         for y in 0..size_y {
             match layout.color_mode {
-                ad_core::driver::ColorMode::Mono => {
+                ad_core_rs::driver::ColorMode::Mono => {
                     for x in 0..size_x {
                         let idx = layout.index(x, y, 0);
                         let val = gains.gain * (state.y_sine1[y] + state.x_sine1[x]);
@@ -467,8 +467,8 @@ pub fn compute_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::driver::ColorMode;
-    use ad_core::ndarray::NDDataBuffer;
+    use ad_core_rs::driver::ColorMode;
+    use ad_core_rs::ndarray::NDDataBuffer;
     use rand::SeedableRng;
 
     fn default_gains() -> Gains {

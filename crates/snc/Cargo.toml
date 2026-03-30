@@ -1,5 +1,5 @@
 [package]
-name = "snc"
+name = "snc-rs"
 version.workspace = true
 edition.workspace = true
 description = "SNL compiler CLI for sequencer-rs"
@@ -8,5 +8,5 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-snc-core = { workspace = true }
+snc-core-rs = { workspace = true }
 clap = { version = "4", features = ["derive"] }

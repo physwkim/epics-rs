@@ -5,11 +5,11 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 use crate::par_util;
 
-use ad_core::ndarray::{NDArray, NDDataBuffer};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::registry::{build_plugin_base_registry, ParamInfo, ParamRegistry};
-use ad_core::plugin::runtime::{NDPluginProcess, ParamUpdate, PluginParamSnapshot, PluginRuntimeHandle, ProcessResult};
-use ad_core::plugin::wiring::WiringRegistry;
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::registry::{build_plugin_base_registry, ParamInfo, ParamRegistry};
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ParamUpdate, PluginParamSnapshot, PluginRuntimeHandle, ProcessResult};
+use ad_core_rs::plugin::wiring::WiringRegistry;
 use asyn_rs::param::ParamType;
 use asyn_rs::port::PortDriverBase;
 use parking_lot::Mutex;
@@ -121,7 +121,7 @@ pub struct ProfileResult {
 /// When `bgd_width == 0`, `net = total`.
 pub fn compute_stats(
     data: &NDDataBuffer,
-    dims: &[ad_core::ndarray::NDDimension],
+    dims: &[ad_core_rs::ndarray::NDDimension],
     bgd_width: usize,
 ) -> StatsResult {
     macro_rules! stats_for {
@@ -1064,7 +1064,7 @@ pub fn create_stats_runtime(
     let stats_handle = processor.stats_handle();
     let params_handle = processor.params_handle();
 
-    let (plugin_handle, data_jh) = ad_core::plugin::runtime::create_plugin_runtime(
+    let (plugin_handle, data_jh) = ad_core_rs::plugin::runtime::create_plugin_runtime(
         port_name,
         processor,
         pool,
@@ -1093,7 +1093,7 @@ pub fn create_stats_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::{NDDataType, NDDimension};
+    use ad_core_rs::ndarray::{NDDataType, NDDimension};
 
     #[test]
     fn test_compute_stats_u8() {

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use ad_core::ndarray::NDArray;
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::ndarray::NDArray;
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// Scatter processor: passes through arrays. Round-robin distribution is handled
 /// by wiring multiple NDArraySender instances downstream.
@@ -33,7 +33,7 @@ impl NDPluginProcess for ScatterProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::{NDDataType, NDDimension};
+    use ad_core_rs::ndarray::{NDDataType, NDDimension};
 
     #[test]
     fn test_scatter_processor_passthrough() {

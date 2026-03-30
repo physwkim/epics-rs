@@ -6,10 +6,10 @@ use rand::SeedableRng;
 
 use asyn_rs::port_handle::PortHandle;
 
-use ad_core::driver::{ADStatus, ImageMode};
-use ad_core::ndarray::{NDArray, NDDataBuffer, NDDimension};
-use ad_core::params::ADBaseParams;
-use ad_core::plugin::channel::{NDArrayOutput, QueuedArrayCounter};
+use ad_core_rs::driver::{ADStatus, ImageMode};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDimension};
+use ad_core_rs::params::ADBaseParams;
+use ad_core_rs::plugin::channel::{NDArrayOutput, QueuedArrayCounter};
 
 use crate::physics::{self, MovingDotImageConfig};
 
@@ -145,10 +145,10 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             ];
             let mut frame = NDArray {
                 unique_id: 0,
-                timestamp: ad_core::timestamp::EpicsTimestamp::default(),
+                timestamp: ad_core_rs::timestamp::EpicsTimestamp::default(),
                 dims,
                 data: NDDataBuffer::F64(img_data),
-                attributes: ad_core::attributes::NDAttributeList::new(),
+                attributes: ad_core_rs::attributes::NDAttributeList::new(),
                 codec: None,
             };
 
@@ -165,7 +165,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             array_counter += 1;
 
             frame.unique_id = array_counter;
-            frame.timestamp = ad_core::timestamp::EpicsTimestamp::now();
+            frame.timestamp = ad_core_rs::timestamp::EpicsTimestamp::now();
 
             ctx.port_handle.write_int32_no_wait(ctx.ad.base.array_counter, 0, array_counter);
             ctx.port_handle.write_int32_no_wait(ctx.ad.num_images_counter, 0, num_counter);

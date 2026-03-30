@@ -19,9 +19,9 @@ use epics_base_rs::error::CaResult;
 use epics_ca_rs::server::ioc_app::IocApplication;
 use epics_base_rs::server::iocsh::registry::*;
 
-use ad_core::ioc::{PluginManager, register_noop_commands};
-use ad_core::plugin::channel::NDArrayOutput;
-use ad_core::plugin::registry::ParamRegistry;
+use ad_core_rs::ioc::{PluginManager, register_noop_commands};
+use ad_core_rs::plugin::channel::NDArrayOutput;
+use ad_core_rs::plugin::registry::ParamRegistry;
 
 use motor_rs::ioc::SimMotorHolder;
 
@@ -120,7 +120,7 @@ async fn main() -> CaResult<()> {
                 let port_handle = rt.port_handle().clone();
                 asyn_rs::asyn_record::register_port("SIM", port_handle, h.trace.clone());
 
-                mgr_c.set_driver(Arc::new(ad_core::ioc::GenericDriverContext::new(
+                mgr_c.set_driver(Arc::new(ad_core_rs::ioc::GenericDriverContext::new(
                     rt.pool().clone(),
                     rt.array_output().clone(),
                     "SIM",
@@ -135,7 +135,7 @@ async fn main() -> CaResult<()> {
     }
 
     // AD plugin commands
-    app = ad_plugins::ioc::register_all_plugins(app, &mgr);
+    app = ad_plugins_rs::ioc::register_all_plugins(app, &mgr);
     app = register_noop_commands(app);
 
     // Device support for AD camera

@@ -1,5 +1,5 @@
-use ad_core::driver::{ColorMode, ImageMode};
-use ad_core::plugin::channel::NDArrayOutput;
+use ad_core_rs::driver::{ColorMode, ImageMode};
+use ad_core_rs::plugin::channel::NDArrayOutput;
 use sim_detector::create_sim_detector;
 
 #[test]

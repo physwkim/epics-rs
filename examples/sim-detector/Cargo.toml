@@ -6,11 +6,11 @@ description = "Simulated areaDetector driver for areadetector-rs"
 publish = false
 
 [features]
-ioc = ["dep:epics-base-rs", "dep:tokio", "dep:ad-plugins", "ad-plugins/ioc", "ad-core/ioc", "asyn-rs/epics"]
+ioc = ["dep:epics-base-rs", "dep:tokio", "dep:ad-plugins-rs", "ad-plugins-rs/ioc", "ad-core-rs/ioc", "asyn-rs/epics"]
 
 [dependencies]
-ad-core = { workspace = true }
-ad-plugins = { workspace = true, optional = true }
+ad-core-rs = { workspace = true }
+ad-plugins-rs = { workspace = true, optional = true }
 asyn-rs = { workspace = true }
 rand = "0.9"
 parking_lot = "0.12"

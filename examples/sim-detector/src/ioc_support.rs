@@ -8,16 +8,16 @@ use epics_base_rs::server::device_support::{DeviceSupport, WriteCompletion};
 use epics_base_rs::server::iocsh::registry::*;
 use epics_base_rs::server::record::{Record, ScanType};
 
-use ad_core::ioc::GenericDriverContext;
-use ad_core::params::ADBaseParams;
-use ad_core::plugin::channel::NDArrayOutput;
-use ad_core::plugin::registry::{ParamInfo, RegistryParamType};
+use ad_core_rs::ioc::GenericDriverContext;
+use ad_core_rs::params::ADBaseParams;
+use ad_core_rs::plugin::channel::NDArrayOutput;
+use ad_core_rs::plugin::registry::{ParamInfo, RegistryParamType};
 use crate::driver::{SimDetectorRuntime, create_sim_detector};
 use crate::params::SimDetectorParams;
 use crate::SimDetector;
 
 // Re-export for public API compatibility.
-pub use ad_core::plugin::registry::{ParamRegistry, self};
+pub use ad_core_rs::plugin::registry::{ParamRegistry, self};
 
 /// Build the parameter registry from a SimDetector instance.
 pub fn build_param_registry(det: &SimDetector) -> ParamRegistry {
@@ -389,7 +389,7 @@ impl DeviceSupport for SimDeviceSupport {
 /// After calling this, `simDetectorConfig(...)` can be used in st.cmd to
 /// create a SimDetector, and records with `DTYP=asynSimDetector` will be
 /// wired automatically.
-pub fn register(ioc: &mut ad_plugins::ioc::AdIoc) {
+pub fn register(ioc: &mut ad_plugins_rs::ioc::AdIoc) {
     epics_base_rs::runtime::env::set_default("ADSIMDETECTOR", env!("CARGO_MANIFEST_DIR"));
 
     let driver_handle: Arc<std::sync::Mutex<Option<PortHandle>>> =

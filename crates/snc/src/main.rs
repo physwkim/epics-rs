@@ -1,11 +1,11 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use snc_core::analysis::analyze;
-use snc_core::codegen::generate;
-use snc_core::lexer::Lexer;
-use snc_core::parser;
-use snc_core::preprocess::preprocess;
+use snc_core_rs::analysis::analyze;
+use snc_core_rs::codegen::generate;
+use snc_core_rs::lexer::Lexer;
+use snc_core_rs::parser;
+use snc_core_rs::preprocess::preprocess;
 
 #[derive(Parser)]
 #[command(name = "snc", about = "SNL to Rust compiler")]

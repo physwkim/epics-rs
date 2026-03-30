@@ -1,5 +1,5 @@
 [package]
-name = "ad-core"
+name = "ad-core-rs"
 version.workspace = true
 edition.workspace = true
 description = "Core types and base classes for areaDetector-rs"

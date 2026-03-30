@@ -1,5 +1,5 @@
 [package]
-name = "snc-core"
+name = "snc-core-rs"
 version.workspace = true
 edition.workspace = true
 description = "SNL compiler library for sequencer-rs"

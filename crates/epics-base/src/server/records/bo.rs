@@ -1,4 +1,4 @@
-use epics_macros::EpicsRecord;
+use epics_macros_rs::EpicsRecord;
 
 #[derive(EpicsRecord)]
 #[record(type = "bo")]

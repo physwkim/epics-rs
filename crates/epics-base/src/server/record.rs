@@ -1643,7 +1643,7 @@ mod tests {
 
     #[test]
     fn test_read_only_field() {
-        use epics_macros::EpicsRecord;
+        use epics_macros_rs::EpicsRecord;
 
         #[derive(EpicsRecord)]
         #[record(type = "test")]

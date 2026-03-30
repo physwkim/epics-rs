@@ -5,9 +5,9 @@
 //! "NDArrayUniqueId" and "NDArrayTimeStamp" that read from the array header
 //! instead of the attribute list.
 
-use ad_core::ndarray::NDArray;
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, ParamUpdate, ProcessResult};
+use ad_core_rs::ndarray::NDArray;
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ParamUpdate, ProcessResult};
 use asyn_rs::error::AsynError;
 use asyn_rs::param::ParamType;
 use asyn_rs::port::PortDriverBase;
@@ -108,8 +108,8 @@ impl NDPluginProcess for AttributeProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
-    use ad_core::ndarray::{NDDataType, NDDimension};
+    use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+    use ad_core_rs::ndarray::{NDDataType, NDDimension};
 
     fn make_array_with_attr(name: &str, value: f64, uid: i32) -> NDArray {
         let mut arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
@@ -193,7 +193,7 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
 
         let mut arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
-        arr.timestamp = ad_core::timestamp::EpicsTimestamp { sec: 100, nsec: 500_000_000 };
+        arr.timestamp = ad_core_rs::timestamp::EpicsTimestamp { sec: 100, nsec: 500_000_000 };
 
         proc.process_array(&arr, &pool);
         assert!((proc.value() - 100.5).abs() < 1e-9);

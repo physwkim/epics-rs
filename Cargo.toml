@@ -27,13 +27,13 @@ license = "MIT"
 repository = "https://github.com/epics-rs/epics-rs"
 
 [workspace.dependencies]
-ad-core = { path = "crates/ad-core", version = "0.6.1" }
-ad-plugins = { path = "crates/ad-plugins", version = "0.6.1" }
+ad-core-rs = { path = "crates/ad-core", version = "0.6.1" }
+ad-plugins-rs = { path = "crates/ad-plugins", version = "0.6.1" }
 asyn-rs = { path = "crates/asyn", version = "0.6.1" }
 epics-base-rs = { path = "crates/epics-base", version = "0.6.1" }
 epics-ca-rs = { path = "crates/epics-ca", version = "0.6.1" }
 epics-pva-rs = { path = "crates/epics-pva", version = "0.6.1" }
-epics-macros = { path = "crates/epics-macros", version = "0.6.1" }
-snc-core = { path = "crates/snc-core", version = "0.6.1" }
-epics-seq = { path = "crates/seq", version = "0.6.1" }
+epics-macros-rs = { path = "crates/epics-macros", version = "0.6.1" }
+snc-core-rs = { path = "crates/snc-core", version = "0.6.1" }
+epics-seq-rs = { path = "crates/seq", version = "0.6.1" }
 motor-rs = { path = "crates/motor", version = "0.6.1" }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use ad_core::ndarray::{NDArray, NDDataBuffer};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// Shape to draw.
 #[derive(Debug, Clone)]
@@ -287,7 +287,7 @@ impl NDPluginProcess for OverlayProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::{NDDataType, NDDimension};
+    use ad_core_rs::ndarray::{NDDataType, NDDimension};
 
     fn make_8x8() -> NDArray {
         NDArray::new(

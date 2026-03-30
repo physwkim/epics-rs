@@ -6,13 +6,13 @@ use rand::SeedableRng;
 
 use asyn_rs::port_handle::PortHandle;
 
-use ad_core::driver::{ADStatus, ImageMode};
-use ad_core::ndarray::{NDArray, NDDataBuffer};
-use ad_core::params::ADBaseParams;
+use ad_core_rs::driver::{ADStatus, ImageMode};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer};
+use ad_core_rs::params::ADBaseParams;
 
-use ad_core::color_layout::ColorLayout;
-use ad_core::plugin::channel::{NDArrayOutput, QueuedArrayCounter};
-use ad_core::roi::crop_roi;
+use ad_core_rs::color_layout::ColorLayout;
+use ad_core_rs::plugin::channel::{NDArrayOutput, QueuedArrayCounter};
+use ad_core_rs::roi::crop_roi;
 
 use crate::compute::{self, SineState};
 use crate::params::{SimConfigSnapshot, SimDetectorParams};
@@ -64,10 +64,10 @@ impl TaskState {
     fn new() -> Self {
         Self {
             rng: StdRng::from_os_rng(),
-            raw_buf: NDDataBuffer::zeros(ad_core::ndarray::NDDataType::UInt8, 0),
-            background_buf: NDDataBuffer::zeros(ad_core::ndarray::NDDataType::UInt8, 0),
-            ramp_buf: NDDataBuffer::zeros(ad_core::ndarray::NDDataType::UInt8, 0),
-            peak_buf: NDDataBuffer::zeros(ad_core::ndarray::NDDataType::UInt8, 0),
+            raw_buf: NDDataBuffer::zeros(ad_core_rs::ndarray::NDDataType::UInt8, 0),
+            background_buf: NDDataBuffer::zeros(ad_core_rs::ndarray::NDDataType::UInt8, 0),
+            ramp_buf: NDDataBuffer::zeros(ad_core_rs::ndarray::NDDataType::UInt8, 0),
+            peak_buf: NDDataBuffer::zeros(ad_core_rs::ndarray::NDDataType::UInt8, 0),
             sine_state: SineState::new(),
             use_background: false,
         }
@@ -222,7 +222,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             array_counter += 1;
 
             frame.unique_id = array_counter;
-            frame.timestamp = ad_core::timestamp::EpicsTimestamp::now();
+            frame.timestamp = ad_core_rs::timestamp::EpicsTimestamp::now();
 
             // Counter updates + callParamCallbacks always run (like C EPICS).
             // Only doCallbacksGenericPointer (publish) is gated by array_callbacks.
@@ -264,7 +264,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
 mod tests {
     use super::*;
     use crate::driver::create_sim_detector;
-    use ad_core::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::channel::NDArrayOutput;
 
     #[test]
     fn test_single_mode_auto_stop() {

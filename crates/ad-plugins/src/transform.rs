@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use ad_core::ndarray::{NDArray, NDDataBuffer, NDDimension};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDimension};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// Transform types matching C++ NDPluginTransform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +134,7 @@ impl NDPluginProcess for TransformProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::NDDataType;
+    use ad_core_rs::ndarray::NDDataType;
 
     /// Create a 3x2 array:
     /// [1, 2, 3]

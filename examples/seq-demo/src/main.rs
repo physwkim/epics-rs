@@ -3,7 +3,7 @@
 //! This is what the snc compiler would eventually generate.
 //! Used to validate the seq runtime API (Phase A).
 
-use epics_seq::prelude::*;
+use epics_seq_rs::prelude::*;
 
 // --- Channel IDs ---
 const CH_COUNTER: usize = 0;

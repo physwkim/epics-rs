@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use ad_core::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::registry::{build_plugin_base_registry, ParamInfo, ParamRegistry};
-use ad_core::plugin::runtime::{NDPluginProcess, ParamUpdate, PluginParamSnapshot, PluginRuntimeHandle, ProcessResult};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::registry::{build_plugin_base_registry, ParamInfo, ParamRegistry};
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ParamUpdate, PluginParamSnapshot, PluginRuntimeHandle, ProcessResult};
 use asyn_rs::param::ParamType;
 use asyn_rs::port::PortDriverBase;
 
@@ -219,7 +219,7 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
         // Convert via color module
         let mut temp = NDArray::new(arr.dims.clone(), src.data.data_type());
         temp.data = out_data;
-        if let Ok(converted) = ad_core::color::convert_data_type(&temp, target_type) {
+        if let Ok(converted) = ad_core_rs::color::convert_data_type(&temp, target_type) {
             arr.data = converted.data;
         } else {
             arr.data = out_data_fallback(&temp.data, target_type, temp.data.len());
@@ -378,14 +378,14 @@ pub fn create_roi_runtime(
     pool: Arc<NDArrayPool>,
     queue_size: usize,
     ndarray_port: &str,
-    wiring: Arc<ad_core::plugin::wiring::WiringRegistry>,
+    wiring: Arc<ad_core_rs::plugin::wiring::WiringRegistry>,
 ) -> (
-    ad_core::plugin::runtime::PluginRuntimeHandle,
+    ad_core_rs::plugin::runtime::PluginRuntimeHandle,
     ROIParams,
     std::thread::JoinHandle<()>,
 ) {
     let processor = ROIProcessor::new(ROIConfig::default());
-    let (handle, jh) = ad_core::plugin::runtime::create_plugin_runtime(
+    let (handle, jh) = ad_core_rs::plugin::runtime::create_plugin_runtime(
         port_name,
         processor,
         pool,
@@ -396,8 +396,8 @@ pub fn create_roi_runtime(
     // Recreate param layout on a scratch PortDriverBase to get matching reasons.
     let params = {
         let mut base = asyn_rs::port::PortDriverBase::new("_scratch_", 1, asyn_rs::port::PortFlags::default());
-        let _ = ad_core::params::ndarray_driver::NDArrayDriverParams::create(&mut base);
-        let _ = ad_core::plugin::params::PluginBaseParams::create(&mut base);
+        let _ = ad_core_rs::params::ndarray_driver::NDArrayDriverParams::create(&mut base);
+        let _ = ad_core_rs::plugin::params::PluginBaseParams::create(&mut base);
         let mut p = ROIParams::default();
         let dim_names = ["DIM0", "DIM1", "DIM2"];
         for (i, prefix) in dim_names.iter().enumerate() {

@@ -5,9 +5,9 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 use crate::par_util;
 
-use ad_core::ndarray::{NDArray, NDDataBuffer, NDDataType};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// 4-tap recursive filter configuration.
 ///
@@ -406,7 +406,7 @@ impl NDPluginProcess for ProcessProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::{NDDimension, NDDataBuffer};
+    use ad_core_rs::ndarray::{NDDimension, NDDataBuffer};
 
     fn make_array(vals: &[u8]) -> NDArray {
         let mut arr = NDArray::new(

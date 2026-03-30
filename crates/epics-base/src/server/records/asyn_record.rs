@@ -1,4 +1,4 @@
-use epics_macros::EpicsRecord;
+use epics_macros_rs::EpicsRecord;
 
 /// Minimal asyn record type.
 /// In C EPICS, the asyn record monitors port connection status.

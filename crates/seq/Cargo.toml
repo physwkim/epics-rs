@@ -1,5 +1,5 @@
 [package]
-name = "epics-seq"
+name = "epics-seq-rs"
 version.workspace = true
 edition.workspace = true
 description = "Rust-native EPICS sequencer runtime"

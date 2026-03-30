@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --bin sim_ioc --features ioc -- ioc/st.cmd
 
-use ad_plugins::ioc::AdIoc;
+use ad_plugins_rs::ioc::AdIoc;
 use epics_base_rs::error::CaResult;
 
 #[tokio::main]

@@ -1,5 +1,5 @@
 [package]
-name = "ad-plugins"
+name = "ad-plugins-rs"
 version.workspace = true
 edition.workspace = true
 description = "NDPlugin implementations for areaDetector-rs"
@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-ad-core = { workspace = true }
+ad-core-rs = { workspace = true }
 asyn-rs = { workspace = true }
 epics-base-rs = { workspace = true }
 epics-ca-rs = { workspace = true }
@@ -33,5 +33,5 @@ optional = true
 [features]
 default = ["parallel"]
 hdf5 = ["dep:hdf5-metno"]
-ioc = ["ad-core/ioc"]
+ioc = ["ad-core-rs/ioc"]
 parallel = ["rayon"]

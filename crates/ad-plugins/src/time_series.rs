@@ -9,7 +9,7 @@ use asyn_rs::runtime::config::RuntimeConfig;
 use asyn_rs::runtime::port::{PortRuntimeHandle, create_port_runtime};
 use parking_lot::Mutex;
 
-use ad_core::plugin::registry::{ParamInfo, ParamRegistry};
+use ad_core_rs::plugin::registry::{ParamInfo, ParamRegistry};
 
 // ===== Stats-specific channel definitions =====
 

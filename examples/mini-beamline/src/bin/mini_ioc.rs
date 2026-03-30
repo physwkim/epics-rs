@@ -21,9 +21,9 @@ use epics_base_rs::error::CaResult;
 use epics_ca_rs::server::ioc_app::IocApplication;
 use epics_base_rs::server::iocsh::registry::*;
 
-use ad_core::ioc::{PluginManager, register_noop_commands};
-use ad_core::plugin::channel::NDArrayOutput;
-use ad_core::plugin::registry::ParamRegistry;
+use ad_core_rs::ioc::{PluginManager, register_noop_commands};
+use ad_core_rs::plugin::channel::NDArrayOutput;
+use ad_core_rs::plugin::registry::ParamRegistry;
 
 use motor_rs::ioc::SimMotorHolder;
 
@@ -214,7 +214,7 @@ async fn main() -> CaResult<()> {
                 // (NDStdArraysConfigure etc. will call connect_downstream on this)
                 // GenericDriverContext also registers "DOT" in the wiring registry
                 // so plugins can rewire their NDArrayPort at runtime.
-                mgr_c.set_driver(Arc::new(ad_core::ioc::GenericDriverContext::new(
+                mgr_c.set_driver(Arc::new(ad_core_rs::ioc::GenericDriverContext::new(
                     dot_rt.pool().clone(),
                     dot_rt.array_output().clone(),
                     "DOT",
@@ -238,7 +238,7 @@ async fn main() -> CaResult<()> {
     // Also register no-op stubs for commands we don't implement (e.g. set_requestfile_path).
     // ========================================================================
 
-    app = ad_plugins::ioc::register_all_plugins(app, &mgr);
+    app = ad_plugins_rs::ioc::register_all_plugins(app, &mgr);
     app = register_noop_commands(app);
 
     // ========================================================================

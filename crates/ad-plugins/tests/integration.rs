@@ -3,18 +3,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ad_core::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
-use ad_core::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::driver::ad_driver::ADDriverBase;
-use ad_core::plugin::runtime::NDPluginProcess;
-use ad_core::plugin::wiring::WiringRegistry;
-use ad_plugins::stats::create_stats_runtime;
-use ad_plugins::std_arrays::create_std_arrays_runtime;
+use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::driver::ad_driver::ADDriverBase;
+use ad_core_rs::plugin::runtime::NDPluginProcess;
+use ad_core_rs::plugin::wiring::WiringRegistry;
+use ad_plugins_rs::stats::create_stats_runtime;
+use ad_plugins_rs::std_arrays::create_std_arrays_runtime;
 
 #[test]
 fn test_driver_to_stats_pipeline() {
-    let pool = Arc::new(ad_core::ndarray_pool::NDArrayPool::new(10_000_000));
+    let pool = Arc::new(ad_core_rs::ndarray_pool::NDArrayPool::new(10_000_000));
     let wiring = Arc::new(WiringRegistry::new());
     let (stats_handle, stats_data, _params, _ts_runtime, _ts_params, _jh, _ts_actor_jh, _ts_data_jh) =
         create_stats_runtime("STATS1", pool.clone(), 10, "SIM1", wiring);
@@ -49,7 +49,7 @@ fn test_driver_to_stats_pipeline() {
 
 #[test]
 fn test_driver_to_std_arrays_pipeline() {
-    let pool = Arc::new(ad_core::ndarray_pool::NDArrayPool::new(10_000_000));
+    let pool = Arc::new(ad_core_rs::ndarray_pool::NDArrayPool::new(10_000_000));
     let wiring = Arc::new(WiringRegistry::new());
     let (image_handle, image_data, _jh) = create_std_arrays_runtime("IMAGE1", pool.clone(), "SIM1", wiring);
 
@@ -77,7 +77,7 @@ fn test_driver_to_std_arrays_pipeline() {
 
 #[test]
 fn test_pool_reuse_in_pipeline() {
-    let pool = Arc::new(ad_core::ndarray_pool::NDArrayPool::new(10_000_000));
+    let pool = Arc::new(ad_core_rs::ndarray_pool::NDArrayPool::new(10_000_000));
 
     // Allocate, use, release, reallocate
     let arr1 = pool.alloc(vec![NDDimension::new(1000)], NDDataType::UInt8).unwrap();
@@ -95,8 +95,8 @@ fn test_pool_reuse_in_pipeline() {
 
 #[test]
 fn test_rewire_ndarray_port_at_runtime() {
-    use ad_core::plugin::channel::NDArrayOutput;
-    use ad_core::plugin::runtime::{create_plugin_runtime, ProcessResult};
+    use ad_core_rs::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::runtime::{create_plugin_runtime, ProcessResult};
     use asyn_rs::request::RequestOp;
     use asyn_rs::user::AsynUser;
 
@@ -115,7 +115,7 @@ fn test_rewire_ndarray_port_at_runtime() {
         last_id: Arc<parking_lot::Mutex<i32>>,
     }
     impl NDPluginProcess for TrackingProcessor {
-        fn process_array(&mut self, array: &ad_core::ndarray::NDArray, _pool: &NDArrayPool) -> ProcessResult {
+        fn process_array(&mut self, array: &ad_core_rs::ndarray::NDArray, _pool: &NDArrayPool) -> ProcessResult {
             *self.last_id.lock() = array.unique_id;
             ProcessResult::empty()
         }
@@ -169,11 +169,11 @@ fn test_rewire_ndarray_port_at_runtime() {
 
 #[test]
 fn test_rewire_through_real_roi_plugin() {
-    use ad_core::plugin::channel::NDArrayOutput;
-    use ad_core::plugin::runtime::{create_plugin_runtime, ProcessResult};
+    use ad_core_rs::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::runtime::{create_plugin_runtime, ProcessResult};
     use asyn_rs::request::RequestOp;
     use asyn_rs::user::AsynUser;
-    use ad_plugins::roi::{ROIConfig, ROIDimConfig, ROIProcessor};
+    use ad_plugins_rs::roi::{ROIConfig, ROIDimConfig, ROIProcessor};
 
     let pool = Arc::new(NDArrayPool::new(1_000_000));
     let wiring = Arc::new(WiringRegistry::new());
@@ -203,7 +203,7 @@ fn test_rewire_through_real_roi_plugin() {
         last_id: Arc<parking_lot::Mutex<i32>>,
     }
     impl NDPluginProcess for TrackingProcessor {
-        fn process_array(&mut self, array: &ad_core::ndarray::NDArray, _pool: &NDArrayPool) -> ProcessResult {
+        fn process_array(&mut self, array: &ad_core_rs::ndarray::NDArray, _pool: &NDArrayPool) -> ProcessResult {
             *self.last_id.lock() = array.unique_id;
             ProcessResult::empty()
         }
@@ -253,8 +253,8 @@ fn test_rewire_through_real_roi_plugin() {
 
 #[test]
 fn test_roi_param_change_enables_output() {
-    use ad_core::plugin::channel::NDArrayOutput;
-    use ad_core::plugin::runtime::{create_plugin_runtime, ProcessResult};
+    use ad_core_rs::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::runtime::{create_plugin_runtime, ProcessResult};
 
     let pool = Arc::new(NDArrayPool::new(1_000_000));
     let wiring = Arc::new(WiringRegistry::new());
@@ -264,7 +264,7 @@ fn test_roi_param_change_enables_output() {
     wiring.register_output("SIM1", sim_output.clone());
 
     // Create ROI1 with DEFAULT config (size=0) — like the real IOC
-    let (roi_handle, roi_params, _roi_jh) = ad_plugins::roi::create_roi_runtime(
+    let (roi_handle, roi_params, _roi_jh) = ad_plugins_rs::roi::create_roi_runtime(
         "ROI1", pool.clone(), 10, "SIM1", wiring.clone(),
     );
     wiring.register_output("ROI1", roi_handle.array_output().clone());
@@ -278,7 +278,7 @@ fn test_roi_param_change_enables_output() {
     // Tracking processor downstream of ROI1
     struct TrackingProcessor { last_id: Arc<parking_lot::Mutex<i32>> }
     impl NDPluginProcess for TrackingProcessor {
-        fn process_array(&mut self, array: &ad_core::ndarray::NDArray, _pool: &NDArrayPool) -> ProcessResult {
+        fn process_array(&mut self, array: &ad_core_rs::ndarray::NDArray, _pool: &NDArrayPool) -> ProcessResult {
             *self.last_id.lock() = array.unique_id;
             ProcessResult::empty()
         }
@@ -334,8 +334,8 @@ fn make_2d_u8(w: usize, h: usize) -> NDArray {
 
 #[test]
 fn test_roi_then_stats_chain() {
-    use ad_plugins::roi::{ROIConfig, ROIDimConfig, ROIProcessor};
-    use ad_plugins::stats::StatsProcessor;
+    use ad_plugins_rs::roi::{ROIConfig, ROIDimConfig, ROIProcessor};
+    use ad_plugins_rs::stats::StatsProcessor;
 
     let pool = NDArrayPool::new(1_000_000);
     let arr = make_2d_u8(16, 16);
@@ -365,9 +365,9 @@ fn test_roi_then_stats_chain() {
 
 #[test]
 fn test_process_then_file_tiff_pipeline() {
-    use ad_plugins::process::{ProcessConfig, ProcessProcessor};
-    use ad_plugins::file_tiff::TiffFileProcessor;
-    use ad_core::plugin::file_base::NDFileMode;
+    use ad_plugins_rs::process::{ProcessConfig, ProcessProcessor};
+    use ad_plugins_rs::file_tiff::TiffFileProcessor;
+    use ad_core_rs::plugin::file_base::NDFileMode;
 
     let pool = NDArrayPool::new(1_000_000);
     let arr = make_2d_u8(8, 8);
@@ -390,8 +390,8 @@ fn test_process_then_file_tiff_pipeline() {
     tiff_proc.file_base_mut().set_mode(NDFileMode::Single);
 
     // Use the writer directly for this test
-    use ad_core::plugin::file_base::NDFileWriter;
-    use ad_plugins::file_tiff::TiffWriter;
+    use ad_core_rs::plugin::file_base::NDFileWriter;
+    use ad_plugins_rs::file_tiff::TiffWriter;
     let mut writer = TiffWriter::new();
     writer.open_file(&path, NDFileMode::Single, &proc_result.output_arrays[0]).unwrap();
     writer.write_file(&proc_result.output_arrays[0]).unwrap();
@@ -406,7 +406,7 @@ fn test_process_then_file_tiff_pipeline() {
 
 #[test]
 fn test_circular_buff_trigger_flow() {
-    use ad_plugins::circular_buff::{CircularBuffProcessor, TriggerCondition};
+    use ad_plugins_rs::circular_buff::{CircularBuffProcessor, TriggerCondition};
 
     let pool = NDArrayPool::new(1_000_000);
     let mut proc = CircularBuffProcessor::new(
@@ -443,7 +443,7 @@ fn test_circular_buff_trigger_flow() {
 
 #[test]
 fn test_codec_compress_decompress_roundtrip() {
-    use ad_plugins::codec::{compress_lz4, decompress_lz4};
+    use ad_plugins_rs::codec::{compress_lz4, decompress_lz4};
 
     // Create array with compressible data (all zeros)
     let arr = NDArray::new(
@@ -462,7 +462,7 @@ fn test_codec_compress_decompress_roundtrip() {
 
 #[test]
 fn test_attribute_plugin_value_extraction() {
-    use ad_plugins::attribute::AttributeProcessor;
+    use ad_plugins_rs::attribute::AttributeProcessor;
 
     let pool = NDArrayPool::new(1_000_000);
     let mut proc = AttributeProcessor::new("exposure");
@@ -484,7 +484,7 @@ fn test_attribute_plugin_value_extraction() {
 
 #[test]
 fn test_pos_plugin_position_attachment() {
-    use ad_plugins::pos_plugin::{PosPluginProcessor, PosMode};
+    use ad_plugins_rs::pos_plugin::{PosPluginProcessor, PosMode};
 
     let pool = NDArrayPool::new(1_000_000);
     let mut proc = PosPluginProcessor::new(PosMode::Discard);
@@ -521,7 +521,7 @@ fn test_process_and_publish_writes_array_size_params() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 
     // Connect and send a 64x48 array
-    let mut driver = ad_core::driver::ad_driver::ADDriverBase::new("DRV1", 64, 48, 1_000_000).unwrap();
+    let mut driver = ad_core_rs::driver::ad_driver::ADDriverBase::new("DRV1", 64, 48, 1_000_000).unwrap();
     driver.connect_downstream(image_handle.array_sender().clone());
 
     let mut arr = NDArray::new(

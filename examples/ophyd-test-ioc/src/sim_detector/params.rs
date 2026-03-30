@@ -3,8 +3,8 @@ use asyn_rs::param::ParamType;
 use asyn_rs::port::PortDriverBase;
 use asyn_rs::port_handle::PortHandle;
 
-use ad_core::driver::ImageMode;
-use ad_core::params::ADBaseParams;
+use ad_core_rs::driver::ImageMode;
+use ad_core_rs::params::ADBaseParams;
 
 /// MovingDot-specific parameter indices (beyond ADBase).
 #[derive(Clone, Copy)]

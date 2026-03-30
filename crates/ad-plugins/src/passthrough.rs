@@ -3,9 +3,9 @@
 //! Used as a stub for plugin types that are not yet fully implemented
 //! but need to appear in the OPI with correct metadata.
 
-use ad_core::ndarray::NDArray;
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::ndarray::NDArray;
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 /// A no-op plugin processor that passes arrays through unchanged.
 pub struct PassthroughProcessor {

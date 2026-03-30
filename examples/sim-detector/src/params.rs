@@ -1,6 +1,6 @@
-use ad_core::driver::{ColorMode, ImageMode};
-use ad_core::ndarray::NDDataType;
-use ad_core::params::ADBaseParams;
+use ad_core_rs::driver::{ColorMode, ImageMode};
+use ad_core_rs::ndarray::NDDataType;
+use ad_core_rs::params::ADBaseParams;
 // ADBaseParams is now ADDriverParams; some fields moved to .base (NDArrayDriverParams)
 use asyn_rs::error::AsynResult;
 use asyn_rs::param::ParamType;

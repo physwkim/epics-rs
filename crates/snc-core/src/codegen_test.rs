@@ -136,7 +136,7 @@ mod tests {
         let code = generate(&ir);
 
         // Check key structural elements
-        assert!(code.contains("use epics_seq::prelude::*;"));
+        assert!(code.contains("use epics_seq_rs::prelude::*;"));
         assert!(code.contains("const CH_COUNTER: usize = 0;"));
         assert!(code.contains("const CH_LIGHT: usize = 1;"));
         assert!(code.contains("const EF_EF_COUNTER: usize = 0;"));

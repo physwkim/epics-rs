@@ -8,9 +8,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use ad_core::ioc::{dtyp_from_port, extract_plugin_args, plugin_arg_defs, PluginManager, register_noop_commands};
-use ad_core::plugin::runtime::create_plugin_runtime;
-use ad_core::plugin::wiring::WiringRegistry;
+use ad_core_rs::ioc::{dtyp_from_port, extract_plugin_args, plugin_arg_defs, PluginManager, register_noop_commands};
+use ad_core_rs::plugin::runtime::create_plugin_runtime;
+use ad_core_rs::plugin::wiring::WiringRegistry;
 use asyn_rs::trace::TraceManager;
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::autosave::AutosaveStartupConfig;
@@ -117,7 +117,7 @@ pub fn register_all_plugins(
     });
     app = register_generic_plugin(&mut app, mgr, "NDColorConvertConfigure", |port_name, queue_size, ndarray_port, pool, wiring| {
         use crate::color_convert::{ColorConvertConfig, ColorConvertProcessor};
-        use ad_core::color::{NDColorMode, NDBayerPattern};
+        use ad_core_rs::color::{NDColorMode, NDBayerPattern};
         let config = ColorConvertConfig { target_mode: NDColorMode::Mono, bayer_pattern: NDBayerPattern::RGGB, false_color: false };
         create_plugin_runtime(port_name, ColorConvertProcessor::new(config), pool, queue_size, ndarray_port, wiring)
     });
@@ -135,7 +135,7 @@ pub fn register_all_plugins(
     });
     app = register_generic_plugin(&mut app, mgr, "NDCodecConfigure", |port_name, queue_size, ndarray_port, pool, wiring| {
         use crate::codec::{CodecMode, CodecProcessor};
-        use ad_core::codec::CodecName;
+        use ad_core_rs::codec::CodecName;
         create_plugin_runtime(port_name, CodecProcessor::new(CodecMode::Compress { codec: CodecName::LZ4, quality: 90 }), pool, queue_size, ndarray_port, wiring)
     });
     app = register_generic_plugin(&mut app, mgr, "NDScatterConfigure", |port_name, queue_size, ndarray_port, pool, wiring| {
@@ -288,10 +288,10 @@ where
             &str,
             usize,
             &str,
-            Arc<ad_core::ndarray_pool::NDArrayPool>,
+            Arc<ad_core_rs::ndarray_pool::NDArrayPool>,
             Arc<WiringRegistry>,
         ) -> (
-            ad_core::plugin::runtime::PluginRuntimeHandle,
+            ad_core_rs::plugin::runtime::PluginRuntimeHandle,
             std::thread::JoinHandle<()>,
         ) + Send
         + Sync

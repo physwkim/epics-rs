@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use ad_core::ndarray::NDArray;
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::runtime::{NDPluginProcess, PluginRuntimeHandle, ProcessResult};
-use ad_core::plugin::wiring::WiringRegistry;
+use ad_core_rs::ndarray::NDArray;
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::runtime::{NDPluginProcess, PluginRuntimeHandle, ProcessResult};
+use ad_core_rs::plugin::wiring::WiringRegistry;
 use parking_lot::Mutex;
 
 /// Pure processing logic: stores the latest array and passes it through.
@@ -52,7 +52,7 @@ pub fn create_std_arrays_runtime(
     let processor = StdArraysProcessor::new();
     let data_handle = processor.data_handle();
 
-    let (handle, data_jh) = ad_core::plugin::runtime::create_plugin_runtime(
+    let (handle, data_jh) = ad_core_rs::plugin::runtime::create_plugin_runtime(
         port_name,
         processor,
         pool,
@@ -67,7 +67,7 @@ pub fn create_std_arrays_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::ndarray::{NDDataType, NDDimension};
+    use ad_core_rs::ndarray::{NDDataType, NDDimension};
 
     fn make_array(id: i32) -> Arc<NDArray> {
         let mut arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);

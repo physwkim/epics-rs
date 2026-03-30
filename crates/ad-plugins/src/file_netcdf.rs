@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ad_core::error::{ADError, ADResult};
-use ad_core::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
-use ad_core::ndarray_pool::NDArrayPool;
-use ad_core::plugin::file_base::{NDFileMode, NDFileWriter, NDPluginFileBase};
-use ad_core::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::error::{ADError, ADResult};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::file_base::{NDFileMode, NDFileWriter, NDPluginFileBase};
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
 
 use netcdf3::{DataSet, FileReader, FileWriter, Version};
 
@@ -341,7 +341,7 @@ impl NDPluginProcess for NetcdfFileProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ad_core::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+    use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);

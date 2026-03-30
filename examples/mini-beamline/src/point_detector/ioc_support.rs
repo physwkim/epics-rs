@@ -7,7 +7,7 @@ use epics_base_rs::error::CaResult;
 use epics_base_rs::server::device_support::{DeviceSupport, WriteCompletion};
 use epics_base_rs::server::record::{Record, ScanType};
 
-use ad_core::plugin::registry::{ParamInfo, ParamRegistry, RegistryParamType};
+use ad_core_rs::plugin::registry::{ParamInfo, ParamRegistry, RegistryParamType};
 
 use super::params::PointDetectorParams;
 
