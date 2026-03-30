@@ -388,6 +388,6 @@ async fn main() -> CaResult<()> {
             ReportHandler { holder: holder_for_report },
         ))
         .startup_script(&script)
-        .run()
+        .run(epics_ca_rs::server::run_ca_ioc)
         .await
 }

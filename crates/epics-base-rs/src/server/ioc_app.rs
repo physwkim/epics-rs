@@ -5,7 +5,7 @@
 //! **Phase 1 (pre-init):** Execute startup script (`st.cmd`)
 //!   - `epicsEnvSet`, `dbLoadRecords`, custom driver config commands
 //!
-//! **Phase 2 (iocInit):** Wire device support, start CA server
+//! **Phase 2 (iocInit):** Wire device support, start protocol server
 //!
 //! **Phase 3 (post-init):** Interactive iocsh REPL
 //!   - `dbl`, `dbgf`, `dbpf`, `dbpr`, custom commands
@@ -18,7 +18,7 @@
 //!     .register_device_support("myDevice", || Box::new(MyDeviceSupport::new()))
 //!     .register_startup_command(my_config_command())
 //!     .startup_script("st.cmd")
-//!     .run()
+//!     .run(my_protocol_runner)
 //!     .await
 //! ```
 
@@ -27,13 +27,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::{CaError, CaResult};
 use crate::runtime::net::CA_SERVER_PORT;
-use crate::server::record::SubroutineFn;
+use crate::server::record::{self, Record, SubroutineFn};
 
-use super::database::PvDatabase;
-use super::device_support::DeviceSupport;
-use super::iocsh::{self, registry::CommandDef};
-use super::record::{self, Record};
-use super::{autosave, access_security, CaServer, DeviceSupportFactory};
+use crate::server::database::PvDatabase;
+use crate::server::device_support::DeviceSupport;
+use crate::server::iocsh::{self, registry::CommandDef};
+use crate::server::{autosave, access_security, DeviceSupportFactory};
 use autosave::startup::AutosaveStartupConfig;
 
 /// Context passed to dynamic device support factories during iocInit wiring.
@@ -46,6 +45,19 @@ pub struct DeviceSupportContext<'a> {
 /// Dynamic device support factory: given a context, returns device support if recognized.
 pub type DynamicDeviceSupportFactory =
     Box<dyn Fn(&DeviceSupportContext) -> Option<Box<dyn DeviceSupport>> + Send + Sync>;
+
+/// Configuration passed to the protocol runner after IOC initialization.
+///
+/// Contains all the pieces needed to start a protocol-specific server
+/// (e.g., CA or PVA) with an interactive shell.
+pub struct IocRunConfig {
+    pub db: Arc<PvDatabase>,
+    pub port: u16,
+    pub acf: Option<access_security::AccessSecurityConfig>,
+    pub autosave_config: Option<autosave::SaveSetConfig>,
+    pub autosave_manager: Option<Arc<autosave::AutosaveManager>>,
+    pub shell_commands: Vec<CommandDef>,
+}
 
 /// IOC Application with st.cmd-style startup support.
 pub struct IocApplication {
@@ -80,7 +92,7 @@ impl IocApplication {
         }
     }
 
-    /// Set the CA server port (default: 5064).
+    /// Set the server port (default: 5064).
     pub fn port(mut self, port: u16) -> Self {
         self.port = port;
         self
@@ -178,7 +190,7 @@ impl IocApplication {
     /// IocApplication::new()
     ///     .record("sensor:temp", AiRecord::new(0.0))
     ///     .record("heater:sp", AoRecord::new(0.0))
-    ///     .run().await
+    ///     .run(my_runner).await
     /// ```
     pub fn record(mut self, name: &str, record: impl Record) -> Self {
         self.inline_records
@@ -192,8 +204,16 @@ impl IocApplication {
         self
     }
 
-    /// Run the full IOC lifecycle: startup script → iocInit → interactive shell.
-    pub async fn run(self) -> CaResult<()> {
+    /// Run the full IOC lifecycle: startup script -> iocInit -> protocol runner.
+    ///
+    /// The `protocol_runner` closure receives an [`IocRunConfig`] containing the
+    /// fully initialized database, port, and configuration. It is responsible for
+    /// starting the protocol-specific server (e.g., CA, PVA) and the interactive shell.
+    pub async fn run<F, Fut>(self, protocol_runner: F) -> CaResult<()>
+    where
+        F: FnOnce(IocRunConfig) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = CaResult<()>> + Send,
+    {
         let db = Arc::new(PvDatabase::new());
         let handle = tokio::runtime::Handle::current();
 
@@ -326,21 +346,21 @@ impl IocApplication {
         let total_records = db.all_record_names().await.len();
         eprintln!("iocInit: {total_records} records, {record_count} with device support, {io_intr_count} I/O Intr");
 
-        // Phase 3: Build CaServer and run with interactive shell
-        let server = CaServer::from_parts(db, port, acf, autosave_config, autosave_manager);
-
-        server
-            .run_with_shell(move |shell| {
-                for cmd in shell_commands {
-                    shell.register(cmd);
-                }
-            })
-            .await
+        // Phase 3: Hand off to protocol runner
+        let config = IocRunConfig {
+            db,
+            port,
+            acf,
+            autosave_config,
+            autosave_manager,
+            shell_commands,
+        };
+        protocol_runner(config).await
     }
 }
 
 /// Wire device support to all records that have DTYP set.
-async fn wire_device_support(
+pub(crate) async fn wire_device_support(
     db: &PvDatabase,
     factories: &HashMap<String, DeviceSupportFactory>,
     dynamic_factory: &Option<DynamicDeviceSupportFactory>,

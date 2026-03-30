@@ -156,7 +156,7 @@ impl CaServer {
 
     /// Construct a CaServer from pre-populated parts.
     /// Used by [`ioc_app::IocApplication`] after st.cmd execution and device support wiring.
-    pub(crate) fn from_parts(
+    pub fn from_parts(
         db: Arc<PvDatabase>,
         port: u16,
         acf: Option<access_security::AccessSecurityConfig>,

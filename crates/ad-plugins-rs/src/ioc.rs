@@ -486,6 +486,6 @@ impl AdIoc {
             },
         ));
 
-        app.startup_script(script).run().await
+        app.startup_script(script).run(epics_ca_rs::server::run_ca_ioc).await
     }
 }

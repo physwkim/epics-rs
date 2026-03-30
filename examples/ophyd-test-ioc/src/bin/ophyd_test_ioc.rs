@@ -165,6 +165,6 @@ async fn main() -> CaResult<()> {
     // Run
     // ========================================================================
     app.startup_script(&script)
-        .run()
+        .run(epics_ca_rs::server::run_ca_ioc)
         .await
 }
