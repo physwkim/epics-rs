@@ -53,12 +53,12 @@ pub fn gain_index_to_bits(idx: i32) -> (bool, bool, bool, bool) {
 
 /// Validate a gain index. Returns `true` if valid.
 pub fn is_valid_gain_index(idx: i32) -> bool {
-    idx >= MIN_GAIN && idx < MAX_GAIN && idx != UNUSED_GAIN
+    (MIN_GAIN..MAX_GAIN).contains(&idx) && idx != UNUSED_GAIN
 }
 
 /// Compute the gain value for a given index.
 pub fn gain_for_index(idx: i32) -> f64 {
-    if idx < 0 || idx >= 16 {
+    if !(0..16).contains(&idx) {
         return 0.0;
     }
     10.0_f64.powi(POWERS[idx as usize] as i32)

@@ -129,7 +129,7 @@ impl Default for ScalerRecord {
 fn parse_indexed_field(name: &str, prefix: &str) -> Option<usize> {
     name.strip_prefix(prefix)
         .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&i| i >= 1 && i <= MAX_SCALER_CHANNELS)
+        .filter(|&i| (1..=MAX_SCALER_CHANNELS).contains(&i))
         .map(|i| i - 1)
 }
 

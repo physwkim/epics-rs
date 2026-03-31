@@ -24,6 +24,12 @@ pub struct EpidSoftCallbackDeviceSupport {
     triggered: bool,
 }
 
+impl Default for EpidSoftCallbackDeviceSupport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EpidSoftCallbackDeviceSupport {
     pub fn new() -> Self {
         Self { triggered: false }

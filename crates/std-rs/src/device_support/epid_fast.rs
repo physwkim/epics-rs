@@ -195,6 +195,12 @@ impl EpidFastPvt {
     }
 }
 
+impl Default for EpidFastDeviceSupport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EpidFastDeviceSupport {
     pub fn new() -> Self {
         Self {

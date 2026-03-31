@@ -21,6 +21,12 @@ use crate::records::epid::EpidRecord;
 /// ```
 pub struct EpidSoftDeviceSupport;
 
+impl Default for EpidSoftDeviceSupport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EpidSoftDeviceSupport {
     pub fn new() -> Self {
         Self

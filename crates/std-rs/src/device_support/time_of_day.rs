@@ -20,6 +20,12 @@ const EPICS_EPOCH_OFFSET: u64 = 631152000;
 /// Ported from `devTimeOfDay.c` (`devSiTodString`).
 pub struct TimeOfDayStringDeviceSupport;
 
+impl Default for TimeOfDayStringDeviceSupport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeOfDayStringDeviceSupport {
     pub fn new() -> Self {
         Self
@@ -66,6 +72,12 @@ impl DeviceSupport for TimeOfDayStringDeviceSupport {
 ///
 /// Ported from `devTimeOfDay.c` (`devAiTodSeconds`).
 pub struct SecPastEpochDeviceSupport;
+
+impl Default for SecPastEpochDeviceSupport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SecPastEpochDeviceSupport {
     pub fn new() -> Self {
