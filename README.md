@@ -36,11 +36,13 @@ The wire protocol is identical to C EPICS, so existing clients (`caget`, `camoni
 epics-rs reimplements the core components of C/C++ EPICS in Rust:
 
 - **Channel Access protocol** — client & server (UDP name resolution + TCP virtual circuit)
-- **IOC runtime** — 20 record types, .db file loading, link chains, scan scheduling
+- **IOC runtime** — 23 record types, .db file loading, link chains, scan scheduling
 - **asyn framework** — actor-based async port driver model
 - **Motor record** — 9-phase state machine, coordinate transforms, backlash compensation
 - **areaDetector** — NDArray, driver base, 23 plugins
 - **Sequencer** — SNL compiler + runtime
+- **Standard records** — epid (PID/MaxMin feedback), throttle (rate-limited output), timestamp
+- **Scaler** — 64-channel counter with presets, auto-count, delayed start
 - **Calc engine** — numeric/string/array expressions
 - **Autosave** — PV save/restore
 
@@ -66,6 +68,8 @@ epics-rs = { git = "https://github.com/epics-rs/epics-rs" }
 | `autosave` | PV save/restore | no |
 | `busy` | Busy record | no |
 | `seq` | Sequencer runtime | no |
+| `std` | Standard records (epid, throttle, timestamp) | no |
+| `scaler` | Scaler record (64-channel counter) | no |
 | `full` | Everything | no |
 
 ```toml
@@ -82,7 +86,7 @@ epics-rs = { git = "https://github.com/epics-rs/epics-rs", features = ["full"] }
 epics-rs/
 ├── crates/
 │   ├── epics-rs/         # Umbrella crate (feature-gated re-exports)
-│   ├── epics-base-rs/    # Core: IOC runtime, 20 record types, iocsh, db loader
+│   ├── epics-base-rs/    # Core: IOC runtime, 23 record types, iocsh, db loader
 │   ├── epics-ca-rs/      # Channel Access protocol (client + server)
 │   ├── epics-pva-rs/     # pvAccess protocol (experimental)
 │   ├── epics-macros-rs/  # #[derive(EpicsRecord)] proc macro
@@ -90,12 +94,11 @@ epics-rs/
 │   ├── motor-rs/         # Motor record + SimMotor
 │   ├── ad-core-rs/       # areaDetector core (NDArray, NDArrayPool, driver base)
 │   ├── ad-plugins-rs/    # 23 NDPlugins (Stats, ROI, FFT, TIFF, JPEG, HDF5, etc.)
-│   ├── epics-calc-rs/    # Calc expression engine (numeric, string, array, math)
+│   ├── std-rs/           # Standard records (epid, throttle, timestamp) + device support
+│   ├── scaler-rs/        # Scaler record (64-channel counter) + device support
 │   ├── epics-seq-rs/     # Sequencer runtime (state machine execution)
 │   ├── snc-core-rs/      # SNL compiler library (lexer, parser, codegen)
-│   ├── snc-rs/           # SNL compiler CLI
-│   ├── autosave-rs/      # PV automatic save/restore
-│   └── busy-rs/          # Busy record
+│   └── snc-rs/           # SNL compiler CLI
 └── examples/
     ├── scope-ioc/        # Digital oscilloscope simulator
     ├── mini-beamline/    # Beamline simulator with 5 motors + detectors
@@ -110,16 +113,15 @@ epics-rs (umbrella — feature-gated re-exports)
     │
     ├── epics-base-rs ◄─── epics-macros-rs (proc macro)
     │       ▲
-    │       ├── epics-calc-rs
-    │       ├── autosave-rs
-    │       ├── busy-rs
     │       ├── epics-seq-rs
     │       │    └── snc-core-rs
     │       ├── asyn-rs
     │       │    └── motor-rs
-    │       └── ad-core-rs
-    │            ├── asyn-rs
-    │            └── ad-plugins-rs
+    │       ├── ad-core-rs
+    │       │    ├── asyn-rs
+    │       │    └── ad-plugins-rs
+    │       ├── std-rs (epid, throttle, timestamp)
+    │       └── scaler-rs (64-channel counter)
     │
     ├── epics-ca-rs (Channel Access protocol)
     └── epics-pva-rs (pvAccess protocol, experimental)
@@ -211,7 +213,22 @@ This enables future wire transport extensions (Unix sockets, network) and simpli
 | `registrar()` / `device()` in `.dbd` | `register_device_support()` call |
 | `#ifdef` conditional include | Cargo `features` |
 
-### 5. Record System Separation
+### 5. ProcessOutcome: Action-Based Side Effects
+
+C EPICS records call `dbPutLink()`, `callbackRequestDelayed()`, and device support functions directly from `process()`. In epics-rs, records are pure state machines that express side effects as **action requests**:
+
+```rust
+pub enum ProcessAction {
+    WriteDbLink { link_field, value },     // "write this value to that link"
+    ReadDbLink { link_field, target },     // "read that link into this field" (pre-process)
+    ReprocessAfter(Duration),              // "wake me up after N seconds"
+    DeviceCommand { command, args },       // "tell device support to do this"
+}
+```
+
+The processing layer executes these actions at the correct point in the cycle. Records never touch the database directly. This keeps records testable (unit-test `process()` by inspecting returned actions) and decoupled from the runtime infrastructure.
+
+### 6. Record System Separation
 
 In C EPICS, each record type requires separate `.dbd` and C source files. epics-rs splits the record system into two layers:
 
@@ -244,6 +261,10 @@ Adding a new record type requires only a new file in `records/` — no changes t
 | compress | Circular buffer / N-to-1 compression | DoubleArray |
 | histogram | Signal histogram | LongArray |
 | sub | Subroutine | Double |
+| epid | Extended PID feedback (PID/MaxMin) | Double |
+| throttle | Rate-limited output | Double |
+| timestamp | Formatted timestamp string | String |
+| scaler | 64-channel 32-bit counter | Double (elapsed time) |
 
 ## Quick Start
 
@@ -340,7 +361,7 @@ client.caput("TEMP", "42.0").await?;
 
 ### epics-base-rs (core)
 
-IOC runtime, 20 record types, iocsh, .db file loader, access security, autosave integration.
+IOC runtime, 23 record types, iocsh, .db file loader, access security, autosave integration, calc engine, busy record.
 
 - Record system with `#[derive(EpicsRecord)]` proc macro
 - PvDatabase with record processing chains (FLNK, INP/OUT links)
@@ -391,7 +412,7 @@ areaDetector framework:
 - **23 plugins** — Stats, ROI, ROIStat, Process, Transform, ColorConvert, Overlay, FFT, TimeSeries, CircularBuff, Codec, Gather, Scatter, StdArrays, FileTIFF, FileJPEG, FileHDF5, Attribute, AttrPlot, BadPixel, PosPlugin, Passthrough
 - **Parallel processing** — rayon data-parallelism for CPU-heavy plugins (Stats, ROIStat, ColorConvert, Process). Shared thread pool sized to `available_cores - 2` to leave headroom for driver threads and tokio runtime. Enabled by default; see [ad-plugins README](crates/ad-plugins-rs/README.md#parallel-processing)
 
-### epics-calc-rs
+### Calc Engine (in epics-base-rs)
 
 Expression engine:
 
@@ -400,6 +421,28 @@ Expression engine:
 - **Array** — element-wise operations, statistics (mean, sigma, min, max, median)
 - **EPICS records** — transform, scalcout, sseq (epics feature)
 
+### std-rs
+
+Port of the EPICS [std](https://github.com/epics-modules/std) synApps module:
+
+- **epid record** — Extended PID feedback with PID and MaxMin modes, anti-windup, bumpless turn-on, output deadband
+- **throttle record** — Rate-limited output with drive limits, delay enforcement, sync input
+- **timestamp record** — Formatted timestamp string (11 format options)
+- **Device support** — Epid Soft (synchronous PID), Epid Async Soft (trigger-based), Fast Epid (interrupt-driven 1kHz+ PID), Time of Day, Sec Past Epoch
+- **SNL programs** — Femto amplifier gain control, delayDo state machine (native Rust async)
+- **70+ database templates** and autosave request files bundled
+
+### scaler-rs
+
+Port of the EPICS [scaler](https://github.com/epics-modules/scaler) module:
+
+- **scaler record** — 64-channel 32-bit counter with per-channel presets, gates, directions, names
+- **OneShot/AutoCount** modes with configurable DLY/DLY1 delayed start
+- **RATE/RAT1** periodic display update during counting
+- **COUT/COUTP** output links fired on count start/stop transitions
+- **Asyn device support** — bridges to ScalerDriver trait (reset, read, write_preset, arm, done)
+- **Software scaler driver** — for testing/simulation
+
 ### seq & snc-core
 
 EPICS sequencer:
@@ -407,7 +450,7 @@ EPICS sequencer:
 - **Runtime (seq)** — state set execution, pvGet/pvPut/pvMonitor, event flags
 - **Compiler (snc-core)** — SNL lexer/parser, AST, IR, semantic analysis, Rust code generation
 
-### autosave-rs
+### Autosave (in epics-base-rs)
 
 PV automatic save/restore:
 
@@ -669,11 +712,11 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 ## Testing
 
 ```bash
-# All tests (1,750+)
+# All tests (2,145+)
 cargo test --workspace
 ```
 
-Test coverage: protocol encoding, wire format golden packets, snapshot generation, GR/CTRL metadata serialization, record processing, link chains, calc engine, .db parsing, access security, autosave, iocsh, IOC builder, event scheduling, motor state machine, asyn port driver, etc.
+Test coverage: protocol encoding, wire format golden packets, snapshot generation, GR/CTRL metadata serialization, record processing, link chains, calc engine, .db parsing, access security, autosave, iocsh, IOC builder, event scheduling, motor state machine, asyn port driver, PID algorithms, scaler state machine, SNL compiler, derive macros, pvAccess serialization, etc.
 
 ## Requirements
 
