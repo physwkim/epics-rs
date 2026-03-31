@@ -1,0 +1,120 @@
+record(calcout, "$(P)$(R):standbyCalc")
+{
+  field(DESC, "standby calc")
+  field(INPA, "$(SB_INPA="")")
+  field(INPB, "$(SB_INPB="")")
+  field(INPC, "$(SB_INPC="")")
+  field(INPD, "$(SB_INPD="")")
+  field(INPE, "$(SB_INPE="")")
+  field(INPF, "$(SB_INPF="")")
+  field(INPG, "$(SB_INPG="")")
+  field(INPH, "$(SB_INPH="")")
+  field(INPI, "$(SB_INPI="")")
+  field(INPJ, "$(SB_INPJ="")")
+  field(INPK, "$(SB_INPK="")")
+  field(INPL, "$(SB_INPL="")")
+  field(CALC, "$(SB_CALC="0")")
+  field(OOPT, "On Change")
+}
+
+record(calcout, "$(P)$(R):activeCalc")
+{
+  field(DESC, "active calc")
+  field(INPA, "$(A_INPA="")")
+  field(INPB, "$(A_INPB="")")
+  field(INPC, "$(A_INPC="")")
+  field(INPD, "$(A_INPD="")")
+  field(INPE, "$(A_INPE="")")
+  field(INPF, "$(A_INPF="")")
+  field(INPG, "$(A_INPG="")")
+  field(INPH, "$(A_INPH="")")
+  field(INPI, "$(A_INPI="")")
+  field(INPJ, "$(A_INPJ="")")
+  field(INPK, "$(A_INPK="")")
+  field(INPL, "$(A_INPL="")")
+  field(CALC, "$(A_CALC="0")")
+  field(OOPT, "On Change")
+}
+
+record(sseq, "$(P)$(R):doSeq")
+{
+  field(DESC, "do sequence")
+  field(DLY1, "$(D_DLY1="0.00000")")
+  field(DLY2, "$(D_DLY2="0.00000")")
+  field(DLY3, "$(D_DLY3="0.00000")")
+  field(DLY4, "$(D_DLY4="0.00000")")
+  field(DLY5, "$(D_DLY5="0.00000")")
+  field(DLY6, "$(D_DLY6="0.00000")")
+  field(DLY7, "$(D_DLY7="0.00000")")
+  field(DLY8, "$(D_DLY8="0.00000")")
+  field(DLY9, "$(D_DLY9="0.00000")")
+  field(DLYA, "$(D_DLYA="0.00000")")
+  field(STR1, "$(D_STR1="0.00000")")
+  field(STR2, "$(D_STR2="0.00000")")
+  field(STR3, "$(D_STR3="0.00000")")
+  field(STR4, "$(D_STR4="0.00000")")
+  field(STR5, "$(D_STR5="0.00000")")
+  field(STR6, "$(D_STR6="0.00000")")
+  field(STR7, "$(D_STR7="0.00000")")
+  field(STR8, "$(D_STR8="0.00000")")
+  field(STR9, "$(D_STR9="0.00000")")
+  field(STRA, "$(D_STRA="0.00000")")
+  field(LNK1, "$(D_LNK1="")")
+  field(LNK2, "$(D_LNK2="")")
+  field(LNK3, "$(D_LNK3="")")
+  field(LNK4, "$(D_LNK4="")")
+  field(LNK5, "$(D_LNK5="")")
+  field(LNK6, "$(D_LNK6="")")
+  field(LNK7, "$(D_LNK7="")")
+  field(LNK8, "$(D_LNK8="")")
+  field(LNK9, "$(D_LNK9="")")
+  field(LNKA, "$(D_LNKA="")")
+}
+
+record(bo, "$(P)$(R):enable")
+{
+  field(DESC, "enable delay do")
+  field(ZNAM, "Disable")
+  field(ONAM, "Enable")
+  field(VAL,  "1")
+}
+
+record(longout, "$(P)$(R):debug")
+{
+  field(DESC, "debug level")
+  field(VAL,  "0")
+}
+
+record(ao, "$(P)$(R):delay")
+{
+  field(DESC, "delay period")
+  field(EGU,  "sec")
+  field(VAL,  "$(DELAY="1.0")")
+  field(PREC, "1")
+}
+
+record(stringout, "$(P)$(R):state")
+{
+  field(DESC, "seq program state")
+  field(VAL,  "init")  
+}
+
+record(calcout, "$(P)$(R):delayCalc")
+{
+  field(DESC, "delay calc")
+  field(INPA, "$(T_INPA="")")
+  field(INPB, "$(T_INPB="")")
+  field(INPC, "$(T_INPC="")")
+  field(INPD, "$(T_INPD="")")
+  field(INPE, "$(T_INPE="")")
+  field(INPF, "$(T_INPF="")")
+  field(INPG, "$(T_INPG="")")
+  field(INPH, "$(T_INPH="")")
+  field(INPI, "$(T_INPI="")")
+  field(INPJ, "$(T_INPJ="")")
+  field(INPK, "$(T_INPK="")")
+  field(INPL, "$(T_INPL="")")
+  field(CALC, "$(T_CALC="0")")
+  field(OOPT, "Every Time")
+  field(OUT,  "$(T_OUT="$(P)$(R):delay PP")")
+}

@@ -1,0 +1,63 @@
+record(longout, "$(P)$(Q)s1") {
+}
+record(longout, "$(P)$(Q)s2") {
+}
+record(longout, "$(P)$(Q)s3") {
+}
+record(longout, "$(P)$(Q)s4") {
+}
+record(longout, "$(P)$(Q)s5") {
+}
+record(longout, "$(P)$(Q)s6") {
+}
+record(longout, "$(P)$(Q)s7") {
+}
+record(longout, "$(P)$(Q)s8") {
+}
+record(calcout, "$(P)$(Q)Calc") {
+	field(INPA, "$(SCALER).CNT CP")
+	field(CALC, "A")
+	field(OOPT, "Transition To Non-zero")
+	field(OUT, "$(P)$(Q)Tran.P PP")
+	field(FLNK, "$(P)$(Q)Count.PROC")
+}
+record(calcout, "$(P)$(Q)Count") {
+	field(CALC, "0")
+	field(ODLY, ".1")
+	field(OUT, "$(P)$(Q)Tran.P PP")
+}
+record(bo, "$(P)$(Q)doTran") {
+	field(SDIS, "$(SCALER).CNT")
+	field(DISV, "0")
+	field(SCAN, ".1 second")
+	field(OUT, "$(P)$(Q)Count.PROC PP")
+}
+record(transform, "$(P)$(Q)Tran") {
+	field(CLCA, "p?0:a+1e6")
+	field(OUTA, "$(P)$(Q)s1")
+	field(INPB, "$(P)scan1.NPTS")
+	field(INPC, "$(P)scan1.CPT")
+	field(CLCD, "b<=1?10:exp(-((c-b/2)^2)/(b/10)^2)")
+	field(CLCE, "p?0:e+d+rndm")
+	field(OUTE, "$(P)$(Q)s2")
+	field(CLCF, "p?0:f+d+rndm")
+	field(OUTF, "$(P)$(Q)s3")
+	field(CLCG, "p?0:g+d+rndm")
+	field(OUTG, "$(P)$(Q)s4")
+	field(CLCH, "p?0:h+d+rndm")
+	field(OUTH, "$(P)$(Q)s5")
+	field(CLCI, "p?0:i+d+rndm")
+	field(OUTI, "$(P)$(Q)s6")
+	field(CLCJ, "p?0:j+d+rndm")
+	field(OUTJ, "$(P)$(Q)s7")
+	field(CLCK, "p?0:k+d+rndm")
+	field(OUTK, "$(P)$(Q)s8")
+}
+record(calcout, "$(P)$(Q)Zero") {
+	field(INPA, "$(SCALER).CNT CP")
+	field(CALC, "a")
+	field(OOPT, "Transition To Zero")
+	field(DOPT, "Use OCAL")
+	field(OCAL, "1")
+	field(OUT, "$(P)$(Q)Tran.P PP")
+}

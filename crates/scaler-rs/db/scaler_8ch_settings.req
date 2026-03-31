@@ -1,0 +1,28 @@
+$(P)$(S).TP
+$(P)$(S).TP1
+$(P)$(S).CONT
+$(P)$(S).DLY1
+$(P)$(S).RAT1
+$(P)$(S).PREC
+$(P)$(S).FREQ
+$(P)$(S).RATE
+$(P)$(S).DLY
+$(P)$(S).COUT
+$(P)$(S)_calcEnable.VAL
+$(P)$(S)_calc_ctrl.VAL
+$(P)$(S)_calc1.CALC
+$(P)$(S)_calc2.CALC
+$(P)$(S)_calc3.CALC
+$(P)$(S)_calc4.CALC
+$(P)$(S)_calc5.CALC
+$(P)$(S)_calc6.CALC
+$(P)$(S)_calc7.CALC
+$(P)$(S)_calc8.CALC
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=1
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=2
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=3
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=4
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=5
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=6
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=7
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=8

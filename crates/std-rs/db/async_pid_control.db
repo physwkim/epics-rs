@@ -1,0 +1,90 @@
+grecord(epid,"$(P)$(PID)") {
+        field(DTYP,"Async Soft Channel")
+        field(INP,"$(INP) CA")
+        field(OUTL,"$(OUT) PP")
+        field(SCAN,"$(SCAN)")
+        field(KP,"$(KP)")
+        field(KI,"$(KI)")
+        field(KD,"$(KD)")
+        field(LOPR,"$(LOPR)")
+        field(HOPR,"$(HOPR)")
+        field(DRVL,"$(DRVL)")
+        field(DRVH,"$(DRVH)")
+        field(PREC,"$(PREC)")
+        field(STPL,"0")
+        field(FLNK,"$(P)$(PID)_limits.VAL PP NMS")
+}
+grecord(transform,"$(P)$(PID)_limits") {
+        field(DESC,"PID limits")
+        field(CMTA,"Low input")
+        field(INPA,"$(DRVL)")
+        field(CMTB,"High limit")
+        field(INPB,"$(DRVH)")
+        field(CMTO,"Low output")
+        field(CLCO,"a")
+        field(OUTO,"$(P)$(PID).DRVL NPP NMS")
+        field(CMTP,"High output")
+        field(CLCP,"b")
+        field(OUTP,"$(P)$(PID).DRVH NPP NMS")
+        field(PREC,"$(PREC)")
+}
+grecord(transform,"$(P)$(PID)_incalc") {
+        field(DESC,"PID input calc")
+        field(PREC,"$(PREC)")
+}
+grecord(transform,"$(P)$(PID)_outcalc") {
+        field(DESC,"PID output calc")
+        field(PREC,"$(PREC)")
+}
+
+# These records are for tweaking the output (if the feedback is off)
+grecord(ao,"$(P)$(PID)OUT_tweak") {
+        field(PREC,"3")
+}
+
+grecord(calcout,"$(P)$(PID)OUT_tweak_down") {
+        field(INPA,"$(P)$(PID)OUT_tweak.VAL NPP NMS")
+        field(INPB,"$(OUT) NPP NMS")
+        field(CALC,"B-A")
+        field(OUT, "$(OUT) PP NMS")
+}
+
+grecord(calcout,"$(P)$(PID)OUT_tweak_up") {
+        field(INPA,"$(P)$(PID)OUT_tweak.VAL NPP NMS")
+        field(INPB,"$(OUT) NPP NMS")
+        field(CALC,"B+A")
+        field(OUT, "$(OUT) PP NMS")
+}
+
+# These records are for tweaking the setpoint
+grecord(ao,"$(P)$(PID)SP_tweak") {
+        field(PREC,"3")
+}
+
+grecord(calcout,"$(P)$(PID)SP_tweak_down") {
+        field(INPA,"$(P)$(PID)SP_tweak.VAL NPP NMS")
+        field(INPB,"$(P)$(PID).VAL NPP NMS")
+        field(CALC,"B-A")
+        field(OUT, "$(P)$(PID).VAL PP NMS")
+}
+
+grecord(calcout,"$(P)$(PID)SP_tweak_up") {
+        field(INPA,"$(P)$(PID)SP_tweak.VAL NPP NMS")
+        field(INPB,"$(P)$(PID).VAL NPP NMS")
+        field(CALC,"B+A")
+        field(OUT, "$(P)$(PID).VAL PP NMS")
+}
+
+# STOP logic
+# This record turns off feedback
+grecord(ao,"$(P)$(PID)Stop") {
+        field(VAL,"0")
+        field(OUT, "$(P)$(PID).FBON PP NMS")
+        field(FLNK,"$(P)$(PID)Stop2")
+}
+
+# This record turns off the output
+grecord(ao,"$(P)$(PID)Stop2") {
+        field(VAL,"0.0")
+        field(OUT, "$(OUT) PP NMS")
+}

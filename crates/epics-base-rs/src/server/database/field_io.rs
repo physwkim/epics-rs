@@ -64,7 +64,11 @@ impl PvDatabase {
             // Try record-specific field first; only fall back to common on FieldNotFound
             use crate::server::record::CommonFieldPutResult;
             let common_result = match instance.record.put_field(&field, value.clone()) {
-                Ok(()) => CommonFieldPutResult::NoChange,
+                Ok(()) => {
+                    instance.record.on_put(&field);
+                    let _ = instance.record.special(&field, true);
+                    CommonFieldPutResult::NoChange
+                }
                 Err(CaError::FieldNotFound(_)) => instance.put_common_field(&field, value)?,
                 Err(e) => return Err(e),
             };
@@ -165,10 +169,16 @@ impl PvDatabase {
                 }
             };
 
-            // Try record-specific field first; fall back to common on FieldNotFound
+            // Try record-specific field first; fall back to common on FieldNotFound.
+            // For record-owned fields, call on_put() and special() after successful put,
+            // matching what put_common_field() does for common fields.
             use crate::server::record::CommonFieldPutResult;
             let common_result = match instance.record.put_field(&field, value.clone()) {
-                Ok(()) => CommonFieldPutResult::NoChange,
+                Ok(()) => {
+                    instance.record.on_put(&field);
+                    let _ = instance.record.special(&field, true);
+                    CommonFieldPutResult::NoChange
+                }
                 Err(CaError::FieldNotFound(_)) => {
                     instance.put_common_field(&field, value)?
                 }

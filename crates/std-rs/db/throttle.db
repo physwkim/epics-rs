@@ -1,0 +1,10 @@
+record(throttle, "$(P)$(THR)")
+{
+	field( DESC,  "throttle record")
+        field( PREC,  "$(PREC=6)")
+        field( DPREC, "$(DPREC=3)")
+        field( OUT,   "$(OUT=)")
+        field( DLY,   "$(DELAY=1.0)")
+        field( DRVLH,  "$(DRVLH=0.0)")
+        field( DRVLL,  "$(DRVLL=0.0)")
+}

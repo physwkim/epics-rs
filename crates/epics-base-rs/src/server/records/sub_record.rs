@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Sub (subroutine) record — calls a named subroutine function on process.
@@ -62,8 +62,8 @@ static SUB_FIELDS: &[FieldDesc] = &[
 impl Record for SubRecord {
     fn record_type(&self) -> &'static str { "sub" }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
-        Ok(RecordProcessResult::Complete)
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

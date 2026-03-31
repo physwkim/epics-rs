@@ -1,5 +1,5 @@
 use crate::error::CaResult;
-use crate::server::record::{Record, ScanType};
+use crate::server::record::{ProcessAction, Record, ScanType};
 
 /// Handle for waiting on asynchronous write completion.
 /// Returned by [`DeviceSupport::write_begin`] when the write is submitted
@@ -9,6 +9,38 @@ pub trait WriteCompletion: Send + 'static {
     fn wait(&self, timeout: std::time::Duration) -> CaResult<()>;
 }
 
+/// Outcome of a device support read() call.
+///
+/// Allows device support to return side-effect actions (link writes,
+/// delayed reprocess) and signal that it has already performed the
+/// record's compute step (e.g., PID calculation).
+#[derive(Default)]
+pub struct DeviceReadOutcome {
+    /// Actions for the framework to execute (WriteDbLink, ReprocessAfter, etc.)
+    pub actions: Vec<ProcessAction>,
+    /// If true, the record's built-in compute (e.g., PID) was already
+    /// performed by device support. The record's process() should skip
+    /// its own computation. This replaces the `pid_done` flag pattern.
+    pub did_compute: bool,
+}
+
+impl DeviceReadOutcome {
+    /// Shorthand for a successful read with no actions.
+    pub fn ok() -> Self {
+        Self::default()
+    }
+
+    /// Shorthand for a read that performed the record's compute step.
+    pub fn computed() -> Self {
+        Self { did_compute: true, actions: Vec::new() }
+    }
+
+    /// Shorthand for a computed read with actions.
+    pub fn computed_with(actions: Vec<ProcessAction>) -> Self {
+        Self { did_compute: true, actions }
+    }
+}
+
 /// Trait for custom device support implementations.
 /// When DTYP is set to something other than "" or "Soft Channel",
 /// the registered DeviceSupport is used instead of link resolution.
@@ -16,7 +48,19 @@ pub trait DeviceSupport: Send + Sync + 'static {
     fn init(&mut self, _record: &mut dyn Record) -> CaResult<()> {
         Ok(())
     }
-    fn read(&mut self, record: &mut dyn Record) -> CaResult<()>;
+
+    /// Read from hardware into the record.
+    ///
+    /// Returns a `DeviceReadOutcome` containing:
+    /// - `actions`: side-effect actions (link writes, delayed reprocess)
+    ///   that the framework will execute after process()
+    /// - `did_compute`: if true, the record's built-in compute was already
+    ///   performed (e.g., device support ran PID), so process() should skip it
+    fn read(&mut self, record: &mut dyn Record) -> CaResult<DeviceReadOutcome> {
+        let _ = record;
+        Ok(DeviceReadOutcome::ok())
+    }
+
     fn write(&mut self, record: &mut dyn Record) -> CaResult<()>;
     fn dtyp(&self) -> &str;
 
@@ -41,5 +85,15 @@ pub trait DeviceSupport: Send + Sync + 'static {
     /// Returns `None` to fall back to synchronous [`write()`](DeviceSupport::write).
     fn write_begin(&mut self, _record: &mut dyn Record) -> CaResult<Option<Box<dyn WriteCompletion>>> {
         Ok(None)
+    }
+
+    /// Handle a named command from the record's process() via
+    /// `ProcessAction::DeviceCommand`. This allows records to request
+    /// driver operations (e.g., scaler reset/arm/write_preset) without
+    /// holding a direct driver reference.
+    ///
+    /// Default: ignore.
+    fn handle_command(&mut self, _record: &mut dyn Record, _command: &str, _args: &[crate::types::EpicsValue]) -> CaResult<()> {
+        Ok(())
     }
 }

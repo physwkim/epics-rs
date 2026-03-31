@@ -1,0 +1,6 @@
+# FILE... pid_control_settings.req
+# USAGE.. pid_control.db fields autosave'd.
+file "pid_control_settings.req" P=$(P) PID=$(PID)
+$(P)$(PID).TRIG
+$(P)$(PID).TVAL
+file "transform_settings.req", P=$(P)$(PID)_outcalc

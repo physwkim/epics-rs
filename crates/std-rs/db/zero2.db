@@ -1,0 +1,12 @@
+grecord(sseq,"$(P)$(S)") {
+	field(STR1,"Set")
+	field(STR3,"Use")
+	field(LNK1,"$(SET1) PP NMS")
+	field(LNK2,"$(VAL1) PP NMS")
+	field(LNK3,"$(SET1) PP NMS")
+	field(STR4,"Set")
+	field(STR6,"Use")
+	field(LNK4,"$(SET2) PP NMS")
+	field(LNK5,"$(VAL2) PP NMS")
+	field(LNK6,"$(SET2) PP NMS")
+}

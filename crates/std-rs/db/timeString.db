@@ -1,0 +1,6 @@
+record(stringin, "$(P):currentTimeDate")
+{
+    field(DESC, "Current time and date")
+    field(DTYP, "Soft Timestamp")
+    field(INP, "@%Y-%m-%d %H:%M:%S.%03f")
+}

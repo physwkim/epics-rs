@@ -1,0 +1,67 @@
+#- softMotorTf.db
+#- Adapted from softMotor.db to use transform records for more flexibility
+#- ##################################################
+#- P	 - IOC prefix
+#- SM	 - Soft motor record name
+#- DESC  - DESC field of soft motor record
+#- ##################################################
+
+record(motor,"$(P)$(SM)") {
+    field(DTYP,"Soft Channel")
+    field(DESC,"$(DESC=$(P)$(SM))")
+    field(VELO,"100")
+    field(VBAS,"25")
+    field(ACCL,"0.5")
+    field(OUT,"0")
+    field(MRES,"0.01")
+    field(ERES,"0.01")
+    field(RRES,"1.0")
+    field(PREC,"4")
+    field(DHLM,"1E10")
+    field(DLLM,"-1E10")
+    field(RTRY,"0")
+    field(TWV,"1.0")
+    field(URIP,"Yes")
+    field(RDBL,"$(P)$(SM)CalcRdbk.VAL PP MS")
+    field(OUT,"$(P)$(SM)DriveTf.A PP MS")
+    field(DINP,"$(P)$(SM)CalcMove.VAL NPP MS")
+    field(STOO,"$(P)$(SM)StopTf.PROC PP MS")
+}
+
+record(transform,"$(P)$(SM)_ableput") {
+  field(CLCB,"a")
+  field(CLCC,"a")
+  field(OUTA,"$(P)$(SM).DISA NPP NMS")
+  field(OUTB,"$(P)$(SM).DISP NPP NMS")
+  field(OUTC,"$(P)$(SM).DISA NPP NMS")
+}
+
+record(bo,"$(P)$(SM)_able") {
+  field(DESC,"$(SM) enable")
+  field(PINI,"YES")
+  field(OUT,"$(P)$(SM)_ableput.A PP MS")
+  field(ZNAM,"Enable")
+  field(ONAM,"Disable")
+}
+
+record(transform,"$(P)$(SM)DriveTf") {
+    field(DESC, "$(SM) Output Transform")
+    field(CMTA, "$(SM) Output")
+    field(PREC, 4)
+}
+
+record(calcout,"$(P)$(SM)CalcRdbk") {
+    field(DESC,"$(SM) Readback")
+    field(PREC, 4)
+}
+
+record(calcout,"$(P)$(SM)CalcMove") {
+    field(DESC,"$(SM) Moving Calc")
+    field(PREC, 4)
+    field(OUT,"$(P)$(SM).NTM NPP NMS")
+}
+
+record(transform, "$(P)$(SM)StopTf") {
+    field(DESC, "$(SM) Stop Transform")
+    field(PREC, 4)
+}

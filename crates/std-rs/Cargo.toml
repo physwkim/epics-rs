@@ -1,0 +1,22 @@
+[package]
+name = "std-rs"
+version.workspace = true
+edition.workspace = true
+description = "Rust port of EPICS std module (epid, throttle, timestamp records)"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+epics-base-rs = { workspace = true }
+epics-ca-rs = { workspace = true }
+asyn-rs = { workspace = true }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+tracing = "0.1"
+chrono = { version = "0.4", features = ["std"] }
+
+[dev-dependencies]
+epics-ca-rs = { workspace = true }
+scaler-rs = { workspace = true }
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"

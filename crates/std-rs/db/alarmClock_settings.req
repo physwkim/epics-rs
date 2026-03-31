@@ -1,0 +1,8 @@
+# FILE... alarmClock_settings.req
+$(P)AClock$(N):Enable
+$(P)AClock$(N):Set:mm
+$(P)AClock$(N):Set:dd
+$(P)AClock$(N):Set:yy
+$(P)AClock$(N):Set:HH
+$(P)AClock$(N):Set:MM
+$(P)AClock$(N):Set:SS

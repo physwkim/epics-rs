@@ -1,0 +1,97 @@
+grecord(motor,"$(P)$(SM)") {
+    field(DTYP,"Soft Channel")
+    field(DESC,"Soft Motor $(SM)")
+    field(VELO,"100")
+    field(VBAS,"25")
+    field(ACCL,"0.5")
+    field(OUT,"0")
+    field(MRES,"0.01")
+    field(ERES,"0.01")
+    field(RRES,"1.0")
+    field(PREC,"4")
+    field(DHLM,"1E10")
+    field(DLLM,"-1E10")
+    field(RTRY,"0")
+    field(TWV,"1.0")
+    field(URIP,"Yes")
+    field(RDBL,"$(P)$(SM)CalcRevs.VAL PP MS")
+    field(OUT,"$(P)$(SM)CalcFrwd.A PP MS")
+    field(DINP,"$(P)$(SM)CalcMove.VAL NPP MS")
+    field(STOO,"$(P)$(SM)CalcStop.A PP MS")        
+}
+grecord(transform,"$(P)$(SM)_ableput") {
+  field(CLCB,"a")
+  field(CLCC,"a")
+  field(OUTA,"$(P)$(SM).DISA NPP NMS")
+  field(OUTB,"$(P)$(SM).DISP NPP NMS")
+  field(OUTC,"$(P)$(SM).DISA NPP NMS")
+}
+grecord(bo,"$(P)$(SM)_able") {
+  field(DESC,"softmotor enable")
+  field(PINI,"YES")
+  field(OUT,"$(P)$(SM)_ableput.A PP MS")
+  field(ZNAM,"Enable")
+  field(ONAM,"Disable")
+}
+grecord(dfanout,"$(P)$(SM)Init") {
+	field(SCAN,"1 second")
+	field(DOL,"1")
+	field(OUTA,"$(P)$(SM)CalcFrwdOutput.PROC  PP NMS")
+	field(OUTB,"$(P)$(SM)CalcRevsInput.PROC  PP NMS")
+	field(OUTC,"$(P)$(SM)CalcMoveInput.PROC  PP NMS")
+	field(OUTD,"$(P)$(SM)CalcStopOutput.PROC  PP NMS")
+        field(OUTE,"$(P)$(SM)MoveLogic.PROC  PP NMS") 
+	field(OUTF,"$(P)$(SM)Init.DISA CA NMS")
+}
+grecord(scalcout,"$(P)$(SM)CalcFrwdOutput") {
+    field(DESC,"$(SM) Parse Fwd OutLink")
+    field(BB," PP MS")
+    field(CALC,"(AA=='')?AA:AA+BB")
+    field(OUT,"$(P)$(SM)CalcFrwd.OUT CA NMS")
+}
+grecord(calcout,"$(P)$(SM)CalcFrwd") {
+    field(DESC,"$(SM) Fwd Calc")
+    field(PREC,"4")
+    field(CALC,"A")
+}
+grecord(scalcout,"$(P)$(SM)CalcRevsInput") {
+    field(DESC,"$(SM) Parse Rev InLink")
+    field(BB," CP MS")
+    field(CALC,"(AA=='')?AA:AA+BB")
+    field(OUT,"$(P)$(SM)CalcRevs.INPA CA NMS")
+}
+grecord(calcout,"$(P)$(SM)CalcRevs") {
+    field(DESC,"$(SM) Reverse Calc")
+    field(PREC,"4")
+    field(CALC,"A")
+}
+grecord(bo,"$(P)$(SM)MoveLogic") {
+    field(ZNAM,"Invert")
+    field(ONAM,"Same")
+    field(OUT,"$(P)$(SM)CalcMoveLogic.A PP MS")
+}
+grecord(scalcout,"$(P)$(SM)CalcMoveLogic") {
+    field(CALC,"A?'A':'!A'")
+    field(OUT,"$(P)$(SM)CalcMove.CALC PP MS")
+}
+grecord(scalcout,"$(P)$(SM)CalcMoveInput") {
+    field(DESC,"$(SM) Parse Move InLink")
+    field(BB," CP MS")
+    field(CALC,"(AA=='')?AA:AA+BB")
+    field(OUT,"$(P)$(SM)CalcMove.INPA CA NMS")
+}
+grecord(calcout,"$(P)$(SM)CalcMove") {
+    field(DESC,"$(SM) Moving Calc")
+    field(CALC,"!A")
+    field(OUT,"$(P)$(SM).NTM NPP NMS")
+}
+grecord(scalcout,"$(P)$(SM)CalcStopOutput") {
+    field(DESC,"$(SM) Parse Stop OutLink")
+    field(BB," PP MS")
+    field(CALC,"(AA=='')?AA:AA+BB")
+    field(OUT,"$(P)$(SM)CalcStop.OUT CA NMS")
+}
+grecord(calcout,"$(P)$(SM)CalcStop") {
+    field(DESC,"$(SM) Stop Calc")
+    field(CALC,"A")
+}

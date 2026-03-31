@@ -1,0 +1,33 @@
+
+record(seq, "$(P)rshtr$(S):Open") {
+  field(DESC, "Shutter Open Sequence")
+  field(SDIS, "PA:$(BL)ID:$(PPS)_SHTRS_CLOSED")
+  field(DISV, "0")
+  field(SCAN, "Passive")
+  field(DOL1, "0")
+  field(LNK1, "$(P)Unidig1Bo$(OUT).VAL PP")
+  field(DLY2, "2")
+  field(DOL2, "1")
+  field(LNK2, "$(P)Unidig1Bo$(OUT).VAL PP")
+}
+
+record(seq, "$(P)rshtr$(S):Close") {
+  field(DESC, "Shutter Close Sequence")
+  field(SDIS, "PA:$(BL)ID:$(PPS)_SHTRS_CLOSED")
+  field(DISV, "1")
+  field(SCAN, "Passive")
+  field(DOL1, "1")
+  field(LNK1, "$(P)Unidig1Bo$(OUT).VAL PP")
+  field(DLY2, "2")
+  field(DOL2, "0")
+  field(LNK2, "$(P)Unidig1Bo$(OUT).VAL PP")
+}
+
+# Simulation Record
+# record(bo, "$(P)Unidig1Bo$(OUT)") {
+#   field(SCAN, "Passive")
+#   field(DTYP, "Soft Channel")
+#   field(ZNAM, "Close")
+#   field(ONAM, "Open")
+# }
+

@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 use crate::calc::StringInputs;
@@ -202,7 +202,7 @@ impl Record for ScalcoutRecord {
         "scalcout"
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         self.prev_val = self.val;
         self.prev_sval = self.sval.clone();
 
@@ -214,7 +214,7 @@ impl Record for ScalcoutRecord {
                 Err(_) => {
                     // Invalid calc — check IVOA
                     match self.ivoa {
-                        1 => return Ok(RecordProcessResult::Complete), // Don't drive output
+                        1 => return Ok(ProcessOutcome::complete()), // Don't drive output
                         2 => { self.val = self.ivov; }
                         _ => {} // Continue
                     }
@@ -250,7 +250,7 @@ impl Record for ScalcoutRecord {
                 self.osv = self.sval.clone();
             }
         }
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

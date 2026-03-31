@@ -1,0 +1,25 @@
+grecord(ao,"$(P)trend_time1") {
+	field(DESC,"Time between Data points")
+	field(FLNK,"$(P)trend_realtime1.PROC  PP MS")
+}
+grecord(bo,"$(P)stop_trend1") {
+}
+grecord(calc,"$(P)trend_realtime1") {
+	field(DESC,"Calc to fix time count")
+	field(CALC,"(A-1.0)")
+	field(INPA,"$(P)trend_time1.VAL  PP MS")
+}
+grecord(sscan,"$(P)trend_scan1") {
+	field(MPTS,"1000")
+	field(R1PV,"time")
+}
+grecord(swait,"$(P)trend_wait1") {
+	field(DESC,"waitRec for trend data")
+	field(SCAN,"1 second")
+	field(INAN,"$(P)trend_wait1.VAL")
+	field(INBN,"$(P)trend_realtime1.VAL")
+	field(INCN,"$(P)trend_scan1.EXSC")
+	field(OUTN,"$(P)trend_scan1.PROC")
+	field(CALC,"A&&C?A-1:B")
+	field(OOPT,"When Zero")
+}

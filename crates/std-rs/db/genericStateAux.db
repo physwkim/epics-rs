@@ -1,0 +1,69 @@
+# Auxiliary Generic State database
+# allows multiple generic states to be grouped for simplified operation
+
+############  SVN Repository information  #############
+# $Date$
+# $Author$
+# $Revision$
+# $HeadURL$
+# $Id$
+#######################################################
+
+record(stringout, "$(P)$(S)$(G)desc")
+{
+  field(DESC, "$(G)$(S) State description")
+}
+
+record(fanout, "$(P)$(S)$(G)apply")
+{
+  field(DESC, "$(G)$(S) Apply button")
+  field(LNK1, "$(P)$(S)outCalc$(N1)")
+  field(LNK2, "$(P)$(S)outCalc$(N2)")
+  field(LNK3, "$(P)$(S)outCalc$(N3)")
+  field(LNK4, "$(P)$(S)outCalc$(N4)")
+  field(LNK5, "$(P)$(S)outCalc$(N5)")
+  field(LNK6, "$(NA)")
+}
+
+record(fanout, "$(P)$(S)$(G)save")
+{
+  field(DESC, "$(G)$(S) Save button")
+  field(LNK1, "$(P)$(S)inCalc$(N1)")
+  field(LNK2, "$(P)$(S)inCalc$(N2)")
+  field(LNK3, "$(P)$(S)inCalc$(N3)")
+  field(LNK4, "$(P)$(S)inCalc$(N4)")
+  field(LNK5, "$(P)$(S)inCalc$(N5)")
+  field(LNK6, "$(NS)")
+}
+
+record(bo, "$(P)$(S)$(G)mode")
+{
+  field(DESC, "$(G)$(S) mode switch")
+  field(ZNAM, "Save")
+  field(ONAM, "Apply")
+  field(OUT,  "$(P)$(S)$(G)modeFan  PP NMS")
+}
+
+record(dfanout, "$(P)$(S)$(G)modeFan")
+{
+  field(DESC, "$(G)$(S) mode fanout")
+  field(OMSL, "supervisory")
+  field(OUTA, "$(P)$(S)mode$(N1)  PP NMS")
+  field(OUTB, "$(P)$(S)mode$(N2)  PP NMS")
+  field(OUTC, "$(P)$(S)mode$(N3)  PP NMS")
+  field(OUTD, "$(P)$(S)mode$(N4)  PP NMS")
+  field(OUTE, "$(P)$(S)mode$(N5)  PP NMS")
+  field(OUTF, "$(NF)")
+}
+
+record(fanout, "$(P)$(S)$(G)initAll")
+{
+  field(DESC, "$(G)$(S) Init")
+  field(LNK1, "$(P)$(S)init$(N1)")
+  field(LNK2, "$(P)$(S)init$(N2)")
+  field(LNK3, "$(P)$(S)init$(N3)")
+  field(LNK4, "$(P)$(S)init$(N4)")
+  field(LNK5, "$(P)$(S)init$(N5)")
+  field(LNK6, "$(NI)")
+  field(PINI, "NO")
+}

@@ -1,0 +1,35 @@
+# FILE... mbbo_settings.req
+# USAGE.. mbbo Record fields autosave'd.
+$(P).DESC
+$(P).ZRVL
+$(P).ONVL
+$(P).TWVL
+$(P).THVL
+$(P).FRVL
+$(P).FVVL
+$(P).SXVL
+$(P).SVVL
+$(P).EIVL
+$(P).NIVL
+$(P).TEVL
+$(P).ELVL
+$(P).TVVL
+$(P).TTVL
+$(P).FTVL
+$(P).FFVL
+$(P).ZRST
+$(P).ONST
+$(P).TWST
+$(P).THST
+$(P).FRST
+$(P).FVST
+$(P).SXST
+$(P).SVST
+$(P).EIST
+$(P).NIST
+$(P).TEST
+$(P).ELST
+$(P).TVST
+$(P).TTST
+$(P).FTST
+$(P).FFST

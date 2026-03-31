@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 use crate::calc::NumericInputs;
@@ -174,7 +174,7 @@ impl Record for TransformRecord {
         "transform"
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         // Save previous values
         self.prev_vals = self.vals;
 
@@ -190,14 +190,14 @@ impl Record for TransformRecord {
                         if self.ivla == 1 {
                             // Do Nothing — restore all values
                             self.vals = self.prev_vals;
-                            return Ok(RecordProcessResult::Complete);
+                            return Ok(ProcessOutcome::complete());
                         }
                         // Ignore error — continue
                     }
                 }
             }
         }
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

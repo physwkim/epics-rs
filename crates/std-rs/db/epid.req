@@ -1,0 +1,15 @@
+# FILE... epid.req
+# USAGE... epid record
+
+$(P).DESC
+$(P).EGU
+$(P).PREC
+$(P).SCAN
+$(P).VAL
+$(P).DRVL
+$(P).DRVH
+$(P).FMOD
+$(P).KP
+$(P).KI
+$(P).KD
+$(P).I

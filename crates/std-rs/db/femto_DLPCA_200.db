@@ -1,0 +1,109 @@
+record(ao,"$(P)$(A):Gain")
+{
+        field(DESC,"DLPCA-200 Gain")
+        field(PREC,"0")
+}
+
+record(stringin,"$(P)$(A):Description")
+{
+        field(DESC,"DLPCA-200 Description")
+}
+
+record(mbbo,"$(P)$(A):GainIndex")
+{
+        field(DESC,"DLPCA-200 Gain Index")
+#        field(NOBT,"16")
+        field(ZRVL,"0")
+        field(ZRST,"1e5 high speed")
+        field(ONVL,"1")
+        field(ONST,"1e6 high speed")
+        field(TWVL,"2")
+        field(TWST,"1e7 high speed")
+        field(THVL,"3")
+        field(THST,"1e8 high speed")
+        field(FRVL,"4")
+        field(FRST,"1e9 high speed")
+        field(FVVL,"5")
+        field(FVST,"1e10 high speed")
+        field(SXVL,"6")
+        field(SXST,"1e11 high speed")
+        field(SVVL,"7")
+        field(SVST,"UNDEF")
+        field(EIVL,"8")
+        field(EIST,"1e3 low noise")
+        field(NIVL,"9")
+        field(NIST,"1e4 low noise")
+        field(TEVL,"10")
+        field(TEST,"1e5 low noise")
+        field(ELVL,"11")
+        field(ELST,"1e6 low noise")
+        field(TVVL,"12")
+        field(TVST,"1e7 low noise")
+        field(TTVL,"13")
+        field(TTST,"1e8 low noise")
+        field(FTVL,"14")
+        field(FTST,"1e9 low noise")
+        field(FFVL,"15")
+        field(FFST,"UNDEF")
+}
+
+
+record(transform,"$(P)$(A):TransformGainIndex") {
+        field(DESC,"DLCPA-200 Gain Bit Transformer")
+        field(PREC,"0")
+        field(CMTA,"Input")
+        field(CMTB,"Mode check 1")
+        field(CMTC,"Mode check 2")
+        field(CMTE,"Bit 0 Out")
+        field(CMTF,"Bit 1 Out")
+        field(CMTG,"Bit 2 Out")
+        field(CMTH,"Bit 3 Out")
+        field(CMTI,"Gain Output")
+        field(CLCB,"A>14?8:A")
+        field(CLCC,"B=7?8:B")
+        field(CLCE,"C&1")
+        field(CLCF,"(C>>1)&1")
+        field(CLCG,"(C>>2)&1")
+        field(CLCH,"(C>>3)&1")
+        field(CLCI,"(C>>3)&1?10^(C-5):10^(C+5)")
+        field(INPA,"$(P)$(A):GainIndex.VAL CP MS")
+        field(OUTC,"$(P)$(A):GainIndex.VAL CA NMS")
+        field(OUTE,"$(P)$(A):G1.VAL PP NMS")
+        field(OUTF,"$(P)$(A):G2.VAL PP NMS")
+        field(OUTG,"$(P)$(A):G3.VAL PP NMS")
+        field(OUTH,"$(P)$(A):G4.VAL PP NMS")
+        field(OUTI,"$(P)$(A):Gain.VAL PP NMS")
+}
+
+record(bo,"$(P)$(A):G1") {
+        field(DESC,"Encode Out G1")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G1).VAL  PP MS")
+}
+record(bo,"$(P)$(A):G2") {
+        field(DESC,"Encode Out G2")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G2).VAL  PP MS")
+}
+record(bo,"$(P)$(A):G3") {
+        field(DESC,"Encode Out G3")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G3).VAL  PP MS")
+}
+record(bo,"$(P)$(A):G4") {
+        field(DESC,"Encode Out G4")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(SN).VAL  PP MS")
+}
+
+record(bo,"$(P)$(A):Coupling") {
+        field(DESC,"DLPCA-200 Coupling Mode")
+        field(ZNAM,"AC")
+        field(ONAM,"DC")
+        field(OUT,"$(P)$(C).VAL  PP MS")
+}
+

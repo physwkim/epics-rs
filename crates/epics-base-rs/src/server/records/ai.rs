@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Analog input record with conversion support.
@@ -107,7 +107,7 @@ impl Record for AiRecord {
         "ai"
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         match self.linr {
             1 => {
                 let mut v = (self.rval as i64 + self.roff as i64) as f64;
@@ -122,7 +122,7 @@ impl Record for AiRecord {
             _ => {}
         }
         self.init = true;
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

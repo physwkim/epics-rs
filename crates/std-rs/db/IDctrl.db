@@ -1,0 +1,103 @@
+grecord(ao,"$(P)ID$(xx)_energy") {
+	field(DTYP,"Soft Channel")
+	field(FLNK,"$(P)ID$(xx)_busyOn.VAL  PP MS")
+	field(PREC,"3")
+}
+grecord(ao,"$(P)ID$(xx)_energyPut") {
+	field(DTYP,"Soft Channel")
+	field(OUT,"ID$(xx):ScanEnergy.VAL  PP MS")
+	field(DOL,"$(P)ID$(xx)_energy.VAL  NPP NMS")
+	field(OMSL,"closed_loop")
+	field(PREC,"3")
+}
+grecord(ao,"$(P)ID$(xx)_gap") {
+	field(DTYP,"Soft Channel")
+	field(FLNK,"$(P)ID$(xx)_busyOn1.VAL  PP MS")
+	field(PREC,"3")
+}
+grecord(ao,"$(P)ID$(xx)_gapPut") {
+	field(DTYP,"Soft Channel")
+	field(OUT,"ID$(xx):ScanGap.VAL  PP MS")
+	field(DOL,"$(P)ID$(xx)_gap.VAL  NPP MS")
+	field(OMSL,"closed_loop")
+	field(PREC,"3")
+}
+grecord(ao,"$(P)ID$(xx)_monEnergy") {
+	field(DTYP,"Soft Channel")
+	field(FLNK,"$(P)ID$(xx)_monEnergyPut.VAL  PP MS")
+	field(DOL,"ID$(xx):EnergySet.VAL  CP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(ao,"$(P)ID$(xx)_monEnergyPut") {
+	field(DTYP,"Soft Channel")
+	field(OUT,"$(P)ID$(xx)_energy.VAL  PP MS")
+	field(DOL,"ID$(xx):EnergySet.VAL  NPP MS")
+	field(OMSL,"closed_loop")
+	field(PREC,"3")
+}
+grecord(ao,"$(P)ID$(xx)_monGap") {
+	field(DTYP,"Soft Channel")
+	field(FLNK,"$(P)ID$(xx)_monGapPut.VAL  PP MS")
+	field(DOL,"ID$(xx):ScanGap.VAL  CP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(ao,"$(P)ID$(xx)_monGapPut") {
+	field(DTYP,"Soft Channel")
+	field(OUT,"$(P)ID$(xx)_gap.VAL  PP MS")
+	field(DOL,"ID$(xx):ScanGap.VAL  NPP MS")
+	field(OMSL,"closed_loop")
+	field(PREC,"3")
+}
+grecord(bo,"$(P)ID$(xx)_busyOn") {
+	field(DTYP,"Soft Channel")
+	field(SDIS,"$(P)ID$(xx)_monEnergyPut.PACT  NPP MS")
+	field(FLNK,"$(P)ID$(xx)_energyPut.VAL  PP MS")
+	field(DOL,"1")
+	field(OUT,"$(P)ID$(xx)_busy.VAL  PP MS")
+}
+grecord(bo,"$(P)ID$(xx)_busyOn1") {
+	field(DTYP,"Soft Channel")
+	field(SDIS,"$(P)ID$(xx)_monGapPut.PACT  NPP MS")
+	field(FLNK,"$(P)ID$(xx)_gapPut.VAL  PP MS")
+	field(DOL,"1")
+	field(OUT,"$(P)ID$(xx)_busy.VAL  PP MS")
+}
+grecord(bo,"$(P)ID$(xx)_copyBusy") {
+	field(DTYP,"Soft Channel")
+	field(OMSL,"closed_loop")
+	field(DOL,"ID$(xx):Busy.VAL  CP MS")
+	field(OUT,"$(P)ID$(xx)_busy.VAL  CA MS")
+}
+grecord(bo,"$(P)ID$(xx)_syncBusy") {
+	field(DTYP,"Soft Channel")
+	field(OMSL,"closed_loop")
+	field(DOL,"ID$(xx):Busy.VAL  NPP MS")
+	field(OUT,"$(P)ID$(xx)_busy.VAL  CA MS")
+}
+grecord(fanout,"$(P)ID$(xx)_sync") {
+	field(LNK1,"$(P)ID$(xx)_monEnergyPut.VAL  PP MS")
+	field(LNK2,"$(P)ID$(xx)_monGapPut.VAL  PP MS")
+	field(LNK3,"$(P)ID$(xx)_syncBusy.VAL  PP MS")
+}
+grecord(transform,"$(P)ID$(xx)_energyTweak") {
+	field(CLCD,"a?c-e:b?c+e:c")
+	field(INPC,"$(P)ID$(xx)_energy.VAL  NPP MS")
+	field(INPE,".01")
+	field(OUTD,"$(P)ID$(xx)_energy.VAL  PP MS")
+	field(OUTF,"$(P)ID$(xx)_energyTweak.A  NPP MS")
+	field(OUTG,"$(P)ID$(xx)_energyTweak.B  NPP MS")
+	field(EGU,"keV")
+	field(PREC,"3")
+}
+grecord(transform,"$(P)ID$(xx)_gapTweak") {
+	field(CLCD,"a?c-e:b?c+e:c")
+	field(INPC,"$(P)ID$(xx)_gap.VAL  NPP MS")
+	field(INPE,".01")
+	field(OUTD,"$(P)ID$(xx)_gap.VAL  PP MS")
+	field(OUTF,"$(P)ID$(xx)_gapTweak.A  NPP MS")
+	field(OUTG,"$(P)ID$(xx)_gapTweak.B  NPP MS")
+	field(EGU,"keV")
+	field(PREC,"3")
+}
+grecord(busy,"$(P)ID$(xx)_busy") {
+}

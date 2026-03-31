@@ -1,0 +1,5 @@
+# FILE... Jscaler_channelN_settings.req
+# USAGE.. Jscaler.db fields autosave'd.
+$(P)$(S).NM$(Ch)
+$(P)$(S).PR$(Ch)
+$(P)$(S).G$(Ch)

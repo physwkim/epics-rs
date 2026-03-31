@@ -1,0 +1,14 @@
+# FILE... pid_control_settings.req
+# USAGE.. pid_control.db fields autosave'd.
+$(P)$(PID).VAL
+$(P)$(PID).SCAN
+$(P)$(PID).HOPR
+$(P)$(PID).LOPR
+$(P)$(PID).DRVL
+$(P)$(PID).DRVH
+$(P)$(PID).FMOD
+$(P)$(PID).KP
+$(P)$(PID).KI
+$(P)$(PID).KD
+$(P)$(PID).DT
+file "transform_settings.req", P=$(P)$(PID)_incalc

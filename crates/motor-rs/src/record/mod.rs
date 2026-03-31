@@ -4,7 +4,7 @@ mod status_update;
 mod field_access;
 
 use epics_base_rs::error::CaResult;
-use epics_base_rs::server::record::{FieldDesc, Record, RecordProcessResult};
+use epics_base_rs::server::record::{FieldDesc, ProcessOutcome, Record, RecordProcessResult};
 use epics_base_rs::types::EpicsValue;
 
 use crate::coordinate;
@@ -114,7 +114,7 @@ impl Record for MotorRecord {
         self.stat.dmov
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         // If wired to device state, determine event from shared mailbox
         if self.device_state.is_some() {
             if let Some(event) = self.determine_event() {
@@ -140,15 +140,16 @@ impl Record for MotorRecord {
             // before the move completes. The next I/O Intr cycle will
             // process again and eventually notify DMOV=1.
             use epics_base_rs::types::EpicsValue;
-            Ok(RecordProcessResult::AsyncPendingNotify(vec![
+            let fields = vec![
                 ("DMOV".to_string(), EpicsValue::Short(0)),
                 ("MOVN".to_string(), EpicsValue::Short(1)),
                 ("VAL".to_string(), EpicsValue::Double(self.pos.val)),
                 ("DVAL".to_string(), EpicsValue::Double(self.pos.dval)),
                 ("RVAL".to_string(), EpicsValue::Long(self.pos.rval)),
-            ]))
+            ];
+            Ok(ProcessOutcome { result: RecordProcessResult::AsyncPendingNotify(fields), actions: Vec::new(), device_did_compute: false })
         } else {
-            Ok(RecordProcessResult::Complete)
+            Ok(ProcessOutcome::complete())
         }
     }
 

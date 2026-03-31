@@ -4,7 +4,7 @@ use std::time::Duration;
 use asyn_rs::interfaces::motor::AsynMotor;
 use asyn_rs::user::AsynUser;
 use epics_base_rs::error::CaResult;
-use epics_base_rs::server::device_support::DeviceSupport;
+use epics_base_rs::server::device_support::{DeviceReadOutcome, DeviceSupport};
 use epics_base_rs::server::record::{Record, ScanType};
 use tokio::sync::mpsc;
 
@@ -160,8 +160,8 @@ impl DeviceSupport for MotorDeviceSupport {
         Ok(())
     }
 
-    fn read(&mut self, _record: &mut dyn Record) -> CaResult<()> {
-        Ok(())
+    fn read(&mut self, _record: &mut dyn Record) -> CaResult<DeviceReadOutcome> {
+        Ok(DeviceReadOutcome::ok())
     }
 
     fn write(&mut self, _record: &mut dyn Record) -> CaResult<()> {

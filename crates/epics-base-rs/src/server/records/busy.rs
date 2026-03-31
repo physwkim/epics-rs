@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 // --- Busy-specific types (inlined from busy-rs/types.rs) ---
@@ -231,7 +231,7 @@ impl Record for BusyRecord {
         "busy"
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         // Step 1: DOL reading handled by framework (OMSL=ClosedLoop)
 
         // Step 2: VAL → RVAL conversion
@@ -270,7 +270,7 @@ impl Record for BusyRecord {
         self.monitor();
 
         // Step 8: FLNK handled by should_fire_forward_link()
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn should_fire_forward_link(&self) -> bool {

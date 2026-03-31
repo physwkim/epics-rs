@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Analog output record with conversion and output policy support.
@@ -136,7 +136,7 @@ impl Record for AoRecord {
         "ao"
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         if self.drvh != self.drvl {
             self.val = self.val.clamp(self.drvl, self.drvh);
         }
@@ -156,7 +156,7 @@ impl Record for AoRecord {
         }
 
         self.init = true;
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

@@ -1,0 +1,505 @@
+grecord(ao,"$(P)$(S)p2_tweak_set") {
+	field(PREC,"4")
+}
+grecord(ao,"$(P)$(S)p2_set_position") {
+	field(DESC,"$(S) positioner 2")
+	field(FLNK,"$(P)$(S)p2_fan.VAL  PP MS")
+	field(PREC,"4")
+	field(EGU,"microns")
+	field(DRVH,"50")
+	field(DRVL,"-50")
+}
+grecord(ao,"$(P)$(S)p2_motion_range") {
+	field(FLNK,"$(P)$(S)p2_calc_range.VAL  PP MS")
+	field(PREC,"2")
+}
+grecord(ao,"$(P)$(S)p2_init_range") {
+	field(PINI,"YES")
+	field(OUT,"$(P)$(S)p2_motion_range.VAL  PP MS")
+	field(DOL,"$(P)$(S)p2_init_range_val.VAL  PP MS")
+	field(OMSL,"closed_loop")
+	field(PREC,"2")
+}
+grecord(ao,"$(P)$(S)p1_tweak_set") {
+	field(PREC,"4")
+}
+grecord(ao,"$(P)$(S)p1_set_position") {
+	field(DESC,"$(S) positioner 1")
+	field(PINI,"YES")
+	field(FLNK,"$(P)$(S)p1_fan.VAL  PP MS")
+	field(PREC,"4")
+	field(EGU,"microns")
+	field(DRVH,"50")
+	field(DRVL,"-50")
+}
+grecord(ao,"$(P)$(S)p1_motion_range") {
+	field(FLNK,"$(P)$(S)p1_calc_range.VAL  PP MS")
+	field(PREC,"2")
+}
+grecord(ao,"$(P)$(S)p1_init_range") {
+	field(PINI,"YES")
+	field(OUT,"$(P)$(S)p1_motion_range.VAL  PP MS")
+	field(DOL,"$(P)$(S)p1_init_range_val.VAL  PP MS")
+	field(OMSL,"closed_loop")
+	field(PREC,"2")
+}
+grecord(bi,"$(P)$(S)p2_LoLimit") {
+	field(ONAM,"Low Limit")
+}
+grecord(bi,"$(P)$(S)p2_HiLimit") {
+	field(FLNK,"$(P)$(S)p2_convert.VAL  PP MS")
+	field(ONAM,"High Limit")
+}
+grecord(bi,"$(P)$(S)p1_LoLimit") {
+	field(ONAM,"Low Limit")
+}
+grecord(bi,"$(P)$(S)p1_HiLimit") {
+	field(FLNK,"$(P)$(S)p1_convert.VAL  PP MS")
+	field(ONAM,"High Limit")
+}
+grecord(bo,"$(P)$(S)p2_twR") {
+	field(FLNK,"$(P)$(S)p2_tweak.VAL  PP MS")
+}
+grecord(bo,"$(P)$(S)p2_twF") {
+	field(FLNK,"$(P)$(S)p2_tweak.VAL  PP MS")
+}
+grecord(bo,"$(P)$(S)p1_twR") {
+	field(FLNK,"$(P)$(S)p1_tweak.VAL  PP MS")
+}
+grecord(bo,"$(P)$(S)p1_twF") {
+	field(FLNK,"$(P)$(S)p1_tweak.VAL  PP MS")
+}
+grecord(bo,"$(P)$(S)nano_init") {
+	field(PINI,"YES")
+	field(FLNK,"$(P)$(S)init_fan.VAL  PP MS")
+}
+grecord(bo,"$(P)$(S)init_reminder") {
+	field(HIGH,"3")
+}
+grecord(calc,"$(P)$(S)p2_loVal") {
+	field(CALC,"A+32")
+	field(INPA,"$(P)$(S)p2_slot_no.RVAL  PP MS")
+}
+grecord(calc,"$(P)$(S)p2_init_range_val") {
+	field(CALC,"A")
+	field(INPA,"100")
+}
+grecord(calc,"$(P)$(S)p2_hiVal") {
+	field(CALC,"A+96")
+	field(INPA,"$(P)$(S)p2_slot_no.RVAL  PP MS")
+}
+grecord(calc,"$(P)$(S)p2_F_enable") {
+	field(CALC,"A=0?0:1")
+	field(INPA,"$(P)$(S)p2_DAC_sel.RVAL  NPP NMS")
+}
+grecord(calc,"$(P)$(S)p2_CF_offset") {
+	field(FLNK,"$(P)$(S)p2_CF_getBits1.VAL  PP MS")
+	field(CALC,"(B=0)?(A+16384):A+B")
+	field(INPA,"$(P)$(S)p2_convert.C  NPP NMS")
+	field(INPB,"$(P)$(S)p2_DAC_sel.RVAL  NPP NMS")
+}
+grecord(calc,"$(P)$(S)p1_loVal") {
+	field(CALC,"A+32")
+	field(INPA,"$(P)$(S)p1_slot_no.VAL  PP MS")
+}
+grecord(calc,"$(P)$(S)p1_init_range_val") {
+	field(CALC,"A")
+	field(INPA,"100")
+}
+grecord(calc,"$(P)$(S)p1_hiVal") {
+	field(CALC,"A+96")
+	field(INPA,"$(P)$(S)p1_slot_no.VAL  PP MS")
+}
+grecord(calc,"$(P)$(S)p1_F_enable") {
+	field(CALC,"A=0?0:1")
+	field(INPA,"$(P)$(S)p1_DAC_sel.RVAL  NPP NMS")
+}
+grecord(calc,"$(P)$(S)p1_CF_offset") {
+	field(FLNK,"$(P)$(S)p1_CF_getBits1.VAL  PP MS")
+	field(CALC,"(B=0)?(A+16384):A+B")
+	field(INPA,"$(P)$(S)p1_convert.C  NPP NMS")
+	field(INPB,"$(P)$(S)p1_DAC_sel.RVAL  NPP NMS")
+}
+grecord(calcout,"$(P)$(S)p2_calcout") {
+	field(CALC,"B")
+	field(INPA,"$(P)$(S)p1_set_position.VAL  NPP NMS")
+	field(INPB,"$(P)$(S)p2_set_position.VAL  NPP NMS")
+	field(PREC,"4")
+}
+grecord(calcout,"$(P)$(S)p1_calcout") {
+	field(CALC,"A")
+	field(INPA,"$(P)$(S)p1_set_position.VAL  NPP NMS")
+	field(INPB,"$(P)$(S)p2_set_position.VAL  NPP NMS")
+	field(PREC,"4")
+}
+grecord(fanout,"$(P)$(S)init_fan") {
+	field(LNK1,"$(P)$(S)get_init_111.VAL  PP MS")
+	field(LNK2,"$(P)$(S)init_put_1.VAL  PP MS")
+}
+grecord(fanout,"$(P)$(S)p2_fan") {
+	field(LNK1,"$(P)$(S)p2_calc_limits.VAL  PP MS")
+	field(LNK2,"$(P)$(S)p1_calcout.VAL  PP MS")
+	field(LNK3,"$(P)$(S)p1_convert.VAL  PP MS")
+}
+grecord(fanout,"$(P)$(S)p1_fan") {
+	field(LNK1,"$(P)$(S)p1_calc_limits.VAL  PP MS")
+	field(LNK2,"$(P)$(S)p2_calcout.VAL  PP MS")
+	field(LNK3,"$(P)$(S)p2_convert.VAL  PP MS")
+}
+grecord(longout,"$(P)$(S)p2_setFmode") {
+	field(OUT,"$(P)$(S)p2_DAC_sel.RVAL  NPP NMS")
+	field(DOL,"32768")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_setCmode") {
+	field(OUT,"$(P)$(S)p2_DAC_sel.RVAL  NPP NMS")
+	field(DOL,"16384")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_initFpos") {
+	field(OUT,"$(P)$(S)p2_set_position.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_initCpos") {
+	field(OUT,"$(P)$(S)p2_set_position.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_F_getBits3") {
+	field(OUT,"$(P)$(S)p2_F_writeBits3.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p2_hiVal.VAL  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_F_getBits2") {
+	field(OUT,"$(P)$(S)p2_F_writeBits2.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p2_loVal.VAL  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_F_getBits1") {
+	field(SDIS,"$(P)$(S)p2_F_enable.VAL  PP MS")
+	field(OUT,"$(P)$(S)p2_F_writeBits1.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p2_convert.F  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_CF_getBits3") {
+	field(OUT,"$(P)$(S)p2_CF_writeBits3.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p2_hiVal.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_CF_getBits2") {
+	field(OUT,"$(P)$(S)p2_CF_writeBits2.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p2_loVal.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p2_CF_getBits1") {
+	field(OUT,"$(P)$(S)p2_CF_writeBits1.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p2_CF_offset.VAL  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_setFmode") {
+	field(OUT,"$(P)$(S)p1_DAC_sel.RVAL  NPP NMS")
+	field(DOL,"32768")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_setCmode") {
+	field(OUT,"$(P)$(S)p1_DAC_sel.RVAL  NPP NMS")
+	field(DOL,"16384")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_initFpos") {
+	field(OUT,"$(P)$(S)p1_set_position.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_initCpos") {
+	field(OUT,"$(P)$(S)p1_set_position.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_F_getBits3") {
+	field(OUT,"$(P)$(S)p1_F_writeBits3.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p1_hiVal.VAL  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_F_getBits2") {
+	field(OUT,"$(P)$(S)p1_F_writeBits2.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p1_loVal.VAL  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_F_getBits1") {
+	field(SDIS,"$(P)$(S)p1_F_enable.VAL  PP MS")
+	field(OUT,"$(P)$(S)p1_F_writeBits1.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p1_convert.F  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_CF_getBits3") {
+	field(OUT,"$(P)$(S)p1_CF_writeBits3.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p1_hiVal.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_CF_getBits2") {
+	field(OUT,"$(P)$(S)p1_CF_writeBits2.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p1_loVal.VAL  PP MS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)p1_CF_getBits1") {
+	field(OUT,"$(P)$(S)p1_CF_writeBits1.ZRVL  PP MS")
+	field(DOL,"$(P)$(S)p1_CF_offset.VAL  NPP NMS")
+	field(OMSL,"closed_loop")
+}
+grecord(longout,"$(P)$(S)get_init_111") {
+	field(OUT,"$(P)$(S)write_init.VAL  PP MS")
+	field(DOL,"111")
+	field(OMSL,"closed_loop")
+}
+grecord(mbbo,"$(P)$(S)write_init") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)init_p1_p2.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p2_F_writeBits3") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p1_done.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p2_F_writeBits2") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p2_F_getBits3.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p2_F_writeBits1") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p2_F_getBits2.VAL  PP MS")
+	field(NOBT,"16")
+	field(OUT,"#C0 S0 @")
+}
+grecord(mbbo,"$(P)$(S)p2_DAC_sel") {
+	field(FLNK,"$(P)$(S)p2_calc_range.VAL  PP MS")
+	field(NOBT,"2")
+	field(ZRVL,"16384")
+	field(ONVL,"32768")
+	field(ZRST,"Coarse")
+	field(ONST,"Fine")
+	field(TWST,"Both")
+}
+grecord(mbbo,"$(P)$(S)p2_CF_writeBits3") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p2_F_getBits1.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p2_CF_writeBits2") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p2_CF_getBits3.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p2_CF_writeBits1") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p2_CF_getBits2.VAL  PP MS")
+	field(NOBT,"16")
+	field(OUT,"#C0 S0 @")
+}
+grecord(mbbo,"$(P)$(S)p1_slot_no") {
+	field(ONVL,"1")
+	field(TWVL,"2")
+	field(THVL,"3")
+	field(FRVL,"4")
+	field(FVVL,"5")
+	field(SXVL,"6")
+	field(SVVL,"7")
+	field(EIVL,"8")
+	field(NIVL,"9")
+	field(TEVL,"10")
+	field(ELVL,"11")
+	field(TVVL,"12")
+	field(TTVL,"13")
+	field(FTVL,"14")
+	field(FFVL,"15")
+	field(ZRST,"Slot 0")
+	field(ONST,"Slot 1")
+	field(TWST,"Slot 2")
+	field(THST,"Slot 3")
+	field(FRST,"Slot 4")
+	field(FVST,"Slot 5")
+	field(SXST,"Slot 6")
+	field(SVST,"Slot 7")
+	field(EIST,"Slot 8")
+	field(NIST,"Slot 9")
+	field(TEST,"Slot 10")
+	field(ELST,"Slot 11")
+	field(TVST,"Slot 12")
+	field(TTST,"Slot 13")
+	field(FTST,"Slot 14")
+	field(FFST,"Slot 15")
+}
+grecord(mbbo,"$(P)$(S)p1_F_writeBits3") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p1_done.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p1_F_writeBits2") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p1_F_getBits3.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p1_F_writeBits1") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p1_F_getBits2.VAL  PP MS")
+	field(NOBT,"16")
+	field(OUT,"#C0 S0 @")
+}
+grecord(mbbo,"$(P)$(S)p1_DAC_sel") {
+	field(FLNK,"$(P)$(S)p1_calc_range.VAL  PP MS")
+	field(NOBT,"2")
+	field(ZRVL,"16384")
+	field(ONVL,"32768")
+	field(ZRST,"Coarse")
+	field(ONST,"Fine")
+	field(TWST,"Both")
+}
+grecord(mbbo,"$(P)$(S)p2_slot_no") {
+	field(ONVL,"1")
+	field(TWVL,"2")
+	field(THVL,"3")
+	field(FRVL,"4")
+	field(FVVL,"5")
+	field(SXVL,"6")
+	field(SVVL,"7")
+	field(EIVL,"8")
+	field(NIVL,"9")
+	field(TEVL,"10")
+	field(ELVL,"11")
+	field(TVVL,"12")
+	field(TTVL,"13")
+	field(FTVL,"14")
+	field(FFVL,"15")
+	field(ZRST,"Slot 0")
+	field(ONST,"Slot 1")
+	field(TWST,"Slot 2")
+	field(THST,"Slot 3")
+	field(FRST,"Slot 4")
+	field(FVST,"Slot 5")
+	field(SXST,"Slot 6")
+	field(SVST,"Slot 7")
+	field(EIST,"Slot 8")
+	field(NIST,"Slot 9")
+	field(TEST,"Slot 10")
+	field(ELST,"Slot 11")
+	field(TVST,"Slot 12")
+	field(TTST,"Slot 13")
+	field(FTST,"Slot 14")
+	field(FFST,"Slot 15")
+}
+grecord(mbbo,"$(P)$(S)p1_CF_writeBits3") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p1_F_getBits1.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p1_CF_writeBits2") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p1_CF_getBits3.VAL  PP MS")
+	field(NOBT,"7")
+	field(OUT,"#C0 S16 @")
+}
+grecord(mbbo,"$(P)$(S)p1_CF_writeBits1") {
+	field(DTYP,"XYCOM-240")
+	field(FLNK,"$(P)$(S)p1_CF_getBits2.VAL  PP MS")
+	field(NOBT,"16")
+	field(OUT,"#C0 S0 @")
+}
+grecord(seq,"$(P)$(S)init_put_1") {
+	field(DOL1,"1")
+	field(LNK1,"$(P)$(S)init_reminder.VAL  PP MS")
+}
+grecord(seq,"$(P)$(S)init_p1_p2") {
+	field(LNK1,"$(P)$(S)p1_setFmode.VAL  PP MS")
+	field(DLY2,"0.3")
+	field(LNK2,"$(P)$(S)p1_initFpos.VAL  PP MS")
+	field(DLY3,"0.3")
+	field(LNK3,"$(P)$(S)p1_setCmode.VAL  PP MS")
+	field(DLY4,"0.3")
+	field(LNK4,"$(P)$(S)p1_initCpos.VAL  PP MS")
+	field(DLY5,"0.3")
+	field(LNK5,"$(P)$(S)p2_setFmode.VAL  PP MS")
+	field(DLY6,"0.3")
+	field(LNK6,"$(P)$(S)p2_initFpos.VAL  PP MS")
+	field(DLY7,"0.3")
+	field(LNK7,"$(P)$(S)p2_setCmode.VAL  PP MS")
+	field(DLY8,"0.3")
+	field(LNK8,"$(P)$(S)p2_initCpos.VAL  PP MS")
+	field(DLY9,"0.3")
+	field(LNK9,"$(P)$(S)p1_DAC_sel.VAL  PP MS")
+	field(LNKA,"$(P)$(S)p2_DAC_sel.VAL  PP MS")
+}
+grecord(transform,"$(P)$(S)p2_tweak") {
+	field(CLCE,"a?c+d:b?c-d:c")
+	field(INPA,"$(P)$(S)p2_twF.VAL  NPP NMS")
+	field(INPB,"$(P)$(S)p2_twR.VAL  NPP NMS")
+	field(INPC,"$(P)$(S)p2_set_position.VAL  NPP NMS")
+	field(INPD,"$(P)$(S)p2_tweak_set.VAL  NPP NMS")
+	field(OUTE,"$(P)$(S)p2_set_position.VAL  PP MS")
+}
+grecord(transform,"$(P)$(S)p2_convert") {
+	field(FLNK,"$(P)$(S)p2_CF_offset.VAL  PP MS")
+	field(CLCB,"(G/H)*65535")
+	field(CLCC,"(B/8)+8192")
+	field(CLCE,"(B%8)+8192")
+	field(CLCF,"E+32768")
+	field(INPG,"$(P)$(S)p2_calcout.VAL  NPP NMS")
+	field(INPH,"$(P)$(S)p2_set_position.HOPR  NPP NMS")
+}
+grecord(transform,"$(P)$(S)p2_calc_range") {
+	field(CLCC,"(A=32768)?(B/16):(B/2)")
+	field(CLCD,"(A=32768)?(-B/16):(-B/2)")
+	field(INPA,"$(P)$(S)p2_DAC_sel.RVAL  NPP NMS")
+	field(INPB,"$(P)$(S)p2_motion_range.VAL  NPP NMS")
+	field(OUTC,"$(P)$(S)p2_set_position.HOPR  NPP NMS")
+	field(OUTD,"$(P)$(S)p2_set_position.LOPR  NPP NMS")
+}
+grecord(transform,"$(P)$(S)p2_calc_limits") {
+	field(CLCD,"(A<=C)?1:0")
+	field(CLCE,"(A>=B)?1:0")
+	field(INPA,"$(P)$(S)p2_calcout.VAL  PP MS")
+	field(INPB,"$(P)$(S)p2_set_position.DRVH  NPP NMS")
+	field(INPC,"$(P)$(S)p2_set_position.DRVL  NPP NMS")
+	field(OUTD,"$(P)$(S)p2_LoLimit.VAL  PP MS")
+	field(OUTE,"$(P)$(S)p2_HiLimit.VAL  PP MS")
+}
+grecord(transform,"$(P)$(S)p1_tweak") {
+	field(CLCE,"a?c+d:b?c-d:c")
+	field(INPA,"$(P)$(S)p1_twF.VAL  NPP NMS")
+	field(INPB,"$(P)$(S)p1_twR.VAL  NPP NMS")
+	field(INPC,"$(P)$(S)p1_set_position.VAL  NPP NMS")
+	field(INPD,"$(P)$(S)p1_tweak_set.VAL  NPP NMS")
+	field(OUTE,"$(P)$(S)p1_set_position.VAL  PP MS")
+}
+grecord(transform,"$(P)$(S)p1_convert") {
+	field(FLNK,"$(P)$(S)p1_CF_offset.VAL  PP MS")
+	field(CLCB,"(G/H)*65535")
+	field(CLCC,"(B/8)+8192")
+	field(CLCE,"(B%8)+8192")
+	field(CLCF,"E+32768")
+	field(INPG,"$(P)$(S)p1_calcout.VAL  NPP NMS")
+	field(INPH,"$(P)$(S)p1_set_position.HOPR  NPP NMS")
+}
+grecord(transform,"$(P)$(S)p1_calc_range") {
+	field(CLCC,"(A=32768)?(B/16):(B/2)")
+	field(CLCD,"(A=32768)?(-B/16):(-B/2)")
+	field(INPA,"$(P)$(S)p1_DAC_sel.RVAL  NPP NMS")
+	field(INPB,"$(P)$(S)p1_motion_range.VAL  NPP NMS")
+	field(OUTC,"$(P)$(S)p1_set_position.HOPR  NPP NMS")
+	field(OUTD,"$(P)$(S)p1_set_position.LOPR  NPP NMS")
+}
+grecord(transform,"$(P)$(S)p1_calc_limits") {
+	field(CLCD,"(A<=C)?1:0")
+	field(CLCE,"(A>=B)?1:0")
+	field(INPA,"$(P)$(S)p1_calcout.VAL  PP MS")
+	field(INPB,"$(P)$(S)p1_set_position.DRVH  NPP NMS")
+	field(INPC,"$(P)$(S)p1_set_position.DRVL  NPP NMS")
+	field(OUTD,"$(P)$(S)p1_LoLimit.VAL  PP MS")
+	field(OUTE,"$(P)$(S)p1_HiLimit.VAL  PP MS")
+}

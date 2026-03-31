@@ -1,0 +1,29 @@
+grecord(bo,"$(P)allstop") {
+	field(DOL,"1")
+	field(OUT,"$(P)allstop1.A  PP MS")
+}
+grecord(calc,"$(P)alldoneBlinker") {
+	field(SCAN,".5 second")
+	field(CALC,"B?0:!A")
+	field(INPA,"$(P)alldoneBlinker.VAL  NPP NMS")
+	field(INPB,"$(P)alldone.VAL  NPP NMS")
+}
+grecord(transform,"$(P)allstop1") {
+	field(DESC,"allstop distribution")
+	field(CLCB,"a")
+	field(OUTA,"$(P)AbortScans.PROC  PP MS")
+	field(OUTB,"0")
+}
+grecord(swait,"$(P)alldone") {
+	field(DESC,"All motors done moving")
+	field(SCAN,"I/O Intr")
+	field(PINI,"YES")
+	field(CALC,"1")
+	field(DOLD,"1")
+}
+grecord(swait,"$(P)alldoneBlink") {
+	field(SCAN,"I/O Intr")
+	field(INAN,"$(P)alldone")
+	field(INBN,"$(P)alldoneBlinker")
+	field(CALC,"a?0:b")
+}

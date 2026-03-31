@@ -449,9 +449,9 @@ impl MockDeviceSupport {
 }
 
 impl epics_base_rs::server::device_support::DeviceSupport for MockDeviceSupport {
-    fn read(&mut self, _record: &mut dyn Record) -> epics_base_rs::error::CaResult<()> {
+    fn read(&mut self, _record: &mut dyn Record) -> epics_base_rs::error::CaResult<epics_base_rs::server::device_support::DeviceReadOutcome> {
         self.read_count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(epics_base_rs::server::device_support::DeviceReadOutcome::ok())
     }
     fn write(&mut self, _record: &mut dyn Record) -> epics_base_rs::error::CaResult<()> {
         self.write_count.fetch_add(1, Ordering::SeqCst);
@@ -591,8 +591,8 @@ async fn test_phas_change_passive_no_index() {
 struct AsyncRecord { val: f64 }
 impl Record for AsyncRecord {
     fn record_type(&self) -> &'static str { "async_test" }
-    fn process(&mut self) -> epics_base_rs::error::CaResult<RecordProcessResult> {
-        Ok(RecordProcessResult::AsyncPending)
+    fn process(&mut self) -> epics_base_rs::error::CaResult<ProcessOutcome> {
+        Ok(ProcessOutcome::async_pending())
     }
     fn get_field(&self, name: &str) -> Option<EpicsValue> {
         match name { "VAL" => Some(EpicsValue::Double(self.val)), _ => None }

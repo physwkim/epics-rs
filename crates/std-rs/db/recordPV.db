@@ -1,0 +1,20 @@
+record(ao, "$(P)$(Q)$(R)_local") {
+	field(PREC, "3")
+	field(FLNK, "$(P)$(Q)$(R).PROC")
+}
+record(bo, "$(P)$(Q)$(R)_clear") {
+	field(OUT, "$(P)$(Q)$(R).RES")
+	field(FLNK, "$(P)$(Q)$(R)_nUse")
+	field(ZNAM, "0")
+	field(ONAM, "1")
+	field(HIGH, "0.1")
+}
+record(compress, "$(P)$(Q)$(R)") {
+	field(NSAM, "$(N)")
+	field(ALG, "Circular Buffer")
+	field(FLNK, "$(P)$(Q)$(R)_nUse")
+}
+record(longout, "$(P)$(Q)$(R)_nUse") {
+	field(OMSL, "closed_loop")
+	field(DOL, "$(P)$(Q)$(R).NUSE")
+}

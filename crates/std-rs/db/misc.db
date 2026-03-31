@@ -1,0 +1,22 @@
+grecord(ai,"$(P)burtResult") {
+}
+
+# IOC timestamp PV compliant with ISO8601   yyyy-mm-ddThh:mm:ss
+# evaluates 10x/second, updates string 1x/second
+record(stringin, "$(P)iso8601")
+{
+  field(DTYP,"Soft Timestamp")
+  field(DESC,"Current Time, ISO8601")
+  field(INP, "@%Y-%m-%dT%H:%M:%S")
+  field(SCAN,".1 second")
+}
+
+# IOC timestamp PV friendlier than ISO8601   yyyy-mm-dd hh:mm:ss
+# evaluates 10x/second, updates string 1x/second
+record(stringin, "$(P)datetime")
+{
+  field(DTYP,"Soft Timestamp")
+  field(DESC,"Current Time")
+  field(INP, "@%Y-%m-%d %H:%M:%S")
+  field(SCAN,".1 second")
+}

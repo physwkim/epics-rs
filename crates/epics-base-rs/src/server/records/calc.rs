@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Calc record — evaluates CALC expression with inputs A-L.
@@ -150,7 +150,7 @@ impl Record for CalcRecord {
         "calc"
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         if !self.calc.is_empty() {
             let vars = self.get_vars();
             let mut inputs = crate::calc::NumericInputs::new();
@@ -162,7 +162,7 @@ impl Record for CalcRecord {
         self.la = self.a; self.lb = self.b; self.lc = self.c; self.ld = self.d;
         self.le = self.e; self.lf = self.f; self.lg = self.g; self.lh = self.h;
         self.li = self.i; self.lj = self.j; self.lk = self.k; self.ll = self.l;
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

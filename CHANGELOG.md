@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.7.3
+
+### New Crates
+- **std-rs**: Port of EPICS std module — epid (PID/MaxMin feedback), throttle (rate-limited output), timestamp (formatted time strings) records, plus device support (Soft/Async/Fast Epid, Time of Day, Sec Past Epoch) and SNL programs (femto gain control, delayDo state machine)
+- **scaler-rs**: Port of EPICS scaler module — 64-channel 32-bit counter record with preset-based counting, OneShot/AutoCount modes, DLY/DLY1 delayed start, RATE periodic display update, asyn device support, and software scaler driver
+
+### Framework: ProcessOutcome / ProcessAction
+- **Breaking**: `Record::process()` now returns `CaResult<ProcessOutcome>` instead of `CaResult<RecordProcessResult>`
+- `ProcessOutcome` contains `result` (Complete/AsyncPending) + `actions` (side-effect requests)
+- `ProcessAction::WriteDbLink` — record requests a DB link write without direct DB access
+- `ProcessAction::ReadDbLink` — record requests a DB link read (pre-process execution)
+- `ProcessAction::ReprocessAfter(Duration)` — delayed self re-process (replaces C `callbackRequestDelayed` + `scanOnce`)
+- `ProcessAction::DeviceCommand` — record sends named commands to device support via `handle_command()`
+- Processing layer executes actions at the correct point in the cycle (ReadDbLink before process, WriteDbLink/DeviceCommand after, ReprocessAfter via tokio::spawn)
+
+### Framework: DeviceReadOutcome
+- **Breaking**: `DeviceSupport::read()` now returns `CaResult<DeviceReadOutcome>` instead of `CaResult<()>`
+- `DeviceReadOutcome` carries `did_compute` flag and `actions` list
+- `did_compute`: signals that device support already performed the record's compute step (e.g., PID), passed to record via `set_device_did_compute()` before `process()`
+- Device support actions are merged into the record's ProcessOutcome by the framework
+
+### Framework: Other Improvements
+- `Record::pre_process_actions()` — return ReadDbLink actions executed BEFORE process() (matches C `dbGetLink` immediate semantics)
+- `Record::put_field_internal()` — bypasses read-only checks for framework-internal writes
+- `Record::set_device_did_compute()` — framework signals device support compute status
+- `DeviceSupport::handle_command()` — handle named commands from ProcessAction::DeviceCommand
+- `field_io.rs`: `put_pv()` and `put_record_field_from_ca()` now call `on_put()` + `special()` for record-owned fields (was previously only for common fields)
+- ReprocessAfter timer cancellation via generation counter in RecordInstance (prevents stale timer accumulation)
+
+### Workspace Integration
+- Add `std-rs` and `scaler-rs` to workspace members and default-members
+- Add `std` and `scaler` feature flags to epics-rs umbrella crate
+- Bundle 70+ database templates (.db) and autosave request files (.req)
+
+### Testing
+- Add 390+ new tests across all crates:
+  - std-rs: 94 tests (epid PID algorithm, throttle rate limiting, timestamp formats, SNL state machines, framework integration, e2e autosave)
+  - scaler-rs: 40 tests (64-channel field access, state machine, TP↔PR1 conversion, soft driver, DLY delayed start, COUT/COUTP link firing)
+  - asyn-rs: 20 integration tests (port driver parameters, octet echo, error handling, interrupt callbacks, enum, blocking API)
+  - ad-core-rs: 47 tests (NDArray types/dimensions, pool allocation/reuse/memory limits, attributes, concurrent access)
+  - epics-macros-rs: 27 tests (derive macro field generation, type mapping, read-only, snake_case conversion)
+  - epics-ca-rs: 30 tests (protocol header encoding, server builder, get/put API, field access, multiple record types)
+  - epics-pva-rs: 49 tests (scalar types, PvStructure, serialization roundtrip, protocol header, codec)
+  - epics-seq-rs: 30 tests (event flags, channel store, program builder, variable traits)
+  - snc-core-rs: 42 tests (lexer tokenization, parser AST, codegen output, end-to-end pipeline)
+  - snc-rs: 11 tests (CLI help, compilation, error handling, debug flags)
+
 ## v0.7.2
 
 - Fix asyn-rs epics feature compilation (get_port export, AsynRecord import)

@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Calcout record — calc with output.
@@ -116,7 +116,7 @@ static CALCOUT_FIELDS: &[FieldDesc] = &[
 impl Record for CalcoutRecord {
     fn record_type(&self) -> &'static str { "calcout" }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         self.prev_val = self.val;
         if !self.calc.is_empty() {
             let vars = self.get_vars();
@@ -141,7 +141,7 @@ impl Record for CalcoutRecord {
         self.la = self.a; self.lb = self.b; self.lc = self.c; self.ld = self.d;
         self.le = self.e; self.lf = self.f; self.lg = self.g; self.lh = self.h;
         self.li = self.i; self.lj = self.j; self.lk = self.k; self.ll = self.l;
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Histogram record — counts values into buckets.
@@ -64,12 +64,12 @@ static HISTOGRAM_FIELDS: &[FieldDesc] = &[
 impl Record for HistogramRecord {
     fn record_type(&self) -> &'static str { "histogram" }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         if self.cmd == 1 {
             for v in &mut self.val { *v = 0; }
             self.cmd = 0;
         }
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

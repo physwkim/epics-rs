@@ -1,0 +1,7 @@
+# FILE... autoShutter_settings.req
+$(P)$(S)Shtr:Enable
+$(P)$(S)Shtr:ThresholdCurrent
+$(P)$(S)Shtr:Trigger.OUT
+$(P)$(S)Shtr:CalcTrigOut.AA
+file scalcout_settings.req P=$(P)$(S)Shtr:UserArm
+file calcout_settings.req P=$(P)$(S)Shtr:EnableOff

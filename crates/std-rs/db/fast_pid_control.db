@@ -1,0 +1,43 @@
+grecord(epid,"$(P)$(PID)") {
+        field(DTYP,"Fast Epid")
+        field(INP,"@$(INPUT) $(ICHAN) $(INPUT_DATA) $(INPUT_INTERVAL)")
+        field(DESC,"$(OUTPUT) $(OCHAN) $(OUTPUT_DATA)")
+        field(SCAN,"$(SCAN)")
+        field(KP,"$(KP)")
+        field(KI,"$(KI)")
+        field(KD,"$(KD)")
+        field(DT,"$(DT)")
+        field(LOPR,"$(LOPR)")
+        field(HOPR,"$(HOPR)")
+        field(DRVL,"$(DRVL)")
+        field(DRVH,"$(DRVH)")
+        field(PREC,"$(PREC)")
+        field(FLNK,"$(P)$(PID)_limits.VAL PP NMS")
+}
+grecord(transform,"$(P)$(PID)_limits") {
+        field(DESC,"PID limits")
+        field(CMTA,"Low input")
+        field(INPA,"$(DRVL)")
+        field(CMTB,"High limit")
+        field(INPB,"$(DRVH)")
+        field(CMTO,"Low output")
+        field(CLCO,"a")
+        field(OUTO,"$(P)$(PID).DRVL NPP NMS")
+        field(CMTP,"High output")
+        field(CLCP,"b")
+        field(OUTP,"$(P)$(PID).DRVH NPP NMS")
+        field(PREC,"$(PREC)")
+}
+
+grecord(transform,"$(P)$(PID)_incalc") {
+        field(DESC,"PID input calculation")
+        field(CMTA,"Shutter Status")
+        field(CMTB,"Sum")
+        field(CMTC,"Error")
+}
+
+grecord(bo,"$(P)$(PID)Locked") {
+        field(OSV, "NO_ALARM")
+        field(ZSV, "MAJOR")
+}
+

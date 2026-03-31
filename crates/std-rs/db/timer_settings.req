@@ -1,0 +1,6 @@
+$(P)timer$(N):preset
+$(P)timer$(N):Go
+$(P)timer$(N):update.SCAN
+$(P)timer$(N):doStop.FLNK
+$(P)timer$(N):calcElapsed.B
+$(P)timer$(N):startTime

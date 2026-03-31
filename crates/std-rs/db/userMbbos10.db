@@ -1,0 +1,121 @@
+
+record(bo, "$(P)userMbboEnable") {
+  field(DESC, "userMbbo Enable")
+  field(ZNAM, "Disable")
+  field(ONAM, "Enable")
+}
+
+record(bo, "$(P)EnableUserMbbos") {
+  field(OMSL, "closed_loop")
+  field(DOL, "1")
+  field(OUT, "$(P)userMbboEnable.VAL  PP MS")
+}
+
+record(bo, "$(P)DisableUserMbbos") {
+  field(OMSL, "closed_loop")
+  field(OUT, "$(P)userMbboEnable.VAL  PP MS")
+}
+
+record(mbbo, "$(P)userMbbo1") {
+  field(DESC, "userMbbo 1")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  #field(ZRVL, "$ | (ZRVL,0)")
+  #field(ONVL, "$ | (ONVL,1)")
+  #field(ZRST, "$ | (ZRST,0)")
+  #field(ONST, "$ | (ONST,1)")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo2") {
+  field(DESC, "userMbbo 2")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo3") {
+  field(DESC, "userMbbo 3")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo4") {
+  field(DESC, "userMbbo 4")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo5") {
+  field(DESC, "userMbbo 5")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo6") {
+  field(DESC, "userMbbo 6")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo7") {
+  field(DESC, "userMbbo 7")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo8") {
+  field(DESC, "userMbbo 8")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo9") {
+  field(DESC, "userMbbo 9")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}
+
+record(mbbo, "$(P)userMbbo10") {
+  field(DESC, "userMbbo 10")
+  field(DISV, "0")
+  field(SDIS, "$(P)userMbboEnable.VAL  NPP MS")
+  field(ZRVL, "0")
+  field(ONVL, "1")
+  field(ZRST, "default ZRST and ZRVL")
+  field(ONST, "default ONST and ONVL")
+}

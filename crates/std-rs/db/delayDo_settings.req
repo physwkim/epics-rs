@@ -1,0 +1,7 @@
+file calcout_settings.req P=$(P)$(R):standbyCalc
+file calcout_settings.req P=$(P)$(R):activeCalc
+file calcout_settings.req P=$(P)$(R):delayCalc
+file sseq_settings.req P=$(P),S=$(R):doSeq
+$(P)$(R):enable
+$(P)$(R):delay
+#$(P)$(R):debug

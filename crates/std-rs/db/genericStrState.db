@@ -1,0 +1,80 @@
+# Generic String State database
+# allows string values to be saved to and restored from a placeholder pv
+
+############  SVN Repository information  #############
+# $Date$
+# $Author$
+# $Revision$
+# $HeadURL$
+# $Id$
+#######################################################
+
+record(bo, "$(P)$(S)mode$(N)")
+{
+  field(DESC, "Use switch")
+  field(ZNAM, "Save")
+  field(ONAM, "Apply")
+  field(OUT,  "$(P)$(S)outCalc$(N).A  NPP NMS")
+  field(PINI, "YES")
+}
+
+record(stringout, "$(P)$(S)val$(N)")
+{
+  field(DESC, "Value to apply")
+  field(OUT,  "$(P)$(S)outCalc$(N).BB  NPP NMS")
+  field(PINI, "YES")
+}
+
+record(stringout, "$(P)$(S)pv$(N)")
+{
+  field(DESC, "Output PV")
+  field(OUT,  "$(P)$(S)sseq$(N).STR1  PP")
+  field(PINI, "YES")
+}
+
+record(scalcout, "$(P)$(S)outCalc$(N)")
+{
+  field(DESC, "Calc to apply val$(N)")
+  field(CALC, "a")
+  field(OOPT, "When Non-zero")
+  field(OCAL, "BB")
+  field(DOPT, "Use OCAL")
+  field(PREC, "5")
+}
+
+record(sseq, "$(P)$(S)sseq$(N)")
+{
+  field(DESC, "Fanout string")
+  field(LNK1, "$(P)$(S)sco$(N).AA  PP NMS")
+  field(DOL2, "$(P)$(S)sseq$(N).STR1  NPP NMS")
+  field(LNK2, "$(P)$(S)inCalc$(N).INBB  CA NMS")
+}
+
+record(scalcout, "$(P)$(S)sco$(N)")
+{
+  field(DESC, "Output PV string calc")
+  field(BB, "  NPP")
+  field(CC, "  PP")
+  field(DD, " NMS")
+  field(EE, " MS")
+  field(CALC, "((A)?AA+BB:AA+CC)+((B)?DD:EE)")
+  field(OUT,  "$(P)$(S)outCalc$(N).OUT  CA NMS")
+}
+
+record(scalcout, "$(P)$(S)inCalc$(N)")
+{
+  field(DESC, "Calc to save val$(N)")
+  field(INPA, "$(P)$(S)mode$(N)  NPP NMS")
+  field(CALC, "!a")
+  field(OCAL, "BB")
+  field(DOPT, "Use OCAL")
+  field(OOPT, "When Non-zero")
+  field(OUT,  "$(P)$(S)val$(N)  PP NMS")
+}
+
+record(fanout, "$(P)$(S)init$(N)")
+{
+  field(DESC, "Post-iocInit init")
+  field(LNK1, "$(P)$(S)sseq$(N)")
+  field(PINI, "NO")
+}

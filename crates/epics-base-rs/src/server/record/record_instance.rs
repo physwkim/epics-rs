@@ -38,6 +38,10 @@ pub struct RecordInstance {
     pub put_notify_tx: Option<crate::runtime::sync::oneshot::Sender<()>>,
     // Last posted values for subscribed fields (generic change detection)
     pub last_posted: HashMap<String, EpicsValue>,
+    /// Generation counter for ReprocessAfter timer cancellation.
+    /// Bumped each process cycle. Spawned timers check this to avoid
+    /// stale re-processes from accumulated timers.
+    pub reprocess_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RecordInstance {
@@ -69,6 +73,7 @@ impl RecordInstance {
             processing: AtomicBool::new(false),
             put_notify_tx: None,
             last_posted: HashMap::new(),
+            reprocess_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -730,7 +735,10 @@ impl RecordInstance {
         if let Some(ref sub_fn) = self.subroutine {
             sub_fn(&mut *self.record)?;
         }
-        let process_result = self.record.process()?;
+        let outcome = self.record.process()?;
+        let process_result = outcome.result;
+        // Note: process_local() does not execute ProcessActions — those are
+        // handled by the full process_record_with_links() path in processing.rs.
 
         if process_result == RecordProcessResult::AsyncPending {
             // Async: PACT stays set, no further processing this cycle

@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Compress record — circular buffer with compression algorithms.
@@ -76,8 +76,8 @@ static COMPRESS_FIELDS: &[FieldDesc] = &[
 impl Record for CompressRecord {
     fn record_type(&self) -> &'static str { "compress" }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
-        Ok(RecordProcessResult::Complete)
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

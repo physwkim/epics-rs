@@ -226,7 +226,7 @@ impl PvDatabase {
         };
 
         // 2. Lock record, apply INP/DOL, process, evaluate alarms, build snapshot
-        let (snapshot, out_info, flnk_name) = {
+        let (snapshot, out_info, flnk_name, process_actions) = {
             let mut instance = rec.write().await;
 
             // Apply DOL value for output records (OMSL=CLOSED_LOOP)
@@ -269,22 +269,65 @@ impl PvDatabase {
             let is_soft = instance.common.dtyp.is_empty()
                 || instance.common.dtyp == "Soft Channel";
             let is_output = instance.record.can_device_write();
+            let mut device_actions: Vec<crate::server::record::ProcessAction> = Vec::new();
+            let mut device_did_compute = false;
             if !is_soft && !is_output {
                 if let Some(mut dev) = instance.device.take() {
-                    if let Err(e) = dev.read(&mut *instance.record) {
-                        eprintln!("device read error on {}: {e}", instance.name);
-                        use crate::server::recgbl::{rec_gbl_set_sevr, alarm_status};
-                        rec_gbl_set_sevr(&mut instance.common, alarm_status::READ_ALARM, crate::server::record::AlarmSeverity::Invalid);
+                    match dev.read(&mut *instance.record) {
+                        Ok(read_outcome) => {
+                            device_did_compute = read_outcome.did_compute;
+                            device_actions = read_outcome.actions;
+                        }
+                        Err(e) => {
+                            eprintln!("device read error on {}: {e}", instance.name);
+                            use crate::server::recgbl::{rec_gbl_set_sevr, alarm_status};
+                            rec_gbl_set_sevr(&mut instance.common, alarm_status::READ_ALARM, crate::server::record::AlarmSeverity::Invalid);
+                        }
                     }
                     instance.device = Some(dev);
                 }
             }
 
+            // Pre-process actions: execute ReadDbLink from device support and
+            // record's pre_process_actions() BEFORE process() so the values
+            // are immediately available. Matches C dbGetLink() semantics.
+            let mut pre_actions = instance.record.pre_process_actions();
+            // Also collect ReadDbLink from device actions
+            let mut deferred_device_actions = Vec::new();
+            for action in device_actions {
+                if matches!(action, crate::server::record::ProcessAction::ReadDbLink { .. }) {
+                    pre_actions.push(action);
+                } else {
+                    deferred_device_actions.push(action);
+                }
+            }
+            if !pre_actions.is_empty() {
+                let rec_name = instance.name.clone();
+                drop(instance);
+                self.execute_read_db_links(&rec_name, &rec, &pre_actions).await;
+                instance = rec.write().await;
+            }
+
+            // Tell the record whether device support already computed.
+            // Records that override set_device_did_compute() use this to
+            // skip their built-in computation (e.g., epid PID).
+            if device_did_compute {
+                instance.record.set_device_did_compute(true);
+            }
+
             // Process
-            let process_result = instance.record.process()?;
+            let mut outcome = instance.record.process()?;
+            // Merge deferred device actions into process outcome actions
+            outcome.actions.extend(deferred_device_actions);
+            let process_result = outcome.result;
+            let process_actions = outcome.actions;
 
             if process_result == crate::server::record::RecordProcessResult::AsyncPending {
-                // PACT stays set; skip alarm/timestamp/snapshot/OUT/FLNK
+                // PACT stays set; skip alarm/timestamp/snapshot/OUT/FLNK.
+                // But still execute any actions (e.g., ReprocessAfter for delayed re-entry).
+                let rec_name = instance.name.clone();
+                drop(instance);
+                self.execute_process_actions(&rec_name, &rec, process_actions, visited, depth).await;
                 return Ok(());
             }
             if let crate::server::record::RecordProcessResult::AsyncPendingNotify(fields) = process_result {
@@ -526,7 +569,7 @@ impl PvDatabase {
                 }
             }
 
-            (snapshot, out_info, flnk_name)
+            (snapshot, out_info, flnk_name, process_actions)
         };
 
         // 3. Notify subscribers (outside lock)
@@ -606,7 +649,122 @@ impl PvDatabase {
             }
         }
 
+        // 8. Execute ProcessActions from the record's process() outcome.
+        // This handles WriteDbLink, ReadDbLink, and ReprocessAfter actions.
+        self.execute_process_actions(name, &rec, process_actions, visited, depth).await;
+
         Ok(())
+    }
+
+    /// Execute ReadDbLink actions before process().
+    /// Reads linked PV values and writes them into record fields via put_field_internal.
+    async fn execute_read_db_links(
+        &self,
+        _record_name: &str,
+        rec: &Arc<crate::runtime::sync::RwLock<RecordInstance>>,
+        actions: &[crate::server::record::ProcessAction],
+    ) {
+        use crate::server::record::ProcessAction;
+        for action in actions {
+            if let ProcessAction::ReadDbLink { link_field, target_field } = action {
+                let link_str = {
+                    let instance = rec.read().await;
+                    instance.record.get_field(link_field)
+                        .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                        .unwrap_or_default()
+                };
+                if link_str.is_empty() { continue; }
+                let parsed = crate::server::record::parse_link_v2(&link_str);
+                if let Some(value) = self.read_link_value(&parsed).await {
+                    let mut instance = rec.write().await;
+                    let _ = instance.record.put_field_internal(target_field, value);
+                }
+            }
+        }
+    }
+
+    /// Execute ProcessActions returned by a record's process() call.
+    ///
+    /// Actions are executed in order:
+    /// - ReadDbLink: reads a linked PV value and writes it into a record field
+    ///   (bypasses read-only checks via put_field_internal)
+    /// - WriteDbLink: writes a value to a linked PV
+    /// - ReprocessAfter: schedules a delayed re-process via tokio::spawn
+    async fn execute_process_actions(
+        &self,
+        record_name: &str,
+        rec: &Arc<crate::runtime::sync::RwLock<RecordInstance>>,
+        actions: Vec<crate::server::record::ProcessAction>,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) {
+        use crate::server::record::ProcessAction;
+
+        for action in actions {
+            match action {
+                ProcessAction::ReadDbLink { link_field, target_field } => {
+                    // 1. Get the link string from the record
+                    let link_str = {
+                        let instance = rec.read().await;
+                        instance.record.get_field(link_field)
+                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                            .unwrap_or_default()
+                    };
+                    if link_str.is_empty() { continue; }
+                    // 2. Parse and read the linked PV
+                    let parsed = crate::server::record::parse_link_v2(&link_str);
+                    if let Some(value) = self.read_link_value(&parsed).await {
+                        // 3. Write into the record field (internal put bypasses read-only)
+                        let mut instance = rec.write().await;
+                        let _ = instance.record.put_field_internal(target_field, value);
+                    }
+                }
+                ProcessAction::WriteDbLink { link_field, value } => {
+                    // 1. Get the link string from the record
+                    let link_str = {
+                        let instance = rec.read().await;
+                        instance.record.get_field(link_field)
+                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                            .unwrap_or_default()
+                    };
+                    if link_str.is_empty() { continue; }
+                    // 2. Parse and write to the linked PV
+                    let parsed = crate::server::record::parse_link_v2(&link_str);
+                    if let crate::server::record::ParsedLink::Db(ref db_link) = parsed {
+                        self.write_db_link_value(db_link, value, visited, depth).await;
+                    }
+                }
+                ProcessAction::DeviceCommand { command, ref args } => {
+                    let mut instance = rec.write().await;
+                    if let Some(mut dev) = instance.device.take() {
+                        let _ = dev.handle_command(&mut *instance.record, command, args);
+                        instance.device = Some(dev);
+                    }
+                }
+                ProcessAction::ReprocessAfter(delay) => {
+                    // Use generation counter for timer cancellation.
+                    // Bump generation now; the spawned task only fires if
+                    // the generation hasn't been bumped again (i.e., no newer
+                    // timer replaced this one).
+                    let (gen_counter, gen_val) = {
+                        let instance = rec.read().await;
+                        let val = instance.reprocess_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        (instance.reprocess_generation.clone(), val)
+                    };
+                    let db = self.clone();
+                    let rec_name = record_name.to_string();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        // Only fire if no newer timer has been scheduled
+                        let current = gen_counter.load(std::sync::atomic::Ordering::Relaxed);
+                        if current == gen_val {
+                            let mut visited = HashSet::new();
+                            let _ = db.process_record_with_links(&rec_name, &mut visited, 0).await;
+                        }
+                    });
+                }
+            }
+        }
     }
 
     /// Complete an asynchronous record's post-process steps.

@@ -16,6 +16,8 @@ motor-rs = { workspace = true, optional = true }
 ad-core-rs = { workspace = true, optional = true }
 ad-plugins-rs = { workspace = true, optional = true }
 epics-seq-rs = { workspace = true, optional = true }
+std-rs = { workspace = true, optional = true }
+scaler-rs = { workspace = true, optional = true }
 
 [features]
 default = ["ca"]
@@ -29,4 +31,6 @@ calc = []
 autosave = []
 busy = []
 seq = ["dep:epics-seq-rs"]
-full = ["ca", "pva", "asyn", "motor", "ad", "calc", "autosave", "busy", "seq"]
+std = ["dep:std-rs"]
+scaler = ["dep:scaler-rs"]
+full = ["ca", "pva", "asyn", "motor", "ad", "calc", "autosave", "busy", "seq", "std", "scaler"]

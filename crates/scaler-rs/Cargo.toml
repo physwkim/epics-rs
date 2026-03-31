@@ -1,0 +1,18 @@
+[package]
+name = "scaler-rs"
+version.workspace = true
+edition.workspace = true
+description = "Rust port of EPICS scaler record"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+epics-base-rs = { workspace = true }
+asyn-rs = { workspace = true }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+epics-ca-rs = { workspace = true }
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -11,7 +11,8 @@ pub use common_fields::CommonFields;
 pub use link::{DbLink, LinkAddress, LinkProcessPolicy, ParsedLink, parse_link, parse_link_v2};
 pub use record_instance::RecordInstance;
 pub use record_trait::{
-    CommonFieldPutResult, FieldDesc, ProcessSnapshot, Record, RecordProcessResult, SubroutineFn,
+    CommonFieldPutResult, FieldDesc, ProcessAction, ProcessOutcome, ProcessSnapshot,
+    Record, RecordProcessResult, SubroutineFn,
 };
 pub use crate::server::recgbl::EventMask;
 pub use scan::ScanType;

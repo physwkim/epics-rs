@@ -1,0 +1,39 @@
+# Generic Tweak database
+# adds tweak functionality to any floating point PV 
+
+############  SVN Repository information  #############
+# $Date$
+# $Author$
+# $Revision$
+# $HeadURL$
+# $Id$
+#######################################################
+
+record(ao, "$(P)$(N)twv")
+{
+    field(DTYP, "Soft Channel")
+    field(PREC, "$(PREC)")
+    field(VAL,  "0.0")
+}
+
+record(calcout, "$(P)$(N)twf")
+{
+    field(DTYP, "Soft Channel")
+    field(PREC, "$(PREC)")
+    field(INPA, "$(PV)  NPP MS")
+    field(INPB, "$(P)$(N)twv  NPP MS")
+    field(CALC, "A+B")
+    field(OOPT, "Every Time")
+    field(OUT,  "$(PV)  PP MS")
+}
+
+record(calcout, "$(P)$(N)twr")
+{
+    field(DTYP, "Soft Channel")
+    field(PREC, "$(PREC)")
+    field(INPA, "$(PV)  NPP MS")
+    field(INPB, "$(P)$(N)twv  NPP MS")
+    field(CALC, "A-B")
+    field(OOPT, "Every Time")
+    field(OUT,  "$(PV)  PP MS")
+}

@@ -1,0 +1,43 @@
+$(P)$(S).TP
+$(P)$(S).TP1
+$(P)$(S).CONT
+$(P)$(S).DLY1
+$(P)$(S).RAT1
+$(P)$(S).PREC
+$(P)$(S).FREQ
+$(P)$(S).RATE
+$(P)$(S).DLY
+$(P)$(S).COUT
+$(P)$(S)_calcEnable.VAL
+$(P)$(S)_calc_ctrl.VAL
+$(P)$(S)_calc1.CLCB
+$(P)$(S)_calc1.CLCC
+$(P)$(S)_calc1.CLCD
+$(P)$(S)_calc1.CLCE
+$(P)$(S)_calc1.CLCF
+$(P)$(S)_calc1.CLCG
+$(P)$(S)_calc1.CLCH
+$(P)$(S)_calc1.CLCI
+$(P)$(S)_calc1.CLCJ
+$(P)$(S)_calc1.CLCK
+$(P)$(S)_calc1.CLCL
+$(P)$(S)_calc1.CLCM
+$(P)$(S)_calc1.CLCN
+$(P)$(S)_calc1.CLCO
+$(P)$(S)_calc1.CLCP
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=1
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=2
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=3
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=4
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=5
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=6
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=7
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=8
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=9
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=10
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=11
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=12
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=13
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=14
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=15
+file "scaler_channelN_settings.req", P=$(P), S=$(S), Ch=16

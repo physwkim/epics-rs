@@ -1,0 +1,64 @@
+grecord(bo,"$(P)allstop") {
+	field(DTYP,"Soft Channel")
+	field(DOL,"1")
+	field(OUT,"$(P)allstop1.A  PP MS")
+}
+grecord(bo,"$(P)gateOpen") {
+	field(DTYP,"Soft Channel")
+	field(ZNAM,"Closed")
+	field(ONAM,"Open")
+}
+grecord(calc,"$(P)alldoneBlinker") {
+	field(SCAN,".5 second")
+	field(CALC,"B?0:!A")
+	field(INPA,"$(P)alldoneBlinker.VAL  NPP NMS")
+	field(INPB,"$(P)alldone.VAL  NPP NMS")
+}
+grecord(transform,"$(P)allstop1") {
+	field(DESC,"allstop distribution")
+	field(CLCB,"a")
+	field(OUTA,"$(P)AbortScans.VAL  PP MS")
+	field(OUTB,"$(P)allstop2.A  PP MS")
+}
+grecord(transform,"$(P)allstop2") {
+	field(DESC,"allstop distribution")
+	field(CLCB,"a")
+	field(CLCC,"a")
+	field(CLCD,"a")
+	field(CLCE,"a")
+	field(OUTA,"$(P)m1.STOP  CA MS")
+	field(OUTB,"$(P)m2.STOP  CA MS")
+	field(OUTC,"$(P)m3.STOP  CA MS")
+	field(OUTD,"$(P)m4.STOP  CA MS")
+	field(OUTE,"0")
+}
+grecord(swait,"$(P)alldone") {
+	field(DESC,"All motors done moving")
+	field(SCAN,"I/O Intr")
+	field(PINI,"YES")
+	field(DTYP,"Soft Channel")
+	field(INAN,"$(P)alldone_1.VAL")
+	field(ININ,"$(P)gateOpen.VAL")
+	field(CALC,"A&&!I")
+	field(DOLD,"1")
+}
+grecord(swait,"$(P)alldoneBlink") {
+	field(SCAN,"I/O Intr")
+	field(DTYP,"Soft Channel")
+	field(INAN,"$(P)alldone")
+	field(INBN,"$(P)alldoneBlinker")
+	field(CALC,"a?0:b")
+}
+grecord(swait,"$(P)alldone_1") {
+	field(DESC,"4 motors done moving")
+	field(SCAN,"I/O Intr")
+	field(PINI,"YES")
+	field(DTYP,"Soft Channel")
+	field(INAN,"$(P)m1.DMOV")
+	field(INBN,"$(P)m2.DMOV")
+	field(INCN,"$(P)m3.DMOV")
+	field(INDN,"$(P)m4.DMOV")
+	field(CALC,"(a&b&c&d)=1")
+	field(OOPT,"Transition To Non-zero")
+	field(DOLD,"1")
+}

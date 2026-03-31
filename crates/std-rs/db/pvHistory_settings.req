@@ -1,0 +1,11 @@
+$(P)history$(N)_StopScan.VAL
+$(P)history$(N)_Interval.B
+# Note the following are array PV's, which require autosave v3.5 or higher
+$(P)history$(N).VALB
+$(P)history$(N).VALC
+$(P)history$(N).VALD
+$(P)history$(N).VALE
+$(P)history$(N).VALF
+$(P)history$(N)_PV1_curr.INP
+$(P)history$(N)_PV2_curr.INP
+$(P)history$(N)_PV3_curr.INP

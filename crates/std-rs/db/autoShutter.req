@@ -1,0 +1,10 @@
+# FILE... autoShutter.req 
+# MACROS...
+#	P=Prefix
+#       S=Shutter ID
+#       T1=delay timer #, T2=open timer #
+#       A=Alarm Clock #
+file autoShutter_settings.req P=$(P),S=$(S)
+file countDownTimer_settings.req P=$(P),N=$(T1)
+file countDownTimer_settings.req P=$(P),N=$(T2)
+file alarmClock_settings.req P=$(P),N=$(A)

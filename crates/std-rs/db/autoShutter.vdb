@@ -1,0 +1,152 @@
+record(bo, "$(P)$(S)Shtr:Enable") {
+  field(DESC, "User enable")
+  field(SCAN, "Passive")
+  field(DTYP, "Soft Channel")
+  field(ZNAM, "Disable")
+  field(ONAM, "Enable")
+}
+
+record(ai, "$(P)$(S)Shtr:ThresholdCurrent") {
+  field(DESC, "SR current to open at")
+  field(SCAN, "Passive")
+  field(DTYP, "Soft Channel")
+  field(VAL, "30")
+  field(EGU, "mA")
+  field(PINI, "YES")
+}
+
+record(calcout, "$(P)$(S)Shtr:EnableOff") {
+  field(DESC, "Disable autoshutter")
+  field(SCAN, "Passive")
+  field(INPA, "$(P)$(S)Shtr:modeOk.VAL CP")
+  field(INPB, "$(P)AClock$(A):Trigger.VAL CP")
+  field(CALC, "A&!B")
+  field(OOPT, "When Zero")
+  field(OUT, "$(P)$(S)Shtr:Enable PP NMS")
+}
+
+record(calcout, "$(P)$(S)Shtr:Arm") {
+  field(DESC, "Arm shutter open")
+  field(SCAN, "Passive")
+  field(INPA, "$(P)$(S)Shtr:Enable.VAL CP")
+  field(INPB, "$(P)$(S)Shtr:srCurrentOk CP")
+  field(INPC, "$(P)$(S)Shtr:BlepsShtrPermit CP")
+  field(INPD, "$(P)$(S)Shtr:AcisShtrPermit.VAL CP")
+  field(INPE, "$(P)$(S)Shtr:Status.VAL CP")
+  field(INPF, "$(P)$(S)Shtr:UserArm.VAL CP")
+  field(INPG, "$(P)$(S)Shtr:Trigger.VAL CP")
+  field(INPH, "$(P)$(S)Shtr:TrigOutOK.VAL CP")
+  field(CALC, "A#0&B#0&C#0&D#0&E#0&F#0&H#0")
+  field(OUT, "$(P)cdt$(T1):start PP NMS")
+}
+
+record(calcout, "$(P)$(S)Shtr:Trigger") {
+  field(DESC, "Send open signal")
+  field(SCAN, "Passive")
+  field(DISV, "0")
+  field(DISA, "0")
+  field(SDIS, "$(P)$(S)Shtr:Arm")
+  field(INPA, "$(P)cdt$(T1):trigger CP NMS")
+  field(CALC, "A")
+  field(OOPT, "Transition To Non-zero")
+}
+
+record(scalcout,"$(P)$(S)Shtr:TrigOutOK") {
+    field(DESC,"$(S) Check Trig OutLink")
+    field(INPA, "$(P)$(S)Shtr:Trigger.OUTV CP NMS")
+    field(INAA, "$(P)$(S)Shtr:Trigger.OUT CP NMS")
+    field(CALC,"(AA==''|A==0)?0:1")
+}
+
+record(scalcout,"$(P)$(S)Shtr:CalcTrigOut") {
+    field(DESC,"$(S) Parse Trig OutLink")
+    field(BB," PP MS")
+    field(CALC,"(AA=='')?AA:AA+BB")
+    field(OUT,"$(P)$(S)Shtr:Trigger.OUT CA NMS")
+}
+
+record(scalcout,"$(P)$(S)Shtr:OpenTSCalc") {
+    field(DESC,"$(S) Open TOD Calc")
+    field(INPA,"$(P)$(S)Shtr:Status.VAL CP")
+    field(CALC,"A")
+    field(OOPT,"Transition To Zero")
+    field(OUT, "$(P)$(S)Shtr:OpenTimeStamp.PROC PP")
+}
+
+record(stringin, "$(P)$(S)Shtr:OpenTimeStamp")
+{
+    field(DESC,"$(S) Open TOD Stamp")
+    field(INP,"$(P)AClock$(A):TOD")
+}
+
+record(calcout, "$(P)$(S)Shtr:PostTrig") {
+  field(DESC, "Start post timer")
+  field(SCAN, "Passive")
+  field(INPA, "$(P)$(S)Shtr:Arm CP NMS")
+  field(INPB, "$(P)$(S)Shtr:Status.VAL CP")
+  field(CALC, "!A&!B")
+  field(OUT, "$(P)cdt$(T2):start PP NMS")
+}
+
+record(scalcout, "$(P)$(S)Shtr:UserArm") {
+  field(DESC, "User Arm Logic")
+  field(SCAN, "Passive")
+  field(PINI, "YES")
+  field(A, "1")
+  field(CALC, "A")
+}
+
+record(bi, "$(P)$(S)Shtr:Active") {
+  field(DESC, "AutoOpen Status")
+  field(SCAN, "Passive")
+  field(DTYP, "Soft Channel")
+  field(ZNAM, "Off")
+  field(ONAM, "On")
+  field(INP, "$(P)$(S)Shtr:Arm.VAL CP NMS")
+}
+
+record(calcout, "$(P)$(S)Shtr:srCurrentOk") {
+  field(DESC, "SR current enough to open")
+  field(SCAN, "Passive")
+  field(INPA, "S:SRcurrentAI CP")
+  field(INPB, "$(P)$(S)Shtr:ThresholdCurrent CP")
+  field(CALC, "A>=B")
+}
+
+record(scalcout, "$(P)$(S)Shtr:modeOk") {
+  field(DESC, "Arm shutter open")
+  field(SCAN, "Passive")
+  field(INAA, "S:DesiredMode CP")
+  field(BB, "USER OPERATIONS")
+  field(CALC, "AA==BB")
+}
+
+# To allow simulation
+record(bi, "$(P)$(S)Shtr:BlepsShtrPermit") {
+  field(DESC, "BLEPS shutter permit")
+  field(SCAN, "Passive")
+  field(DTYP, "Soft Channel")
+  field(INP, "S$(BL)-FEEPS:FES_PermitM CP")
+  field(ZNAM, "NO Permit")
+  field(ONAM, "Permit OK")
+}
+
+# To allow simulation
+record(bi, "$(P)$(S)Shtr:AcisShtrPermit") {
+  field(DESC, "BLEPS shutter permit")
+  field(SCAN, "Passive")
+  field(DTYP, "Soft Channel")
+  field(INP, "S$(BL)-PSS:FES:ACISPermitM CP")
+  field(ZNAM, "NO Permit")
+  field(ONAM, "Permit OK")
+}
+
+record(bi, "$(P)$(S)Shtr:Status") {
+  field(DESC, "Shutter status from PSS")
+  field(SCAN, "Passive")
+  field(DTYP, "Soft Channel")
+  field(INP, "S$(BL)-PSS:FES:ClosedM CP")
+  field(ZNAM, "Open")
+  field(ONAM, "Closed")
+}
+

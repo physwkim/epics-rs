@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 const NUM_STEPS: usize = 10;
@@ -165,7 +165,7 @@ impl Record for SseqRecord {
         "sseq"
     }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         // In a real EPICS implementation, processing would:
         // 1. Read SELL link to get SELN
         // 2. For each selected step: wait DLY, read DOL→DO, write DO/STR→LNK
@@ -178,7 +178,7 @@ impl Record for SseqRecord {
         // and writing to LNK links. Our process() just validates state.
 
         self.busy = 0;
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

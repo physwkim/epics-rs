@@ -1,5 +1,5 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record, RecordProcessResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Sel (select) record — selects one of A-L based on SELM algorithm.
@@ -77,7 +77,7 @@ static SEL_FIELDS: &[FieldDesc] = &[
 impl Record for SelRecord {
     fn record_type(&self) -> &'static str { "sel" }
 
-    fn process(&mut self) -> CaResult<RecordProcessResult> {
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
         let vals = self.get_values();
         self.val = match self.selm {
             0 => self.get_value_by_index(self.seln as usize),
@@ -95,7 +95,7 @@ impl Record for SelRecord {
             }
             _ => self.val,
         };
-        Ok(RecordProcessResult::Complete)
+        Ok(ProcessOutcome::complete())
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

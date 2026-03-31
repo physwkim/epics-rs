@@ -1,0 +1,179 @@
+record(ao,"$(P)$(A):Gain")
+{
+        field(DESC,"DHPCA-100 Gain")
+        field(PREC,"0")
+}
+
+record(stringin,"$(P)$(A):Description")
+{
+        field(DESC,"DHPCA-100 Description")
+}
+
+record(mbbo,"$(P)$(A):GainIndex")
+{
+        field(DESC,"DHPCA-100 Gain")
+#        field(NOBT,"16")
+        field(ZRVL,"0")
+        field(ZRST,"1e2 low noise")
+        field(ONVL,"1")
+        field(ONST,"1e3 low noise")
+        field(TWVL,"2")
+        field(TWST,"1e4 low noise")
+        field(THVL,"3")
+        field(THST,"1e5 low noise")
+        field(FRVL,"4")
+        field(FRST,"1e6 low noise")
+        field(FVVL,"5")
+        field(FVST,"1e7 low noise")
+        field(SXVL,"6")
+        field(SXST,"UNDEF")
+        field(SVVL,"7")
+        field(SVST,"UNDEF")
+        field(EIVL,"8")
+        field(EIST,"1e3 high speed")
+        field(NIVL,"9")
+        field(NIST,"1e4 high speed")
+        field(TEVL,"10")
+        field(TEST,"1e5 high speed")
+        field(ELVL,"11")
+        field(ELST,"1e6 high speed")
+        field(TVVL,"12")
+        field(TVST,"1e7 high speed")
+        field(TTVL,"13")
+        field(TTST,"1e8 high speed")
+        field(FTVL,"14")
+        field(FTST,"UNDEF")
+        field(FFVL,"15")
+        field(FFST,"UNDEF")
+}
+
+
+record(transform,"$(P)$(A):TransformGainIndex") {
+        field(DESC,"DHCPA-100 Gain Bit Transformer")
+        field(PREC,"0")
+        field(CMTA,"Input")
+        field(CMTB,"Mode check 1")
+        field(CMTC,"Mode check 2")
+        field(CMTD,"Mode check 3")
+        field(CMTE,"Bit 0 Out")
+        field(CMTF,"Bit 1 Out")
+        field(CMTG,"Bit 2 Out")
+        field(CMTH,"Bit 3 Out")
+        field(CMTI,"Gain Output")
+        field(CLCB,"A>13?0:A")
+        field(CLCC,"B=6?0:B")
+        field(CLCD,"C=7?0:C")
+        field(CLCE,"D&1")
+        field(CLCF,"(D>>1)&1")
+        field(CLCG,"(D>>2)&1")
+        field(CLCH,"(D>>3)&1")
+        field(CLCI,"(D>>3)&1?10^(D-5):10^(D+2)")
+        field(INPA,"$(P)$(A):GainIndex.VAL CP MS")
+        field(OUTD,"$(P)$(A):GainIndex.VAL CA NMS")
+        field(OUTE,"$(P)$(A):G1.VAL PP NMS")
+        field(OUTF,"$(P)$(A):G2.VAL PP NMS")
+        field(OUTG,"$(P)$(A):G3.VAL PP NMS")
+        field(OUTH,"$(P)$(A):G4.VAL PP NMS")
+        field(OUTI,"$(P)$(A):Gain.VAL PP NMS")
+}
+
+record(bo,"$(P)$(A):G1") {
+        field(DESC,"Encode Out G1")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G1).VAL  PP MS")
+}
+record(bo,"$(P)$(A):G2") {
+        field(DESC,"Encode Out G2")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G2).VAL  PP MS")
+}
+record(bo,"$(P)$(A):G3") {
+        field(DESC,"Encode Out G3")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G3).VAL  PP MS")
+}
+record(bo,"$(P)$(A):G4") {
+        field(DESC,"Encode Out G4")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(SN).VAL  PP MS")
+}
+
+record(bo,"$(P)$(A):Coupling") {
+        field(DESC,"DHPCA-100 Coupling Mode")
+        field(ZNAM,"DC")
+        field(ONAM,"AC")
+        field(OUT,"$(P)$(C).VAL  PP MS")
+}
+
+record(mbbo,"$(P)$(A):Filter")
+{
+        field(DESC,"DHPCA-100 Filter")
+#        field(NOBT,"16")
+        field(ZRVL,"0")
+        field(ZRST,"Full Bandwidth")
+        field(ONVL,"1")
+        field(ONST,"10 MHz Low Pass")
+        field(TWVL,"2")
+        field(TWST,"1 MHz Low Pass")
+        field(THVL,"3")
+        field(THST,"UNDEF")
+        field(FRVL,"4")
+        field(FRST,"UNDEF")
+        field(FVVL,"5")
+        field(FVST,"UNDEF")
+        field(SXVL,"6")
+        field(SXST,"UNDEF")
+        field(SVVL,"7")
+        field(SVST,"UNDEF")
+        field(EIVL,"8")
+        field(EIST,"UNDEF")
+        field(NIVL,"9")
+        field(NIST,"UNDEF")
+        field(TEVL,"10")
+        field(TEST,"UNDEF")
+        field(ELVL,"11")
+        field(ELST,"UNDEF")
+        field(TVVL,"12")
+        field(TVST,"UNDEF")
+        field(TTVL,"13")
+        field(TTST,"UNDEF")
+        field(FTVL,"14")
+        field(FTST,"UNDEF")
+        field(FFVL,"15")
+        field(FFST,"UNDEF")
+}
+
+
+record(transform,"$(P)$(A):TransformFilter") {
+        field(DESC,"DHCPA-100 Filter Bit Transformer")
+        field(PREC,"0")
+        field(CMTA,"Input")
+        field(CMTB,"Mode check")
+        field(CMTE,"Bit 0 Out")
+        field(CMTF,"Bit 1 Out")
+        field(CLCB,"A>2?0:A")
+        field(CLCE,"B&1")
+        field(CLCF,"(B>>1)&1")
+        field(INPA,"$(P)$(A):Filter.VAL CP MS")
+        field(OUTB,"$(P)$(A):Filter.VAL CA NMS")
+        field(OUTE,"$(P)$(A):F10.VAL PP NMS")
+        field(OUTF,"$(P)$(A):F1.VAL PP NMS")
+}
+
+record(bo,"$(P)$(A):F10") {
+        field(DESC,"Encode Out F10")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(F10).VAL PP MS")
+}
+record(bo,"$(P)$(A):F1") {
+        field(DESC,"Encode Out F1")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(F1).VAL PP MS")
+}
+

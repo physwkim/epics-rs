@@ -1,0 +1,100 @@
+record(ao,"$(P)$(A):Gain")
+{
+        field(DESC,"DDPCA-300 Gain")
+        field(PREC,"0")
+}
+
+record(stringin,"$(P)$(A):Description")
+{
+        field(DESC,"DDPCA-300 Description")
+}
+
+record(mbbo,"$(P)$(A):GainIndex")
+{
+        field(DESC,"DDPCA-300 Gain")
+#        field(NOBT,"16")
+        field(ZRVL,"0")
+        field(ZRST,"1e4")
+        field(ONVL,"1")
+        field(ONST,"1e5")
+        field(TWVL,"2")
+        field(TWST,"1e6")
+        field(THVL,"3")
+        field(THST,"1e7")
+        field(FRVL,"4")
+        field(FRST,"1e8")
+        field(FVVL,"5")
+        field(FVST,"1e9")
+        field(SXVL,"6")
+        field(SXST,"1e10")
+        field(SVVL,"7")
+        field(SVST,"1e11")
+        field(EIVL,"8")
+        field(EIST,"1e12")
+        field(NIVL,"9")
+        field(NIST,"1e13")
+        field(TEVL,"10")
+        field(TEST,"UNDEF")
+        field(ELVL,"11")
+        field(ELST,"UNDEF")
+        field(TVVL,"12")
+        field(TVST,"UNDEF")
+        field(TTVL,"13")
+        field(TTST,"UNDEF")
+        field(FTVL,"14")
+        field(FTST,"UNDEF")
+        field(FFVL,"15")
+        field(FFST,"UNDEF")
+}
+
+
+record(transform,"$(P)$(A):TransformGainIndex") {
+        field(DESC,"DDCPA-300 Gain Bit Transformer")
+        field(PREC,"0")
+        field(CMTA,"Input")
+        field(CMTB,"Mode check")
+        field(CMTE,"Bit 0 Out")
+        field(CMTF,"Bit 1 Out")
+        field(CMTG,"Bit 2 Out")
+        field(CMTH,"Bit 3 Out")
+        field(CMTI,"Gain Output")
+        field(CLCB,"A>9?0:A")
+        field(CLCE,"B&1")
+        field(CLCF,"(B>>1)&1")
+        field(CLCG,"(B>>2)&1")
+        field(CLCH,"(B>>3)&1")
+        field(CLCI,"10^(B+4)")
+        field(INPA,"$(P)$(A):GainIndex.VAL CP MS")
+        field(OUTB,"$(P)$(A):GainIndex.VAL CA NMS")
+        field(OUTE,"$(P)$(A):G1.VAL PP NMS")
+        field(OUTF,"$(P)$(A):G2.VAL PP NMS")
+        field(OUTG,"$(P)$(A):G3.VAL PP NMS")
+        field(OUTH,"$(P)$(A):G4.VAL PP NMS")
+        field(OUTI,"$(P)$(A):Gain.VAL PP NMS")
+}
+
+record(bo,"$(P)$(A):G1") {
+        field(DESC,"Encode Out G1")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G1).VAL PP MS")
+}
+record(bo,"$(P)$(A):G2") {
+        field(DESC,"Encode Out G2")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G2).VAL PP MS")
+}
+record(bo,"$(P)$(A):G3") {
+        field(DESC,"Encode Out G3")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G3).VAL PP MS")
+}
+record(bo,"$(P)$(A):G4") {
+        field(DESC,"Encode Out G4")
+        field(ZNAM,"Down")
+        field(ONAM,"Up")
+        field(OUT,"$(P)$(G4).VAL PP MS")
+}
+

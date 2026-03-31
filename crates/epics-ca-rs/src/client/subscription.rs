@@ -110,8 +110,11 @@ impl SubscriptionRegistry {
         }
     }
 
-    /// Check if any subscription for a cid has a closed callback_tx (receiver dropped).
-    /// Remove them and return the subids.
+    /// Remove subscriptions whose callback receiver has been dropped.
+    /// Returns the subids that were removed.
+    ///
+    /// Not currently called — channel drop sends ClearChannel to the IOC
+    /// which cleans up server-side subscriptions automatically.
     #[allow(dead_code)]
     pub fn cleanup_closed(&mut self) -> Vec<u32> {
         let closed: Vec<u32> = self

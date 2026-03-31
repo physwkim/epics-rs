@@ -1,0 +1,13 @@
+# FILE... userMbbos10_settings.req
+# USAGE.. userMbbos10.db fields autosave'd.
+
+file mbbo_settings.req P=$(P)userMbbo1
+file mbbo_settings.req P=$(P)userMbbo2
+file mbbo_settings.req P=$(P)userMbbo3
+file mbbo_settings.req P=$(P)userMbbo4
+file mbbo_settings.req P=$(P)userMbbo5
+file mbbo_settings.req P=$(P)userMbbo6
+file mbbo_settings.req P=$(P)userMbbo7
+file mbbo_settings.req P=$(P)userMbbo8
+file mbbo_settings.req P=$(P)userMbbo9
+file mbbo_settings.req P=$(P)userMbbo10

@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime};
 
 use epics_base_rs::error::{CaError, CaResult};
-use epics_base_rs::server::device_support::{DeviceSupport, WriteCompletion};
+use epics_base_rs::server::device_support::{DeviceReadOutcome, DeviceSupport, WriteCompletion};
 use epics_base_rs::server::record::{Record, ScanType};
 use epics_base_rs::types::EpicsValue;
 
@@ -351,7 +351,7 @@ impl DeviceSupport for AsynDeviceSupport {
         Ok(())
     }
 
-    fn read(&mut self, record: &mut dyn Record) -> CaResult<()> {
+    fn read(&mut self, record: &mut dyn Record) -> CaResult<DeviceReadOutcome> {
         let op = self.read_op().ok_or_else(|| {
             CaError::Protocol(format!("unsupported interface type for read: {}", self.iface_type))
         })?;
@@ -365,7 +365,7 @@ impl DeviceSupport for AsynDeviceSupport {
         self.last_alarm_status = result.alarm_status;
         self.last_alarm_severity = result.alarm_severity;
         self.last_ts = result.timestamp;
-        Ok(())
+        Ok(DeviceReadOutcome::ok())
     }
 
     fn write(&mut self, record: &mut dyn Record) -> CaResult<()> {
