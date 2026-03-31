@@ -184,13 +184,13 @@ fn field_list_tracks_read_only() {
 #[test]
 fn get_field_double() {
     let ai = AiRecord {
-        val: 3.14,
+        val: 3.15,
         high_limit: 100.0,
         low_limit: -100.0,
         precision: 3,
         engineering_units: "volts".into(),
     };
-    assert_eq!(ai.get_field("VAL"), Some(EpicsValue::Double(3.14)));
+    assert_eq!(ai.get_field("VAL"), Some(EpicsValue::Double(3.15)));
     assert_eq!(ai.get_field("HIGH_LIMIT"), Some(EpicsValue::Double(100.0)));
     assert_eq!(
         ai.get_field("LOW_LIMIT"),
@@ -439,7 +439,7 @@ fn put_field_type_mismatch_short_gets_double() {
         precision: 0,
         engineering_units: String::new(),
     };
-    let result = ai.put_field("PRECISION", EpicsValue::Double(3.14));
+    let result = ai.put_field("PRECISION", EpicsValue::Double(3.15));
     assert!(result.is_err());
     match result.unwrap_err() {
         CaError::TypeMismatch(field) => assert_eq!(field, "PRECISION"),
