@@ -4,13 +4,21 @@
 # Loaded from st.cmd via: < commonPlugins.cmd
 #
 # Required macros (set before loading):
-#   $(PREFIX)  - PV prefix
-#   $(PORT)    - Detector port name
-#   $(QSIZE)   - Queue size (default 20)
-#   $(XSIZE)   - Max image width
-#   $(YSIZE)   - Max image height
-#   $(NCHANS)  - Max time series points
-#   $(CBUFFS)  - Circular buffer frame count (default 500)
+#   $(PREFIX)    - PV prefix
+#   $(PORT)      - Detector port name
+#   $(QSIZE)     - Queue size (default 20)
+#   $(XSIZE)     - Max image width
+#   $(YSIZE)     - Max image height
+#   $(NCHANS)    - Max time series points
+#   $(CBUFFS)    - Circular buffer frame count (default 500)
+#   $(NELEMENTS) - Max waveform elements for image data
+#   $(FTVL)      - Waveform field type (default: UCHAR)
+#   $(TYPE)      - Array interface type (default: Int8)
+
+# ===== StdArrays plugin (image data for clients) =====
+
+NDStdArraysConfigure("IMAGE1", $(QSIZE), 0, "$(PORT)", 0)
+dbLoadRecords("NDStdArrays.template", "P=$(PREFIX),R=image1:,PORT=IMAGE1,NDARRAY_PORT=$(PORT),TYPE=$(TYPE=Int8),FTVL=$(FTVL=UCHAR),NELEMENTS=$(NELEMENTS)")
 
 # ===== File saving plugins =====
 

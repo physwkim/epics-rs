@@ -158,8 +158,8 @@ impl NDArrayDriverParams {
 
             // Attributes
             attributes_file: base.create_param("ATTRIBUTES_FILE", ParamType::Octet)?,
-            attributes_status: base.create_param("ATTRIBUTES_STATUS", ParamType::Int32)?,
-            attributes_macros: base.create_param("ATTRIBUTES_MACROS", ParamType::Octet)?,
+            attributes_status: base.create_param("ND_ATTRIBUTES_STATUS", ParamType::Int32)?,
+            attributes_macros: base.create_param("ND_ATTRIBUTES_MACROS", ParamType::Octet)?,
 
             // Queue
             num_queued_arrays: base.create_param("NUM_QUEUED_ARRAYS", ParamType::Int32)?,

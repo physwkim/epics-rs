@@ -42,10 +42,10 @@ impl AcquisitionContext {
         if wait_for_plugins {
             self.queued_counter.wait_until_zero(Duration::from_secs(5));
         }
-        let _ = self.port_handle.write_int32_blocking(self.ad.acquire_busy, 0, 0);
-        let _ = self.port_handle.write_int32_blocking(self.ad.status, 0, ADStatus::Idle as i32);
-        let _ = self.port_handle.write_int32_blocking(self.ad.acquire, 0, 0);
-        let _ = self.port_handle.call_param_callbacks_blocking(0);
+        self.port_handle.write_int32_no_wait(self.ad.acquire_busy, 0, 0);
+        self.port_handle.write_int32_no_wait(self.ad.status, 0, ADStatus::Idle as i32);
+        self.port_handle.write_int32_no_wait(self.ad.acquire, 0, 0);
+        self.port_handle.call_param_callbacks_no_wait(0);
     }
 }
 
@@ -96,9 +96,9 @@ fn acquisition_loop(ctx: AcquisitionContext) {
         }
 
         // Initialize counters
-        let _ = ctx.port_handle.write_int32_blocking(ctx.ad.num_images_counter, 0, 0);
-        let _ = ctx.port_handle.write_int32_blocking(ctx.ad.status, 0, ADStatus::Acquire as i32);
-        let _ = ctx.port_handle.write_int32_blocking(ctx.ad.acquire_busy, 0, 1);
+        ctx.port_handle.write_int32_no_wait(ctx.ad.num_images_counter, 0, 0);
+        ctx.port_handle.write_int32_no_wait(ctx.ad.status, 0, ADStatus::Acquire as i32);
+        ctx.port_handle.write_int32_no_wait(ctx.ad.acquire_busy, 0, 1);
 
         let mut num_counter = 0;
         let mut array_counter = ctx.port_handle.read_int32_blocking(ctx.ad.base.array_counter, 0).unwrap_or(0);
@@ -117,16 +117,17 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             let reset = dirty_flags.any;
 
             if reset {
-                config = match MovingDotConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.dot) {
-                    Ok(cfg) => cfg,
-                    Err(_) => break,
-                };
+                // If the read fails (e.g. port busy with CP link writes during motor move),
+                // keep the previous config rather than aborting acquisition.
+                if let Ok(cfg) = MovingDotConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.dot) {
+                    config = cfg;
+                }
             }
 
             // Generate the image
             let width = config.size_x;
             let height = config.size_y;
-            let img_data = physics::moving_dot_image_with_config(
+            let mut img_data = physics::moving_dot_image_with_config(
                 width,
                 height,
                 config.motor_x,
@@ -138,7 +139,24 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                 &ctx.image_config,
             );
 
-            // Build NDArray from f64 data
+            // Apply slit aperture mask (zero out pixels outside the aperture)
+            let sl = config.slit_left.max(0.0) as usize;
+            let sr = (config.slit_right as usize).min(width);
+            let st = config.slit_top.max(0.0) as usize;
+            let sb = (config.slit_bottom as usize).min(height);
+            for row in 0..height {
+                for col in 0..width {
+                    if row < st || row >= sb || col < sl || col >= sr {
+                        img_data[row * width + col] = 0.0;
+                    }
+                }
+            }
+
+            // Convert f64 photon counts to u16 (clamp to 0..65535)
+            let u16_data: Vec<u16> = img_data.iter()
+                .map(|&v| v.round().clamp(0.0, 65535.0) as u16)
+                .collect();
+
             let dims = vec![
                 NDDimension::new(height),
                 NDDimension::new(width),
@@ -147,7 +165,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                 unique_id: 0,
                 timestamp: ad_core_rs::timestamp::EpicsTimestamp::default(),
                 dims,
-                data: NDDataBuffer::F64(img_data),
+                data: NDDataBuffer::U16(u16_data),
                 attributes: ad_core_rs::attributes::NDAttributeList::new(),
                 codec: None,
             };
@@ -172,7 +190,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             ctx.port_handle.write_float64_no_wait(ctx.ad.base.timestamp_rbv, 0, frame.timestamp.as_f64());
             ctx.port_handle.write_int32_no_wait(ctx.ad.base.epics_ts_sec, 0, frame.timestamp.sec as i32);
             ctx.port_handle.write_int32_no_wait(ctx.ad.base.epics_ts_nsec, 0, frame.timestamp.nsec as i32);
-            let _ = ctx.port_handle.call_param_callbacks_blocking(0);
+            ctx.port_handle.call_param_callbacks_no_wait(0);
 
             if config.array_callbacks {
                 ctx.array_output.lock().publish(Arc::new(frame));

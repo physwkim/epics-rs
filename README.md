@@ -563,11 +563,12 @@ camonitor mini:ph:DetValue_RBV
 caput mini:ph:mtr 20    # move away from center — value decreases
 
 # Acquire a MovingDot image
-caput mini:dot:cam:ArrayCallbacks 1
-caput mini:dot:cam:ImageMode 0          # Single
-caput mini:dot:cam:AcquireTime 0.1
-caput mini:dot:cam:Acquire 1
-caget mini:dot:cam:ArrayCounter_RBV
+caput mini:dot:cam1:ArrayCallbacks 1
+caput mini:dot:cam1:ImageMode 0          # Single
+caput mini:dot:cam1:AcquireTime 0.1
+caput mini:dot:cam1:Acquire 1
+caget mini:dot:cam1:ArrayCounter_RBV
+caget mini:dot:image1:ArrayData
 ```
 
 **Open the PyDM screens:**
@@ -577,7 +578,7 @@ caget mini:dot:cam:ArrayCounter_RBV
 pydm crates/motor-rs/opi/pydm/motorx_all.ui -m "P=mini:,M=ph:mtr"
 
 # areaDetector top-level display
-pydm opi/pydm/ADTop.ui -m "P=mini:,R=dot:cam:"
+pydm opi/pydm/ADTop.ui -m "P=mini:dot:,R=cam1:"
 ```
 
 ---

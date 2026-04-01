@@ -18,6 +18,7 @@ epicsEnvSet("XSIZE",  "1024")
 epicsEnvSet("YSIZE",  "1024")
 epicsEnvSet("NCHANS", "2048")
 epicsEnvSet("CBUFFS", "500")
+epicsEnvSet("NELEMENTS", "1048576")
 epicsEnvSet("EPICS_DB_INCLUDE_PATH", "$(ADCORE)/db")
 
 # Autosave configuration
@@ -37,11 +38,7 @@ simDetectorConfig("$(PORT)", 1024, 1024, 50000000)
 # Load the detector database
 dbLoadRecords("$(ADSIMDETECTOR)/db/simDetector.template", "P=$(PREFIX),R=$(CAM),PORT=$(PORT),DTYP=asynSimDetector")
 
-# StdArrays plugin (image data for clients)
-NDStdArraysConfigure("IMAGE1", $(QSIZE), 0, "$(PORT)", 0)
-dbLoadRecords("$(ADCORE)/db/NDStdArrays.template", "P=$(PREFIX),R=image1:,PORT=IMAGE1,DTYP=asynIMAGE1,NDARRAY_PORT=$(PORT),FTVL=UCHAR,NELEMENTS=65536")
-
-# Load all common plugins
+# Load all common plugins (includes image1 StdArrays)
 < $(ADCORE)/ioc/commonPlugins.cmd
 
 # Autosave monitor sets (after all records are loaded)

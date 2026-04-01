@@ -13,6 +13,10 @@ pub struct MovingDotParams {
     pub motor_y_pos: usize,
     pub beam_current: usize,
     pub shutter_open: usize,
+    pub slit_left: usize,
+    pub slit_right: usize,
+    pub slit_top: usize,
+    pub slit_bottom: usize,
 }
 
 impl MovingDotParams {
@@ -22,6 +26,10 @@ impl MovingDotParams {
             motor_y_pos: base.create_param("DOT_MOTOR_Y_POS", ParamType::Float64)?,
             beam_current: base.create_param("DOT_BEAM_CURRENT", ParamType::Float64)?,
             shutter_open: base.create_param("DOT_SHUTTER_OPEN", ParamType::Int32)?,
+            slit_left: base.create_param("DOT_SLIT_LEFT", ParamType::Float64)?,
+            slit_right: base.create_param("DOT_SLIT_RIGHT", ParamType::Float64)?,
+            slit_top: base.create_param("DOT_SLIT_TOP", ParamType::Float64)?,
+            slit_bottom: base.create_param("DOT_SLIT_BOTTOM", ParamType::Float64)?,
         })
     }
 }
@@ -40,6 +48,10 @@ pub struct MovingDotConfigSnapshot {
     pub wait_for_plugins: bool,
     pub size_x: usize,
     pub size_y: usize,
+    pub slit_left: f64,
+    pub slit_right: f64,
+    pub slit_top: f64,
+    pub slit_bottom: f64,
 }
 
 impl MovingDotConfigSnapshot {
@@ -62,6 +74,10 @@ impl MovingDotConfigSnapshot {
             wait_for_plugins: handle.read_int32_blocking(ad.base.wait_for_plugins, 0).unwrap_or(0) != 0,
             size_x: handle.read_int32_blocking(ad.size_x, 0)? as usize,
             size_y: handle.read_int32_blocking(ad.size_y, 0)? as usize,
+            slit_left: handle.read_float64_blocking(dot.slit_left, 0)?,
+            slit_right: handle.read_float64_blocking(dot.slit_right, 0)?,
+            slit_top: handle.read_float64_blocking(dot.slit_top, 0)?,
+            slit_bottom: handle.read_float64_blocking(dot.slit_bottom, 0)?,
         })
     }
 }

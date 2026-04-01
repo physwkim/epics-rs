@@ -82,7 +82,7 @@ impl ADDriverParams {
             num_images: port_base.create_param("NUM_IMAGES", ParamType::Int32)?,
             num_images_counter: port_base.create_param("NUM_IMAGES_COUNTER", ParamType::Int32)?,
             num_exposures: port_base.create_param("NUM_EXPOSURES", ParamType::Int32)?,
-            num_exposures_counter: port_base.create_param("NUM_EXPOSURES_COUNTER", ParamType::Int32)?,
+            num_exposures_counter: port_base.create_param("NEXPOSURES_COUNTER", ParamType::Int32)?,
             acquire_time: port_base.create_param("ACQUIRE_TIME", ParamType::Float64)?,
             acquire_period: port_base.create_param("ACQUIRE_PERIOD", ParamType::Float64)?,
             time_remaining: port_base.create_param("TIME_REMAINING", ParamType::Float64)?,

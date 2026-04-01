@@ -26,29 +26,36 @@ impl Default for WaveformRecord {
 
 impl WaveformRecord {
     pub fn new(nelm: i32, ftvl: DbFieldType) -> Self {
-        let val = match ftvl {
-            DbFieldType::Double => EpicsValue::DoubleArray(vec![0.0; nelm as usize]),
-            DbFieldType::Long => EpicsValue::LongArray(vec![0; nelm as usize]),
-            DbFieldType::Char => EpicsValue::CharArray(vec![0; nelm as usize]),
-            _ => EpicsValue::DoubleArray(vec![0.0; nelm as usize]),
+        // Map DBR type to menuFtype index for the ftvl field.
+        // DBR and menuFtype have different numbering.
+        let (val, ftvl_idx) = match ftvl {
+            DbFieldType::Char   => (EpicsValue::CharArray(vec![0; nelm as usize]),    1),  // CHAR
+            DbFieldType::Short  => (EpicsValue::ShortArray(vec![0; nelm as usize]),   3),  // SHORT
+            DbFieldType::Long   => (EpicsValue::LongArray(vec![0; nelm as usize]),    5),  // LONG
+            DbFieldType::Float  => (EpicsValue::FloatArray(vec![0.0; nelm as usize]), 9),  // FLOAT
+            DbFieldType::Double => (EpicsValue::DoubleArray(vec![0.0; nelm as usize]), 10), // DOUBLE
+            _                   => (EpicsValue::DoubleArray(vec![0.0; nelm as usize]), 10),
         };
         Self {
             val,
             nelm,
             nord: 0,
-            ftvl: ftvl as i16,
+            ftvl: ftvl_idx,
         }
     }
 
     /// Reallocate VAL buffer to match current FTVL and NELM.
     ///
-    /// FTVL uses menuFtype indices: CHAR=1, LONG=5, FLOAT=9, DOUBLE=10, etc.
+    /// menuFtype indices: STRING=0, CHAR=1, UCHAR=2, SHORT=3, USHORT=4,
+    /// LONG=5, ULONG=6, INT64=7, UINT64=8, FLOAT=9, DOUBLE=10, ENUM=11
     fn reallocate_val(&mut self) {
         let n = self.nelm.max(0) as usize;
         self.val = match self.ftvl {
-            5 | 6 => EpicsValue::LongArray(vec![0; n]),       // LONG, ULONG
-            1 | 2 => EpicsValue::CharArray(vec![0; n]),       // CHAR, UCHAR
-            _ => EpicsValue::DoubleArray(vec![0.0; n]),       // DOUBLE, FLOAT, etc.
+            1 | 2 => EpicsValue::CharArray(vec![0; n]),           // CHAR, UCHAR
+            3 | 4 => EpicsValue::ShortArray(vec![0; n]),          // SHORT, USHORT
+            5 | 6 => EpicsValue::LongArray(vec![0; n]),           // LONG, ULONG
+            9     => EpicsValue::FloatArray(vec![0.0; n]),        // FLOAT
+            _     => EpicsValue::DoubleArray(vec![0.0; n]),       // DOUBLE, etc.
         };
         self.nord = 0;
     }
@@ -82,7 +89,9 @@ impl Record for WaveformRecord {
                 // Update NORD based on actual data length
                 match &value {
                     EpicsValue::DoubleArray(arr) => self.nord = arr.len() as i32,
+                    EpicsValue::FloatArray(arr) => self.nord = arr.len() as i32,
                     EpicsValue::LongArray(arr) => self.nord = arr.len() as i32,
+                    EpicsValue::ShortArray(arr) => self.nord = arr.len() as i32,
                     EpicsValue::CharArray(arr) => self.nord = arr.len() as i32,
                     _ => self.nord = 1,
                 }

@@ -48,10 +48,18 @@ impl MovingDotDetector {
         base.set_int32_param(ad.params.image_mode, 0, ImageMode::Continuous as i32)?;
         base.set_int32_param(ad.params.num_images, 0, 100)?;
 
+        base.set_int32_param(ad.params.base.data_type, 0, 3)?; // UInt16
+
         base.set_float64_param(dot_params.motor_x_pos, 0, 0.0)?;
         base.set_float64_param(dot_params.motor_y_pos, 0, 0.0)?;
         base.set_float64_param(dot_params.beam_current, 0, 500.0)?;
         base.set_int32_param(dot_params.shutter_open, 0, 1)?;
+
+        // Slit aperture: 0 means no limit (full image)
+        base.set_float64_param(dot_params.slit_left, 0, 0.0)?;
+        base.set_float64_param(dot_params.slit_right, 0, 640.0)?;
+        base.set_float64_param(dot_params.slit_top, 0, 0.0)?;
+        base.set_float64_param(dot_params.slit_bottom, 0, 480.0)?;
 
         dirty.lock().set();
 
@@ -81,6 +89,8 @@ impl PortDriver for MovingDotDetector {
             let acquiring = self.ad.port_base.get_int32_param(acquire_idx, 0).unwrap_or(0);
             if value != 0 && acquiring == 0 {
                 self.ad.port_base.set_int32_param(acquire_idx, 0, value)?;
+                // Flush Acquire state immediately so the record reflects the change
+                self.ad.port_base.call_param_callbacks(0)?;
                 let _ = self.acq_tx.send(AcqCommand::Start);
             } else if value == 0 && acquiring != 0 {
                 self.ad.port_base.set_int32_param(acquire_idx, 0, value)?;
@@ -95,7 +105,9 @@ impl PortDriver for MovingDotDetector {
             }
         }
 
-        self.ad.port_base.call_param_callbacks(0)?;
+        // No call_param_callbacks here — the acquisition task fires callbacks
+        // after each frame. Calling it from within the port actor during a
+        // CP-link write causes re-entrant message storms that stall tokio.
         Ok(())
     }
 
@@ -108,11 +120,15 @@ impl PortDriver for MovingDotDetector {
             || reason == self.dot_params.beam_current
             || reason == self.ad.params.acquire_time
             || reason == self.ad.params.acquire_period
+            || reason == self.dot_params.slit_left
+            || reason == self.dot_params.slit_right
+            || reason == self.dot_params.slit_top
+            || reason == self.dot_params.slit_bottom
         {
             self.dirty.lock().set();
         }
 
-        self.ad.port_base.call_param_callbacks(0)?;
+        // No call_param_callbacks — deferred to acquisition task
         Ok(())
     }
 }

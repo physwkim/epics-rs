@@ -11,8 +11,8 @@ epicsEnvSet("BEAM_UPDATE_MS", "100")
 simMotorCreate("ph_mtr", -100, 100, 100)
 simMotorCreate("edge_mtr", -100, 100, 100)
 simMotorCreate("slit_mtr", -100, 100, 100)
-simMotorCreate("dot_mtrx", -100, 100, 100)
-simMotorCreate("dot_mtry", -100, 100, 100)
+simMotorCreate("dot_mtrx", -500, 500, 100)
+simMotorCreate("dot_mtry", -500, 500, 100)
 
 # ===== Kohzu DCM (Double Crystal Monochromator) =====
 simMotorCreate("dcm_theta", -10, 90, 100)
@@ -41,8 +41,8 @@ miniBeamlineConfig()
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=ph:mtr,PORT=ph_mtr")
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=edge:mtr,PORT=edge_mtr")
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=slit:mtr,PORT=slit_mtr")
-dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=dot:mtrx,PORT=dot_mtrx")
-dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=dot:mtry,PORT=dot_mtry")
+dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=dot:mtrx,PORT=dot_mtrx,VELO=500,ACCL=0.1,HLM=500,LLM=-500")
+dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=dot:mtry,PORT=dot_mtry,VELO=500,ACCL=0.1,HLM=500,LLM=-500")
 
 # Load DCM motors and sequencer database
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=dcm:theta,PORT=dcm_theta")
@@ -63,18 +63,25 @@ dbLoadRecords("$(MINI_BEAMLINE)/db/point_detector.template", "P=$(PREFIX),R=ph:,
 dbLoadRecords("$(MINI_BEAMLINE)/db/point_detector.template", "P=$(PREFIX),R=edge:,MTR=edge:mtr,DTYP=asynPointDet_EDGE")
 dbLoadRecords("$(MINI_BEAMLINE)/db/point_detector.template", "P=$(PREFIX),R=slit:,MTR=slit:mtr,DTYP=asynPointDet_SLIT")
 
-# Load moving dot detector
-dbLoadRecords("$(MINI_BEAMLINE)/db/moving_dot.template", "P=$(PREFIX),R=dot:cam:,PORT=DOT,DTYP=asynMovingDot")
+# ===== MovingDot area detector (AD convention: P=detector prefix, R=cam1:) =====
+epicsEnvSet("PREFIX", "mini:dot:")
+epicsEnvSet("PORT",       "DOT")
+epicsEnvSet("QSIZE",      "20")
+epicsEnvSet("XSIZE",      "$(DOT_SIZE_X)")
+epicsEnvSet("YSIZE",      "$(DOT_SIZE_Y)")
+epicsEnvSet("NCHANS",     "2048")
+epicsEnvSet("CBUFFS",     "500")
+epicsEnvSet("NELEMENTS",  "307200")
+epicsEnvSet("FTVL",       "SHORT")
+epicsEnvSet("TYPE",       "Int16")
+epicsEnvSet("EPICS_DB_INCLUDE_PATH", "$(MINI_BEAMLINE)/db:$(ADCORE)/db")
+dbLoadRecords("$(MINI_BEAMLINE)/db/moving_dot.template", "P=$(PREFIX),R=cam1:,IOC=mini:,PORT=DOT,DTYP=asynMovingDot")
 
 # Load standard areaDetector plugins for MovingDot
-epicsEnvSet("PORT",    "DOT")
-epicsEnvSet("QSIZE",   "20")
-epicsEnvSet("XSIZE",   "$(DOT_SIZE_X)")
-epicsEnvSet("YSIZE",   "$(DOT_SIZE_Y)")
-epicsEnvSet("NCHANS",  "2048")
-epicsEnvSet("CBUFFS",  "500")
-epicsEnvSet("EPICS_DB_INCLUDE_PATH", "$(ADCORE)/db")
 < $(ADCORE)/ioc/commonPlugins.cmd
+
+# Restore top-level prefix
+epicsEnvSet("PREFIX", "mini:")
 
 # ===== State machines (spawned here, wait internally for iocInit + PV availability) =====
 seqStart("kohzuCtl", "P=$(PREFIX),M_THETA=dcm:theta,M_Y=dcm:y,M_Z=dcm:z")

@@ -63,8 +63,8 @@ pub fn build_param_registry(ad: &ADBaseParams, dot: &MovingDotParams) -> ParamRe
     map.insert("ReadStatus".into(), ParamInfo::int32(ad.read_status, "READ_STATUS"));
 
     // Detector
-    map.insert("ADGain".into(), ParamInfo::float64(ad.gain, "GAIN"));
-    map.insert("ADGain_RBV".into(), ParamInfo::float64(ad.gain, "GAIN"));
+    map.insert("Gain".into(), ParamInfo::float64(ad.gain, "GAIN"));
+    map.insert("Gain_RBV".into(), ParamInfo::float64(ad.gain, "GAIN"));
     map.insert("FrameType".into(), ParamInfo::int32(ad.frame_type, "FRAME_TYPE"));
     map.insert("FrameType_RBV".into(), ParamInfo::int32(ad.frame_type, "FRAME_TYPE"));
     map.insert("TriggerMode".into(), ParamInfo::int32(ad.trigger_mode, "TRIGGER_MODE"));
@@ -94,6 +94,7 @@ pub fn build_param_registry(ad: &ADBaseParams, dot: &MovingDotParams) -> ParamRe
     map.insert("StringFromServer_RBV".into(), ParamInfo::string(ad.string_from_server, "STRING_FROM_SERVER"));
 
     map.insert("AcquireBusyCB".into(), ParamInfo::int32(ad.acquire_busy, "ACQUIRE_BUSY"));
+    map.insert("NumExposuresCounter_RBV".into(), ParamInfo::int32(ad.num_exposures_counter, "NEXPOSURES_COUNTER"));
 
     // ===== NDArrayBase params =====
 
@@ -145,6 +146,12 @@ pub fn build_param_registry(ad: &ADBaseParams, dot: &MovingDotParams) -> ParamRe
     map.insert("PoolEmptyFreeList".into(), ParamInfo::int32(base.pool_empty_free_list, "POOL_EMPTY_FREE_LIST"));
     map.insert("EmptyFreeList".into(), ParamInfo::int32(base.pool_empty_free_list, "POOL_EMPTY_FREE_LIST"));
     map.insert("PoolPollStats".into(), ParamInfo::int32(base.pool_poll_stats, "POOL_POLL_STATS"));
+    map.insert("NumPreAllocBuffers".into(), ParamInfo::int32(base.pool_num_pre_alloc_buffers, "POOL_NUM_PRE_ALLOC_BUFFERS"));
+    map.insert("NumPreAllocBuffers_RBV".into(), ParamInfo::int32(base.pool_num_pre_alloc_buffers, "POOL_NUM_PRE_ALLOC_BUFFERS"));
+    map.insert("PreAllocBuffers".into(), ParamInfo::int32(base.pool_pre_alloc, "POOL_PRE_ALLOC"));
+    map.insert("NumQueuedArrays".into(), ParamInfo::int32(base.num_queued_arrays, "NUM_QUEUED_ARRAYS"));
+    map.insert("NDAttributesStatus".into(), ParamInfo::int32(base.attributes_status, "ND_ATTRIBUTES_STATUS"));
+    map.insert("NDAttributesMacros".into(), ParamInfo::string(base.attributes_macros, "ND_ATTRIBUTES_MACROS"));
 
     // NDFile params
     map.insert("FilePath".into(), ParamInfo::string(base.file_path, "FILE_PATH"));
@@ -195,6 +202,14 @@ pub fn build_param_registry(ad: &ADBaseParams, dot: &MovingDotParams) -> ParamRe
     map.insert("BeamCurrent_RBV".into(), ParamInfo::float64(dot.beam_current, "DOT_BEAM_CURRENT"));
     map.insert("ShutterOpen".into(), ParamInfo::int32(dot.shutter_open, "DOT_SHUTTER_OPEN"));
     map.insert("ShutterOpen_RBV".into(), ParamInfo::int32(dot.shutter_open, "DOT_SHUTTER_OPEN"));
+    map.insert("SlitLeft".into(), ParamInfo::float64(dot.slit_left, "DOT_SLIT_LEFT"));
+    map.insert("SlitLeft_RBV".into(), ParamInfo::float64(dot.slit_left, "DOT_SLIT_LEFT"));
+    map.insert("SlitRight".into(), ParamInfo::float64(dot.slit_right, "DOT_SLIT_RIGHT"));
+    map.insert("SlitRight_RBV".into(), ParamInfo::float64(dot.slit_right, "DOT_SLIT_RIGHT"));
+    map.insert("SlitTop".into(), ParamInfo::float64(dot.slit_top, "DOT_SLIT_TOP"));
+    map.insert("SlitTop_RBV".into(), ParamInfo::float64(dot.slit_top, "DOT_SLIT_TOP"));
+    map.insert("SlitBottom".into(), ParamInfo::float64(dot.slit_bottom, "DOT_SLIT_BOTTOM"));
+    map.insert("SlitBottom_RBV".into(), ParamInfo::float64(dot.slit_bottom, "DOT_SLIT_BOTTOM"));
 
     map
 }
@@ -254,11 +269,22 @@ impl DeviceSupport for MovingDotDeviceSupport {
     }
 
     fn write(&mut self, record: &mut dyn Record) -> CaResult<()> {
-        self.inner.write(record)
+        // Use fire-and-forget writes to avoid blocking the tokio thread.
+        // CP links (MotorXPos, MotorYPos, BeamCurrent) update rapidly during
+        // motor moves; blocking writes would stall the entire record processing.
+        if let Some(val) = record.val() {
+            let op = self.inner.write_op_pub(&val);
+            if let Some(op) = op {
+                let user = asyn_rs::user::AsynUser::new(self.inner.reason())
+                    .with_addr(self.inner.addr());
+                self.inner.handle().submit_no_wait(op, user);
+            }
+        }
+        Ok(())
     }
 
-    fn write_begin(&mut self, record: &mut dyn Record) -> CaResult<Option<Box<dyn WriteCompletion>>> {
-        self.inner.write_begin(record)
+    fn write_begin(&mut self, _record: &mut dyn Record) -> CaResult<Option<Box<dyn WriteCompletion>>> {
+        Ok(None) // write() handles everything non-blocking
     }
 
     fn last_alarm(&self) -> Option<(u16, u16)> {

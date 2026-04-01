@@ -117,41 +117,142 @@ For each `R` = `ph:`, `edge:`, `slit:`:
 
 ### MovingDot Area Detector
 
+Uses the standard areaDetector PV convention: `P=mini:dot:, R=cam1:` for the driver,
+with plugins under the same prefix (`mini:dot:image1:`, `mini:dot:Stats1:`, etc.).
+
 | PV | Type | Description |
 |----|------|-------------|
-| `mini:dot:cam:Acquire` | bo | Start/stop acquisition |
-| `mini:dot:cam:Acquire_RBV` | bi | Acquisition status readback |
-| `mini:dot:cam:ImageMode` | mbbo | Single / Multiple / Continuous |
-| `mini:dot:cam:ImageMode_RBV` | mbbi | Image mode readback |
-| `mini:dot:cam:NumImages` | longout | Number of images (Multiple mode) |
-| `mini:dot:cam:NumImages_RBV` | longin | Number of images readback |
-| `mini:dot:cam:NumImagesCounter_RBV` | longin | Images acquired so far |
-| `mini:dot:cam:AcquireTime` | ao | Exposure time (s) |
-| `mini:dot:cam:AcquireTime_RBV` | ai | Exposure time readback |
-| `mini:dot:cam:AcquirePeriod` | ao | Acquisition period (s) |
-| `mini:dot:cam:AcquirePeriod_RBV` | ai | Acquisition period readback |
-| `mini:dot:cam:DetectorState_RBV` | mbbi | Detector state (Idle/Acquire/...) |
-| `mini:dot:cam:AcquireBusy_RBV` | bi | Whether acquisition is in progress |
-| `mini:dot:cam:ArrayCounter` | longout | Frame counter (resettable) |
-| `mini:dot:cam:ArrayCounter_RBV` | longin | Frame counter readback |
-| `mini:dot:cam:ArrayCallbacks` | bo | Enable/disable NDArray callbacks |
-| `mini:dot:cam:ArrayCallbacks_RBV` | bi | Callback status readback |
-| `mini:dot:cam:MaxSizeX_RBV` | longin | Maximum image width |
-| `mini:dot:cam:MaxSizeY_RBV` | longin | Maximum image height |
-| `mini:dot:cam:SizeX` | longout | Image width |
-| `mini:dot:cam:SizeX_RBV` | longin | Width readback |
-| `mini:dot:cam:SizeY` | longout | Image height |
-| `mini:dot:cam:SizeY_RBV` | longin | Height readback |
-| `mini:dot:cam:MotorXPos` | ao | X motor position (CP from dot:mtrx RBV) |
-| `mini:dot:cam:MotorXPos_RBV` | ai | X motor position readback |
-| `mini:dot:cam:MotorYPos` | ao | Y motor position (CP from dot:mtry RBV) |
-| `mini:dot:cam:MotorYPos_RBV` | ai | Y motor position readback |
-| `mini:dot:cam:BeamCurrent` | ao | Beam current (CP from mini:current) |
-| `mini:dot:cam:BeamCurrent_RBV` | ai | Beam current readback |
-| `mini:dot:cam:ShutterOpen` | bo | Shutter open/closed |
-| `mini:dot:cam:ShutterOpen_RBV` | bi | Shutter status readback |
-| `mini:dot:cam:Manufacturer_RBV` | stringin | Manufacturer ("Mini Beamline") |
-| `mini:dot:cam:Model_RBV` | stringin | Model name ("Moving Dot") |
+| `mini:dot:cam1:Acquire` | bo | Start/stop acquisition |
+| `mini:dot:cam1:Acquire_RBV` | bi | Acquisition status readback |
+| `mini:dot:cam1:ImageMode` | mbbo | Single / Multiple / Continuous |
+| `mini:dot:cam1:ImageMode_RBV` | mbbi | Image mode readback |
+| `mini:dot:cam1:NumImages` | longout | Number of images (Multiple mode) |
+| `mini:dot:cam1:NumImages_RBV` | longin | Number of images readback |
+| `mini:dot:cam1:NumImagesCounter_RBV` | longin | Images acquired so far |
+| `mini:dot:cam1:AcquireTime` | ao | Exposure time (s) |
+| `mini:dot:cam1:AcquireTime_RBV` | ai | Exposure time readback |
+| `mini:dot:cam1:AcquirePeriod` | ao | Acquisition period (s) |
+| `mini:dot:cam1:AcquirePeriod_RBV` | ai | Acquisition period readback |
+| `mini:dot:cam1:DetectorState_RBV` | mbbi | Detector state (Idle/Acquire/...) |
+| `mini:dot:cam1:AcquireBusy_RBV` | bi | Whether acquisition is in progress |
+| `mini:dot:cam1:ArrayCounter` | longout | Frame counter (resettable) |
+| `mini:dot:cam1:ArrayCounter_RBV` | longin | Frame counter readback |
+| `mini:dot:cam1:ArrayCallbacks` | bo | Enable/disable NDArray callbacks |
+| `mini:dot:cam1:ArrayCallbacks_RBV` | bi | Callback status readback |
+| `mini:dot:cam1:MaxSizeX_RBV` | longin | Maximum image width |
+| `mini:dot:cam1:MaxSizeY_RBV` | longin | Maximum image height |
+| `mini:dot:cam1:SizeX` | longout | Image width |
+| `mini:dot:cam1:SizeX_RBV` | longin | Width readback |
+| `mini:dot:cam1:SizeY` | longout | Image height |
+| `mini:dot:cam1:SizeY_RBV` | longin | Height readback |
+| `mini:dot:cam1:MotorXPos` | ao | X motor position (CP from mtrx RBV) |
+| `mini:dot:cam1:MotorXPos_RBV` | ai | X motor position readback |
+| `mini:dot:cam1:MotorYPos` | ao | Y motor position (CP from mtry RBV) |
+| `mini:dot:cam1:MotorYPos_RBV` | ai | Y motor position readback |
+| `mini:dot:cam1:BeamCurrent` | ao | Beam current (CP from mini:current) |
+| `mini:dot:cam1:BeamCurrent_RBV` | ai | Beam current readback |
+| `mini:dot:cam1:ShutterOpen` | bo | Shutter open/closed |
+| `mini:dot:cam1:ShutterOpen_RBV` | bi | Shutter status readback |
+| `mini:dot:cam1:Manufacturer_RBV` | stringin | Manufacturer ("Mini Beamline") |
+| `mini:dot:cam1:Model_RBV` | stringin | Model name ("Moving Dot") |
+| `mini:dot:image1:ArrayData` | waveform | Image data (FTVL=DOUBLE, NELM=307200) |
+
+## Quick Start
+
+```bash
+# Build
+cargo build --release -p mini-beamline --features ioc
+
+# Run
+./target/release/mini_ioc examples/mini-beamline/ioc/st.cmd
+```
+
+### Acquire an image and display with Python
+
+```bash
+# 1. Enable callbacks and acquire a single image
+caput mini:dot:cam1:ArrayCallbacks 1
+caput mini:dot:cam1:ImageMode 0          # Single
+caput mini:dot:cam1:AcquireTime 0.1
+caput mini:dot:cam1:Acquire 1
+
+# 2. Read the image data
+caget mini:dot:image1:ArrayData
+```
+
+```python
+# Display with Python + pyepics + matplotlib
+import epics
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Acquire
+epics.caput('mini:dot:cam1:ArrayCallbacks', 1)
+epics.caput('mini:dot:cam1:ImageMode', 0)
+epics.caput('mini:dot:cam1:AcquireTime', 0.1)
+epics.caput('mini:dot:cam1:Acquire', 1, wait=True)
+
+# Read image (Float64 waveform, 640x480 pixels)
+data = epics.caget('mini:dot:image1:ArrayData')
+sx = epics.caget('mini:dot:cam1:SizeX_RBV')
+sy = epics.caget('mini:dot:cam1:SizeY_RBV')
+img = np.array(data).reshape(sy, sx)
+
+plt.imshow(img, origin='lower')
+plt.colorbar(label='counts')
+plt.title('MovingDot')
+plt.show()
+```
+
+### Move the beam spot
+
+The Gaussian spot center tracks the motor positions (pixel units):
+
+```bash
+# Move spot to the right
+caput mini:dot:mtrx 200
+
+# Move spot down
+caput mini:dot:mtry -150
+
+# Acquire and see the shifted spot
+caput mini:dot:cam1:Acquire 1
+```
+
+### Continuous acquisition
+
+```bash
+caput mini:dot:cam1:ImageMode 2          # Continuous
+caput mini:dot:cam1:AcquirePeriod 0.2    # 5 Hz
+caput mini:dot:cam1:Acquire 1
+
+# Monitor frame counter
+camonitor mini:dot:cam1:ArrayCounter_RBV
+
+# Stop
+caput mini:dot:cam1:Acquire 0
+```
+
+### Point detector scan (motor sweep)
+
+```bash
+# Monitor the pinhole detector value while moving the motor
+camonitor mini:ph:DetValue_RBV &
+for pos in $(seq -20 1 20); do
+  caput -w 1 mini:ph:mtr $pos
+  sleep 0.2
+done
+
+# The detector value traces a Gaussian peak centered at 0
+```
+
+### Dark frame (shutter closed)
+
+```bash
+caput mini:dot:cam1:ShutterOpen 0        # Close shutter
+caput mini:dot:cam1:Acquire 1            # Only Poisson background noise
+caput mini:dot:cam1:ShutterOpen 1        # Re-open
+```
 
 ## Configuration
 
@@ -306,9 +407,10 @@ camonitor mini:ph:DetValue_RBV
 caput mini:ph:mtr 20
 
 # Acquire a MovingDot image
-caput mini:dot:cam:ArrayCallbacks 1
-caput mini:dot:cam:ImageMode 0        # Single
-caput mini:dot:cam:AcquireTime 0.1
-caput mini:dot:cam:Acquire 1
-caget mini:dot:cam:ArrayCounter_RBV
+caput mini:dot:cam1:ArrayCallbacks 1
+caput mini:dot:cam1:ImageMode 0        # Single
+caput mini:dot:cam1:AcquireTime 0.1
+caput mini:dot:cam1:Acquire 1
+caget mini:dot:cam1:ArrayCounter_RBV
+caget mini:dot:image1:ArrayData
 ```

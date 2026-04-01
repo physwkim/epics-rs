@@ -61,7 +61,7 @@ pub fn build_param_registry_from_params(ad: &ADBaseParams, sim: &SimDetectorPara
     map.insert("NumImagesCounter_RBV".into(), ParamInfo::int32(ad.num_images_counter, "NUM_IMAGES_COUNTER"));
     map.insert("NumExposures".into(), ParamInfo::int32(ad.num_exposures, "NUM_EXPOSURES"));
     map.insert("NumExposures_RBV".into(), ParamInfo::int32(ad.num_exposures, "NUM_EXPOSURES"));
-    map.insert("NumExposuresCounter_RBV".into(), ParamInfo::int32(ad.num_exposures_counter, "NUM_EXPOSURES_COUNTER"));
+    map.insert("NumExposuresCounter_RBV".into(), ParamInfo::int32(ad.num_exposures_counter, "NEXPOSURES_COUNTER"));
     map.insert("AcquireTime".into(), ParamInfo::float64(ad.acquire_time, "ACQUIRE_TIME"));
     map.insert("AcquireTime_RBV".into(), ParamInfo::float64(ad.acquire_time, "ACQUIRE_TIME"));
     map.insert("AcquirePeriod".into(), ParamInfo::float64(ad.acquire_period, "ACQUIRE_PERIOD"));
@@ -171,9 +171,9 @@ pub fn build_param_registry_from_params(ad: &ADBaseParams, sim: &SimDetectorPara
 
     // Attributes
     map.insert("NDAttributesFile".into(), ParamInfo::string(base.attributes_file, "ATTRIBUTES_FILE"));
-    map.insert("NDAttributesStatus".into(), ParamInfo::int32(base.attributes_status, "ATTRIBUTES_STATUS"));
-    map.insert("NDAttributesStatus_RBV".into(), ParamInfo::int32(base.attributes_status, "ATTRIBUTES_STATUS"));
-    map.insert("NDAttributesMacros".into(), ParamInfo::string(base.attributes_macros, "ATTRIBUTES_MACROS"));
+    map.insert("NDAttributesStatus".into(), ParamInfo::int32(base.attributes_status, "ND_ATTRIBUTES_STATUS"));
+    map.insert("NDAttributesStatus_RBV".into(), ParamInfo::int32(base.attributes_status, "ND_ATTRIBUTES_STATUS"));
+    map.insert("NDAttributesMacros".into(), ParamInfo::string(base.attributes_macros, "ND_ATTRIBUTES_MACROS"));
 
     // ===== NDFile.db params =====
 

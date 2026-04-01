@@ -250,6 +250,26 @@ impl AsynDeviceSupport {
         self.reason = reason;
         self.reason_set = true;
     }
+
+    /// Get the param reason (index).
+    pub fn reason(&self) -> usize {
+        self.reason
+    }
+
+    /// Get the asyn address.
+    pub fn addr(&self) -> i32 {
+        self.addr
+    }
+
+    /// Get a reference to the underlying port handle.
+    pub fn handle(&self) -> &PortHandle {
+        &self.handle
+    }
+
+    /// Build a write request op from an EpicsValue (public wrapper for subclasses).
+    pub fn write_op_pub(&self, val: &EpicsValue) -> Option<RequestOp> {
+        self.write_op(val)
+    }
 }
 
 fn asyn_to_ca_error(e: AsynError) -> CaError {

@@ -465,32 +465,50 @@ async fn dispatch_message(
 
             // F1: CA_PROTO_WRITE (cmd=4) is fire-and-forget — no response
             if is_notify {
-                let eca_status = match write_result {
-                    Ok(completion_rx) => {
-                        // If async processing started (e.g. motor move), wait
-                        // for completion callback before sending write_notify.
-                        // This matches C EPICS ca_put_callback behavior.
-                        if let Some(rx) = completion_rx {
-                            let _ = tokio::time::timeout(
-                                std::time::Duration::from_secs(30),
-                                rx,
-                            ).await;
-                        }
-                        ECA_NORMAL
-                    }
+                let eca_status = match &write_result {
+                    Ok(_) => ECA_NORMAL,
                     Err(e) => e.to_eca_status(),
                 };
 
-                // F6: Per spec, param1=status, param2=IOID
-                let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
-                resp.data_type = write_type as u16;
-                resp.count = 1;
-                resp.cid = eca_status;
-                resp.available = ioid;
+                // If async processing started (e.g. motor move), spawn a
+                // background task to await completion and send the response.
+                // This avoids blocking the client handler loop, which would
+                // freeze all camonitor subscriptions on this connection.
+                let completion_rx = match write_result {
+                    Ok(rx) => rx,
+                    Err(_) => None,
+                };
 
-                let mut w = writer.lock().await;
-                w.write_all(&resp.to_bytes()).await?;
-                w.flush().await?;
+                if let Some(rx) = completion_rx {
+                    let writer_c = writer.clone();
+                    tokio::spawn(async move {
+                        // Wait indefinitely for record processing to complete,
+                        // matching C EPICS rsrv behavior. The task is cleaned up
+                        // automatically if the client disconnects (rx sender dropped).
+                        let _ = rx.await;
+
+                        let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
+                        resp.data_type = write_type as u16;
+                        resp.count = 1;
+                        resp.cid = eca_status;
+                        resp.available = ioid;
+
+                        let mut w = writer_c.lock().await;
+                        let _ = w.write_all(&resp.to_bytes()).await;
+                        let _ = w.flush().await;
+                    });
+                } else {
+                    // Synchronous completion — respond immediately
+                    let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
+                    resp.data_type = write_type as u16;
+                    resp.count = 1;
+                    resp.cid = eca_status;
+                    resp.available = ioid;
+
+                    let mut w = writer.lock().await;
+                    w.write_all(&resp.to_bytes()).await?;
+                    w.flush().await?;
+                }
             }
         }
 

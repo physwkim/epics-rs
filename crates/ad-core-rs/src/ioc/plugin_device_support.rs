@@ -109,8 +109,22 @@ impl DeviceSupport for PluginDeviceSupport {
             if let Some(ref data_handle) = self.array_data {
                 let guard = data_handle.lock();
                 if let Some(ref array) = *guard {
-                    let bytes = array.data.as_u8_slice();
-                    record.set_val(EpicsValue::CharArray(bytes.to_vec()))?;
+                    use crate::ndarray::NDDataBuffer;
+                    let val = match &array.data {
+                        NDDataBuffer::F64(v) => EpicsValue::DoubleArray(v.clone()),
+                        NDDataBuffer::F32(v) => EpicsValue::FloatArray(v.clone()),
+                        NDDataBuffer::I32(v) => EpicsValue::LongArray(v.clone()),
+                        NDDataBuffer::U32(v) => EpicsValue::LongArray(v.iter().map(|&x| x as i32).collect()),
+                        NDDataBuffer::I16(v) => EpicsValue::ShortArray(v.clone()),
+                        NDDataBuffer::U16(v) => EpicsValue::ShortArray(v.iter().map(|&x| x as i16).collect()),
+                        NDDataBuffer::U8(v) => EpicsValue::CharArray(v.clone()),
+                        NDDataBuffer::I8(v) => EpicsValue::CharArray(v.iter().map(|&x| x as u8).collect()),
+                        _ => {
+                            let bytes = array.data.as_u8_slice();
+                            EpicsValue::CharArray(bytes.to_vec())
+                        }
+                    };
+                    record.set_val(val)?;
                 }
             }
             return Ok(DeviceReadOutcome::ok());
