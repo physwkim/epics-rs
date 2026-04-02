@@ -61,7 +61,35 @@ impl WaveformRecord {
     }
 }
 
-static WAVEFORM_FIELDS: &[FieldDesc] = &[
+static WAVEFORM_FIELDS_CHAR: &[FieldDesc] = &[
+    FieldDesc { name: "VAL", dbf_type: DbFieldType::Char, read_only: false },
+    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+];
+
+static WAVEFORM_FIELDS_SHORT: &[FieldDesc] = &[
+    FieldDesc { name: "VAL", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+];
+
+static WAVEFORM_FIELDS_LONG: &[FieldDesc] = &[
+    FieldDesc { name: "VAL", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+];
+
+static WAVEFORM_FIELDS_FLOAT: &[FieldDesc] = &[
+    FieldDesc { name: "VAL", dbf_type: DbFieldType::Float, read_only: false },
+    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+];
+
+static WAVEFORM_FIELDS_DOUBLE: &[FieldDesc] = &[
     FieldDesc { name: "VAL", dbf_type: DbFieldType::Double, read_only: false },
     FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
     FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
@@ -86,16 +114,47 @@ impl Record for WaveformRecord {
     fn put_field(&mut self, name: &str, value: EpicsValue) -> CaResult<()> {
         match name {
             "VAL" => {
-                // Update NORD based on actual data length
-                match &value {
-                    EpicsValue::DoubleArray(arr) => self.nord = arr.len() as i32,
-                    EpicsValue::FloatArray(arr) => self.nord = arr.len() as i32,
-                    EpicsValue::LongArray(arr) => self.nord = arr.len() as i32,
-                    EpicsValue::ShortArray(arr) => self.nord = arr.len() as i32,
-                    EpicsValue::CharArray(arr) => self.nord = arr.len() as i32,
-                    _ => self.nord = 1,
+                // Coerce value to match FTVL (e.g. String → CharArray for FTVL=CHAR)
+                let value = match (&value, self.ftvl) {
+                    (EpicsValue::String(s), 1 | 2) => {
+                        EpicsValue::CharArray(s.as_bytes().to_vec())
+                    }
+                    _ => value,
+                };
+                // Update NORD based on actual data length, but keep array
+                // at NELM size to preserve CA channel element count.
+                let nelm = self.nelm.max(0) as usize;
+                match value {
+                    EpicsValue::CharArray(mut arr) => {
+                        self.nord = arr.len() as i32;
+                        arr.resize(nelm, 0);
+                        self.val = EpicsValue::CharArray(arr);
+                    }
+                    EpicsValue::ShortArray(mut arr) => {
+                        self.nord = arr.len() as i32;
+                        arr.resize(nelm, 0);
+                        self.val = EpicsValue::ShortArray(arr);
+                    }
+                    EpicsValue::LongArray(mut arr) => {
+                        self.nord = arr.len() as i32;
+                        arr.resize(nelm, 0);
+                        self.val = EpicsValue::LongArray(arr);
+                    }
+                    EpicsValue::FloatArray(mut arr) => {
+                        self.nord = arr.len() as i32;
+                        arr.resize(nelm, 0.0);
+                        self.val = EpicsValue::FloatArray(arr);
+                    }
+                    EpicsValue::DoubleArray(mut arr) => {
+                        self.nord = arr.len() as i32;
+                        arr.resize(nelm, 0.0);
+                        self.val = EpicsValue::DoubleArray(arr);
+                    }
+                    other => {
+                        self.nord = 1;
+                        self.val = other;
+                    }
                 }
-                self.val = value;
                 Ok(())
             }
             "NELM" => {
@@ -124,6 +183,12 @@ impl Record for WaveformRecord {
     }
 
     fn field_list(&self) -> &'static [FieldDesc] {
-        WAVEFORM_FIELDS
+        match self.ftvl {
+            1 | 2 => WAVEFORM_FIELDS_CHAR,
+            3 | 4 => WAVEFORM_FIELDS_SHORT,
+            5 | 6 => WAVEFORM_FIELDS_LONG,
+            9     => WAVEFORM_FIELDS_FLOAT,
+            _     => WAVEFORM_FIELDS_DOUBLE,
+        }
     }
 }

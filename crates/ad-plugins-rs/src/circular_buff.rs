@@ -476,6 +476,28 @@ impl NDPluginProcess for CircularBuffProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginCircularBuff"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("CIRC_BUFF_CONTROL", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_STATUS", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_TRIGGER_A", ParamType::Octet)?;
+        base.create_param("CIRC_BUFF_TRIGGER_B", ParamType::Octet)?;
+        base.create_param("CIRC_BUFF_TRIGGER_A_VAL", ParamType::Float64)?;
+        base.create_param("CIRC_BUFF_TRIGGER_B_VAL", ParamType::Float64)?;
+        base.create_param("CIRC_BUFF_TRIGGER_CALC", ParamType::Octet)?;
+        base.create_param("CIRC_BUFF_TRIGGER_CALC_VAL", ParamType::Float64)?;
+        base.create_param("CIRC_BUFF_PRE_TRIGGER", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_POST_TRIGGER", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_CURRENT_IMAGE", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_POST_COUNT", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_SOFT_TRIGGER", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_TRIGGERED", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_PRESET_TRIGGER_COUNT", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_ACTUAL_TRIGGER_COUNT", ParamType::Int32)?;
+        base.create_param("CIRC_BUFF_FLUSH_ON_SOFTTRIGGER", ParamType::Int32)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

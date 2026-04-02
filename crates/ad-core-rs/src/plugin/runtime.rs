@@ -55,6 +55,7 @@ impl ParamChangeValue {
 pub enum ParamUpdate {
     Int32 { reason: usize, addr: i32, value: i32 },
     Float64 { reason: usize, addr: i32, value: f64 },
+    Octet { reason: usize, addr: i32, value: String },
 }
 
 impl ParamUpdate {
@@ -99,6 +100,30 @@ impl ProcessResult {
     }
 }
 
+/// Result of handling a control-plane param change.
+pub struct ParamChangeResult {
+    pub output_arrays: Vec<Arc<NDArray>>,
+    pub param_updates: Vec<ParamUpdate>,
+}
+
+impl ParamChangeResult {
+    pub fn updates(param_updates: Vec<ParamUpdate>) -> Self {
+        Self { output_arrays: vec![], param_updates }
+    }
+
+    pub fn arrays(output_arrays: Vec<Arc<NDArray>>) -> Self {
+        Self { output_arrays, param_updates: vec![] }
+    }
+
+    pub fn combined(output_arrays: Vec<Arc<NDArray>>, param_updates: Vec<ParamUpdate>) -> Self {
+        Self { output_arrays, param_updates }
+    }
+
+    pub fn empty() -> Self {
+        Self { output_arrays: vec![], param_updates: vec![] }
+    }
+}
+
 /// Pure processing logic. No threading concerns.
 pub trait NDPluginProcess: Send + 'static {
     /// Process one array. Return output arrays and param updates.
@@ -113,7 +138,10 @@ pub trait NDPluginProcess: Send + 'static {
     }
 
     /// Called when a param changes. Reason is the param index.
-    fn on_param_change(&mut self, _reason: usize, _params: &PluginParamSnapshot) {}
+    /// Return param updates to be written back to the port driver.
+    fn on_param_change(&mut self, _reason: usize, _params: &PluginParamSnapshot) -> ParamChangeResult {
+        ParamChangeResult::empty()
+    }
 
     /// Return a handle to the latest NDArray data for array reads.
     /// Override this in plugins like NDPluginStdArrays that serve pixel data
@@ -153,79 +181,88 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
         let t0 = std::time::Instant::now();
         let result = self.processor.process_array(array, &self.pool);
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        self.publish_result(result.output_arrays, result.param_updates, Some(array), elapsed_ms);
+    }
 
-        // Publish output arrays to downstream plugins
+    fn publish_result(
+        &mut self,
+        output_arrays: Vec<Arc<NDArray>>,
+        param_updates: Vec<ParamUpdate>,
+        fallback_array: Option<&NDArray>,
+        elapsed_ms: f64,
+    ) {
         let output = self.output.lock();
-        for out in &result.output_arrays {
+        for out in &output_arrays {
             output.publish(out.clone());
         }
         drop(output);
 
-        // Update base NDArrayDriver params from output array metadata.
-        // Use the first output array if available (reflects ROI/binning/transform),
-        // otherwise fall back to the input array (for sink plugins like Stats).
-        self.array_counter += 1;
+        if let Some(report_arr) = output_arrays
+            .first()
+            .map(|a| a.as_ref())
+            .or(fallback_array)
+        {
+            self.array_counter += 1;
 
-        // Fire array data interrupt directly (C EPICS pattern).
-        // Bypasses port actor channel to avoid dropping large array messages.
-        if let Some(param) = self.std_array_data_param {
-            let data_arr = result.output_arrays.first().map(|a| a.as_ref()).unwrap_or(array);
-            use crate::ndarray::NDDataBuffer;
-            use asyn_rs::param::ParamValue;
-            let value = match &data_arr.data {
-                NDDataBuffer::I8(v) => Some(ParamValue::Int8Array(std::sync::Arc::from(v.as_slice()))),
-                NDDataBuffer::U8(v) => Some(ParamValue::Int8Array(std::sync::Arc::from(
-                    v.iter().map(|&x| x as i8).collect::<Vec<_>>().as_slice()
-                ))),
-                NDDataBuffer::I16(v) => Some(ParamValue::Int16Array(std::sync::Arc::from(v.as_slice()))),
-                NDDataBuffer::U16(v) => Some(ParamValue::Int16Array(std::sync::Arc::from(
-                    v.iter().map(|&x| x as i16).collect::<Vec<_>>().as_slice()
-                ))),
-                NDDataBuffer::I32(v) => Some(ParamValue::Int32Array(std::sync::Arc::from(v.as_slice()))),
-                NDDataBuffer::U32(v) => Some(ParamValue::Int32Array(std::sync::Arc::from(
-                    v.iter().map(|&x| x as i32).collect::<Vec<_>>().as_slice()
-                ))),
-                NDDataBuffer::I64(v) => Some(ParamValue::Int64Array(std::sync::Arc::from(v.as_slice()))),
-                NDDataBuffer::U64(v) => Some(ParamValue::Int64Array(std::sync::Arc::from(
-                    v.iter().map(|&x| x as i64).collect::<Vec<_>>().as_slice()
-                ))),
-                NDDataBuffer::F32(v) => Some(ParamValue::Float32Array(std::sync::Arc::from(v.as_slice()))),
-                NDDataBuffer::F64(v) => Some(ParamValue::Float64Array(std::sync::Arc::from(v.as_slice()))),
-            };
-            if let Some(value) = value {
-                let ts = data_arr.timestamp.to_system_time();
-                self.port_handle.interrupts().notify(asyn_rs::interrupt::InterruptValue {
-                    reason: param,
-                    addr: 0,
-                    value,
-                    timestamp: ts,
-                });
+            // Fire array data interrupt directly (C EPICS pattern).
+            // Bypasses port actor channel to avoid dropping large array messages.
+            if let Some(param) = self.std_array_data_param {
+                use crate::ndarray::NDDataBuffer;
+                use asyn_rs::param::ParamValue;
+                let value = match &report_arr.data {
+                    NDDataBuffer::I8(v) => Some(ParamValue::Int8Array(std::sync::Arc::from(v.as_slice()))),
+                    NDDataBuffer::U8(v) => Some(ParamValue::Int8Array(std::sync::Arc::from(
+                        v.iter().map(|&x| x as i8).collect::<Vec<_>>().as_slice()
+                    ))),
+                    NDDataBuffer::I16(v) => Some(ParamValue::Int16Array(std::sync::Arc::from(v.as_slice()))),
+                    NDDataBuffer::U16(v) => Some(ParamValue::Int16Array(std::sync::Arc::from(
+                        v.iter().map(|&x| x as i16).collect::<Vec<_>>().as_slice()
+                    ))),
+                    NDDataBuffer::I32(v) => Some(ParamValue::Int32Array(std::sync::Arc::from(v.as_slice()))),
+                    NDDataBuffer::U32(v) => Some(ParamValue::Int32Array(std::sync::Arc::from(
+                        v.iter().map(|&x| x as i32).collect::<Vec<_>>().as_slice()
+                    ))),
+                    NDDataBuffer::I64(v) => Some(ParamValue::Int64Array(std::sync::Arc::from(v.as_slice()))),
+                    NDDataBuffer::U64(v) => Some(ParamValue::Int64Array(std::sync::Arc::from(
+                        v.iter().map(|&x| x as i64).collect::<Vec<_>>().as_slice()
+                    ))),
+                    NDDataBuffer::F32(v) => Some(ParamValue::Float32Array(std::sync::Arc::from(v.as_slice()))),
+                    NDDataBuffer::F64(v) => Some(ParamValue::Float64Array(std::sync::Arc::from(v.as_slice()))),
+                };
+                if let Some(value) = value {
+                    let ts = report_arr.timestamp.to_system_time();
+                    self.port_handle.interrupts().notify(asyn_rs::interrupt::InterruptValue {
+                        reason: param,
+                        addr: 0,
+                        value,
+                        timestamp: ts,
+                    });
+                }
             }
+
+            let info = report_arr.info();
+            let color_mode = if report_arr.dims.len() <= 2 { 0 } else { 2 };
+            self.port_handle.write_int32_no_wait(self.ndarray_params.array_counter, 0, self.array_counter);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.unique_id, 0, report_arr.unique_id);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.n_dimensions, 0, report_arr.dims.len() as i32);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_x, 0, info.x_size as i32);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_y, 0, info.y_size as i32);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_z, 0, info.color_size as i32);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.array_size, 0, info.total_bytes as i32);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.data_type, 0, report_arr.data.data_type() as i32);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.color_mode, 0, color_mode);
+
+            let ts_f64 = report_arr.timestamp.as_f64();
+            self.port_handle.write_float64_no_wait(self.ndarray_params.timestamp_rbv, 0, ts_f64);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.epics_ts_sec, 0, report_arr.timestamp.sec as i32);
+            self.port_handle.write_int32_no_wait(self.ndarray_params.epics_ts_nsec, 0, report_arr.timestamp.nsec as i32);
         }
-
-        let report_arr = result.output_arrays.first().map(|a| a.as_ref()).unwrap_or(array);
-        let info = report_arr.info();
-        let color_mode = if report_arr.dims.len() <= 2 { 0 } else { 2 };
-        self.port_handle.write_int32_no_wait(self.ndarray_params.array_counter, 0, self.array_counter);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.unique_id, 0, report_arr.unique_id);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.n_dimensions, 0, report_arr.dims.len() as i32);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_x, 0, info.x_size as i32);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_y, 0, info.y_size as i32);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.array_size_z, 0, info.color_size as i32);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.array_size, 0, info.total_bytes as i32);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.data_type, 0, report_arr.data.data_type() as i32);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.color_mode, 0, color_mode);
-
-        let ts_f64 = array.timestamp.as_f64();
-        self.port_handle.write_float64_no_wait(self.ndarray_params.timestamp_rbv, 0, ts_f64);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.epics_ts_sec, 0, array.timestamp.sec as i32);
-        self.port_handle.write_int32_no_wait(self.ndarray_params.epics_ts_nsec, 0, array.timestamp.nsec as i32);
 
         self.port_handle.write_float64_no_wait(self.plugin_params.execution_time, 0, elapsed_ms);
 
         // Collect unique addrs that have updates (beyond addr 0 which is always flushed)
         let mut extra_addrs: Vec<i32> = Vec::new();
-        for update in &result.param_updates {
+        for update in &param_updates {
             match update {
                 ParamUpdate::Int32 { reason, addr, value } => {
                     self.port_handle.write_int32_no_wait(*reason, *addr, *value);
@@ -238,6 +275,11 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
                     if *addr != 0 && !extra_addrs.contains(addr) {
                         extra_addrs.push(*addr);
                     }
+                }
+                ParamUpdate::Octet { reason, addr, value } => {
+                    let data = value.as_bytes().to_vec();
+                    let user = asyn_rs::user::AsynUser::new(*reason).with_addr(*addr);
+                    self.port_handle.submit_no_wait(asyn_rs::request::RequestOp::OctetWrite { data }, user);
                 }
             }
         }
@@ -305,6 +347,19 @@ impl PluginPortDriver {
         base.set_int32_param(plugin_params.queue_use, 0, 0)?;
         base.set_string_param(plugin_params.plugin_type, 0, plugin_type_name.into())?;
         base.set_int32_param(ndarray_params.array_callbacks, 0, 1)?;
+        base.set_int32_param(ndarray_params.write_file, 0, 0)?;
+        base.set_int32_param(ndarray_params.read_file, 0, 0)?;
+        base.set_int32_param(ndarray_params.capture, 0, 0)?;
+        base.set_int32_param(ndarray_params.file_write_status, 0, 0)?;
+        base.set_string_param(ndarray_params.file_write_message, 0, "".into())?;
+        base.set_string_param(ndarray_params.file_path, 0, "".into())?;
+        base.set_string_param(ndarray_params.file_name, 0, "".into())?;
+        base.set_int32_param(ndarray_params.file_number, 0, 0)?;
+        base.set_int32_param(ndarray_params.auto_increment, 0, 0)?;
+        base.set_string_param(ndarray_params.file_template, 0, "%s%s_%3.3d.dat".into())?;
+        base.set_string_param(ndarray_params.full_file_name, 0, "".into())?;
+        base.set_int32_param(ndarray_params.create_dir, 0, 0)?;
+        base.set_string_param(ndarray_params.temp_suffix, 0, "".into())?;
 
         // Set plugin identity params
         base.set_string_param(ndarray_params.port_name_self, 0, port_name.into())?;
@@ -655,11 +710,12 @@ fn plugin_data_loop<P: NDPluginProcess>(
                             // Handle NDArrayPort rewiring
                             if reason == nd_array_port_reason {
                                 if let Some(new_port) = value.as_string() {
-                                    let old = std::mem::replace(&mut current_upstream, new_port.to_string());
-                                    if let Err(e) = wiring.rewire_by_name(&sender_port_name, &old, new_port) {
-                                        eprintln!("NDArrayPort rewire failed: {e}");
-                                        // Revert current_upstream on failure
-                                        current_upstream = old;
+                                    if new_port != current_upstream {
+                                        let old = std::mem::replace(&mut current_upstream, new_port.to_string());
+                                        if let Err(e) = wiring.rewire_by_name(&sender_port_name, &old, new_port) {
+                                            eprintln!("NDArrayPort rewire failed: {e}");
+                                            current_upstream = old;
+                                        }
                                     }
                                 }
                             }
@@ -669,7 +725,14 @@ fn plugin_data_loop<P: NDPluginProcess>(
                                 addr,
                                 value,
                             };
-                            shared.lock().processor.on_param_change(reason, &snapshot);
+                            let mut guard = shared.lock();
+                            let t0 = std::time::Instant::now();
+                            let result = guard.processor.on_param_change(reason, &snapshot);
+                            let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                            if !result.output_arrays.is_empty() || !result.param_updates.is_empty() {
+                                guard.publish_result(result.output_arrays, result.param_updates, None, elapsed_ms);
+                            }
+                            drop(guard);
                         }
                         None => break,
                     }

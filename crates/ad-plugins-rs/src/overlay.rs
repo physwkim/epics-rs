@@ -282,6 +282,33 @@ impl NDPluginProcess for OverlayProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginOverlay"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        // NDOverlay.template params
+        base.create_param("MAX_SIZE_X", ParamType::Int32)?;
+        base.create_param("MAX_SIZE_Y", ParamType::Int32)?;
+        // NDOverlayN.template params
+        base.create_param("NAME", ParamType::Octet)?;
+        base.create_param("USE", ParamType::Int32)?;
+        base.create_param("OVERLAY_POSITION_X", ParamType::Int32)?;
+        base.create_param("OVERLAY_POSITION_Y", ParamType::Int32)?;
+        base.create_param("OVERLAY_CENTER_X", ParamType::Int32)?;
+        base.create_param("OVERLAY_CENTER_Y", ParamType::Int32)?;
+        base.create_param("OVERLAY_SIZE_X", ParamType::Int32)?;
+        base.create_param("OVERLAY_SIZE_Y", ParamType::Int32)?;
+        base.create_param("OVERLAY_WIDTH_X", ParamType::Int32)?;
+        base.create_param("OVERLAY_WIDTH_Y", ParamType::Int32)?;
+        base.create_param("OVERLAY_SHAPE", ParamType::Int32)?;
+        base.create_param("OVERLAY_DRAW_MODE", ParamType::Int32)?;
+        base.create_param("OVERLAY_RED", ParamType::Int32)?;
+        base.create_param("OVERLAY_GREEN", ParamType::Int32)?;
+        base.create_param("OVERLAY_BLUE", ParamType::Int32)?;
+        base.create_param("OVERLAY_DISPLAY_TEXT", ParamType::Octet)?;
+        base.create_param("OVERLAY_TIMESTAMP_FORMAT", ParamType::Octet)?;
+        base.create_param("OVERLAY_FONT", ParamType::Int32)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

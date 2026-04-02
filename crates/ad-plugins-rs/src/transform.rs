@@ -129,6 +129,12 @@ impl NDPluginProcess for TransformProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginTransform"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("TRANSFORM_TYPE", ParamType::Int32)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -56,7 +56,7 @@ impl NDPluginFileBase {
             file_name: String::new(),
             file_number: 0,
             file_template: String::new(),
-            auto_increment: true,
+            auto_increment: false,
             temp_suffix: String::new(),
             create_dir: 0,
             capture_buffer: Vec::new(),
@@ -68,13 +68,69 @@ impl NDPluginFileBase {
     }
 
     /// Construct the full file path from template/path/name/number.
+    ///
+    /// Mimics C `epicsSnprintf(buf, ..., template, filePath, fileName, fileNumber)`.
+    /// Template uses printf-style: first `%s` → filePath, second `%s` → fileName,
+    /// `%d` (with optional width/precision like `%3.3d`) → fileNumber.
     pub fn create_file_name(&self) -> String {
         if self.file_template.is_empty() {
             format!("{}{}{:04}", self.file_path, self.file_name, self.file_number)
         } else {
-            self.file_template
-                .replace("%s%s", &format!("{}{}", self.file_path, self.file_name))
-                .replace("%d", &self.file_number.to_string())
+            let mut result = String::new();
+            let mut chars = self.file_template.chars().peekable();
+            let mut s_count = 0;
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    // Collect format spec
+                    let mut spec = String::new();
+                    while let Some(&nc) = chars.peek() {
+                        if nc.is_ascii_digit() || nc == '.' || nc == '-' {
+                            spec.push(nc);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    match chars.next() {
+                        Some('s') => {
+                            s_count += 1;
+                            match s_count {
+                                1 => result.push_str(&self.file_path),
+                                2 => result.push_str(&self.file_name),
+                                _ => result.push_str(""),
+                            }
+                        }
+                        Some('d') => {
+                            // Parse width and precision from spec (e.g. "3.3" → width=3, precision=3)
+                            let width: usize = if spec.contains('.') {
+                                spec.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+                            } else {
+                                spec.parse().unwrap_or(0)
+                            };
+                            let precision: usize = if spec.contains('.') {
+                                spec.split('.').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            let pad = width.max(precision);
+                            if pad > 0 {
+                                result.push_str(&format!("{:0>width$}", self.file_number, width = pad));
+                            } else {
+                                result.push_str(&self.file_number.to_string());
+                            }
+                        }
+                        Some(other) => {
+                            result.push('%');
+                            result.push_str(&spec);
+                            result.push(other);
+                        }
+                        None => result.push('%'),
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+            result
         }
     }
 
@@ -89,10 +145,31 @@ impl NDPluginFileBase {
     }
 
     /// Create directory if needed.
+    /// Create directory if needed.
+    /// C ADCore behavior: createDir != 0 → create directories.
+    /// Positive or negative values both trigger creation (negative = depth hint in C,
+    /// but in practice create_dir_all handles any depth).
     pub fn ensure_directory(&self) -> ADResult<()> {
-        if self.create_dir > 0 && !self.file_path.is_empty() {
+        if self.create_dir != 0 && !self.file_path.is_empty() {
             std::fs::create_dir_all(&self.file_path)?;
         }
+        Ok(())
+    }
+
+    /// Write to temp path if temp_suffix is set, then rename to final path.
+    fn write_path(&self) -> (PathBuf, Option<PathBuf>) {
+        let final_path = PathBuf::from(self.create_file_name());
+        if self.temp_suffix.is_empty() {
+            (final_path, None)
+        } else {
+            let temp = PathBuf::from(format!("{}{}", final_path.display(), self.temp_suffix));
+            (temp, Some(final_path))
+        }
+    }
+
+    /// Rename temp file to final path if applicable.
+    fn rename_temp(temp_path: &Path, final_path: &Path) -> ADResult<()> {
+        std::fs::rename(temp_path, final_path)?;
         Ok(())
     }
 
@@ -104,10 +181,13 @@ impl NDPluginFileBase {
     ) -> ADResult<()> {
         match self.mode {
             NDFileMode::Single => {
-                let path = PathBuf::from(self.create_file_name());
-                writer.open_file(&path, NDFileMode::Single, &array)?;
+                let (write_path, final_path) = self.write_path();
+                writer.open_file(&write_path, NDFileMode::Single, &array)?;
                 writer.write_file(&array)?;
                 writer.close_file()?;
+                if let Some(final_path) = final_path {
+                    Self::rename_temp(&write_path, &final_path)?;
+                }
                 if self.auto_increment {
                     self.file_number += 1;
                 }
@@ -121,8 +201,8 @@ impl NDPluginFileBase {
             }
             NDFileMode::Stream => {
                 if !self.is_open {
-                    let path = PathBuf::from(self.create_file_name());
-                    writer.open_file(&path, NDFileMode::Stream, &array)?;
+                    let (write_path, _) = self.write_path();
+                    writer.open_file(&write_path, NDFileMode::Stream, &array)?;
                     self.is_open = true;
                 }
                 writer.write_file(&array)?;
@@ -137,12 +217,15 @@ impl NDPluginFileBase {
         if self.capture_buffer.is_empty() {
             return Ok(());
         }
-        let path = PathBuf::from(self.create_file_name());
-        writer.open_file(&path, NDFileMode::Capture, &self.capture_buffer[0])?;
+        let (write_path, final_path) = self.write_path();
+        writer.open_file(&write_path, NDFileMode::Capture, &self.capture_buffer[0])?;
         for arr in &self.capture_buffer {
             writer.write_file(arr)?;
         }
         writer.close_file()?;
+        if let Some(final_path) = final_path {
+            Self::rename_temp(&write_path, &final_path)?;
+        }
         self.capture_buffer.clear();
         self.num_captured = 0;
         if self.auto_increment {
@@ -155,12 +238,22 @@ impl NDPluginFileBase {
     pub fn close_stream(&mut self, writer: &mut dyn NDFileWriter) -> ADResult<()> {
         if self.is_open {
             writer.close_file()?;
+            // Rename temp to final if temp_suffix was set
+            if !self.temp_suffix.is_empty() {
+                let final_name = self.create_file_name();
+                let temp_name = format!("{}{}", final_name, self.temp_suffix);
+                Self::rename_temp(Path::new(&temp_name), Path::new(&final_name))?;
+            }
             self.is_open = false;
             if self.auto_increment {
                 self.file_number += 1;
             }
         }
         Ok(())
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.is_open
     }
 
     pub fn set_mode(&mut self, mode: NDFileMode) {
@@ -173,6 +266,24 @@ impl NDPluginFileBase {
 
     pub fn num_captured(&self) -> usize {
         self.num_captured
+    }
+
+    pub fn mode(&self) -> NDFileMode {
+        self.mode
+    }
+
+    pub fn num_capture_target(&self) -> usize {
+        self.num_capture
+    }
+
+    pub fn capture_array(&mut self, array: Arc<NDArray>) {
+        self.capture_buffer.push(array);
+        self.num_captured = self.capture_buffer.len();
+    }
+
+    pub fn clear_capture(&mut self) {
+        self.capture_buffer.clear();
+        self.num_captured = 0;
     }
 }
 
@@ -228,6 +339,7 @@ mod tests {
         fb.file_path = "/tmp/".into();
         fb.file_name = "test_".into();
         fb.file_number = 1;
+        fb.auto_increment = true;
         fb.set_mode(NDFileMode::Single);
 
         let mut writer = MockWriter::new(false);
@@ -307,6 +419,7 @@ mod tests {
         fb.file_path = "/tmp/".into();
         fb.file_name = "t_".into();
         fb.file_number = 0;
+        fb.auto_increment = true;
         fb.set_mode(NDFileMode::Single);
 
         let mut writer = MockWriter::new(false);

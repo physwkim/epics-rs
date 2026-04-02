@@ -28,6 +28,15 @@ impl NDPluginProcess for PassthroughProcessor {
     fn process_array(&mut self, _array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         ProcessResult::empty()
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        // Plugin-specific params based on plugin type
+        if self.plugin_type.as_str() == "NDPvaConfigure" {
+            base.create_param("PV_NAME", ParamType::Octet)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -385,9 +385,9 @@ fn test_process_then_file_tiff_pipeline() {
     // Write to TIFF
     let path = std::env::temp_dir().join("integration_process_tiff.tif");
     let mut tiff_proc = TiffFileProcessor::new();
-    tiff_proc.file_base_mut().file_path = path.parent().unwrap().to_str().unwrap().into();
-    tiff_proc.file_base_mut().file_name = path.file_name().unwrap().to_str().unwrap().into();
-    tiff_proc.file_base_mut().set_mode(NDFileMode::Single);
+    tiff_proc.ctrl.file_base.file_path = path.parent().unwrap().to_str().unwrap().into();
+    tiff_proc.ctrl.file_base.file_name = path.file_name().unwrap().to_str().unwrap().into();
+    tiff_proc.ctrl.file_base.set_mode(NDFileMode::Single);
 
     // Use the writer directly for this test
     use ad_core_rs::plugin::file_base::NDFileWriter;

@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use ad_core_rs::error::{ADError, ADResult};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
-use ad_core_rs::plugin::file_base::{NDFileMode, NDFileWriter, NDPluginFileBase};
-use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::plugin::file_base::{NDFileMode, NDFileWriter};
+use ad_core_rs::plugin::file_controller::FilePluginController;
+use ad_core_rs::plugin::runtime::{
+    NDPluginProcess, ParamChangeResult, PluginParamSnapshot, ProcessResult,
+};
 
 // ============================================================
 // Real HDF5 writer (feature-gated)
@@ -390,24 +392,114 @@ fn reconstruct_buffer(dtype: NDDataType, raw: &[u8]) -> NDDataBuffer {
 // Processor (wraps either real HDF5 or binary writer)
 // ============================================================
 
-/// HDF5 file processor wrapping NDPluginFileBase + Hdf5Writer.
+/// HDF5 file processor wrapping FilePluginController<Hdf5Writer>.
 /// When the `hdf5` feature is not enabled, uses a binary format fallback.
 pub struct Hdf5FileProcessor {
-    file_base: NDPluginFileBase,
-    writer: Hdf5Writer,
+    ctrl: FilePluginController<Hdf5Writer>,
 }
 
 impl Hdf5FileProcessor {
     pub fn new() -> Self {
         Self {
-            file_base: NDPluginFileBase::new(),
-            writer: Hdf5Writer::new(),
+            ctrl: FilePluginController::new(Hdf5Writer::new()),
         }
     }
+}
 
-    pub fn file_base_mut(&mut self) -> &mut NDPluginFileBase {
-        &mut self.file_base
-    }
+/// Register all HDF5-specific params (shared by both stub and real processors).
+fn register_hdf5_params(base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    use asyn_rs::param::ParamType;
+    base.create_param("HDF5_SWMRFlushNow", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSizeAuto", ParamType::Int32)?;
+    base.create_param("HDF5_nRowChunks", ParamType::Int32)?;
+    base.create_param("HDF5_nColChunks", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize2", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize3", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize4", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize5", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize6", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize7", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize8", ParamType::Int32)?;
+    base.create_param("HDF5_chunkSize9", ParamType::Int32)?;
+    base.create_param("HDF5_nFramesChunks", ParamType::Int32)?;
+    base.create_param("HDF5_NDAttributeChunk", ParamType::Int32)?;
+    base.create_param("HDF5_chunkBoundaryAlign", ParamType::Int32)?;
+    base.create_param("HDF5_chunkBoundaryThreshold", ParamType::Int32)?;
+    base.create_param("HDF5_nExtraDims", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimSizeN", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimNameN", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSizeX", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimNameX", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSizeY", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimNameY", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSize3", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimName3", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSize4", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimName4", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSize5", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimName5", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSize6", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimName6", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSize7", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimName7", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSize8", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimName8", ParamType::Octet)?;
+    base.create_param("HDF5_extraDimSize9", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimName9", ParamType::Octet)?;
+    base.create_param("HDF5_storeAttributes", ParamType::Int32)?;
+    base.create_param("HDF5_storePerformance", ParamType::Int32)?;
+    base.create_param("HDF5_totalRuntime", ParamType::Float64)?;
+    base.create_param("HDF5_totalIoSpeed", ParamType::Float64)?;
+    base.create_param("HDF5_flushNthFrame", ParamType::Int32)?;
+    base.create_param("HDF5_compressionType", ParamType::Int32)?;
+    base.create_param("HDF5_nbitsPrecision", ParamType::Int32)?;
+    base.create_param("HDF5_nbitsOffset", ParamType::Int32)?;
+    base.create_param("HDF5_szipNumPixels", ParamType::Int32)?;
+    base.create_param("HDF5_zCompressLevel", ParamType::Int32)?;
+    base.create_param("HDF5_bloscShuffleType", ParamType::Int32)?;
+    base.create_param("HDF5_bloscCompressor", ParamType::Int32)?;
+    base.create_param("HDF5_bloscCompressLevel", ParamType::Int32)?;
+    base.create_param("HDF5_jpegQuality", ParamType::Int32)?;
+    base.create_param("HDF5_dimAttDatasets", ParamType::Int32)?;
+    base.create_param("HDF5_layoutErrorMsg", ParamType::Octet)?;
+    base.create_param("HDF5_layoutValid", ParamType::Int32)?;
+    base.create_param("HDF5_layoutFilename", ParamType::Octet)?;
+    base.create_param("HDF5_SWMRSupported", ParamType::Int32)?;
+    base.create_param("HDF5_SWMRMode", ParamType::Int32)?;
+    base.create_param("HDF5_SWMRRunning", ParamType::Int32)?;
+    base.create_param("HDF5_SWMRCbCounter", ParamType::Int32)?;
+    base.create_param("HDF5_posRunning", ParamType::Int32)?;
+    base.create_param("HDF5_posNameDimN", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDimX", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDimY", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDim3", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDim4", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDim5", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDim6", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDim7", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDim8", ParamType::Octet)?;
+    base.create_param("HDF5_posNameDim9", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDimN", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDimX", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDimY", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDim3", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDim4", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDim5", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDim6", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDim7", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDim8", ParamType::Octet)?;
+    base.create_param("HDF5_posIndexDim9", ParamType::Octet)?;
+    base.create_param("HDF5_fillValue", ParamType::Float64)?;
+    base.create_param("HDF5_extraDimChunkX", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunkY", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunk3", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunk4", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunk5", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunk6", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunk7", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunk8", ParamType::Int32)?;
+    base.create_param("HDF5_extraDimChunk9", ParamType::Int32)?;
+    Ok(())
 }
 
 impl Default for Hdf5FileProcessor {
@@ -418,14 +510,20 @@ impl Default for Hdf5FileProcessor {
 
 impl NDPluginProcess for Hdf5FileProcessor {
     fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
-        let _ = self
-            .file_base
-            .process_array(Arc::new(array.clone()), &mut self.writer);
-        ProcessResult::empty() // file plugins are sinks
+        self.ctrl.process_array(array)
     }
 
     fn plugin_type(&self) -> &str {
         "NDFileHDF5"
+    }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        self.ctrl.register_params(base)?;
+        register_hdf5_params(base)
+    }
+
+    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+        self.ctrl.on_param_change(reason, params)
     }
 }
 
@@ -436,25 +534,19 @@ pub use hdf5_real::Hdf5RealWriter;
 /// HDF5 file processor using the real hdf5 crate.
 #[cfg(feature = "hdf5")]
 pub struct Hdf5RealFileProcessor {
-    file_base: NDPluginFileBase,
-    writer: Hdf5RealWriter,
+    ctrl: FilePluginController<Hdf5RealWriter>,
 }
 
 #[cfg(feature = "hdf5")]
 impl Hdf5RealFileProcessor {
     pub fn new() -> Self {
         Self {
-            file_base: NDPluginFileBase::new(),
-            writer: Hdf5RealWriter::new(),
+            ctrl: FilePluginController::new(Hdf5RealWriter::new()),
         }
     }
 
-    pub fn file_base_mut(&mut self) -> &mut NDPluginFileBase {
-        &mut self.file_base
-    }
-
     pub fn set_dataset_name(&mut self, name: &str) {
-        self.writer.set_dataset_name(name);
+        self.ctrl.writer.set_dataset_name(name);
     }
 }
 
@@ -468,14 +560,20 @@ impl Default for Hdf5RealFileProcessor {
 #[cfg(feature = "hdf5")]
 impl NDPluginProcess for Hdf5RealFileProcessor {
     fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
-        let _ = self
-            .file_base
-            .process_array(Arc::new(array.clone()), &mut self.writer);
-        ProcessResult::empty()
+        self.ctrl.process_array(array)
     }
 
     fn plugin_type(&self) -> &str {
         "NDFileHDF5"
+    }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        self.ctrl.register_params(base)?;
+        register_hdf5_params(base)
+    }
+
+    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+        self.ctrl.on_param_change(reason, params)
     }
 }
 

@@ -377,6 +377,21 @@ impl NDPluginProcess for CodecProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginCodec"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("MODE", ParamType::Int32)?;
+        base.create_param("COMPRESSOR", ParamType::Int32)?;
+        base.create_param("COMP_FACTOR", ParamType::Float64)?;
+        base.create_param("JPEG_QUALITY", ParamType::Int32)?;
+        base.create_param("BLOSC_COMPRESSOR", ParamType::Int32)?;
+        base.create_param("BLOSC_CLEVEL", ParamType::Int32)?;
+        base.create_param("BLOSC_SHUFFLE", ParamType::Int32)?;
+        base.create_param("BLOSC_NUMTHREADS", ParamType::Int32)?;
+        base.create_param("CODEC_STATUS", ParamType::Int32)?;
+        base.create_param("CODEC_ERROR", ParamType::Octet)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

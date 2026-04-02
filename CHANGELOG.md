@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.7.9
+
+### File Plugin Architecture (C ADCore NDPluginFile pattern)
+- **`FilePluginController<W: NDFileWriter>`**: generic file plugin controller extracted to `ad-core-rs`, matching C ADCore's `NDPluginFile` base class — all file control logic (auto_save, capture, stream, temp_suffix rename, create_dir, param updates, error reporting) in one place
+- All file plugins (TIFF, HDF5, JPEG, NetCDF) now delegate to `FilePluginController` via composition, eliminating ~300 lines of duplicated control logic
+- **Auto-save**: write each incoming array as a single file when `AutoSave=Yes` (matches C `processCallbacks` autoSave)
+- **Stream mode auto-stop**: close stream when `NumCaptured >= NumCapture` (NumCapture > 0), matching C `doCapture(0)` pattern
+- **Capture mode**: full buffer → flush → close cycle with `NumCaptured` tracking
+- **Temp suffix rename**: write to `path.tmp`, rename to `path` on close (all three modes)
+- **Create dir**: `create_dir != 0` triggers `create_dir_all` (was `> 0` only, negative values like `-5` were ignored)
+- **Write message cleared on success**: prevents stale error messages from persisting after successful writes
+- **printf-style file template**: proper `%s%s_%3.3d.tif` expansion with sequential `%s` → filePath/fileName, `%d` with width/precision
+
+### Waveform FTVL=CHAR Support
+- asynOctetWrite device support for waveform records with `FTVL=CHAR`
+- `write_only` flag: `read()` performs write (waveform is input record type in EPICS)
+- Dynamic `field_list()` returns FTVL-appropriate VAL type (prevents CA write coercion errors)
+- String → CharArray coercion in `put_field` for FTVL=CHAR
+- NELM padding preserved on put (resize to NELM, prevents element count shrink)
+- Trailing null trimming from CharArray before OctetWrite
+
+### Plugin Infrastructure
+- `register_params` implemented for all 12+ areaDetector plugins (was missing, causing silent `drv_user_create` failures)
+- `on_param_change` with `Vec<ParamUpdate>` return for immediate param feedback (FILE_PATH_EXISTS, FULL_FILE_NAME, etc.)
+- `ParamUpdate::Octet` variant for string param updates from data plane
+- Fix NDArrayPort rewire: skip no-op rewire when `new_port == current_upstream` (eliminates startup race condition errors)
+
+### Other
+- `AdIoc::register_record_type()` for custom record type registration
+- `put_notify` completion: `complete_async_record` fires `put_notify_tx.send(())` for CA WRITE_NOTIFY responses
+- ophyd-test-ioc: all plugin ports reused for ADSIM prefix, motor record type registered
+
 ## v0.7.8
 
 ### Universal Asyn Device Support (C EPICS pattern)

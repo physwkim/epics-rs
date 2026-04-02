@@ -491,6 +491,23 @@ impl NDPluginProcess for FFTProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginFFT"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("FFT_TIME_PER_POINT", ParamType::Float64)?;
+        base.create_param("FFT_TIME_AXIS", ParamType::Float64Array)?;
+        base.create_param("FFT_FREQ_AXIS", ParamType::Float64Array)?;
+        base.create_param("FFT_DIRECTION", ParamType::Int32)?;
+        base.create_param("FFT_SUPPRESS_DC", ParamType::Int32)?;
+        base.create_param("FFT_NUM_AVERAGE", ParamType::Int32)?;
+        base.create_param("FFT_NUM_AVERAGED", ParamType::Int32)?;
+        base.create_param("FFT_RESET_AVERAGE", ParamType::Int32)?;
+        base.create_param("FFT_TIME_SERIES", ParamType::Float64Array)?;
+        base.create_param("FFT_REAL", ParamType::Float64Array)?;
+        base.create_param("FFT_IMAGINARY", ParamType::Float64Array)?;
+        base.create_param("FFT_ABS_VALUE", ParamType::Float64Array)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -304,7 +304,14 @@ impl EpicsValue {
             DbFieldType::Short => EpicsValue::Short(self.to_f64().unwrap_or(0.0) as i16),
             DbFieldType::Float => EpicsValue::Float(self.to_f64().unwrap_or(0.0) as f32),
             DbFieldType::Enum => EpicsValue::Enum(self.to_f64().unwrap_or(0.0) as u16),
-            DbFieldType::Char => EpicsValue::Char(self.to_f64().unwrap_or(0.0) as u8),
+            DbFieldType::Char => {
+                // String → CharArray (for waveform FTVL=CHAR)
+                if let EpicsValue::String(s) = self {
+                    EpicsValue::CharArray(s.as_bytes().to_vec())
+                } else {
+                    EpicsValue::Char(self.to_f64().unwrap_or(0.0) as u8)
+                }
+            }
             DbFieldType::Long => EpicsValue::Long(self.to_f64().unwrap_or(0.0) as i32),
             DbFieldType::Double => EpicsValue::Double(self.to_f64().unwrap_or(0.0)),
         }

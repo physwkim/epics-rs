@@ -451,7 +451,7 @@ impl NDPluginProcess for ROIStatProcessor {
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) {
+    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) -> ad_core_rs::plugin::runtime::ParamChangeResult {
         let addr = snapshot.addr as usize;
         let p = &self.params;
 
@@ -479,6 +479,7 @@ impl NDPluginProcess for ROIStatProcessor {
         } else if reason == p.ts_num_points {
             self.ts_num_points = snapshot.value.as_i32().max(0) as usize;
         }
+            ad_core_rs::plugin::runtime::ParamChangeResult::empty()
     }
 }
 

@@ -23,6 +23,10 @@ async fn main() -> CaResult<()> {
 
     let mut ioc = AdIoc::new();
 
+    // Motor record type
+    let (motor_name, motor_factory) = motor_rs::motor_record_factory();
+    ioc.register_record_type(motor_name, motor_factory);
+
     // SimDetector (simDetectorConfig command + simDetector.template)
     sim_detector::ioc_support::register(&mut ioc);
 

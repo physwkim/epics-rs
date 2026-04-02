@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use ad_core_rs::error::{ADError, ADResult};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
-use ad_core_rs::plugin::file_base::{NDFileMode, NDFileWriter, NDPluginFileBase};
-use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::plugin::file_base::{NDFileMode, NDFileWriter};
+use ad_core_rs::plugin::file_controller::FilePluginController;
+use ad_core_rs::plugin::runtime::{
+    NDPluginProcess, ParamChangeResult, PluginParamSnapshot, ProcessResult,
+};
 
 use jpeg_encoder::{Encoder as JpegEncoder, ColorType as JpegColorType};
 
@@ -118,22 +120,18 @@ impl NDFileWriter for JpegWriter {
     }
 }
 
-/// JPEG file processor wrapping NDPluginFileBase + JpegWriter.
+/// JPEG file processor wrapping FilePluginController<JpegWriter>.
 pub struct JpegFileProcessor {
-    file_base: NDPluginFileBase,
-    writer: JpegWriter,
+    ctrl: FilePluginController<JpegWriter>,
+    jpeg_quality_idx: Option<usize>,
 }
 
 impl JpegFileProcessor {
     pub fn new(quality: u8) -> Self {
         Self {
-            file_base: NDPluginFileBase::new(),
-            writer: JpegWriter::new(quality),
+            ctrl: FilePluginController::new(JpegWriter::new(quality)),
+            jpeg_quality_idx: None,
         }
-    }
-
-    pub fn file_base_mut(&mut self) -> &mut NDPluginFileBase {
-        &mut self.file_base
     }
 }
 
@@ -145,14 +143,28 @@ impl Default for JpegFileProcessor {
 
 impl NDPluginProcess for JpegFileProcessor {
     fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
-        let _ = self
-            .file_base
-            .process_array(Arc::new(array.clone()), &mut self.writer);
-        ProcessResult::empty() // file plugins are sinks
+        self.ctrl.process_array(array)
     }
 
     fn plugin_type(&self) -> &str {
         "NDFileJPEG"
+    }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        self.ctrl.register_params(base)?;
+        use asyn_rs::param::ParamType;
+        self.jpeg_quality_idx = Some(base.create_param("JPEG_QUALITY", ParamType::Int32)?);
+        Ok(())
+    }
+
+    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+        // JPEG-specific: quality change
+        if Some(reason) == self.jpeg_quality_idx {
+            let q = params.value.as_i32().clamp(1, 100) as u8;
+            self.ctrl.writer.set_quality(q);
+            return ParamChangeResult::empty();
+        }
+        self.ctrl.on_param_change(reason, params)
     }
 }
 

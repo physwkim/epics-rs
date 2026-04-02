@@ -265,6 +265,13 @@ impl ColorConvertProcessor {
 }
 
 impl NDPluginProcess for ColorConvertProcessor {
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("COLOR_MODE_OUT", ParamType::Int32)?;
+        base.create_param("FALSE_COLOR", ParamType::Int32)?;
+        Ok(())
+    }
+
     fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
         let src_mode = detect_color_mode(array);
         let target = self.config.target_mode;

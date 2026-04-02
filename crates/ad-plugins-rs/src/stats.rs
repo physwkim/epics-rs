@@ -934,7 +934,7 @@ impl NDPluginProcess for StatsProcessor {
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) {
+    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) -> ad_core_rs::plugin::runtime::ParamChangeResult {
         let p = &self.params;
         if reason == p.compute_statistics {
             // toggle handled by do_compute_centroid etc. if needed
@@ -959,6 +959,7 @@ impl NDPluginProcess for StatsProcessor {
         } else if reason == p.hist_max {
             self.hist_max = snapshot.value.as_f64();
         }
+            ad_core_rs::plugin::runtime::ParamChangeResult::empty()
     }
 }
 

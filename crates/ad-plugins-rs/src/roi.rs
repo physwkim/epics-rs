@@ -330,32 +330,32 @@ impl NDPluginProcess for ROIProcessor {
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) {
+    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) -> ad_core_rs::plugin::runtime::ParamChangeResult {
         let p = &self.params;
         for i in 0..3 {
             if reason == p.dims[i].min {
                 self.config.dims[i].min = snapshot.value.as_i32().max(0) as usize;
-                return;
+                return ad_core_rs::plugin::runtime::ParamChangeResult::empty();
             }
             if reason == p.dims[i].size {
                 self.config.dims[i].size = snapshot.value.as_i32().max(0) as usize;
-                return;
+                return ad_core_rs::plugin::runtime::ParamChangeResult::empty();
             }
             if reason == p.dims[i].bin {
                 self.config.dims[i].bin = snapshot.value.as_i32().max(1) as usize;
-                return;
+                return ad_core_rs::plugin::runtime::ParamChangeResult::empty();
             }
             if reason == p.dims[i].reverse {
                 self.config.dims[i].reverse = snapshot.value.as_i32() != 0;
-                return;
+                return ad_core_rs::plugin::runtime::ParamChangeResult::empty();
             }
             if reason == p.dims[i].enable {
                 self.config.dims[i].enable = snapshot.value.as_i32() != 0;
-                return;
+                return ad_core_rs::plugin::runtime::ParamChangeResult::empty();
             }
             if reason == p.dims[i].auto_size {
                 self.config.dims[i].auto_size = snapshot.value.as_i32() != 0;
-                return;
+                return ad_core_rs::plugin::runtime::ParamChangeResult::empty();
             }
         }
         if reason == p.enable_scale {
@@ -368,6 +368,7 @@ impl NDPluginProcess for ROIProcessor {
         } else if reason == p.collapse_dims {
             self.config.collapse_dims = snapshot.value.as_i32() != 0;
         }
+            ad_core_rs::plugin::runtime::ParamChangeResult::empty()
     }
 }
 

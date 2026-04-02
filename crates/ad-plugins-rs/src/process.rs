@@ -401,6 +401,50 @@ impl NDPluginProcess for ProcessProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginProcess"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("PROCESS_DATA_TYPE", ParamType::Int32)?;
+        base.create_param("SAVE_BACKGROUND", ParamType::Int32)?;
+        base.create_param("ENABLE_BACKGROUND", ParamType::Int32)?;
+        base.create_param("VALID_BACKGROUND", ParamType::Int32)?;
+        base.create_param("SAVE_FLAT_FIELD", ParamType::Int32)?;
+        base.create_param("ENABLE_FLAT_FIELD", ParamType::Int32)?;
+        base.create_param("VALID_FLAT_FIELD", ParamType::Int32)?;
+        base.create_param("SCALE_FLAT_FIELD", ParamType::Float64)?;
+        base.create_param("ENABLE_OFFSET_SCALE", ParamType::Int32)?;
+        base.create_param("AUTO_OFFSET_SCALE", ParamType::Int32)?;
+        base.create_param("OFFSET", ParamType::Float64)?;
+        base.create_param("SCALE", ParamType::Float64)?;
+        base.create_param("ENABLE_LOW_CLIP", ParamType::Int32)?;
+        base.create_param("LOW_CLIP_THRESH", ParamType::Float64)?;
+        base.create_param("LOW_CLIP_VALUE", ParamType::Float64)?;
+        base.create_param("ENABLE_HIGH_CLIP", ParamType::Int32)?;
+        base.create_param("HIGH_CLIP_THRESH", ParamType::Float64)?;
+        base.create_param("HIGH_CLIP_VALUE", ParamType::Float64)?;
+        base.create_param("ENABLE_FILTER", ParamType::Int32)?;
+        base.create_param("RESET_FILTER", ParamType::Int32)?;
+        base.create_param("AUTO_RESET_FILTER", ParamType::Int32)?;
+        base.create_param("FILTER_CALLBACKS", ParamType::Int32)?;
+        base.create_param("NUM_FILTER", ParamType::Int32)?;
+        base.create_param("NUM_FILTERED", ParamType::Int32)?;
+        base.create_param("FILTER_OOFFSET", ParamType::Float64)?;
+        base.create_param("FILTER_OSCALE", ParamType::Float64)?;
+        base.create_param("FILTER_OC1", ParamType::Float64)?;
+        base.create_param("FILTER_OC2", ParamType::Float64)?;
+        base.create_param("FILTER_OC3", ParamType::Float64)?;
+        base.create_param("FILTER_OC4", ParamType::Float64)?;
+        base.create_param("FILTER_FOFFSET", ParamType::Float64)?;
+        base.create_param("FILTER_FSCALE", ParamType::Float64)?;
+        base.create_param("FILTER_FC1", ParamType::Float64)?;
+        base.create_param("FILTER_FC2", ParamType::Float64)?;
+        base.create_param("FILTER_FC3", ParamType::Float64)?;
+        base.create_param("FILTER_FC4", ParamType::Float64)?;
+        base.create_param("FILTER_ROFFSET", ParamType::Float64)?;
+        base.create_param("FILTER_RC1", ParamType::Float64)?;
+        base.create_param("FILTER_RC2", ParamType::Float64)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

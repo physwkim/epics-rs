@@ -171,6 +171,9 @@ pub struct AsynDeviceSupport {
     max_array_elements: usize,
     /// If true, read back the current driver value during init (for output records).
     initial_readback: bool,
+    /// If true, this is a write-only device support (e.g. asynOctetWrite).
+    /// read() returns no-op to avoid overwriting the record's native value type.
+    write_only: bool,
     /// RAII interrupt subscription — dropping unsubscribes.
     interrupt_sub: Option<InterruptSubscription>,
     /// Shared cache for the latest interrupt value. Written by the I/O Intr
@@ -206,6 +209,7 @@ impl AsynDeviceSupport {
             record_name: String::new(),
             scan: ScanType::Passive,
             initial_readback: false,
+            write_only: false,
             interrupt_sub: None,
             interrupt_cache: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -371,6 +375,11 @@ impl AsynDeviceSupport {
             ("asynOctet", EpicsValue::String(s)) => Some(RequestOp::OctetWrite {
                 data: s.as_bytes().to_vec(),
             }),
+            ("asynOctet", EpicsValue::CharArray(data)) => {
+                // Trim trailing nulls (waveform FTVL=CHAR pads to NELM)
+                let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+                Some(RequestOp::OctetWrite { data: data[..len].to_vec() })
+            }
             ("asynUInt32Digital", EpicsValue::Long(v)) => Some(RequestOp::UInt32DigitalWrite {
                 value: *v as u32,
                 mask: self.mask,
@@ -438,8 +447,21 @@ impl DeviceSupport for AsynDeviceSupport {
     }
 
     fn read(&mut self, record: &mut dyn Record) -> CaResult<DeviceReadOutcome> {
-        // No-op if drv_user_create failed (no matching param in driver)
         if !self.reason_set { return Ok(DeviceReadOutcome::ok()); }
+
+        // Write-only (asynOctetWrite): waveform is an input record type so
+        // process calls read(), not write(). Perform the write here instead.
+        if self.write_only {
+            if let Some(val) = record.val() {
+                if let Some(op) = self.write_op(&val) {
+                    let user = AsynUser::new(self.reason)
+                        .with_addr(self.addr)
+                        .with_timeout(self.timeout);
+                    let _ = self.handle.submit_blocking(op, user);
+                }
+            }
+            return Ok(DeviceReadOutcome::ok());
+        }
 
         // For I/O Intr records, use the cached interrupt value instead of
         // sending a blocking read to the port. This matches C EPICS behavior
@@ -608,7 +630,9 @@ pub fn universal_asyn_factory(
     let (link_str, is_output) = if ctx.out.contains("@asyn") || ctx.out.contains("@asynMask") {
         (ctx.out, true)
     } else if ctx.inp.contains("@asyn") || ctx.inp.contains("@asynMask") {
-        (ctx.inp, false)
+        // asynOctetWrite uses INP field for output (C EPICS convention for waveform records)
+        let is_write_dtyp = ctx.dtyp == "asynOctetWrite";
+        (ctx.inp, is_write_dtyp)
     } else {
         return None;
     };
@@ -636,9 +660,15 @@ pub fn universal_asyn_factory(
 
     let mut adapter = AsynDeviceSupport::from_handle(entry.handle, link, &dtyp);
 
-    // Output records: read back current driver value on init
+    // Output records: read back current driver value on init.
     if is_output {
-        adapter = adapter.with_initial_readback();
+        if ctx.dtyp == "asynOctetWrite" {
+            // asynOctetWrite is write-only — no reads allowed.
+            // Reading would replace waveform CharArray with String, breaking element_count.
+            adapter.write_only = true;
+        } else {
+            adapter = adapter.with_initial_readback();
+        }
     }
 
     // UInt32Digital: apply mask

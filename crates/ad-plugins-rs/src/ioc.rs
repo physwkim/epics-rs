@@ -399,6 +399,12 @@ impl AdIoc {
         &self.trace
     }
 
+    /// Register a record type (equivalent to C EPICS dbd record type registration).
+    pub fn register_record_type(&mut self, name: &str, factory: epics_base_rs::server::RecordFactory) {
+        let app = self.app.take().unwrap();
+        self.app = Some(app.register_record_type(name, move || factory()));
+    }
+
     /// Register a startup command (e.g., detector configure command).
     pub fn register_startup_command(&mut self, cmd: CommandDef) {
         let app = self.app.take().unwrap();

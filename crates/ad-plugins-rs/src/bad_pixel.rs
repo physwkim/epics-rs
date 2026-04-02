@@ -198,6 +198,12 @@ impl NDPluginProcess for BadPixelProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginBadPixel"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("BAD_PIXEL_FILE_NAME", ParamType::Octet)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

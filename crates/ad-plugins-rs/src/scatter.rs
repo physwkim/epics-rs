@@ -28,6 +28,12 @@ impl NDPluginProcess for ScatterProcessor {
     fn plugin_type(&self) -> &str {
         "NDPluginScatter"
     }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        use asyn_rs::param::ParamType;
+        base.create_param("SCATTER_METHOD", ParamType::Int32)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -845,6 +845,11 @@ impl PvDatabase {
             // Clear PACT
             instance.processing.store(false, std::sync::atomic::Ordering::Release);
 
+            // Fire put_notify completion (CA WRITE_NOTIFY response)
+            if let Some(tx) = instance.put_notify_tx.take() {
+                let _ = tx.send(());
+            }
+
             use crate::server::recgbl::EventMask;
             let mut event_mask = EventMask::NONE;
             let (include_val, include_archive) = instance.check_deadband_ext();
