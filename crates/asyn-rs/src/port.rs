@@ -342,6 +342,24 @@ impl PortDriverBase {
         }
         Ok(())
     }
+
+    /// Flush a single parameter's changed flag and notify if dirty.
+    /// Use this instead of `call_param_callbacks` when you want to avoid
+    /// flushing unrelated parameters (e.g. rapidly-updating CP-linked params).
+    pub fn call_param_callback(&mut self, addr: i32, reason: usize) -> AsynResult<()> {
+        if self.params.take_changed_single(reason, addr)? {
+            let now = self.current_timestamp();
+            let value = self.params.get_value(reason, addr)?.clone();
+            let ts = self.params.get_timestamp(reason, addr)?.unwrap_or(now);
+            self.interrupts.notify(InterruptValue {
+                reason,
+                addr,
+                value,
+                timestamp: ts,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Port driver trait. All methods have default implementations that operate

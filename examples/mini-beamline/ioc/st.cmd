@@ -80,6 +80,9 @@ dbLoadRecords("$(MINI_BEAMLINE)/db/moving_dot.template", "P=$(PREFIX),R=cam1:,IO
 # Load standard areaDetector plugins for MovingDot
 < $(ADCORE)/ioc/commonPlugins.cmd
 
+# Enable image plugin callbacks by default
+dbpf("mini:dot:image1:EnableCallbacks", "1")
+
 # Restore top-level prefix
 epicsEnvSet("PREFIX", "mini:")
 
@@ -89,5 +92,10 @@ seqStart("kohzuCtl", "P=$(PREFIX),M_THETA=dcm:theta,M_Y=dcm:y,M_Z=dcm:z")
 # ===== Autosave =====
 set_savefile_path("$(MINI_BEAMLINE)/ioc/autosave")
 set_requestfile_path("$(MINI_BEAMLINE)/ioc/autosave")
+set_requestfile_path("$(MINI_BEAMLINE)/db")
+set_requestfile_path("$(ADCORE)/db")
 set_pass0_restoreFile("mini_positions.sav")
+set_pass0_restoreFile("moving_dot_settings.req", "P=mini:dot:,R=cam1:")
+set_pass1_restoreFile("moving_dot_settings.req", "P=mini:dot:,R=cam1:")
 create_monitor_set("mini_positions.req", 5)
+create_monitor_set("moving_dot_settings.req", 5, "P=mini:dot:,R=cam1:")

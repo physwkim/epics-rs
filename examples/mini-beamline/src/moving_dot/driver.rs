@@ -103,11 +103,9 @@ impl PortDriver for MovingDotDetector {
             if reason == self.dot_params.shutter_open {
                 self.dirty.lock().set();
             }
+            self.ad.port_base.call_param_callback(0, reason)?;
         }
 
-        // No call_param_callbacks here — the acquisition task fires callbacks
-        // after each frame. Calling it from within the port actor during a
-        // CP-link write causes re-entrant message storms that stall tokio.
         Ok(())
     }
 
@@ -115,9 +113,11 @@ impl PortDriver for MovingDotDetector {
         let reason = user.reason;
         self.ad.port_base.params.set_float64(reason, user.addr, value)?;
 
-        if reason == self.dot_params.motor_x_pos
+        let is_cp_linked = reason == self.dot_params.motor_x_pos
             || reason == self.dot_params.motor_y_pos
-            || reason == self.dot_params.beam_current
+            || reason == self.dot_params.beam_current;
+
+        if is_cp_linked
             || reason == self.ad.params.acquire_time
             || reason == self.ad.params.acquire_period
             || reason == self.dot_params.slit_left
@@ -128,7 +128,13 @@ impl PortDriver for MovingDotDetector {
             self.dirty.lock().set();
         }
 
-        // No call_param_callbacks — deferred to acquisition task
+        // Skip callbacks for CP-linked params (MotorXPos, MotorYPos, BeamCurrent)
+        // which update rapidly during motor moves — the acquisition task flushes
+        // these via call_param_callbacks after each frame.
+        if !is_cp_linked {
+            self.ad.port_base.call_param_callback(0, reason)?;
+        }
+
         Ok(())
     }
 }

@@ -15,6 +15,7 @@ use crate::params::ndarray_driver::NDArrayDriverParams;
 pub enum RegistryParamType {
     Int32,
     Float64,
+    Int32Array,
     Float64Array,
     OctetString,
 }
@@ -33,6 +34,9 @@ impl ParamInfo {
     }
     pub fn float64(index: usize, drv_info: &str) -> Self {
         Self { param_index: index, param_type: RegistryParamType::Float64, drv_info: drv_info.to_string() }
+    }
+    pub fn int32_array(index: usize, drv_info: &str) -> Self {
+        Self { param_index: index, param_type: RegistryParamType::Int32Array, drv_info: drv_info.to_string() }
     }
     pub fn float64_array(index: usize, drv_info: &str) -> Self {
         Self { param_index: index, param_type: RegistryParamType::Float64Array, drv_info: drv_info.to_string() }
@@ -77,6 +81,8 @@ pub fn insert_ndarray_driver_params(map: &mut ParamRegistry, base: &NDArrayDrive
     map.insert("ArraySize2_RBV".into(), ParamInfo::int32(base.array_size_z, "ARRAY_SIZE_Z"));
     map.insert("NDimensions".into(), ParamInfo::int32(base.n_dimensions, "NDIMENSIONS"));
     map.insert("NDimensions_RBV".into(), ParamInfo::int32(base.n_dimensions, "NDIMENSIONS"));
+    map.insert("Dimensions".into(), ParamInfo::int32_array(base.array_dimensions, "ARRAY_DIMENSIONS"));
+    map.insert("Dimensions_RBV".into(), ParamInfo::int32_array(base.array_dimensions, "ARRAY_DIMENSIONS"));
     map.insert("DataType".into(), ParamInfo::int32(base.data_type, "DATA_TYPE"));
     map.insert("DataType_RBV".into(), ParamInfo::int32(base.data_type, "DATA_TYPE"));
     map.insert("ColorMode".into(), ParamInfo::int32(base.color_mode, "COLOR_MODE"));

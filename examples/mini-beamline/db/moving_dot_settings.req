@@ -1,0 +1,8 @@
+# MovingDot-specific settings
+$(P)$(R)ShutterOpen
+$(P)$(R)SlitLeft
+$(P)$(R)SlitRight
+$(P)$(R)SlitTop
+$(P)$(R)SlitBottom
+file "ADBase_settings.req", P=$(P), R=$(R)
+file "commonPlugins_settings.req", P=$(P)

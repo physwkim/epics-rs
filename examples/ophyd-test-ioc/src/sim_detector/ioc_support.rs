@@ -119,6 +119,8 @@ pub fn build_param_registry(ad: &ADBaseParams, dot: &MovingDotParams) -> ParamRe
     map.insert("ArrayCallbacks_RBV".into(), ParamInfo::int32(base.array_callbacks, "ARRAY_CALLBACKS"));
     map.insert("NDimensions".into(), ParamInfo::int32(base.n_dimensions, "NDIMENSIONS"));
     map.insert("NDimensions_RBV".into(), ParamInfo::int32(base.n_dimensions, "NDIMENSIONS"));
+    map.insert("Dimensions".into(), ParamInfo::int32_array(base.array_dimensions, "ARRAY_DIMENSIONS"));
+    map.insert("Dimensions_RBV".into(), ParamInfo::int32_array(base.array_dimensions, "ARRAY_DIMENSIONS"));
     map.insert("DataType".into(), ParamInfo::int32(base.data_type, "DATA_TYPE"));
     map.insert("DataType_RBV".into(), ParamInfo::int32(base.data_type, "DATA_TYPE"));
     map.insert("ColorMode".into(), ParamInfo::int32(base.color_mode, "COLOR_MODE"));
@@ -235,6 +237,7 @@ impl DeviceSupport for MovingDotDeviceSupport {
             let iface = match info.param_type {
                 RegistryParamType::Int32 => "asynInt32",
                 RegistryParamType::Float64 => "asynFloat64",
+                RegistryParamType::Int32Array => "asynInt32Array",
                 RegistryParamType::Float64Array => "asynFloat64Array",
                 RegistryParamType::OctetString => "asynOctet",
             };

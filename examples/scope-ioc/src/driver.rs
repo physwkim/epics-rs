@@ -231,7 +231,7 @@ impl PortDriver for ScopeSimulator {
         let value = if user.reason == self.p_update_time { value.max(MIN_UPDATE_TIME) } else { value };
         self.base.params.set_float64(user.reason, user.addr, value)?;
         if user.reason == self.p_update_time { self.notify.notify_one(); }
-        self.base.call_param_callbacks(user.addr)?;
+        self.base.call_param_callback(user.addr, user.reason)?;
         Ok(())
     }
 

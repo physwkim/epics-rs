@@ -188,6 +188,8 @@ impl PortDriver for SimDetector {
         } else {
             self.ad.port_base.params.set_int32(reason, user.addr, value)?;
             self.set_dirty_for_int32(reason);
+            self.ad.port_base.call_param_callback(0, reason)?;
+            return Ok(());
         }
 
         self.ad.port_base.call_param_callbacks(0)?;
@@ -198,7 +200,7 @@ impl PortDriver for SimDetector {
         let reason = user.reason;
         self.ad.port_base.params.set_float64(reason, user.addr, value)?;
         self.set_dirty_for_float64(reason);
-        self.ad.port_base.call_param_callbacks(0)?;
+        self.ad.port_base.call_param_callback(0, reason)?;
         Ok(())
     }
 }

@@ -636,6 +636,14 @@ impl ParamList {
 
     // --- Change tracking ---
 
+    /// Clear the changed flag for a single parameter. Returns true if it was changed.
+    pub fn take_changed_single(&mut self, index: usize, addr: i32) -> AsynResult<bool> {
+        let entry = self.get_entry_mut(index, addr)?;
+        let was_changed = entry.value_changed;
+        entry.value_changed = false;
+        Ok(was_changed)
+    }
+
     /// Returns indices of parameters whose values changed since last call, then clears flags.
     pub fn take_changed(&mut self, addr: i32) -> AsynResult<Vec<usize>> {
         let a = self.validate_addr(addr)?;

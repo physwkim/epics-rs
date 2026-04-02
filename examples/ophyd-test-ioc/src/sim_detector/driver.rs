@@ -93,6 +93,8 @@ impl PortDriver for MovingDotDetector {
             if reason == self.dot_params.shutter_open {
                 self.dirty.lock().set();
             }
+            self.ad.port_base.call_param_callback(0, reason)?;
+            return Ok(());
         }
 
         self.ad.port_base.call_param_callbacks(0)?;
@@ -103,16 +105,20 @@ impl PortDriver for MovingDotDetector {
         let reason = user.reason;
         self.ad.port_base.params.set_float64(reason, user.addr, value)?;
 
-        if reason == self.dot_params.motor_x_pos
+        let is_cp_linked = reason == self.dot_params.motor_x_pos
             || reason == self.dot_params.motor_y_pos
-            || reason == self.dot_params.beam_current
+            || reason == self.dot_params.beam_current;
+
+        if is_cp_linked
             || reason == self.ad.params.acquire_time
             || reason == self.ad.params.acquire_period
         {
             self.dirty.lock().set();
         }
 
-        self.ad.port_base.call_param_callbacks(0)?;
+        if !is_cp_linked {
+            self.ad.port_base.call_param_callback(0, reason)?;
+        }
         Ok(())
     }
 }

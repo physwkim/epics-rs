@@ -84,7 +84,7 @@ impl PortDriver for PointDetector {
 
     fn write_int32(&mut self, user: &mut AsynUser, value: i32) -> AsynResult<()> {
         self.base.params.set_int32(user.reason, user.addr, value)?;
-        self.base.call_param_callbacks(0)?;
+        self.base.call_param_callback(0, user.reason)?;
         Ok(())
     }
 }

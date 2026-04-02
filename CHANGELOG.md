@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.7.7
+
+### asyn-rs
+- Add `PortDriverBase::call_param_callback(addr, reason)` for per-parameter callback flush, avoiding unintended side-flush of unrelated dirty params
+- Add `ParamSet::take_changed_single(index, addr)` to clear a single param's changed flag
+- Add `Int32Array` variant to `RegistryParamType` with `ParamInfo::int32_array()` constructor
+- Add `array_dimensions` field to `NDArrayDriverParams` (`ParamType::Int32Array`)
+
+### areaDetector
+- Fix `Dimensions`/`Dimensions_RBV` waveform records missing from param registry — resolves "no param mapping for suffix 'Dimensions'" warnings
+- Add `asynInt32Array` interface mapping in `PluginDeviceSupport`
+- Fix RBV records not updating on write (AcquireTime, AcquirePeriod, ShutterOpen, etc.) — use per-reason `call_param_callback` for user-settable params while skipping CP-linked params (MotorXPos, MotorYPos, BeamCurrent) to prevent re-entrant message storms
+- Apply per-reason callback pattern to all example drivers (mini-beamline, sim-detector, ophyd-test-ioc, scope-ioc)
+- Fix sim-detector `Dimensions`/`Dimensions_RBV` mapping from incorrect `int32` to `int32_array`
+
+### Mini-beamline
+- Add autosave for MovingDot cam1 camera (ADBase + commonPlugins settings)
+- Add `dbpf` to enable `image1:EnableCallbacks` at startup
+- Add `KohzuModeBO` Auto mode step to README Verify section
+- Remove unused `sseq_settings.req` references from `NDStats_settings.req`
+
 ## v0.7.6
 
 ### Runtime Facade

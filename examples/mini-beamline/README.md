@@ -391,6 +391,9 @@ The CA server port can be changed with the `EPICS_CA_SERVER_PORT` environment va
 ### Verify
 
 ```bash
+# Enable Auto mode (required — Manual mode ignores energy setpoints)
+caput mini:KohzuModeBO 1
+
 # Set DCM energy and watch the theta motor move
 caput mini:BraggEAO 8.0
 camonitor mini:dcm:theta.RBV
