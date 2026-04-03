@@ -591,25 +591,25 @@ pub async fn run(config: FlexConfig) -> Result<(), Box<dyn std::error::Error + S
 
     loop {
         let event: Option<FlexEvent> = select! {
-            Some(Ok(val)) = sub_set_point.recv() => {
-                Some(FlexEvent::SetPointChanged(val.to_f64().unwrap_or(0.0)))
+            Some(Ok(snap)) = sub_set_point.recv() => {
+                Some(FlexEvent::SetPointChanged(snap.value.to_f64().unwrap_or(0.0)))
             }
-            Some(Ok(val)) = sub_pos_monitor.recv() => {
-                Some(FlexEvent::PosMonitorChanged(val.to_f64().unwrap_or(0.0)))
+            Some(Ok(snap)) = sub_pos_monitor.recv() => {
+                Some(FlexEvent::PosMonitorChanged(snap.value.to_f64().unwrap_or(0.0)))
             }
-            Some(Ok(val)) = sub_fine_rbv.recv() => {
-                Some(FlexEvent::FineRBVChanged(val.to_f64().unwrap_or(0.0)))
+            Some(Ok(snap)) = sub_fine_rbv.recv() => {
+                Some(FlexEvent::FineRBVChanged(snap.value.to_f64().unwrap_or(0.0)))
             }
-            Some(Ok(val)) = sub_coarse_dmov.recv() => {
-                let dmov = val.to_f64().unwrap_or(0.0) as i32;
+            Some(Ok(snap)) = sub_coarse_dmov.recv() => {
+                let dmov = snap.value.to_f64().unwrap_or(0.0) as i32;
                 if dmov == 1 { Some(FlexEvent::CoarseDone) } else { None }
             }
-            Some(Ok(val)) = sub_stop.recv() => {
-                let v = val.to_f64().unwrap_or(0.0) as i32;
+            Some(Ok(snap)) = sub_stop.recv() => {
+                let v = snap.value.to_f64().unwrap_or(0.0) as i32;
                 if v != 0 { Some(FlexEvent::Stop) } else { None }
             }
-            Some(Ok(val)) = sub_mode.recv() => {
-                let m = val.to_f64().unwrap_or(0.0) as i32;
+            Some(Ok(snap)) = sub_mode.recv() => {
+                let m = snap.value.to_f64().unwrap_or(0.0) as i32;
                 Some(FlexEvent::ModeChanged(FlexMode::from(m)))
             }
         };

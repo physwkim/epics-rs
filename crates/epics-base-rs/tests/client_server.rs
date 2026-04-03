@@ -201,22 +201,22 @@ async fn test_monitor_receives_updates() {
     let mut monitor = ch.subscribe().await.unwrap();
 
     // First callback is the current value
-    let val = tokio::time::timeout(Duration::from_secs(3), monitor.recv())
+    let snap = tokio::time::timeout(Duration::from_secs(3), monitor.recv())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(val, EpicsValue::Double(0.0));
+    assert_eq!(snap.value, EpicsValue::Double(0.0));
 
     // Put a new value and expect the monitor to fire
     ch.put(&EpicsValue::Double(123.0)).await.unwrap();
 
-    let val = tokio::time::timeout(Duration::from_secs(3), monitor.recv())
+    let snap = tokio::time::timeout(Duration::from_secs(3), monitor.recv())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(val, EpicsValue::Double(123.0));
+    assert_eq!(snap.value, EpicsValue::Double(123.0));
 }
 
 // ---------------------------------------------------------------------------

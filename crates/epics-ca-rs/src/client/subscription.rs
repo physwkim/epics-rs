@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use epics_base_rs::runtime::sync::mpsc;
 
 use epics_base_rs::error::CaResult;
+use epics_base_rs::server::snapshot::Snapshot;
 use epics_base_rs::types::{DbFieldType, EpicsValue, decode_dbr};
 
 use super::types::TransportCommand;
@@ -13,7 +15,7 @@ pub(crate) struct SubscriptionRecord {
     pub data_type: u16,
     pub count: u32,
     pub mask: u16,
-    pub callback_tx: mpsc::UnboundedSender<CaResult<EpicsValue>>,
+    pub callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
     pub needs_restore: bool,
 }
 
@@ -35,7 +37,7 @@ impl SubscriptionRegistry {
         data_type: u16,
         count: u32,
         mask: u16,
-        callback_tx: mpsc::UnboundedSender<CaResult<EpicsValue>>,
+        callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
     ) {
         self.subscriptions.insert(
             subid,
@@ -58,7 +60,7 @@ impl SubscriptionRegistry {
     pub fn on_monitor_data(&self, subid: u32, data_type: u16, count: u32, data: &[u8]) {
         if let Some(rec) = self.subscriptions.get(&subid) {
             if data_type <= 6 {
-                // Native type — fast path
+                // Native type fallback — wrap in Snapshot with minimal metadata
                 let dbr_type = match DbFieldType::from_u16(data_type) {
                     Ok(t) => t,
                     Err(e) => {
@@ -66,11 +68,12 @@ impl SubscriptionRegistry {
                         return;
                     }
                 };
-                let value = EpicsValue::from_bytes_array(dbr_type, data, count as usize);
-                let _ = rec.callback_tx.send(value);
+                let result = EpicsValue::from_bytes_array(dbr_type, data, count as usize)
+                    .map(|value| Snapshot::new(value, 0, 0, SystemTime::now()));
+                let _ = rec.callback_tx.send(result);
             } else {
-                // Extended DBR type (STS/TIME/GR/CTRL) — decode and extract value
-                let result = decode_dbr(data_type, data, count as usize).map(|snap| snap.value);
+                // Extended DBR type (STS/TIME/GR/CTRL) — full Snapshot
+                let result = decode_dbr(data_type, data, count as usize);
                 let _ = rec.callback_tx.send(result);
             }
         }

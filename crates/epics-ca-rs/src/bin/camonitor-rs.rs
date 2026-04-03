@@ -48,9 +48,9 @@ async fn monitor_pv(channel: epics_ca_rs::client::CaChannel, pv_name: &str) {
             Ok(mut monitor) => {
                 while let Some(result) = monitor.recv().await {
                     match result {
-                        Ok(value) => {
+                        Ok(snap) => {
                             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f");
-                            println!("{pv_name} {now} {value}");
+                            println!("{pv_name} {now} {}", snap.value);
                         }
                         Err(e) => {
                             eprintln!("{pv_name}: {e}");

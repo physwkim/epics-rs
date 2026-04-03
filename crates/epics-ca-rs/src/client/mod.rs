@@ -55,7 +55,7 @@ enum CoordRequest {
         cid: u32,
         subid: u32,
         mask: u16,
-        callback_tx: mpsc::UnboundedSender<CaResult<EpicsValue>>,
+        callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
         reply: oneshot::Sender<CaResult<()>>,
     },
     Unsubscribe {
@@ -244,7 +244,7 @@ impl CaClient {
 
         while let Some(result) = monitor.recv().await {
             match result {
-                Ok(value) => callback(value),
+                Ok(snap) => callback(snap.value),
                 Err(e) => return Err(e),
             }
         }
@@ -319,7 +319,14 @@ impl CaChannel {
 
     /// Get a PV value with metadata. Use `DbrClass::Time` for timestamp + alarm,
     /// or `DbrClass::Ctrl` for full control metadata (units, limits, precision).
+    /// Pass `count` to limit the number of array elements (0 = all).
     pub async fn get_with_metadata(&self, class: DbrClass) -> CaResult<Snapshot> {
+        self.get_with_metadata_count(class, 0).await
+    }
+
+    /// Get a PV value with metadata, requesting at most `count` elements.
+    /// Pass 0 for the full element count.
+    pub async fn get_with_metadata_count(&self, class: DbrClass, count: u32) -> CaResult<Snapshot> {
         let (info_tx, info_rx) = oneshot::channel();
         let _ = self.coord_tx.send(CoordRequest::GetChannelInfo {
             cid: self.cid,
@@ -333,6 +340,8 @@ impl CaChannel {
         if snap.state != ChannelState::Connected {
             return Err(CaError::Disconnected);
         }
+
+        let request_count = if count > 0 { count.min(snap.element_count) } else { snap.element_count };
 
         let native = DbFieldType::from_u16(snap.native_type as u16)?;
         let request_type = match class {
@@ -354,17 +363,17 @@ impl CaChannel {
         let _ = self.transport_tx.send(TransportCommand::ReadNotify {
             sid: snap.sid,
             data_type: request_type,
-            count: snap.element_count,
+            count: request_count,
             ioid,
             server_addr: snap.server_addr,
         });
 
-        let (data_type, count, data) = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+        let (data_type, resp_count, data) = tokio::time::timeout(Duration::from_secs(5), reply_rx)
             .await
             .map_err(|_| CaError::Timeout)?
             .map_err(|_| CaError::Shutdown)??;
 
-        decode_dbr(data_type, &data, count as usize)
+        decode_dbr(data_type, &data, resp_count as usize)
     }
 
     pub async fn put(&self, value: &EpicsValue) -> CaResult<()> {
@@ -520,12 +529,12 @@ impl Drop for CaChannel {
 /// Handle for a monitor subscription. Dropping it cancels the subscription.
 pub struct MonitorHandle {
     subid: u32,
-    callback_rx: mpsc::UnboundedReceiver<CaResult<EpicsValue>>,
+    callback_rx: mpsc::UnboundedReceiver<CaResult<Snapshot>>,
     coord_tx: mpsc::UnboundedSender<CoordRequest>,
 }
 
 impl MonitorHandle {
-    pub async fn recv(&mut self) -> Option<CaResult<EpicsValue>> {
+    pub async fn recv(&mut self) -> Option<CaResult<Snapshot>> {
         self.callback_rx.recv().await
     }
 }
@@ -600,15 +609,17 @@ async fn run_coordinator(
                         if let Some(ch) = channels.get(&cid) {
                             if ch.state == ChannelState::Connected {
                                 let native_type = ch.native_type.unwrap() as u16;
+                                // Request DBR_TIME to get EPICS timestamp + alarm
+                                let time_type = native_type + 14;
                                 let count = ch.element_count;
                                 let sid = ch.sid;
                                 let server_addr = ch.server_addr.unwrap();
 
-                                subscriptions.add(subid, cid, native_type, count, mask, callback_tx);
+                                subscriptions.add(subid, cid, time_type, count, mask, callback_tx);
 
                                 let _ = transport_tx.send(TransportCommand::Subscribe {
                                     sid,
-                                    data_type: native_type,
+                                    data_type: time_type,
                                     count,
                                     subid,
                                     mask,

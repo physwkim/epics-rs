@@ -550,22 +550,22 @@ pub async fn run(config: IoConfig) -> Result<(), Box<dyn std::error::Error + Sen
 
     loop {
         let needs_update = select! {
-            Some(Ok(_val)) = sub_emono.recv() => {
+            Some(Ok(_snap)) = sub_emono.recv() => {
                 let e = get_f64(&ch_emono).await;
                 params.energy = e;
                 put_f64(&ch_e_using, e).await;
                 true
             }
-            Some(Ok(_val)) = sub_e_using.recv() => {
+            Some(Ok(_snap)) = sub_e_using.recv() => {
                 params.energy = get_f64(&ch_e_using).await;
                 true
             }
-            Some(Ok(_val)) = sub_cnt.recv() => true,
-            Some(Ok(_val)) = sub_v_per_a.recv() => {
+            Some(Ok(_snap)) = sub_cnt.recv() => true,
+            Some(Ok(_snap)) = sub_v_per_a.recv() => {
                 params.v_per_a = get_f64(&ch_v_per_a).await;
                 true
             }
-            Some(Ok(_val)) = sub_x_n2.recv() => {
+            Some(Ok(_snap)) = sub_x_n2.recv() => {
                 params.x_n2 = get_f64(&ch_x_n2).await;
                 params.x_ar = get_f64(&ch_x_ar).await;
                 params.x_he = get_f64(&ch_x_he).await;
@@ -573,13 +573,13 @@ pub async fn run(config: IoConfig) -> Result<(), Box<dyn std::error::Error + Sen
                 params.x_co2 = get_f64(&ch_x_co2).await;
                 true
             }
-            Some(Ok(_val)) = sub_active_len.recv() => {
+            Some(Ok(_snap)) = sub_active_len.recv() => {
                 params.active_len = get_f64(&ch_active_len).await;
                 params.dead_front = get_f64(&ch_dead_front).await;
                 params.dead_rear = get_f64(&ch_dead_rear).await;
                 true
             }
-            Some(Ok(_val)) = sub_ar_pcntr.recv() => {
+            Some(Ok(_snap)) = sub_ar_pcntr.recv() => {
                 let val = get_i32(&ch_ar_pcntr).await;
                 params.ar_pcntr = val != 0;
                 if params.ar_pcntr {
@@ -588,7 +588,7 @@ pub async fn run(config: IoConfig) -> Result<(), Box<dyn std::error::Error + Sen
                 }
                 true
             }
-            Some(Ok(_val)) = sub_d_eff.recv() => {
+            Some(Ok(_snap)) = sub_d_eff.recv() => {
                 params.detector_efficiency = get_f64(&ch_d_eff).await;
                 params.ar_pcntr = false;
                 let _ = ch_ar_pcntr.put(&EpicsValue::Long(0)).await;
