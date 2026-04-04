@@ -752,8 +752,12 @@ async fn run_coordinator(
                                 let _ = waiter.send(());
                             }
 
-                            // Broadcast connected event
+                            // Broadcast connected + access rights events
                             let _ = ch.conn_tx.send(ConnectionEvent::Connected);
+                            let _ = ch.conn_tx.send(ConnectionEvent::AccessRightsChanged {
+                                read: access.read,
+                                write: access.write,
+                            });
 
                             // Restore subscriptions
                             subscriptions.restore_for_channel(cid, sid, server_addr, &transport_tx);
