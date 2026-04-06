@@ -28,12 +28,27 @@ pub enum ParsedLink {
     Pva(String),
 }
 
+/// Monitor propagation policy for links.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MonitorSwitch {
+    /// NMS: Do not propagate alarm severity from link source.
+    #[default]
+    NoMaximize,
+    /// MS: Maximize alarm severity from link source into this record.
+    Maximize,
+    /// MSS: Maximize severity, set status from source.
+    MaximizeStatus,
+    /// MSI: Maximize severity if source is invalid.
+    MaximizeIfInvalid,
+}
+
 /// A database link to another record's field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DbLink {
     pub record: String,
     pub field: String,
     pub policy: LinkProcessPolicy,
+    pub monitor_switch: MonitorSwitch,
 }
 
 impl ParsedLink {
@@ -73,12 +88,27 @@ pub fn parse_link_v2(s: &str) -> ParsedLink {
     // Strip trailing link attributes: PP, NPP, CP, CPP, MS, NMS, MSS, MSI
     // They can appear in any order: "REC.FIELD NPP NMS", "REC CP", etc.
     let mut policy = LinkProcessPolicy::ProcessPassive;
+    let mut ms = MonitorSwitch::NoMaximize;
     let mut link_part = s;
     loop {
         let trimmed = link_part.trim_end();
-        if let Some(rest) = trimmed.strip_suffix(" NMS").or_else(|| trimmed.strip_suffix(" MS"))
-            .or_else(|| trimmed.strip_suffix(" MSS")).or_else(|| trimmed.strip_suffix(" MSI"))
-        {
+        if let Some(rest) = trimmed.strip_suffix(" NMS") {
+            ms = MonitorSwitch::NoMaximize;
+            link_part = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_suffix(" MSI") {
+            ms = MonitorSwitch::MaximizeIfInvalid;
+            link_part = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_suffix(" MSS") {
+            ms = MonitorSwitch::MaximizeStatus;
+            link_part = rest;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_suffix(" MS") {
+            ms = MonitorSwitch::Maximize;
             link_part = rest;
             continue;
         }
@@ -122,6 +152,7 @@ pub fn parse_link_v2(s: &str) -> ParsedLink {
                 record: rec.to_string(),
                 field: field_upper,
                 policy,
+                monitor_switch: ms,
             });
         }
     }
@@ -131,6 +162,7 @@ pub fn parse_link_v2(s: &str) -> ParsedLink {
         record: link_part.to_string(),
         field: "VAL".to_string(),
         policy,
+        monitor_switch: ms,
     })
 }
 

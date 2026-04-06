@@ -48,4 +48,13 @@ impl PvDatabase {
         }
         result
     }
+
+    /// Process all records with SCAN=Event. Equivalent to C EPICS post_event().
+    pub async fn post_event(&self) {
+        let names = self.records_for_scan(ScanType::Event).await;
+        for name in &names {
+            let mut visited = std::collections::HashSet::new();
+            let _ = self.process_record_with_links(name, &mut visited, 0).await;
+        }
+    }
 }

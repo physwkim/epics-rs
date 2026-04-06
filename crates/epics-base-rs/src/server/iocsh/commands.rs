@@ -13,6 +13,10 @@ pub(crate) fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(cmd_dbgf());
     registry.register(cmd_dbpf());
     registry.register(cmd_dbpr());
+    registry.register(cmd_dbsr());
+    registry.register(cmd_scanppl());
+    registry.register(cmd_post_event());
+    registry.register(cmd_ioc_stats());
     registry.register(cmd_db_load_records());
     registry.register(cmd_epics_env_set());
     registry.register(cmd_ioc_init());
@@ -282,6 +286,185 @@ fn cmd_dbpr() -> CommandDef {
             for (name, value) in &fields {
                 ctx.println(&format!("{name:>8}: {value}"));
             }
+
+            Ok(CommandOutcome::Continue)
+        },
+    )
+}
+
+fn cmd_dbsr() -> CommandDef {
+    CommandDef::new(
+        "dbsr",
+        vec![ArgDesc {
+            name: "pattern",
+            arg_type: ArgType::String,
+            optional: true,
+        }],
+        "dbsr [pattern] — Search records by name pattern (glob)",
+        |args: &[ArgValue], ctx: &CommandContext| {
+            let pattern = args.first()
+                .and_then(|a| if let ArgValue::String(s) = a { Some(s.as_str()) } else { None })
+                .unwrap_or("*");
+
+            let mut names = ctx.block_on(ctx.db().all_record_names());
+            names.sort();
+
+            let mut count = 0;
+            for name in &names {
+                if glob_match(pattern, name) {
+                    ctx.println(name);
+                    count += 1;
+                }
+            }
+            ctx.println(&format!("Total: {count} records"));
+            Ok(CommandOutcome::Continue)
+        },
+    )
+}
+
+fn cmd_scanppl() -> CommandDef {
+    CommandDef::new(
+        "scanppl",
+        vec![],
+        "scanppl — Print scan phase lists",
+        |_args: &[ArgValue], ctx: &CommandContext| {
+            use crate::server::record::ScanType;
+            let scan_types = [
+                ScanType::Sec01, ScanType::Sec02, ScanType::Sec05,
+                ScanType::Sec1, ScanType::Sec2, ScanType::Sec5, ScanType::Sec10,
+                ScanType::Event, ScanType::Passive,
+            ];
+
+            for st in &scan_types {
+                let names = ctx.block_on(ctx.db().records_for_scan(*st));
+                if !names.is_empty() {
+                    ctx.println(&format!("{st}: {} records", names.len()));
+                    for name in &names {
+                        ctx.println(&format!("  {name}"));
+                    }
+                }
+            }
+
+            let io_count = ctx.block_on(ctx.db().records_for_scan(ScanType::IoIntr)).len();
+            if io_count > 0 {
+                ctx.println(&format!("I/O Intr: {io_count} records"));
+            }
+            Ok(CommandOutcome::Continue)
+        },
+    )
+}
+
+fn cmd_post_event() -> CommandDef {
+    CommandDef::new(
+        "post_event",
+        vec![],
+        "post_event — Process all records with SCAN=Event",
+        |_args: &[ArgValue], ctx: &CommandContext| {
+            ctx.block_on(ctx.db().post_event());
+            ctx.println("Event scan processed");
+            Ok(CommandOutcome::Continue)
+        },
+    )
+}
+
+/// Simple glob matching (* and ? wildcards).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let mut pi = pattern.chars().peekable();
+    let mut ti = text.chars().peekable();
+
+    fn do_match(
+        pat: &mut std::iter::Peekable<std::str::Chars>,
+        txt: &mut std::iter::Peekable<std::str::Chars>,
+    ) -> bool {
+        while let Some(&pc) = pat.peek() {
+            match pc {
+                '*' => {
+                    pat.next();
+                    if pat.peek().is_none() {
+                        return true; // trailing * matches everything
+                    }
+                    // Try matching rest from every position
+                    loop {
+                        let mut pat_clone = pat.clone();
+                        let mut txt_clone = txt.clone();
+                        if do_match(&mut pat_clone, &mut txt_clone) {
+                            return true;
+                        }
+                        if txt.next().is_none() {
+                            return false;
+                        }
+                    }
+                }
+                '?' => {
+                    pat.next();
+                    if txt.next().is_none() {
+                        return false;
+                    }
+                }
+                c => {
+                    pat.next();
+                    match txt.next() {
+                        Some(tc) if tc == c => {}
+                        _ => return false,
+                    }
+                }
+            }
+        }
+        txt.peek().is_none()
+    }
+
+    do_match(&mut pi, &mut ti)
+}
+
+fn cmd_ioc_stats() -> CommandDef {
+    CommandDef::new(
+        "iocStats",
+        vec![],
+        "iocStats — Show IOC runtime statistics",
+        |_args: &[ArgValue], ctx: &CommandContext| {
+            // Record count
+            let names = ctx.block_on(ctx.db().all_record_names());
+            ctx.println(&format!("Records:    {}", names.len()));
+
+            // Uptime
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let start = START.get_or_init(std::time::Instant::now);
+            let uptime = start.elapsed();
+            let hours = uptime.as_secs() / 3600;
+            let mins = (uptime.as_secs() % 3600) / 60;
+            let secs = uptime.as_secs() % 60;
+            ctx.println(&format!("Uptime:     {hours}h {mins}m {secs}s"));
+
+            // Memory (RSS) — read from /proc on Linux, skip on other platforms
+            #[cfg(target_os = "linux")]
+            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+                for line in status.lines() {
+                    if let Some(val) = line.strip_prefix("VmRSS:") {
+                        ctx.println(&format!("RSS:        {}", val.trim()));
+                        break;
+                    }
+                }
+            }
+
+            // Thread count (approximate via tokio metrics if available)
+            let threads = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1);
+            ctx.println(&format!("CPU cores:  {threads}"));
+
+            // Scan types summary
+            use crate::server::record::ScanType;
+            let scan_types = [
+                ScanType::Sec01, ScanType::Sec02, ScanType::Sec05,
+                ScanType::Sec1, ScanType::Sec2, ScanType::Sec5, ScanType::Sec10,
+            ];
+            let mut total_scanned = 0;
+            for st in &scan_types {
+                total_scanned += ctx.block_on(ctx.db().records_for_scan(*st)).len();
+            }
+            let io_intr = ctx.block_on(ctx.db().records_for_scan(ScanType::IoIntr)).len();
+            ctx.println(&format!("Periodic:   {total_scanned} records"));
+            ctx.println(&format!("I/O Intr:   {io_intr} records"));
 
             Ok(CommandOutcome::Continue)
         },

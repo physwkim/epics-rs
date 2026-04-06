@@ -274,16 +274,19 @@ fn test_parse_link_v2() {
     assert_eq!(parse_link_v2("TEMP"), ParsedLink::Db(DbLink {
         record: "TEMP".into(), field: "VAL".into(),
         policy: LinkProcessPolicy::ProcessPassive,
+        monitor_switch: MonitorSwitch::NoMaximize,
     }));
 
     assert_eq!(parse_link_v2("TEMP.EGU"), ParsedLink::Db(DbLink {
         record: "TEMP".into(), field: "EGU".into(),
         policy: LinkProcessPolicy::ProcessPassive,
+        monitor_switch: MonitorSwitch::NoMaximize,
     }));
 
     assert_eq!(parse_link_v2("TEMP.EGU NPP"), ParsedLink::Db(DbLink {
         record: "TEMP".into(), field: "EGU".into(),
         policy: LinkProcessPolicy::NoProcess,
+        monitor_switch: MonitorSwitch::NoMaximize,
     }));
 
     assert_eq!(parse_link_v2("ca://PV:NAME"), ParsedLink::Ca("PV:NAME".to_string()));
