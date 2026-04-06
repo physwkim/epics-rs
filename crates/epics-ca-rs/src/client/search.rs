@@ -696,6 +696,7 @@ mod tests {
     #[test]
     fn aimd_additive_increase() {
         let mut budget = SendBudget::new();
+        budget.frames_per_try = 1;
         budget.sent_this_window = 10;
         budget.responded_this_window = 8; // 80% > 50%
         budget.window_start =
