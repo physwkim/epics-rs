@@ -27,6 +27,10 @@ struct BeaconState {
 
 /// Receives beacon messages from the CA repeater, detects anomalies (IOC
 /// restart), and notifies the coordinator to rescan affected channels.
+/// Re-registration interval: if no beacons for this long, re-register
+/// with the repeater in case it restarted.
+const REREGISTER_INTERVAL: Duration = Duration::from_secs(300);
+
 pub(crate) async fn run_beacon_monitor(
     coord_tx: mpsc::UnboundedSender<CoordRequest>,
 ) {
@@ -36,17 +40,30 @@ pub(crate) async fn run_beacon_monitor(
         Err(_) => return,
     };
 
-    // Register this socket with the repeater so we receive beacon fan-outs.
-    if register_with_repeater(&socket).await.is_err() {
-        return;
+    // Initial registration with retry
+    for attempt in 0..3u32 {
+        if register_with_repeater(&socket).await.is_ok() {
+            break;
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(200 * (1 << attempt))).await;
+        }
     }
 
     let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
     let mut buf = [0u8; 256];
 
     loop {
-        let Ok((len, _src)) = socket.recv_from(&mut buf).await else {
-            continue;
+        // Use timeout to detect beacon silence → re-register with repeater
+        let recv = tokio::time::timeout(REREGISTER_INTERVAL, socket.recv_from(&mut buf)).await;
+        let (len, _src) = match recv {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) => continue,
+            Err(_) => {
+                // No beacons for 5 minutes — repeater may have restarted
+                let _ = register_with_repeater(&socket).await;
+                continue;
+            }
         };
         if len < CaHeader::SIZE {
             continue;

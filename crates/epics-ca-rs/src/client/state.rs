@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use crate::channel::AccessRights;
 use epics_base_rs::types::DbFieldType;
@@ -13,10 +14,19 @@ pub enum ChannelState {
     Connecting,
     /// Channel established, ready for read/write/subscribe
     Connected,
+    /// Echo timeout, TCP still up but server may be hung (C EPICS ECA_UNRESPTMO)
+    Unresponsive,
     /// Connection lost, automatic re-search triggered
     Disconnected,
     /// User dropped channel, no more reconnection
     Shutdown,
+}
+
+impl ChannelState {
+    /// Whether the channel can accept read/write/subscribe operations.
+    pub fn is_operational(self) -> bool {
+        matches!(self, Self::Connected | Self::Unresponsive)
+    }
 }
 
 impl fmt::Display for ChannelState {
@@ -25,6 +35,7 @@ impl fmt::Display for ChannelState {
             Self::Searching => write!(f, "Searching"),
             Self::Connecting => write!(f, "Connecting"),
             Self::Connected => write!(f, "Connected"),
+            Self::Unresponsive => write!(f, "Unresponsive"),
             Self::Disconnected => write!(f, "Disconnected"),
             Self::Shutdown => write!(f, "Shutdown"),
         }
@@ -50,6 +61,10 @@ pub(crate) struct ChannelInner {
     pub connect_waiters: Vec<epics_base_rs::runtime::sync::oneshot::Sender<()>>,
     /// Connection event broadcaster
     pub conn_tx: epics_base_rs::runtime::sync::broadcast::Sender<ConnectionEvent>,
+    /// Consecutive short-lived disconnects (for reconnection backoff)
+    pub reconnect_count: u32,
+    /// When the last successful connection was established
+    pub last_connected_at: Option<Instant>,
 }
 
 /// Connection state change events
@@ -57,6 +72,8 @@ pub(crate) struct ChannelInner {
 pub enum ConnectionEvent {
     Connected,
     Disconnected,
+    /// Echo timed out — server may be hung but TCP is still up
+    Unresponsive,
     AccessRightsChanged {
         read: bool,
         write: bool,

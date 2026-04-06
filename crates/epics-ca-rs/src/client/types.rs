@@ -16,12 +16,13 @@ pub(crate) enum SearchReason {
 }
 
 pub(crate) enum SearchRequest {
-    /// Schedule a PV for searching (replaces old Search variant).
+    /// Schedule a PV for searching.
     Schedule {
         cid: u32,
         pv_name: String,
-        #[allow(dead_code)]
         reason: SearchReason,
+        /// Starting lane for exponential backoff (0 = immediate, higher = longer delay).
+        initial_lane: u32,
     },
     /// Cancel searching for a PV (channel dropped or connected).
     Cancel { cid: u32 },
@@ -133,6 +134,14 @@ pub(crate) enum TransportEvent {
     },
     ServerDisconnect {
         cid: u32,
+        server_addr: SocketAddr,
+    },
+    /// Echo timed out once — circuit may be unresponsive but TCP is still up.
+    CircuitUnresponsive {
+        server_addr: SocketAddr,
+    },
+    /// Data received after unresponsive state — circuit recovered.
+    CircuitResponsive {
         server_addr: SocketAddr,
     },
 }

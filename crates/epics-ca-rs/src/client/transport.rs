@@ -62,7 +62,11 @@ pub(crate) async fn run_transport_manager(
                     .unwrap_or(false);
 
                 if !alive {
-                    connections.remove(&server_addr);
+                    // Abort lingering tasks before creating a new connection
+                    if let Some(old) = connections.remove(&server_addr) {
+                        old._read_task.abort();
+                        old._write_task.abort();
+                    }
                     match connect_server(server_addr, event_tx.clone()).await {
                         Some(conn) => {
                             connections.insert(server_addr, conn);
@@ -280,6 +284,9 @@ async fn write_loop(
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
 ) {
+    // Send watchdog: if write stalls for 2x echo timeout, declare circuit dead.
+    // Matches C EPICS tcpSendWatchdog behavior.
+    let send_timeout = Duration::from_secs(ECHO_TIMEOUT_SECS * 2);
     let mut batch = Vec::with_capacity(4096);
     while let Some(frame) = rx.recv().await {
         batch.extend_from_slice(&frame);
@@ -287,11 +294,13 @@ async fn write_loop(
         while let Ok(frame) = rx.try_recv() {
             batch.extend_from_slice(&frame);
         }
-        if writer.write_all(&batch).await.is_err() {
-            let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
-            return;
+        match tokio::time::timeout(send_timeout, writer.write_all(&batch)).await {
+            Ok(Ok(())) => batch.clear(),
+            Ok(Err(_)) | Err(_) => {
+                let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
+                return;
+            }
         }
-        batch.clear();
     }
 }
 
@@ -306,6 +315,13 @@ async fn read_loop(
     let idle_timeout = Duration::from_secs(echo_idle_secs());
     let echo_timeout = Duration::from_secs(ECHO_TIMEOUT_SECS);
     let mut echo_pending = false;
+    let mut unresponsive_notified = false;
+    let mut server_minor_version: u16 = 0;
+
+    // Monitor flow control (C EPICS contiguousMsgCountWhichTriggersFlowControl)
+    let mut contiguous_read_count: u32 = 0;
+    let mut flow_control_active = false;
+    const FLOW_CONTROL_THRESHOLD: u32 = 10;
 
     loop {
         let timeout = if echo_pending { echo_timeout } else { idle_timeout };
@@ -317,14 +333,35 @@ async fn read_loop(
             }
             Ok(Ok(n)) => n,
             Err(_) => {
-                // Timeout expired
+                // Timeout expired — we caught up (no contiguous data)
+                contiguous_read_count = 0;
+                if flow_control_active {
+                    let hdr = CaHeader::new(CA_PROTO_EVENTS_ON);
+                    let _ = write_tx.send(hdr.to_bytes().to_vec());
+                    flow_control_active = false;
+                }
+
                 if echo_pending {
-                    // Echo response not received — connection is dead
+                    if !unresponsive_notified {
+                        // First echo timeout: mark unresponsive, try one more echo
+                        let _ = event_tx.send(TransportEvent::CircuitUnresponsive { server_addr });
+                        unresponsive_notified = true;
+                        let cmd = if server_minor_version >= 3 { CA_PROTO_ECHO } else { CA_PROTO_READ_SYNC };
+                        let echo_hdr = CaHeader::new(cmd);
+                        if write_tx.send(echo_hdr.to_bytes().to_vec()).is_err() {
+                            let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
+                            return;
+                        }
+                        continue;
+                    }
+                    // Second echo timeout — truly dead
                     let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
                     return;
                 }
                 // Idle timeout — send echo heartbeat
-                let echo_hdr = CaHeader::new(CA_PROTO_ECHO);
+                // Use READ_SYNC for pre-v4.3 servers that don't understand ECHO
+                let cmd = if server_minor_version >= 3 { CA_PROTO_ECHO } else { CA_PROTO_READ_SYNC };
+                let echo_hdr = CaHeader::new(cmd);
                 if write_tx.send(echo_hdr.to_bytes().to_vec()).is_err() {
                     let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
                     return;
@@ -336,6 +373,18 @@ async fn read_loop(
 
         // Data received — connection is alive
         echo_pending = false;
+        if unresponsive_notified {
+            unresponsive_notified = false;
+            let _ = event_tx.send(TransportEvent::CircuitResponsive { server_addr });
+        }
+
+        // Flow control: count contiguous reads without a gap
+        contiguous_read_count += 1;
+        if !flow_control_active && contiguous_read_count >= FLOW_CONTROL_THRESHOLD {
+            let hdr = CaHeader::new(CA_PROTO_EVENTS_OFF);
+            let _ = write_tx.send(hdr.to_bytes().to_vec());
+            flow_control_active = true;
+        }
         accumulated.extend_from_slice(&buf[..n]);
 
         let mut offset = 0;
@@ -354,7 +403,9 @@ async fn read_loop(
             let data_start = offset + hdr_size;
 
             match hdr.cmmd {
-                CA_PROTO_VERSION => {}
+                CA_PROTO_VERSION => {
+                    server_minor_version = hdr.count;
+                }
                 CA_PROTO_ACCESS_RIGHTS => {
                     let _ = event_tx.send(TransportEvent::AccessRightsChanged {
                         cid: hdr.cid,
@@ -402,8 +453,8 @@ async fn read_loop(
                         data,
                     });
                 }
-                CA_PROTO_ECHO => {
-                    // Server-initiated echo: respond immediately
+                CA_PROTO_ECHO | CA_PROTO_READ_SYNC => {
+                    // Server-initiated echo (or READ_SYNC response): respond immediately
                     let echo_hdr = CaHeader::new(CA_PROTO_ECHO);
                     let _ = write_tx.send(echo_hdr.to_bytes().to_vec());
                 }

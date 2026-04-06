@@ -23,6 +23,139 @@ use epics_base_rs::types::{DbFieldType, EpicsValue, decode_dbr};
 pub use state::{ChannelState, ConnectionEvent};
 
 use state::ChannelInner;
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// Type of diagnostic event recorded in the event history.
+#[derive(Debug, Clone)]
+pub enum DiagEvent {
+    Connected { pv: String, server: SocketAddr },
+    Disconnected { server: SocketAddr, channels: usize },
+    Reconnected { pv: String, restored: u32, stale: u32 },
+    Unresponsive { server: SocketAddr },
+    Responsive { server: SocketAddr },
+    BeaconAnomaly { server: SocketAddr },
+}
+
+impl std::fmt::Display for DiagEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connected { pv, server } => write!(f, "Connected {pv} @ {server}"),
+            Self::Disconnected { server, channels } => write!(f, "Disconnected {server} ({channels} channels)"),
+            Self::Reconnected { pv, restored, stale } => write!(f, "Reconnected {pv} (restored={restored}, stale={stale})"),
+            Self::Unresponsive { server } => write!(f, "Unresponsive {server}"),
+            Self::Responsive { server } => write!(f, "Responsive {server}"),
+            Self::BeaconAnomaly { server } => write!(f, "Beacon anomaly {server}"),
+        }
+    }
+}
+
+/// Timestamped diagnostic event.
+#[derive(Debug, Clone)]
+pub struct DiagRecord {
+    pub time: std::time::Instant,
+    pub event: DiagEvent,
+}
+
+const EVENT_HISTORY_CAPACITY: usize = 256;
+
+/// Diagnostic counters for CA client health monitoring.
+pub struct CaDiagnostics {
+    pub connections: AtomicU64,
+    pub disconnections: AtomicU64,
+    pub reconnections: AtomicU64,
+    pub unresponsive_events: AtomicU64,
+    pub subscriptions_restored: AtomicU64,
+    pub subscriptions_stale: AtomicU64,
+    pub beacon_anomalies: AtomicU64,
+    pub search_requests: AtomicU64,
+    /// Ring buffer of recent events for post-mortem analysis.
+    history: std::sync::Mutex<Vec<DiagRecord>>,
+}
+
+impl Default for CaDiagnostics {
+    fn default() -> Self {
+        Self {
+            connections: AtomicU64::new(0),
+            disconnections: AtomicU64::new(0),
+            reconnections: AtomicU64::new(0),
+            unresponsive_events: AtomicU64::new(0),
+            subscriptions_restored: AtomicU64::new(0),
+            subscriptions_stale: AtomicU64::new(0),
+            beacon_anomalies: AtomicU64::new(0),
+            search_requests: AtomicU64::new(0),
+            history: std::sync::Mutex::new(Vec::with_capacity(EVENT_HISTORY_CAPACITY)),
+        }
+    }
+}
+
+impl CaDiagnostics {
+    /// Record a diagnostic event with the current timestamp.
+    pub fn record(&self, event: DiagEvent) {
+        let record = DiagRecord { time: std::time::Instant::now(), event };
+        if let Ok(mut history) = self.history.lock() {
+            if history.len() >= EVENT_HISTORY_CAPACITY {
+                history.remove(0);
+            }
+            history.push(record);
+        }
+    }
+
+    /// Get a snapshot of counters + recent event history.
+    pub fn snapshot(&self) -> DiagnosticsSnapshot {
+        let history = self.history.lock()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+        DiagnosticsSnapshot {
+            connections: self.connections.load(Ordering::Relaxed),
+            disconnections: self.disconnections.load(Ordering::Relaxed),
+            reconnections: self.reconnections.load(Ordering::Relaxed),
+            unresponsive_events: self.unresponsive_events.load(Ordering::Relaxed),
+            subscriptions_restored: self.subscriptions_restored.load(Ordering::Relaxed),
+            subscriptions_stale: self.subscriptions_stale.load(Ordering::Relaxed),
+            beacon_anomalies: self.beacon_anomalies.load(Ordering::Relaxed),
+            search_requests: self.search_requests.load(Ordering::Relaxed),
+            history,
+        }
+    }
+}
+
+/// Point-in-time snapshot of diagnostic counters + event history.
+#[derive(Debug, Clone)]
+pub struct DiagnosticsSnapshot {
+    pub connections: u64,
+    pub disconnections: u64,
+    pub reconnections: u64,
+    pub unresponsive_events: u64,
+    pub subscriptions_restored: u64,
+    pub subscriptions_stale: u64,
+    pub beacon_anomalies: u64,
+    pub search_requests: u64,
+    pub history: Vec<DiagRecord>,
+}
+
+impl std::fmt::Display for DiagnosticsSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Connections:            {}", self.connections)?;
+        writeln!(f, "Disconnections:         {}", self.disconnections)?;
+        writeln!(f, "Reconnections:          {}", self.reconnections)?;
+        writeln!(f, "Unresponsive events:    {}", self.unresponsive_events)?;
+        writeln!(f, "Subscriptions restored: {}", self.subscriptions_restored)?;
+        writeln!(f, "Subscriptions stale:    {}", self.subscriptions_stale)?;
+        writeln!(f, "Beacon anomalies:       {}", self.beacon_anomalies)?;
+        writeln!(f, "Search requests:        {}", self.search_requests)?;
+        if !self.history.is_empty() {
+            writeln!(f, "Recent events ({}):", self.history.len())?;
+            let start = self.history.first().map(|r| r.time).unwrap_or_else(std::time::Instant::now);
+            for rec in &self.history {
+                let elapsed = rec.time.duration_since(start);
+                writeln!(f, "  +{:.1}s  {}", elapsed.as_secs_f64(), rec.event)?;
+            }
+        }
+        Ok(())
+    }
+}
 use subscription::SubscriptionRegistry;
 use types::*;
 
@@ -31,6 +164,7 @@ pub struct CaClient {
     search_tx: mpsc::UnboundedSender<SearchRequest>,
     transport_tx: mpsc::UnboundedSender<TransportCommand>,
     coord_tx: mpsc::UnboundedSender<CoordRequest>,
+    diagnostics: Arc<CaDiagnostics>,
     _coordinator: tokio::task::JoinHandle<()>,
     _search_task: tokio::task::JoinHandle<()>,
     _transport_task: tokio::task::JoinHandle<()>,
@@ -57,6 +191,7 @@ enum CoordRequest {
         cid: u32,
         subid: u32,
         mask: u16,
+        deadband: f64,
         callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
         reply: oneshot::Sender<CaResult<()>>,
     },
@@ -80,6 +215,10 @@ enum CoordRequest {
     /// Beacon anomaly detected — rescan channels for this server.
     ForceRescanServer {
         server_addr: SocketAddr,
+    },
+    /// Graceful shutdown: clear all channels on their servers before exiting.
+    Shutdown {
+        reply: oneshot::Sender<()>,
     },
 }
 
@@ -120,12 +259,15 @@ impl CaClient {
             transport_evt_tx,
         ));
 
+        let diagnostics = Arc::new(CaDiagnostics::default());
+
         let coordinator = epics_base_rs::runtime::task::spawn(run_coordinator(
             coord_rx,
             search_resp_rx,
             transport_evt_rx,
             search_tx.clone(),
             transport_tx.clone(),
+            diagnostics.clone(),
         ));
 
         let beacon_task = epics_base_rs::runtime::task::spawn(
@@ -136,11 +278,26 @@ impl CaClient {
             search_tx,
             transport_tx,
             coord_tx,
+            diagnostics,
             _coordinator: coordinator,
             _search_task: search_task,
             _transport_task: transport_task,
             _beacon_task: beacon_task,
         })
+    }
+
+    /// Get a snapshot of diagnostic counters.
+    pub fn diagnostics(&self) -> DiagnosticsSnapshot {
+        self.diagnostics.snapshot()
+    }
+
+    /// Graceful shutdown: send ClearChannel for all connected channels
+    /// so servers can release resources immediately.
+    pub async fn shutdown(&self) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.coord_tx.send(CoordRequest::Shutdown { reply: tx });
+        // Wait briefly for the clear commands to be sent
+        let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
     }
 
     /// Create a persistent channel. Returns immediately (starts searching in background).
@@ -158,6 +315,7 @@ impl CaClient {
             cid,
             pv_name: name.to_string(),
             reason: SearchReason::Initial,
+            initial_lane: 0,
         });
 
         CaChannel {
@@ -300,7 +458,7 @@ impl CaChannel {
             .await
             .map_err(|_| CaError::Shutdown)?
             .ok_or(CaError::Disconnected)?;
-        if snap.state != ChannelState::Connected {
+        if !snap.state.is_operational() {
             return Err(CaError::Disconnected);
         }
         Ok(ChannelInfo {
@@ -323,7 +481,7 @@ impl CaChannel {
             .map_err(|_| CaError::Shutdown)?
             .ok_or(CaError::Disconnected)?;
 
-        if snap.state != ChannelState::Connected {
+        if !snap.state.is_operational() {
             return Err(CaError::Disconnected);
         }
 
@@ -373,7 +531,7 @@ impl CaChannel {
             .map_err(|_| CaError::Shutdown)?
             .ok_or(CaError::Disconnected)?;
 
-        if snap.state != ChannelState::Connected {
+        if !snap.state.is_operational() {
             return Err(CaError::Disconnected);
         }
 
@@ -423,7 +581,7 @@ impl CaChannel {
             .map_err(|_| CaError::Shutdown)?
             .ok_or(CaError::Disconnected)?;
 
-        if snap.state != ChannelState::Connected {
+        if !snap.state.is_operational() {
             return Err(CaError::Disconnected);
         }
 
@@ -447,7 +605,11 @@ impl CaChannel {
             server_addr: snap.server_addr,
         });
 
-        tokio::time::timeout(Duration::from_secs(30), reply_rx)
+        // Default put timeout configurable via EPICS_CA_PUT_TIMEOUT (seconds).
+        let default_secs = epics_base_rs::runtime::env::get("EPICS_CA_PUT_TIMEOUT")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(30.0);
+        tokio::time::timeout(Duration::from_secs_f64(default_secs), reply_rx)
             .await
             .map_err(|_| CaError::Timeout)?
             .map_err(|_| CaError::Shutdown)?
@@ -465,7 +627,7 @@ impl CaChannel {
             .map_err(|_| CaError::Shutdown)?
             .ok_or(CaError::Disconnected)?;
 
-        if snap.state != ChannelState::Connected {
+        if !snap.state.is_operational() {
             return Err(CaError::Disconnected);
         }
 
@@ -509,7 +671,7 @@ impl CaChannel {
             .map_err(|_| CaError::Shutdown)?
             .ok_or(CaError::Disconnected)?;
 
-        if snap.state != ChannelState::Connected {
+        if !snap.state.is_operational() {
             return Err(CaError::Disconnected);
         }
 
@@ -527,6 +689,12 @@ impl CaChannel {
     }
 
     pub async fn subscribe(&self) -> CaResult<MonitorHandle> {
+        self.subscribe_with_deadband(0.0).await
+    }
+
+    /// Subscribe with client-side deadband filtering.
+    /// Events where |new - old| < deadband are suppressed (scalar values only).
+    pub async fn subscribe_with_deadband(&self, deadband: f64) -> CaResult<MonitorHandle> {
         // Wait for connection first
         self.wait_connected(Duration::from_secs(30)).await?;
 
@@ -538,6 +706,7 @@ impl CaChannel {
             cid: self.cid,
             subid,
             mask: DBE_VALUE | DBE_LOG | DBE_ALARM,
+            deadband,
             callback_tx,
             reply: reply_tx,
         });
@@ -591,6 +760,7 @@ async fn run_coordinator(
     mut transport_rx: mpsc::UnboundedReceiver<TransportEvent>,
     search_tx: mpsc::UnboundedSender<SearchRequest>,
     transport_tx: mpsc::UnboundedSender<TransportCommand>,
+    diag: Arc<CaDiagnostics>,
 ) {
     let mut channels: HashMap<u32, ChannelInner> = HashMap::new();
     let mut pending_wait_connected: HashMap<u32, Vec<oneshot::Sender<()>>> = HashMap::new();
@@ -624,6 +794,8 @@ async fn run_coordinator(
                             access_rights: AccessRights::from_u32(0),
                             connect_waiters: early_waiters,
                             conn_tx,
+                            reconnect_count: 0,
+                            last_connected_at: None,
                         });
                         // Process any Found response that arrived before registration.
                         if let Some(server_addr) = pending_found.remove(&cid) {
@@ -668,7 +840,7 @@ async fn run_coordinator(
                         });
                         let _ = reply.send(snap);
                     }
-                    CoordRequest::Subscribe { cid, subid, mask, callback_tx, reply } => {
+                    CoordRequest::Subscribe { cid, subid, mask, deadband, callback_tx, reply } => {
                         if let Some(ch) = channels.get(&cid) {
                             if ch.state == ChannelState::Connected {
                                 let native_type = ch.native_type.unwrap() as u16;
@@ -678,7 +850,11 @@ async fn run_coordinator(
                                 let sid = ch.sid;
                                 let server_addr = ch.server_addr.unwrap();
 
-                                subscriptions.add(subid, cid, time_type, count, mask, callback_tx);
+                                subscriptions.add(subscription::SubscriptionRecord {
+                                    subid, cid, data_type: time_type, count, mask,
+                                    deadband, callback_tx, needs_restore: false,
+                                    last_value: None,
+                                });
 
                                 let _ = transport_tx.send(TransportCommand::Subscribe {
                                     sid,
@@ -756,7 +932,25 @@ async fn run_coordinator(
                     CoordRequest::WriteNotify { cid: _, ioid, value: _, reply } => {
                         write_waiters.insert(ioid, reply);
                     }
+                    CoordRequest::Shutdown { reply } => {
+                        // Send ClearChannel for all connected channels
+                        for ch in channels.values() {
+                            if ch.state.is_operational() {
+                                if let Some(addr) = ch.server_addr {
+                                    let _ = transport_tx.send(TransportCommand::ClearChannel {
+                                        cid: ch.cid,
+                                        sid: ch.sid,
+                                        server_addr: addr,
+                                    });
+                                }
+                            }
+                        }
+                        let _ = reply.send(());
+                        return; // Exit coordinator loop
+                    }
                     CoordRequest::ForceRescanServer { server_addr } => {
+                        diag.beacon_anomalies.fetch_add(1, Ordering::Relaxed);
+                        diag.record(DiagEvent::BeaconAnomaly { server: server_addr });
                         // Beacon anomaly: rescan Disconnected/Searching channels
                         // for this server. Connected channels are left alone —
                         // if the IOC truly restarted, TCP will break on its own.
@@ -770,6 +964,7 @@ async fn run_coordinator(
                                             cid,
                                             pv_name: ch.pv_name.clone(),
                                             reason: SearchReason::BeaconAnomaly,
+                                            initial_lane: 0,
                                         });
                                     }
                                 }
@@ -816,6 +1011,7 @@ async fn run_coordinator(
                             ch.element_count = element_count;
                             ch.server_addr = Some(server_addr);
                             ch.access_rights = access;
+                            ch.last_connected_at = Some(std::time::Instant::now());
 
                             // Wake connect waiters
                             for waiter in ch.connect_waiters.drain(..) {
@@ -830,7 +1026,16 @@ async fn run_coordinator(
                             });
 
                             // Restore subscriptions
-                            subscriptions.restore_for_channel(cid, sid, server_addr, &transport_tx);
+                            let (restored, stale) = subscriptions.restore_for_channel(cid, sid, server_addr, &transport_tx);
+                            diag.connections.fetch_add(1, Ordering::Relaxed);
+                            diag.record(DiagEvent::Connected { pv: ch.pv_name.clone(), server: server_addr });
+                            if restored > 0 || stale > 0 {
+                                diag.reconnections.fetch_add(1, Ordering::Relaxed);
+                                diag.subscriptions_restored.fetch_add(restored as u64, Ordering::Relaxed);
+                                diag.subscriptions_stale.fetch_add(stale as u64, Ordering::Relaxed);
+                                diag.record(DiagEvent::Reconnected { pv: ch.pv_name.clone(), restored, stale });
+                                eprintln!("CA: {}: restored {restored} subscriptions ({stale} stale removed)", ch.pv_name);
+                            }
 
                             // Notify search engine of successful connect (clears penalty).
                             let _ = search_tx.send(SearchRequest::ConnectResult {
@@ -886,6 +1091,7 @@ async fn run_coordinator(
                                 cid,
                                 pv_name: ch.pv_name.clone(),
                                 reason: SearchReason::Reconnect,
+                                initial_lane: 0,
                             });
                             // Notify search engine of failed connect (penalty box).
                             if let Some(addr) = server_addr {
@@ -901,7 +1107,7 @@ async fn run_coordinator(
                         // Logged in transport layer; no further action needed
                     }
                     TransportEvent::TcpClosed { server_addr } => {
-                        handle_disconnect(&mut channels, &mut subscriptions, &search_tx, server_addr);
+                        handle_disconnect(&mut channels, &mut subscriptions, &search_tx, server_addr, &diag);
                     }
                     TransportEvent::ServerDisconnect { cid, server_addr } => {
                         // Single channel disconnect (CA_PROTO_SERVER_DISCONN)
@@ -918,7 +1124,31 @@ async fn run_coordinator(
                                     cid,
                                     pv_name: ch.pv_name.clone(),
                                     reason: SearchReason::Reconnect,
+                                    initial_lane: 0,
                                 });
+                            }
+                        }
+                    }
+                    TransportEvent::CircuitUnresponsive { server_addr } => {
+                        diag.unresponsive_events.fetch_add(1, Ordering::Relaxed);
+                        diag.record(DiagEvent::Unresponsive { server: server_addr });
+                        for ch in channels.values_mut() {
+                            if ch.server_addr == Some(server_addr)
+                                && ch.state == ChannelState::Connected
+                            {
+                                ch.state = ChannelState::Unresponsive;
+                                let _ = ch.conn_tx.send(ConnectionEvent::Unresponsive);
+                            }
+                        }
+                    }
+                    TransportEvent::CircuitResponsive { server_addr } => {
+                        diag.record(DiagEvent::Responsive { server: server_addr });
+                        for ch in channels.values_mut() {
+                            if ch.server_addr == Some(server_addr)
+                                && ch.state == ChannelState::Unresponsive
+                            {
+                                ch.state = ChannelState::Connected;
+                                let _ = ch.conn_tx.send(ConnectionEvent::Connected);
                             }
                         }
                     }
@@ -933,24 +1163,44 @@ fn handle_disconnect(
     subscriptions: &mut SubscriptionRegistry,
     search_tx: &mpsc::UnboundedSender<SearchRequest>,
     server_addr: SocketAddr,
+    diag: &CaDiagnostics,
 ) {
     let mut affected_cids = Vec::new();
+    let now = std::time::Instant::now();
 
     for ch in channels.values_mut() {
         if ch.server_addr == Some(server_addr)
-            && (ch.state == ChannelState::Connected || ch.state == ChannelState::Connecting)
+            && ch.state.is_operational()
+            || ch.state == ChannelState::Connecting
         {
             ch.state = ChannelState::Disconnected;
             affected_cids.push(ch.cid);
             let _ = ch.conn_tx.send(ConnectionEvent::Disconnected);
 
-            // Re-search
+            // Reconnection backoff: if the connection was short-lived (<30s),
+            // increment reconnect_count for exponential backoff. Sustained
+            // connections reset the counter.
+            let sustained = ch.last_connected_at
+                .map(|t| now.duration_since(t).as_secs() > 30)
+                .unwrap_or(false);
+            if sustained {
+                ch.reconnect_count = 0;
+            } else {
+                ch.reconnect_count = ch.reconnect_count.saturating_add(1);
+            }
+            let initial_lane = ch.reconnect_count.min(8);
+
             let _ = search_tx.send(SearchRequest::Schedule {
                 cid: ch.cid,
                 pv_name: ch.pv_name.clone(),
                 reason: SearchReason::Reconnect,
+                initial_lane,
             });
         }
+    }
+    if !affected_cids.is_empty() {
+        diag.disconnections.fetch_add(1, Ordering::Relaxed);
+        diag.record(DiagEvent::Disconnected { server: server_addr, channels: affected_cids.len() });
     }
     subscriptions.mark_disconnected(&affected_cids);
 }

@@ -62,6 +62,15 @@ pub const ECA_BADCOUNT: u32 = defmsg(CA_K_ERROR, 21);      // 170 (0xAA)
 pub const ECA_INTERNAL: u32 = defmsg(CA_K_ERROR, 11);      // 90 (0x5A)
 
 /// Maximum payload size for DoS prevention (16 MB).
+/// Maximum payload size for DoS prevention.
+/// Default 16 MB, configurable via EPICS_CA_MAX_ARRAY_BYTES (matches C EPICS).
+pub fn max_payload_size() -> usize {
+    epics_base_rs::runtime::env::get("EPICS_CA_MAX_ARRAY_BYTES")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(16 * 1024 * 1024)
+}
+
+/// Compile-time constant for tests that need a fixed value.
 pub const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 
 /// Extra bytes consumed by extended header fields.
@@ -201,7 +210,7 @@ impl CaHeader {
             }
             let ext_post = u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]);
             let ext_count = u32::from_be_bytes([buf[20], buf[21], buf[22], buf[23]]);
-            if ext_post as usize > MAX_PAYLOAD_SIZE {
+            if ext_post as usize > max_payload_size() {
                 return Err(CaError::Protocol("payload too large".into()));
             }
             hdr.extended_postsize = Some(ext_post);

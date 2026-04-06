@@ -2,11 +2,14 @@ use clap::Parser;
 use epics_ca_rs::client::CaClient;
 
 #[derive(Parser)]
-#[command(name = "rcainfo", about = "Show EPICS PV channel information")]
+#[command(name = "rcainfo", about = "Show EPICS PV channel information and client diagnostics")]
 struct Args {
-    /// PV names to query
-    #[arg(required = true)]
+    /// PV names to query (omit for diagnostics only)
     pv_names: Vec<String>,
+
+    /// Show client diagnostic counters and event history
+    #[arg(short, long)]
+    diag: bool,
 }
 
 #[tokio::main]
@@ -30,6 +33,15 @@ async fn main() {
             }
         }
     }
+
+    if args.diag || args.pv_names.is_empty() {
+        if !args.pv_names.is_empty() {
+            println!();
+        }
+        println!("--- Client Diagnostics ---");
+        println!("{}", client.diagnostics());
+    }
+
     if failed {
         std::process::exit(1);
     }

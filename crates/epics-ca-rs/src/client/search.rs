@@ -295,6 +295,7 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
             cid,
             pv_name,
             reason,
+            initial_lane,
         } => {
             let search_payload = build_search_payload(cid, &pv_name);
             let now = Instant::now();
@@ -302,7 +303,21 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
                 SearchReason::BeaconAnomaly => Some(now + BEACON_FAST_RESCAN_WINDOW),
                 SearchReason::Initial | SearchReason::Reconnect => None,
             };
-            let deadline = now;
+
+            // Apply initial backoff lane for reconnection damping.
+            // Jitter: 0-50% of lane period to spread out burst reconnects.
+            let deadline = if initial_lane > 0 {
+                let period = lane_period(initial_lane, state.base_rtte(), state.max_search_period);
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos();
+                let jitter_frac = (nanos % 1000) as f64 / 2000.0; // 0.0 to 0.5
+                let jitter = Duration::from_nanos((period.as_nanos() as f64 * jitter_frac) as u64);
+                now + period + jitter
+            } else {
+                now
+            };
 
             // Remove old entry if re-scheduling (e.g., reconnect).
             state.remove_channel(cid);
@@ -311,7 +326,7 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
                 cid,
                 pv_name,
                 search_payload,
-                lane_index: 0,
+                lane_index: initial_lane,
                 next_deadline: deadline,
                 last_sent_at: None,
                 fast_rescan_until,
@@ -775,6 +790,7 @@ mod tests {
                 cid: 42,
                 pv_name: "TEST:PV".into(),
                 reason: SearchReason::BeaconAnomaly,
+                initial_lane: 0,
             },
         );
 
