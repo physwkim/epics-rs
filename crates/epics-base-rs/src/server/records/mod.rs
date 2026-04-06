@@ -21,5 +21,6 @@ pub mod sseq;
 pub mod stringin;
 pub mod stringout;
 pub mod sub_record;
+pub mod asub_record;
 pub mod transform;
 pub mod waveform;

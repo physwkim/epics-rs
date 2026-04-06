@@ -117,29 +117,34 @@ async fn try_register() -> Result<(), ()> {
 }
 
 /// Spawn the repeater as a detached background process.
+/// Falls back to an in-process repeater thread if the binary is not found.
 fn spawn_repeater() {
-    // Use the current executable with a special subcommand
     let exe = std::env::current_exe().unwrap_or_default();
-
-    // Try our own binary first (ca-repeater), fall back to spawning via cargo
-    // We look for a `ca-repeater` binary next to the current executable
     let repeater_bin = exe.parent().map(|p| p.join("ca-repeater-rs"));
 
-    let cmd = if let Some(ref bin) = repeater_bin {
+    // Try external binary first
+    if let Some(ref bin) = repeater_bin {
         if bin.exists() {
-            bin.clone()
-        } else {
-            // Fallback: cannot find repeater binary, skip
-            return;
+            use std::process::{Command, Stdio};
+            if Command::new(bin)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
         }
-    } else {
-        return;
-    };
+    }
 
-    use std::process::{Command, Stdio};
-    let _ = Command::new(cmd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    // Fallback: run repeater in-process on a background thread.
+    // This ensures beacon reception works even without the external binary.
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("repeater runtime");
+        let _ = rt.block_on(run_repeater());
+    });
 }
