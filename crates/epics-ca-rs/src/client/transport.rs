@@ -230,6 +230,8 @@ async fn connect_server(
     .ok()?
     .ok()?;
 
+    let _ = stream.set_nodelay(true);
+
     let (reader, write_half) = stream.into_split();
     let writer = Arc::new(Mutex::new(write_half));
 
