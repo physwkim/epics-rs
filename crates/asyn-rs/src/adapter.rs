@@ -684,15 +684,20 @@ pub fn universal_asyn_factory(
 
     let mut adapter = AsynDeviceSupport::from_handle(entry.handle, link, &dtyp);
 
-    // Output records: read back current driver value on init.
     if is_output {
         if ctx.dtyp == "asynOctetWrite" {
             // asynOctetWrite is write-only — no reads allowed.
             // Reading would replace waveform CharArray with String, breaking element_count.
             adapter.write_only = true;
         } else {
+            // Output records: read back current driver value on init.
             adapter = adapter.with_initial_readback();
         }
+    } else {
+        // Input records: read current driver value on init so I/O Intr
+        // records start with the correct value instead of the template default.
+        // Matches C EPICS devAsynXxx init_common() behavior.
+        adapter = adapter.with_initial_readback();
     }
 
     // UInt32Digital: apply mask

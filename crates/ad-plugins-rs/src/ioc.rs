@@ -159,6 +159,10 @@ pub fn register_all_plugins(
         use crate::file_netcdf::NetcdfFileProcessor;
         create_plugin_runtime(port_name, NetcdfFileProcessor::new(), pool, queue_size, ndarray_port, wiring)
     });
+    app = register_generic_plugin(&mut app, mgr, "NDFileMagickConfigure", |port_name, queue_size, ndarray_port, pool, wiring| {
+        use crate::file_magick::MagickFileProcessor;
+        create_plugin_runtime(port_name, MagickFileProcessor::new(), pool, queue_size, ndarray_port, wiring)
+    });
 
     // --- NDAttrConfigure (stub with TS port) ---
     {
@@ -234,7 +238,6 @@ pub fn register_all_plugins(
     for name in &[
         "NDBadPixelConfigure",
         "NDFileNexusConfigure",
-        "NDFileMagickConfigure",
         "NDTimeSeriesConfigure",
         "NDPvaConfigure",
     ] {
@@ -247,6 +250,10 @@ pub fn register_all_plugins(
             move |args: &[ArgValue], _ctx: &CommandContext| {
                 let (port_name, queue_size, ndarray_port) = extract_plugin_args(args)?;
                 let dtyp = dtyp_from_port(&port_name);
+                if asyn_rs::asyn_record::get_port(&port_name).is_some() {
+                    println!("{cmd_name}: port={port_name} already configured, skipping");
+                    return Ok(CommandOutcome::Continue);
+                }
                 let drv = m.driver()?;
                 let pool = drv.pool();
                 use crate::passthrough::PassthroughProcessor;
@@ -302,6 +309,12 @@ where
         move |args: &[ArgValue], _ctx: &CommandContext| {
             let (port_name, queue_size, ndarray_port) = extract_plugin_args(args)?;
             let dtyp = dtyp_from_port(&port_name);
+            // Skip if port already exists (allows commonPlugins.cmd to be
+            // loaded multiple times with different PREFIX for alias records).
+            if asyn_rs::asyn_record::get_port(&port_name).is_some() {
+                println!("{cmd_name}: port={port_name} already configured, skipping");
+                return Ok(CommandOutcome::Continue);
+            }
             let drv = m.driver()?;
             let pool = drv.pool();
             let (handle, _jh) = factory(&port_name, queue_size, &ndarray_port, pool, m.wiring().clone());

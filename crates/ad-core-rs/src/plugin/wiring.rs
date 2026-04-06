@@ -88,6 +88,22 @@ impl WiringRegistry {
 
         let reg = self.inner.lock().unwrap();
 
+        if new_upstream.is_empty() {
+            // Disconnect: extract sender (if any) and drop it
+            if !old_upstream.is_empty() {
+                if let Some(old_output) = reg.get(old_upstream) {
+                    old_output.lock().take(sender_port);
+                }
+            }
+            return Ok(());
+        }
+
+        // Validate new upstream exists BEFORE extracting from old,
+        // so a failed rewire doesn't lose the sender.
+        let new_output = reg
+            .get(new_upstream)
+            .ok_or_else(|| format!("upstream port '{}' not found in wiring registry", new_upstream))?;
+
         // Extract sender from old upstream
         let sender = if !old_upstream.is_empty() {
             if let Some(old_output) = reg.get(old_upstream) {
@@ -98,15 +114,6 @@ impl WiringRegistry {
         } else {
             None
         };
-
-        if new_upstream.is_empty() {
-            // Just disconnect — sender (if any) is dropped
-            return Ok(());
-        }
-
-        let new_output = reg
-            .get(new_upstream)
-            .ok_or_else(|| format!("upstream port '{}' not found in wiring registry", new_upstream))?;
 
         match sender {
             Some(s) => {

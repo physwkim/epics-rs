@@ -1,0 +1,369 @@
+use std::path::{Path, PathBuf};
+
+use ad_core_rs::color::{convert_rgb_layout, NDColorMode};
+use ad_core_rs::error::{ADError, ADResult};
+use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
+use ad_core_rs::ndarray_pool::NDArrayPool;
+use ad_core_rs::plugin::file_base::{NDFileMode, NDFileWriter};
+use ad_core_rs::plugin::file_controller::FilePluginController;
+use ad_core_rs::plugin::runtime::{
+    NDPluginProcess, ParamChangeResult, PluginParamSnapshot, ProcessResult,
+};
+
+use image::{DynamicImage, ImageFormat};
+
+/// NDFileMagick: file writer using the `image` crate.
+///
+/// Format is determined by the file extension (PNG, BMP, GIF, TIFF, etc.).
+/// Supports UInt8 and UInt16 data in mono and RGB color modes.
+pub struct MagickWriter {
+    current_path: Option<PathBuf>,
+    quality: u8,
+    bit_depth: u32,
+}
+
+impl MagickWriter {
+    pub fn new() -> Self {
+        Self {
+            current_path: None,
+            quality: 100,
+            bit_depth: 8,
+        }
+    }
+
+    pub fn set_quality(&mut self, q: u8) {
+        self.quality = q;
+    }
+
+    pub fn set_bit_depth(&mut self, depth: u32) {
+        self.bit_depth = depth;
+    }
+
+    fn color_mode(array: &NDArray) -> NDColorMode {
+        array
+            .attributes
+            .get("ColorMode")
+            .and_then(|attr| attr.value.as_i64())
+            .map(|v| NDColorMode::from_i32(v as i32))
+            .unwrap_or_else(|| match array.dims.as_slice() {
+                [a, _, _] if a.size == 3 => NDColorMode::RGB1,
+                [_, b, _] if b.size == 3 => NDColorMode::RGB2,
+                [_, _, c] if c.size == 3 => NDColorMode::RGB3,
+                _ => NDColorMode::Mono,
+            })
+    }
+
+    /// Convert NDArray to DynamicImage for encoding.
+    fn array_to_image(array: &NDArray) -> ADResult<DynamicImage> {
+        let info = array.info();
+        let width = info.x_size as u32;
+        let height = info.y_size as u32;
+        let color = Self::color_mode(array);
+        let is_rgb = matches!(color, NDColorMode::RGB1 | NDColorMode::RGB2 | NDColorMode::RGB3);
+
+        // Convert to RGB1 layout if needed (image crate expects interleaved RGB)
+        let src = if is_rgb && color != NDColorMode::RGB1 {
+            &convert_rgb_layout(array, color, NDColorMode::RGB1)?
+        } else {
+            array
+        };
+
+        match &src.data {
+            NDDataBuffer::U8(v) => {
+                if is_rgb {
+                    image::RgbImage::from_raw(width, height, v.clone())
+                        .map(DynamicImage::ImageRgb8)
+                        .ok_or_else(|| ADError::UnsupportedConversion("RGB8 buffer size mismatch".into()))
+                } else {
+                    image::GrayImage::from_raw(width, height, v.clone())
+                        .map(DynamicImage::ImageLuma8)
+                        .ok_or_else(|| ADError::UnsupportedConversion("Gray8 buffer size mismatch".into()))
+                }
+            }
+            NDDataBuffer::U16(v) => {
+                if is_rgb {
+                    image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(width, height, v.clone())
+                        .map(DynamicImage::ImageRgb16)
+                        .ok_or_else(|| ADError::UnsupportedConversion("RGB16 buffer size mismatch".into()))
+                } else {
+                    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(width, height, v.clone())
+                        .map(DynamicImage::ImageLuma16)
+                        .ok_or_else(|| ADError::UnsupportedConversion("Gray16 buffer size mismatch".into()))
+                }
+            }
+            _ => Err(ADError::UnsupportedConversion(format!(
+                "NDFileMagick: unsupported data type {:?}, use UInt8 or UInt16",
+                src.data.data_type()
+            ))),
+        }
+    }
+}
+
+impl NDFileWriter for MagickWriter {
+    fn open_file(&mut self, path: &Path, _mode: NDFileMode, _array: &NDArray) -> ADResult<()> {
+        self.current_path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    fn write_file(&mut self, array: &NDArray) -> ADResult<()> {
+        let path = self.current_path.as_ref()
+            .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
+
+        let img = Self::array_to_image(array)?;
+
+        // Determine format from extension, default to PNG
+        let format = ImageFormat::from_path(path).unwrap_or(ImageFormat::Png);
+
+        // For JPEG, use quality setting
+        if format == ImageFormat::Jpeg {
+            let mut buf = Vec::new();
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut buf, self.quality,
+            );
+            img.write_with_encoder(encoder)
+                .map_err(|e| ADError::UnsupportedConversion(format!("Magick encode error: {e}")))?;
+            std::fs::write(path, &buf)?;
+        } else {
+            img.save(path)
+                .map_err(|e| ADError::UnsupportedConversion(format!("Magick save error: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    fn read_file(&mut self) -> ADResult<NDArray> {
+        let path = self.current_path.as_ref()
+            .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
+
+        let img = image::open(path)
+            .map_err(|e| ADError::UnsupportedConversion(format!("Magick read error: {e}")))?;
+
+        let width = img.width() as usize;
+        let height = img.height() as usize;
+
+        match img {
+            DynamicImage::ImageLuma8(buf) => {
+                let mut arr = NDArray::new(
+                    vec![NDDimension::new(width), NDDimension::new(height)],
+                    NDDataType::UInt8,
+                );
+                arr.data = NDDataBuffer::U8(buf.into_raw());
+                Ok(arr)
+            }
+            DynamicImage::ImageRgb8(buf) => {
+                let mut arr = NDArray::new(
+                    vec![
+                        NDDimension::new(3),
+                        NDDimension::new(width),
+                        NDDimension::new(height),
+                    ],
+                    NDDataType::UInt8,
+                );
+                arr.data = NDDataBuffer::U8(buf.into_raw());
+                Ok(arr)
+            }
+            DynamicImage::ImageLuma16(buf) => {
+                let mut arr = NDArray::new(
+                    vec![NDDimension::new(width), NDDimension::new(height)],
+                    NDDataType::UInt16,
+                );
+                arr.data = NDDataBuffer::U16(buf.into_raw());
+                Ok(arr)
+            }
+            DynamicImage::ImageRgb16(buf) => {
+                let mut arr = NDArray::new(
+                    vec![
+                        NDDimension::new(3),
+                        NDDimension::new(width),
+                        NDDimension::new(height),
+                    ],
+                    NDDataType::UInt16,
+                );
+                arr.data = NDDataBuffer::U16(buf.into_raw());
+                Ok(arr)
+            }
+            other => {
+                // Convert anything else to RGB8
+                let rgb = other.to_rgb8();
+                let mut arr = NDArray::new(
+                    vec![
+                        NDDimension::new(3),
+                        NDDimension::new(width),
+                        NDDimension::new(height),
+                    ],
+                    NDDataType::UInt8,
+                );
+                arr.data = NDDataBuffer::U8(rgb.into_raw());
+                Ok(arr)
+            }
+        }
+    }
+
+    fn close_file(&mut self) -> ADResult<()> {
+        self.current_path = None;
+        Ok(())
+    }
+
+    fn supports_multiple_arrays(&self) -> bool {
+        false
+    }
+}
+
+/// Magick file processor wrapping FilePluginController<MagickWriter>.
+pub struct MagickFileProcessor {
+    ctrl: FilePluginController<MagickWriter>,
+    quality_idx: Option<usize>,
+    bit_depth_idx: Option<usize>,
+    compress_type_idx: Option<usize>,
+}
+
+impl MagickFileProcessor {
+    pub fn new() -> Self {
+        Self {
+            ctrl: FilePluginController::new(MagickWriter::new()),
+            quality_idx: None,
+            bit_depth_idx: None,
+            compress_type_idx: None,
+        }
+    }
+}
+
+impl NDPluginProcess for MagickFileProcessor {
+    fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
+        self.ctrl.process_array(array)
+    }
+
+    fn plugin_type(&self) -> &str {
+        "NDFileMagick"
+    }
+
+    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+        self.ctrl.register_params(base)?;
+        use asyn_rs::param::ParamType;
+        self.quality_idx = Some(base.create_param("MAGICK_QUALITY", ParamType::Int32)?);
+        self.bit_depth_idx = Some(base.create_param("MAGICK_BIT_DEPTH", ParamType::Int32)?);
+        self.compress_type_idx = Some(base.create_param("MAGICK_COMPRESS_TYPE", ParamType::Int32)?);
+        // Set defaults
+        base.set_int32_param(self.quality_idx.unwrap(), 0, 100)?;
+        base.set_int32_param(self.bit_depth_idx.unwrap(), 0, 8)?;
+        base.set_int32_param(self.compress_type_idx.unwrap(), 0, 0)?;
+        Ok(())
+    }
+
+    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+        if Some(reason) == self.quality_idx {
+            let q = params.value.as_i32().clamp(1, 100) as u8;
+            self.ctrl.writer.set_quality(q);
+            return ParamChangeResult::empty();
+        }
+        if Some(reason) == self.bit_depth_idx {
+            let d = params.value.as_i32() as u32;
+            self.ctrl.writer.set_bit_depth(d);
+            return ParamChangeResult::empty();
+        }
+        if Some(reason) == self.compress_type_idx {
+            // CompressType stored but not actively used by `image` crate;
+            // format-specific compression is handled by each codec internally.
+            return ParamChangeResult::empty();
+        }
+        self.ctrl.on_param_change(reason, params)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_path(ext: &str) -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("adcore_test_magick_{n}.{ext}"))
+    }
+
+    #[test]
+    fn test_write_read_png_u8() {
+        let path = temp_path("png");
+        let mut writer = MagickWriter::new();
+
+        let mut arr = NDArray::new(
+            vec![NDDimension::new(8), NDDimension::new(8)],
+            NDDataType::UInt8,
+        );
+        if let NDDataBuffer::U8(ref mut v) = arr.data {
+            for i in 0..64 { v[i] = (i * 4) as u8; }
+        }
+
+        writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
+        writer.write_file(&arr).unwrap();
+
+        let read_back = writer.read_file().unwrap();
+        assert_eq!(read_back.data.data_type(), NDDataType::UInt8);
+        if let (NDDataBuffer::U8(orig), NDDataBuffer::U8(read)) = (&arr.data, &read_back.data) {
+            assert_eq!(orig, read);
+        }
+
+        writer.close_file().unwrap();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_write_read_png_u16() {
+        let path = temp_path("png");
+        let mut writer = MagickWriter::new();
+
+        let mut arr = NDArray::new(
+            vec![NDDimension::new(8), NDDimension::new(8)],
+            NDDataType::UInt16,
+        );
+        if let NDDataBuffer::U16(ref mut v) = arr.data {
+            for i in 0..64 { v[i] = (i * 1000) as u16; }
+        }
+
+        writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
+        writer.write_file(&arr).unwrap();
+
+        let read_back = writer.read_file().unwrap();
+        assert_eq!(read_back.data.data_type(), NDDataType::UInt16);
+        if let (NDDataBuffer::U16(orig), NDDataBuffer::U16(read)) = (&arr.data, &read_back.data) {
+            assert_eq!(orig, read);
+        }
+
+        writer.close_file().unwrap();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_write_read_bmp_rgb() {
+        let path = temp_path("bmp");
+        let mut writer = MagickWriter::new();
+
+        let mut arr = NDArray::new(
+            vec![NDDimension::new(3), NDDimension::new(4), NDDimension::new(4)],
+            NDDataType::UInt8,
+        );
+        if let NDDataBuffer::U8(ref mut v) = arr.data {
+            for i in 0..48 { v[i] = (i * 5) as u8; }
+        }
+
+        writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
+        writer.write_file(&arr).unwrap();
+
+        let read_back = writer.read_file().unwrap();
+        assert_eq!(read_back.dims.len(), 3);
+        assert_eq!(read_back.dims[0].size, 3);
+
+        writer.close_file().unwrap();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_rejects_unsupported_type() {
+        let arr = NDArray::new(
+            vec![NDDimension::new(4), NDDimension::new(4)],
+            NDDataType::Float32,
+        );
+        assert!(MagickWriter::array_to_image(&arr).is_err());
+    }
+}

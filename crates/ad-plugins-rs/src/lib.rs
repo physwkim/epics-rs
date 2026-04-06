@@ -30,6 +30,7 @@ pub mod file_tiff;
 pub mod file_jpeg;
 pub mod file_hdf5;
 pub mod file_netcdf;
+pub mod file_magick;
 pub mod passthrough;
 pub mod attribute;
 pub mod roi_stat;

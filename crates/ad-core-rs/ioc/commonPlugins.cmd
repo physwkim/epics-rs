@@ -37,8 +37,8 @@ dbLoadRecords("NDFileNexus.template", "P=$(PREFIX),R=Nexus1:,PORT=FileNexus1,NDA
 NDFileHDF5Configure("FileHDF1", $(QSIZE), 0, "$(PORT)", 0)
 dbLoadRecords("NDFileHDF5.template", "P=$(PREFIX),R=HDF1:,PORT=FileHDF1,NDARRAY_PORT=$(PORT)")
 
-#NDFileMagickConfigure("FileMagick1", $(QSIZE), 0, "$(PORT)", 0)
-#dbLoadRecords("NDFileMagick.template", "P=$(PREFIX),R=Magick1:,PORT=FileMagick1,NDARRAY_PORT=$(PORT)")
+NDFileMagickConfigure("FileMagick1", $(QSIZE), 0, "$(PORT)", 0)
+dbLoadRecords("NDFileMagick.template", "P=$(PREFIX),R=Magick1:,PORT=FileMagick1,NDARRAY_PORT=$(PORT)")
 
 # ===== ROI plugins (4 instances) =====
 
