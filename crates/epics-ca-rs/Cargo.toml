@@ -14,6 +14,13 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 socket2 = { version = "0.5", features = ["all"] }
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "protocol_bench"
+harness = false
+
 [[bin]]
 name = "caget-rs"
 path = "src/bin/caget-rs.rs"

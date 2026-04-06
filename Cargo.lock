@@ -429,6 +429,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "criterion",
  "epics-ca-rs",
  "epics-macros-rs",
  "hostname",
@@ -446,6 +447,7 @@ version = "0.7.12"
 dependencies = [
  "chrono",
  "clap",
+ "criterion",
  "epics-base-rs",
  "socket2 0.5.10",
  "tokio",
