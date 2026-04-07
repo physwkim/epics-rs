@@ -67,7 +67,7 @@ fn bench_dbr_encode_decode(c: &mut Criterion) {
     use epics_base_rs::server::snapshot::Snapshot;
 
     let snap = Snapshot::new(
-        EpicsValue::Double(3.14159),
+        EpicsValue::Double(std::f64::consts::PI),
         0, 0,
         std::time::SystemTime::now(),
     );
