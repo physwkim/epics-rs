@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.8.1
+
+### Fix: Plugin param update re-entrancy (CPU 100% on idle)
+
+Plugin `on_param_change` handlers that return `ParamUpdate` values (readback pushes)
+previously used `write_int32_no_wait` which sends `Int32Write` to the port actor.
+The port actor then calls `io_write_int32` → `on_param_change` again, causing
+**infinite re-entrancy loops** (e.g., Overlay Position↔Center bidirectional update).
+
+This is now fixed by introducing `ParamSetValue` and `set_params_and_notify()`,
+which mirrors C ADCore's `setIntegerParam()` + `callParamCallbacks()` pattern:
+values are stored directly in the param store without going through the driver's
+write path, so `on_param_change` is never re-triggered.
+
+- **asyn-rs**: Add `ParamSetValue` enum, extend `CallParamCallbacks` with inline param updates, add `PortHandle::set_params_and_notify()`
+- **ad-core-rs**: `publish_result` now uses `set_params_and_notify` instead of `write_int32_no_wait` for plugin readback values
+- **ad-plugins-rs**: Restore Overlay Position↔Center bidirectional readback (safe with new path)
+- **commonPlugins.cmd**: Add missing `NDTimeSeriesConfigure` commands for Stats/ROIStat/Attr TS ports
+
 ## v0.8.0
 
 ### HDF5 Plugin — Complete Rewrite

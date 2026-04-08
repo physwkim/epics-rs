@@ -410,10 +410,14 @@ impl NDPluginProcess for ROIStatProcessor {
             let _ = sender.try_send(TimeSeriesData { values });
         }
 
-        // Build per-ROI param updates
+        // Build per-ROI param updates (only for enabled ROIs)
         let p = &self.params;
         let mut updates = Vec::new();
-        for (i, result) in self.results.iter().enumerate() {
+        for (i, roi) in self.rois.iter().enumerate() {
+            if !roi.enabled {
+                continue;
+            }
+            let result = &self.results[i];
             let addr = i as i32;
             updates.push(ParamUpdate::float64_addr(p.min_value, addr, result.min));
             updates.push(ParamUpdate::float64_addr(p.max_value, addr, result.max));

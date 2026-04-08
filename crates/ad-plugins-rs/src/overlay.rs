@@ -545,7 +545,6 @@ impl NDPluginProcess for OverlayProcessor {
             slot.draw_mode = params.value.as_i32();
         } else if Some(reason) == self.params.position_x {
             slot.position_x = params.value.as_i32().max(0) as usize;
-            // Update center readback
             if let Some(ci) = self.params.center_x {
                 updates.push(ParamUpdate::int32_addr(
                     ci,

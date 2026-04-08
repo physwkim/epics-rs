@@ -68,7 +68,7 @@ impl From<&RequestOp> for PortCommand {
             RequestOp::DrvUserCreate { drv_info } => Self::DrvUserCreate {
                 drv_info: drv_info.clone(),
             },
-            RequestOp::CallParamCallbacks { addr } => Self::CallParamCallbacks { addr: *addr },
+            RequestOp::CallParamCallbacks { addr, .. } => Self::CallParamCallbacks { addr: *addr },
             RequestOp::GetOption { key } => Self::GetOption { key: key.clone() },
             RequestOp::SetOption { key, value } => Self::SetOption {
                 key: key.clone(),
@@ -144,7 +144,10 @@ impl From<&PortCommand> for RequestOp {
             PortCommand::DrvUserCreate { drv_info } => Self::DrvUserCreate {
                 drv_info: drv_info.clone(),
             },
-            PortCommand::CallParamCallbacks { addr } => Self::CallParamCallbacks { addr: *addr },
+            PortCommand::CallParamCallbacks { addr } => Self::CallParamCallbacks {
+                addr: *addr,
+                updates: vec![],
+            },
             PortCommand::GetOption { key } => Self::GetOption { key: key.clone() },
             PortCommand::SetOption { key, value } => Self::SetOption {
                 key: key.clone(),

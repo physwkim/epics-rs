@@ -357,8 +357,14 @@ impl PortHandle {
     /// Flush changed parameters as interrupt notifications (async).
     pub async fn call_param_callbacks(&self, addr: i32) -> AsynResult<()> {
         let user = AsynUser::new(0).with_addr(addr);
-        self.submit(RequestOp::CallParamCallbacks { addr }, user)
-            .await?;
+        self.submit(
+            RequestOp::CallParamCallbacks {
+                addr,
+                updates: vec![],
+            },
+            user,
+        )
+        .await?;
         Ok(())
     }
 
@@ -411,7 +417,13 @@ impl PortHandle {
     /// Flush changed parameters as interrupt notifications (blocking).
     pub fn call_param_callbacks_blocking(&self, addr: i32) -> AsynResult<()> {
         let user = AsynUser::new(0).with_addr(addr);
-        self.submit_blocking(RequestOp::CallParamCallbacks { addr }, user)?;
+        self.submit_blocking(
+            RequestOp::CallParamCallbacks {
+                addr,
+                updates: vec![],
+            },
+            user,
+        )?;
         Ok(())
     }
 
@@ -422,7 +434,20 @@ impl PortHandle {
     /// guaranteed to be applied before this callback runs.
     pub fn call_param_callbacks_no_wait(&self, addr: i32) {
         let user = AsynUser::new(0).with_addr(addr);
-        self.submit_no_wait(RequestOp::CallParamCallbacks { addr }, user);
+        self.submit_no_wait(
+            RequestOp::CallParamCallbacks {
+                addr,
+                updates: vec![],
+            },
+            user,
+        );
+    }
+
+    /// Set params directly and fire callbacks — no writeInt32/on_param_change re-entrancy.
+    /// Mirrors C ADCore's setIntegerParam + setDoubleParam + callParamCallbacks pattern.
+    pub fn set_params_and_notify(&self, addr: i32, updates: Vec<crate::request::ParamSetValue>) {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_no_wait(RequestOp::CallParamCallbacks { addr, updates }, user);
     }
 
     /// Send a write request without waiting for the reply.

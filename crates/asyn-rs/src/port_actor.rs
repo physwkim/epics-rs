@@ -397,8 +397,34 @@ impl PortActor {
                 self.driver.write_float32_array(user, data)?;
                 Ok(RequestResult::write_ok())
             }
-            RequestOp::CallParamCallbacks { addr } => {
-                self.driver.base_mut().call_param_callbacks(*addr)?;
+            RequestOp::CallParamCallbacks { addr, updates } => {
+                let base = self.driver.base_mut();
+                for u in updates {
+                    match u {
+                        crate::request::ParamSetValue::Int32 {
+                            reason,
+                            addr,
+                            value,
+                        } => {
+                            let _ = base.set_int32_param(*reason, *addr, *value);
+                        }
+                        crate::request::ParamSetValue::Float64 {
+                            reason,
+                            addr,
+                            value,
+                        } => {
+                            let _ = base.set_float64_param(*reason, *addr, *value);
+                        }
+                        crate::request::ParamSetValue::Octet {
+                            reason,
+                            addr,
+                            value,
+                        } => {
+                            let _ = base.params.set_string(*reason, *addr, value.clone());
+                        }
+                    }
+                }
+                base.call_param_callbacks(*addr)?;
                 Ok(RequestResult::write_ok())
             }
             RequestOp::GetOption { key } => {

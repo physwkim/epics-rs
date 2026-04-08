@@ -6,6 +6,27 @@ use std::time::SystemTime;
 
 use crate::error::AsynStatus;
 
+/// A param value to set directly in the store (no writeInt32/on_param_change).
+/// Mirrors C ADCore's setIntegerParam/setDoubleParam.
+#[derive(Debug, Clone)]
+pub enum ParamSetValue {
+    Int32 {
+        reason: usize,
+        addr: i32,
+        value: i32,
+    },
+    Float64 {
+        reason: usize,
+        addr: i32,
+        value: f64,
+    },
+    Octet {
+        reason: usize,
+        addr: i32,
+        value: String,
+    },
+}
+
 /// Operation the worker thread will dispatch to the port driver.
 #[derive(Debug, Clone)]
 pub enum RequestOp {
@@ -105,9 +126,14 @@ pub enum RequestOp {
     Float32ArrayWrite {
         data: Vec<f32>,
     },
-    /// Flush changed parameters as interrupt notifications (callParamCallbacks).
+    /// Set params directly in the store (like C setIntegerParam/setDoubleParam)
+    /// and then fire interrupt notifications (callParamCallbacks).
+    /// Does NOT trigger writeInt32/on_param_change — avoids re-entrancy.
     CallParamCallbacks {
         addr: i32,
+        /// Param updates to apply before firing callbacks.
+        /// Empty = just fire callbacks for previously changed params.
+        updates: Vec<ParamSetValue>,
     },
     /// Get a port/driver option by key.
     GetOption {

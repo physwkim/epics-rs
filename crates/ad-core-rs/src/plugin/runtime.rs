@@ -396,8 +396,14 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
         self.port_handle
             .write_float64_no_wait(self.plugin_params.execution_time, 0, elapsed_ms);
 
-        // Collect unique addrs that have updates (beyond addr 0 which is always flushed)
-        let mut extra_addrs: Vec<i32> = Vec::new();
+        // Set params directly and fire callbacks — no writeInt32/on_param_change re-entrancy.
+        // This mirrors C ADCore's setIntegerParam + callParamCallbacks pattern.
+        use asyn_rs::request::ParamSetValue;
+
+        let mut addr0_updates: Vec<ParamSetValue> = Vec::new();
+        let mut extra_addr_map: std::collections::HashMap<i32, Vec<ParamSetValue>> =
+            std::collections::HashMap::new();
+
         for update in &param_updates {
             match update {
                 ParamUpdate::Int32 {
@@ -405,9 +411,15 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
                     addr,
                     value,
                 } => {
-                    self.port_handle.write_int32_no_wait(*reason, *addr, *value);
-                    if *addr != 0 && !extra_addrs.contains(addr) {
-                        extra_addrs.push(*addr);
+                    let pv = ParamSetValue::Int32 {
+                        reason: *reason,
+                        addr: *addr,
+                        value: *value,
+                    };
+                    if *addr == 0 {
+                        addr0_updates.push(pv);
+                    } else {
+                        extra_addr_map.entry(*addr).or_default().push(pv);
                     }
                 }
                 ParamUpdate::Float64 {
@@ -415,10 +427,15 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
                     addr,
                     value,
                 } => {
-                    self.port_handle
-                        .write_float64_no_wait(*reason, *addr, *value);
-                    if *addr != 0 && !extra_addrs.contains(addr) {
-                        extra_addrs.push(*addr);
+                    let pv = ParamSetValue::Float64 {
+                        reason: *reason,
+                        addr: *addr,
+                        value: *value,
+                    };
+                    if *addr == 0 {
+                        addr0_updates.push(pv);
+                    } else {
+                        extra_addr_map.entry(*addr).or_default().push(pv);
                     }
                 }
                 ParamUpdate::Octet {
@@ -426,17 +443,23 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
                     addr,
                     value,
                 } => {
-                    let data = value.as_bytes().to_vec();
-                    let user = asyn_rs::user::AsynUser::new(*reason).with_addr(*addr);
-                    self.port_handle
-                        .submit_no_wait(asyn_rs::request::RequestOp::OctetWrite { data }, user);
+                    let pv = ParamSetValue::Octet {
+                        reason: *reason,
+                        addr: *addr,
+                        value: value.clone(),
+                    };
+                    if *addr == 0 {
+                        addr0_updates.push(pv);
+                    } else {
+                        extra_addr_map.entry(*addr).or_default().push(pv);
+                    }
                 }
             }
         }
 
-        self.port_handle.call_param_callbacks_no_wait(0);
-        for addr in extra_addrs {
-            self.port_handle.call_param_callbacks_no_wait(addr);
+        self.port_handle.set_params_and_notify(0, addr0_updates);
+        for (addr, updates) in extra_addr_map {
+            self.port_handle.set_params_and_notify(addr, updates);
         }
     }
 }
