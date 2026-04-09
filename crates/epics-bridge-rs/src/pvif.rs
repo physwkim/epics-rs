@@ -213,6 +213,18 @@ pub fn pv_structure_to_epics(pv: &PvStructure) -> Option<EpicsValue> {
 /// If pvRequest has a "field" sub-structure, only those named fields are kept.
 /// If pvRequest is empty or has no "field", return the full structure.
 ///
+/// **Nested filtering**: when a requested field is itself a non-empty
+/// structure in the request, it acts as a sub-spec that recursively
+/// filters the corresponding PvStructure field. An empty structure
+/// in the request means "include this field entirely".
+///
+/// Example:
+/// ```text
+/// request: { field: { value: {}, alarm: { severity: {} } } }
+/// pv:      { value: 42, alarm: {severity: 0, status: 0, message: ""}, timeStamp: {...} }
+/// result:  { value: 42, alarm: { severity: 0 } }
+/// ```
+///
 /// Corresponds to C++ QSRV's pvRequest mask handling.
 pub fn filter_by_request(pv: &PvStructure, request: &PvStructure) -> PvStructure {
     // Look for "field" sub-structure in request
@@ -221,16 +233,39 @@ pub fn filter_by_request(pv: &PvStructure, request: &PvStructure) -> PvStructure
         _ => return pv.clone(), // No field filter, return everything
     };
 
-    // If field spec is empty, return everything
-    if field_spec.fields.is_empty() {
+    filter_by_spec(pv, field_spec)
+}
+
+/// Recursively filter `pv` by the given field spec.
+///
+/// The spec is a PvStructure where each child indicates which sub-field
+/// to keep. An empty child structure means "include this field entirely".
+/// A non-empty child structure recursively filters that sub-field.
+fn filter_by_spec(pv: &PvStructure, spec: &PvStructure) -> PvStructure {
+    // Empty spec → return everything (passthrough)
+    if spec.fields.is_empty() {
         return pv.clone();
     }
 
-    // Filter: only include fields named in the request
     let mut result = PvStructure::new(&pv.struct_id);
     for (name, value) in &pv.fields {
-        if field_spec.get_field(name).is_some() {
-            result.fields.push((name.clone(), value.clone()));
+        let sub_spec = match spec.get_field(name) {
+            Some(s) => s,
+            None => continue, // Field not in spec, skip
+        };
+
+        match (sub_spec, value) {
+            // Both are structures: recurse
+            (PvField::Structure(s_spec), PvField::Structure(s_val)) => {
+                result
+                    .fields
+                    .push((name.clone(), PvField::Structure(filter_by_spec(s_val, s_spec))));
+            }
+            // Spec is structure but value is scalar/array: include as-is
+            // (the spec just selects the field, doesn't restructure it)
+            (_, _) => {
+                result.fields.push((name.clone(), value.clone()));
+            }
         }
     }
     result
@@ -677,6 +712,41 @@ mod tests {
 
         let filtered = filter_by_request(&pv, &req);
         assert_eq!(filtered.fields.len(), 2);
+    }
+
+    #[test]
+    fn filter_by_request_nested_subfield() {
+        let snap = test_snapshot(EpicsValue::Double(1.0));
+        let pv = snapshot_to_nt_scalar(&snap);
+
+        // Build request: {field: {alarm: {severity: {}}}}
+        // — only return alarm.severity, not other alarm fields
+        let mut alarm_spec = PvStructure::new("");
+        alarm_spec.fields.push((
+            "severity".into(),
+            PvField::Structure(PvStructure::new("")),
+        ));
+
+        let mut field_spec = PvStructure::new("");
+        field_spec
+            .fields
+            .push(("alarm".into(), PvField::Structure(alarm_spec)));
+
+        let mut req = PvStructure::new("");
+        req.fields
+            .push(("field".into(), PvField::Structure(field_spec)));
+
+        let filtered = filter_by_request(&pv, &req);
+        assert_eq!(filtered.fields.len(), 1);
+        assert_eq!(filtered.fields[0].0, "alarm");
+
+        // Verify alarm only has "severity" sub-field, not "status" or "message"
+        if let PvField::Structure(alarm) = &filtered.fields[0].1 {
+            assert_eq!(alarm.fields.len(), 1);
+            assert_eq!(alarm.fields[0].0, "severity");
+        } else {
+            panic!("expected alarm structure");
+        }
     }
 
     #[test]

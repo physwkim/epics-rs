@@ -175,6 +175,24 @@ fn raw_to_group_def(name: String, raw: RawGroupDef) -> BridgeResult<GroupPvDef> 
     // Sort by put_order for deterministic ordering
     members.sort_by_key(|m| m.put_order);
 
+    // Validate trigger field references against actual member field names.
+    // C++ QSRV does this in pdb.cpp:510-533 (trigger resolution phase).
+    let member_names: std::collections::HashSet<&str> =
+        members.iter().map(|m| m.field_name.as_str()).collect();
+
+    for member in &members {
+        if let TriggerDef::Fields(targets) = &member.triggers {
+            for target in targets {
+                if !member_names.contains(target.as_str()) {
+                    return Err(BridgeError::GroupConfigError(format!(
+                        "group '{}': member '{}' has trigger '{}' which is not a member of this group",
+                        name, member.field_name, target
+                    )));
+                }
+            }
+        }
+    }
+
     Ok(GroupPvDef {
         name,
         struct_id: raw.id,
@@ -434,5 +452,50 @@ mod tests {
 
         let grp = existing.get("GRP:a").unwrap();
         assert_eq!(grp.members.len(), 2);
+    }
+
+    #[test]
+    fn trigger_validation_unknown_field() {
+        let json = r#"{
+            "GRP:bad": {
+                "x": {
+                    "+channel": "R:x",
+                    "+trigger": "y,z"
+                },
+                "y": { "+channel": "R:y" }
+            }
+        }"#;
+
+        // y exists but z doesn't — should fail
+        let result = parse_group_config(json);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("'z'"), "expected error about 'z': {err}");
+    }
+
+    #[test]
+    fn trigger_validation_self_reference() {
+        let json = r#"{
+            "GRP:ok": {
+                "a": { "+channel": "R:a", "+trigger": "a,b" },
+                "b": { "+channel": "R:b", "+trigger": "a" }
+            }
+        }"#;
+
+        // Self-reference and cross-reference are both valid
+        let result = parse_group_config(json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trigger_validation_star_passes() {
+        let json = r#"{
+            "GRP:ok": {
+                "a": { "+channel": "R:a", "+trigger": "*" }
+            }
+        }"#;
+
+        // "*" doesn't go through field validation
+        assert!(parse_group_config(json).is_ok());
     }
 }

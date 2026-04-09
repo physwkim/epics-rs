@@ -398,6 +398,9 @@ pub struct GroupMonitor {
     db: Arc<PvDatabase>,
     def: GroupPvDef,
     running: bool,
+    /// Reusable GroupChannel for read_group/read_partial calls.
+    /// Created once in start() instead of per-event in poll().
+    group_channel: Option<GroupChannel>,
     /// Initial complete group snapshot (sent on first poll)
     initial_snapshot: Option<PvStructure>,
     /// Fan-in receiver for member events
@@ -412,6 +415,7 @@ impl GroupMonitor {
             db,
             def,
             running: false,
+            group_channel: None,
             initial_snapshot: None,
             event_rx: None,
             _tasks: Vec::new(),
@@ -451,12 +455,15 @@ impl crate::provider::PvaMonitor for GroupMonitor {
             }
         }
 
-        // Read initial complete group snapshot (like C++ BaseMonitor::connect)
+        // Create a reusable GroupChannel once (instead of per-event in poll)
         let group_channel = GroupChannel::new(self.db.clone(), self.def.clone());
+
+        // Read initial complete group snapshot (like C++ BaseMonitor::connect)
         if let Ok(snapshot) = group_channel.read_group().await {
             self.initial_snapshot = Some(snapshot);
         }
 
+        self.group_channel = Some(group_channel);
         self.event_rx = Some(rx);
         self.running = true;
         Ok(())
@@ -478,7 +485,7 @@ impl crate::provider::PvaMonitor for GroupMonitor {
                 None => continue,
             };
 
-            let group_channel = GroupChannel::new(self.db.clone(), self.def.clone());
+            let group_channel = self.group_channel.as_ref()?;
 
             match &member.triggers {
                 TriggerDef::None => continue,
@@ -504,6 +511,7 @@ impl crate::provider::PvaMonitor for GroupMonitor {
         }
 
         self.running = false;
+        self.group_channel = None;
         self.initial_snapshot = None;
     }
 }
