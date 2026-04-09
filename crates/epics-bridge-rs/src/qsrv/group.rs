@@ -11,11 +11,11 @@ use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::types::DbFieldType;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType};
 
-use crate::convert::{dbf_to_scalar_type, epics_to_pv_field};
+use super::convert::{dbf_to_scalar_type, epics_to_pv_field};
 use crate::error::{BridgeError, BridgeResult};
-use crate::group_config::{GroupMember, GroupPvDef, TriggerDef};
-use crate::monitor::BridgeMonitor;
-use crate::pvif::{self, FieldMapping, NtType};
+use super::group_config::{GroupMember, GroupPvDef, TriggerDef};
+use super::monitor::BridgeMonitor;
+use super::pvif::{self, FieldMapping, NtType};
 
 // ---------------------------------------------------------------------------
 // Nested field path support
@@ -244,7 +244,7 @@ impl GroupChannel {
     }
 }
 
-impl crate::provider::Channel for GroupChannel {
+impl super::provider::Channel for GroupChannel {
     fn channel_name(&self) -> &str {
         &self.def.name
     }
@@ -255,8 +255,8 @@ impl crate::provider::Channel for GroupChannel {
     }
 
     async fn put(&self, value: &PvStructure) -> BridgeResult<()> {
-        let opts = crate::channel::PutOptions::from_pv_request(value);
-        let use_process = opts.process != crate::channel::ProcessMode::Inhibit;
+        let opts = super::channel::PutOptions::from_pv_request(value);
+        let use_process = opts.process != super::channel::ProcessMode::Inhibit;
 
         let mut ordered: Vec<&GroupMember> = self.def.members.iter().collect();
         ordered.sort_by_key(|m| m.put_order);
@@ -277,7 +277,7 @@ impl crate::provider::Channel for GroupChannel {
                         continue;
                     }
                 };
-                let epics_val = crate::convert::pv_field_to_epics(pv_field);
+                let epics_val = super::convert::pv_field_to_epics(pv_field);
                 writes.push((member, epics_val));
             }
 
@@ -321,7 +321,7 @@ impl crate::provider::Channel for GroupChannel {
                         .await
                         .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
                 } else {
-                    let epics_val = match crate::convert::pv_field_to_epics(pv_field) {
+                    let epics_val = match super::convert::pv_field_to_epics(pv_field) {
                         Some(v) => v,
                         None => continue,
                     };
@@ -423,7 +423,7 @@ impl GroupMonitor {
     }
 }
 
-impl crate::provider::PvaMonitor for GroupMonitor {
+impl super::provider::PvaMonitor for GroupMonitor {
     async fn start(&mut self) -> BridgeResult<()> {
         if self.running {
             return Ok(());
@@ -526,7 +526,7 @@ pub enum AnyMonitor {
     Group(GroupMonitor),
 }
 
-impl crate::provider::PvaMonitor for AnyMonitor {
+impl super::provider::PvaMonitor for AnyMonitor {
     async fn poll(&mut self) -> Option<PvStructure> {
         match self {
             Self::Single(m) => m.poll().await,

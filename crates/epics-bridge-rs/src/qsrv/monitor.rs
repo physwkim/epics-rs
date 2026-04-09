@@ -19,8 +19,8 @@ use epics_base_rs::server::database::PvDatabase;
 use epics_pva_rs::pvdata::PvStructure;
 
 use crate::error::{BridgeError, BridgeResult};
-use crate::provider::PvaMonitor;
-use crate::pvif::{NtType, snapshot_to_pv_structure};
+use super::provider::PvaMonitor;
+use super::pvif::{NtType, snapshot_to_pv_structure};
 
 /// A PVA monitor backed by a DbSubscription for a single record.
 ///

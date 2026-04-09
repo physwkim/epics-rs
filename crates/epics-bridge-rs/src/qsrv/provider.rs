@@ -13,11 +13,11 @@ use epics_pva_rs::pvdata::{FieldDesc, PvStructure};
 
 use epics_base_rs::types::DbFieldType;
 
-use crate::channel::BridgeChannel;
+use super::channel::BridgeChannel;
 use crate::error::{BridgeError, BridgeResult};
-use crate::group::GroupChannel;
-use crate::group_config::GroupPvDef;
-use crate::pvif::NtType;
+use super::group::GroupChannel;
+use super::group_config::GroupPvDef;
+use super::pvif::NtType;
 
 // ---------------------------------------------------------------------------
 // Access control
@@ -101,7 +101,7 @@ pub trait Channel: Send + Sync {
     /// Create a monitor for this channel.
     fn create_monitor(
         &self,
-    ) -> impl std::future::Future<Output = BridgeResult<crate::group::AnyMonitor>> + Send;
+    ) -> impl std::future::Future<Output = BridgeResult<super::group::AnyMonitor>> + Send;
 }
 
 /// PVA Monitor interface.
@@ -164,7 +164,7 @@ impl Channel for AnyChannel {
         }
     }
 
-    async fn create_monitor(&self) -> BridgeResult<crate::group::AnyMonitor> {
+    async fn create_monitor(&self) -> BridgeResult<super::group::AnyMonitor> {
         match self {
             Self::Single(ch) => ch.create_monitor().await,
             Self::Group(ch) => ch.create_monitor().await,
@@ -218,7 +218,7 @@ impl BridgeProvider {
 
     /// Load group PV definitions from a JSON config string.
     pub fn load_group_config(&mut self, json: &str) -> BridgeResult<()> {
-        let defs = crate::group_config::parse_group_config(json)?;
+        let defs = super::group_config::parse_group_config(json)?;
         for def in defs {
             self.groups.insert(def.name.clone(), def);
         }
@@ -233,8 +233,8 @@ impl BridgeProvider {
 
     /// Load group definitions from a record's info(Q:group, ...) tag.
     pub fn load_info_group(&mut self, record_name: &str, json: &str) -> BridgeResult<()> {
-        let defs = crate::group_config::parse_info_group(record_name, json)?;
-        crate::group_config::merge_group_defs(&mut self.groups, defs);
+        let defs = super::group_config::parse_info_group(record_name, json)?;
+        super::group_config::merge_group_defs(&mut self.groups, defs);
         Ok(())
     }
 

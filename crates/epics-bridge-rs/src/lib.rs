@@ -1,13 +1,21 @@
 //! # epics-bridge-rs
 //!
-//! Bridge that exposes EPICS database records as pvAccess channels
-//! (NTScalar, NTEnum, NTScalarArray, Group PV).
+//! EPICS protocol bridge/adapter hub.
 //!
-//! This crate corresponds to C++ EPICS QSRV (`modules/pva2pva/pdbApp/`).
-//! It translates between `epics-base-rs` record state and `epics-pva-rs`
-//! PVA data structures.
+//! This crate hosts multiple bridge implementations as feature-gated
+//! sub-modules. Each bridge connects EPICS data sources to network
+//! protocols (CA or PVA).
 //!
-//! ## Architecture
+//! ## Sub-modules
+//!
+//! | Module | Feature | Description |
+//! |--------|---------|-------------|
+//! | [`qsrv`] | `qsrv` (default) | Record → pvAccess channels (C++ QSRV equivalent) |
+//! | `ca_gateway` | `ca-gateway` | CA fan-out gateway (C++ ca-gateway equivalent) — *planned* |
+//! | `pvalink` | `pvalink` | PVA links for record INP/OUT — *planned* |
+//! | `pva_gateway` | `pva-gateway` | PVA-to-PVA proxy — *planned* |
+//!
+//! ## QSRV (Record ↔ PVA bridge)
 //!
 //! ```text
 //! PVA Client ←→ [epics-pva-rs server] ←→ BridgeProvider ←→ PvDatabase
@@ -17,30 +25,23 @@
 //!   into it to resolve channel names and create channels.
 //! - [`BridgeChannel`] serves single-record PVs (NTScalar, NTEnum, NTScalarArray).
 //! - [`GroupChannel`] serves multi-record composite PVs from JSON config.
-//! - [`BridgeMonitor`] bridges `DbSubscription` events to PVA monitor updates.
-//!
-//! ## Note
+//! - [`BridgeMonitor`] / [`GroupMonitor`] bridge `DbSubscription` events to PVA monitor updates.
 //!
 //! The `ChannelProvider`, `Channel`, and `PvaMonitor` traits are defined here
 //! temporarily. They will move to `epics-pva-rs` once the PVA server is
 //! implemented by the spvirit maintainer.
 
-pub mod channel;
-pub mod convert;
 pub mod error;
-pub mod group;
-pub mod group_config;
-pub mod monitor;
-pub mod provider;
-pub mod pvif;
-
-pub use channel::{BridgeChannel, ProcessMode, PutOptions};
 pub use error::{BridgeError, BridgeResult};
-pub use group::{AnyMonitor, GroupChannel, GroupMonitor};
-pub use group_config::GroupPvDef;
-pub use monitor::BridgeMonitor;
-pub use provider::{
-    AccessControl, AllowAllAccess, AnyChannel, BridgeProvider, Channel, ChannelProvider,
-    PvaMonitor,
+
+#[cfg(feature = "qsrv")]
+pub mod qsrv;
+
+// Convenience re-exports for the QSRV bridge (default feature).
+// External users can write `epics_bridge_rs::BridgeProvider` directly.
+#[cfg(feature = "qsrv")]
+pub use qsrv::{
+    AccessControl, AllowAllAccess, AnyChannel, AnyMonitor, BridgeChannel, BridgeMonitor,
+    BridgeProvider, Channel, ChannelProvider, FieldMapping, GroupChannel, GroupMonitor,
+    GroupPvDef, NtType, ProcessMode, PutOptions, PvaMonitor,
 };
-pub use pvif::{FieldMapping, NtType};

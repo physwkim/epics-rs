@@ -25,7 +25,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::error::{BridgeError, BridgeResult};
-use crate::pvif::FieldMapping;
+use super::pvif::FieldMapping;
 
 /// Definition of a group PV (multiple records composited into one PvStructure).
 #[derive(Debug, Clone)]

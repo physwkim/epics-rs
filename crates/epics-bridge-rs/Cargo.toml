@@ -2,15 +2,32 @@
 name = "epics-bridge-rs"
 version.workspace = true
 edition.workspace = true
-description = "Bridge between EPICS database records and pvAccess channels (experimental)"
+description = "EPICS protocol bridges: Record↔PVA (QSRV), CA gateway, pvalink, PVA gateway"
 license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = ["qsrv"]
+# Record ↔ pvAccess channels (C++ QSRV equivalent)
+qsrv = ["dep:epics-pva-rs", "dep:serde", "dep:serde_json"]
+# CA fan-out gateway (planned, C++ ca-gateway equivalent)
+ca-gateway = ["dep:epics-ca-rs", "dep:regex"]
+# PVA links for record INP/OUT (planned)
+pvalink = ["dep:epics-pva-rs"]
+# PVA-to-PVA proxy (planned, requires PVA server)
+pva-gateway = ["dep:epics-pva-rs", "dep:regex"]
+# Convenience: enable all bridges
+all-bridges = ["qsrv", "ca-gateway", "pvalink", "pva-gateway"]
+
 [dependencies]
 epics-base-rs = { workspace = true }
-epics-pva-rs = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+
+# Feature-gated optional dependencies
+epics-pva-rs = { workspace = true, optional = true }
+epics-ca-rs = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+regex = { version = "1", optional = true }
