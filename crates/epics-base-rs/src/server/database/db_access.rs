@@ -278,6 +278,19 @@ impl DbSubscription {
         }
     }
 
+    /// Wait for the next change, returning the full Snapshot with metadata.
+    /// Includes alarm, display, control, and enum info — not just the value.
+    /// Silently skips events matching `ignore_origin`.
+    pub async fn recv_snapshot(&mut self) -> Option<crate::server::snapshot::Snapshot> {
+        loop {
+            let event = self.rx.recv().await?;
+            if self.ignore_origin != 0 && event.origin == self.ignore_origin {
+                continue;
+            }
+            return Some(event.snapshot);
+        }
+    }
+
     pub fn pv_name(&self) -> &str {
         &self.pv_name
     }

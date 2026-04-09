@@ -569,6 +569,7 @@ fn decode_gr_ctrl(
                 upper_warning_limit: limits[3],
                 lower_warning_limit: limits[4],
                 lower_alarm_limit: limits[5],
+                ..Default::default()
             });
             if ctrl {
                 control = Some(ControlInfo {
@@ -597,6 +598,7 @@ fn decode_gr_ctrl(
                 upper_warning_limit: limits[3],
                 lower_warning_limit: limits[4],
                 lower_alarm_limit: limits[5],
+                ..Default::default()
             });
             if ctrl {
                 control = Some(ControlInfo {
@@ -623,6 +625,7 @@ fn decode_gr_ctrl(
                 upper_warning_limit: limits[3],
                 lower_warning_limit: limits[4],
                 lower_alarm_limit: limits[5],
+                ..Default::default()
             });
             if ctrl {
                 control = Some(ControlInfo {
@@ -649,6 +652,7 @@ fn decode_gr_ctrl(
                 upper_warning_limit: limits[3],
                 lower_warning_limit: limits[4],
                 lower_alarm_limit: limits[5],
+                ..Default::default()
             });
             if ctrl {
                 control = Some(ControlInfo {
@@ -678,6 +682,7 @@ fn decode_gr_ctrl(
                 upper_warning_limit: limits[3],
                 lower_warning_limit: limits[4],
                 lower_alarm_limit: limits[5],
+                ..Default::default()
             });
             if ctrl {
                 control = Some(ControlInfo {

@@ -1,0 +1,19 @@
+# Example .pvlist for ca-gateway-rs
+# Same format as C++ ca-gateway
+
+EVALUATION ORDER ALLOW, DENY
+
+# Allow all beam line PVs (default access security group)
+Beam:.*           ALLOW BeamGroup 1
+
+# Power supplies via alias: ps3 → PSCurrent3.ai
+ps([0-9])         ALIAS PSCurrent\1.ai PSGroup 1
+
+# Detector PVs read-only
+DET:.*            ALLOW DetGroup 1
+
+# Block all test PVs
+test.*            DENY
+
+# Specific deny: block bypass attempts from a known bad host
+secret:.*         DENY FROM bad.host evil.host

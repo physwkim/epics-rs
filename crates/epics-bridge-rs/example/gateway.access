@@ -1,0 +1,28 @@
+# Example .access (ACF) file for ca-gateway-rs
+# Same format as EPICS asLib
+
+UAG(operators)   { alice, bob }
+UAG(engineers)   { eve, mallory }
+HAG(controlroom) { console1, console2 }
+
+# Default: read-only for everyone
+ASG(DEFAULT) {
+    RULE(1, READ)
+}
+
+# Beam line PVs: read-only public, write for engineers
+ASG(BeamGroup) {
+    RULE(1, READ)
+    RULE(1, WRITE) { UAG(engineers), HAG(controlroom) }
+}
+
+# Power supplies: full control for engineers + operators in control room
+ASG(PSGroup) {
+    RULE(1, READ)
+    RULE(1, WRITE) { UAG(operators), UAG(engineers), HAG(controlroom) }
+}
+
+# Detectors: read-only
+ASG(DetGroup) {
+    RULE(1, READ)
+}

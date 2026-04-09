@@ -1,10 +1,21 @@
 use epics_base_rs::runtime::sync::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 use tokio::net::tcp::OwnedWriteHalf;
+use tokio::sync::broadcast;
+
+/// Connection lifecycle event broadcast by the TCP listener.
+#[derive(Debug, Clone)]
+pub enum ServerConnectionEvent {
+    /// New client connection accepted.
+    Connected(SocketAddr),
+    /// Client connection closed.
+    Disconnected(SocketAddr),
+}
 
 use crate::protocol::*;
 use crate::server::monitor::spawn_monitor_sender;
@@ -119,6 +130,7 @@ pub async fn run_tcp_listener(
     acf: Arc<Option<AccessSecurityConfig>>,
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
+    conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -136,9 +148,16 @@ pub async fn run_tcp_listener(
         let acf = acf.clone();
         let beacon_reset = beacon_reset.clone();
         beacon_reset.notify_one();
+        if let Some(tx) = &conn_events {
+            let _ = tx.send(ServerConnectionEvent::Connected(peer));
+        }
+        let conn_events = conn_events.clone();
         epics_base_rs::runtime::task::spawn(async move {
             let result = handle_client(stream, db, acf, actual_port).await;
             beacon_reset.notify_one();
+            if let Some(tx) = &conn_events {
+                let _ = tx.send(ServerConnectionEvent::Disconnected(peer));
+            }
             if let Err(e) = result {
                 // Suppress normal disconnection errors (client closed connection)
                 let is_disconnect = matches!(

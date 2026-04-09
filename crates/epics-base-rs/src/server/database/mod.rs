@@ -57,6 +57,27 @@ pub enum PvEntry {
 /// Returns the current value of the external PV, or None if unavailable.
 pub type ExternalPvResolver = Arc<dyn Fn(&str) -> Option<EpicsValue> + Send + Sync>;
 
+/// Async hook invoked by [`PvDatabase::has_name`] when a name is not yet
+/// in the database. Used by the CA gateway and similar proxy components
+/// to lazily populate PVs on first search.
+///
+/// The resolver should:
+/// 1. Determine whether the name should be served (e.g., check ACL)
+/// 2. Take whatever action is needed to make `has_name` return true on
+///    a subsequent call (e.g., subscribe to an upstream IOC and call
+///    `add_pv` with a placeholder value)
+/// 3. Return `true` if the name is now resolvable, `false` otherwise
+///
+/// Returning `true` causes `has_name` to re-check the database. The
+/// resolver may take some time (TCP search, upstream connect handshake);
+/// the caller (UDP search responder, TCP CREATE_CHANNEL handler) will
+/// `.await` it.
+pub type SearchResolver = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
+
 struct PvDatabaseInner {
     simple_pvs: RwLock<HashMap<String, Arc<ProcessVariable>>>,
     records: RwLock<HashMap<String, Arc<RwLock<RecordInstance>>>>,
@@ -66,6 +87,8 @@ struct PvDatabaseInner {
     cp_links: RwLock<HashMap<String, Vec<String>>>,
     /// Optional resolver for external PVs (ca://, pva:// links).
     external_resolver: RwLock<Option<ExternalPvResolver>>,
+    /// Optional async resolver invoked on `has_name` misses (e.g. CA gateway).
+    search_resolver: RwLock<Option<SearchResolver>>,
 }
 
 /// Database of all process variables hosted by this server.
@@ -96,11 +119,24 @@ impl PvDatabase {
             inner: Arc::new(PvDatabaseInner {
                 simple_pvs: RwLock::new(HashMap::new()),
                 external_resolver: RwLock::new(None),
+                search_resolver: RwLock::new(None),
                 records: RwLock::new(HashMap::new()),
                 scan_index: RwLock::new(HashMap::new()),
                 cp_links: RwLock::new(HashMap::new()),
             }),
         }
+    }
+
+    /// Install an async resolver invoked when [`PvDatabase::has_name`]
+    /// fails to find a name. Used by proxy/gateway implementations to
+    /// lazily populate PVs on first search.
+    pub async fn set_search_resolver(&self, resolver: SearchResolver) {
+        *self.inner.search_resolver.write().await = Some(resolver);
+    }
+
+    /// Remove the previously installed search resolver, if any.
+    pub async fn clear_search_resolver(&self) {
+        *self.inner.search_resolver.write().await = None;
     }
 
     /// Set an external PV resolver for CA/PVA link resolution.
@@ -148,30 +184,64 @@ impl PvDatabase {
         }
     }
 
-    /// Look up an entry by name. Supports "record.FIELD" syntax.
-    pub async fn find_entry(&self, name: &str) -> Option<PvEntry> {
+    /// Internal: synchronous lookup without invoking the search resolver.
+    async fn find_entry_no_resolve(&self, name: &str) -> Option<PvEntry> {
         let (base, _field) = parse_pv_name(name);
 
-        // Check simple PVs first (exact match on full name)
         if let Some(pv) = self.inner.simple_pvs.read().await.get(name) {
             return Some(PvEntry::Simple(pv.clone()));
         }
-
-        // Check records by base name
         if let Some(rec) = self.inner.records.read().await.get(base) {
             return Some(PvEntry::Record(rec.clone()));
         }
-
         None
     }
 
-    /// Check if a base name exists (for UDP search).
-    pub async fn has_name(&self, name: &str) -> bool {
+    /// Internal: synchronous existence check without resolver.
+    async fn has_name_no_resolve(&self, name: &str) -> bool {
         let (base, _) = parse_pv_name(name);
         if self.inner.simple_pvs.read().await.contains_key(name) {
             return true;
         }
         self.inner.records.read().await.contains_key(base)
+    }
+
+    /// Look up an entry by name. Supports "record.FIELD" syntax.
+    ///
+    /// If the name is not found and a search resolver is installed,
+    /// the resolver is invoked once. If the resolver returns true, the
+    /// database is re-checked.
+    pub async fn find_entry(&self, name: &str) -> Option<PvEntry> {
+        if let Some(entry) = self.find_entry_no_resolve(name).await {
+            return Some(entry);
+        }
+        // Try the search resolver
+        let resolver = self.inner.search_resolver.read().await.clone();
+        if let Some(r) = resolver {
+            if r(name.to_string()).await {
+                return self.find_entry_no_resolve(name).await;
+            }
+        }
+        None
+    }
+
+    /// Check if a base name exists (for UDP search).
+    ///
+    /// If the name is not in the database and a search resolver is installed,
+    /// the resolver is invoked. The resolver may populate the database
+    /// (e.g., subscribe to an upstream IOC and add a placeholder PV) and
+    /// return true; this method then re-checks.
+    pub async fn has_name(&self, name: &str) -> bool {
+        if self.has_name_no_resolve(name).await {
+            return true;
+        }
+        let resolver = self.inner.search_resolver.read().await.clone();
+        if let Some(r) = resolver {
+            if r(name.to_string()).await {
+                return self.has_name_no_resolve(name).await;
+            }
+        }
+        false
     }
 
     /// Look up a simple PV by name (backward-compatible).

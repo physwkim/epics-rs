@@ -8,6 +8,7 @@ pub mod tcp;
 pub mod udp;
 
 pub use ca_server::{CaServer, CaServerBuilder};
+pub use tcp::ServerConnectionEvent;
 
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::ioc_app::IocRunConfig;

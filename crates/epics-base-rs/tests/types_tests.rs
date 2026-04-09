@@ -302,6 +302,7 @@ fn full_snapshot(value: EpicsValue) -> Snapshot {
         upper_warning_limit: 80.0,
         lower_warning_limit: -20.0,
         lower_alarm_limit: -40.0,
+        ..Default::default()
     });
     snap.control = Some(ControlInfo {
         upper_ctrl_limit: 95.0,
@@ -394,6 +395,7 @@ fn test_encode_gr_short_with_metadata() {
         upper_warning_limit: 800.0,
         lower_warning_limit: -50.0,
         lower_alarm_limit: -90.0,
+        ..Default::default()
     });
     let data = encode_dbr(22, &snap).unwrap();
     assert_eq!(data.len(), 26);

@@ -148,6 +148,7 @@ impl RecordInstance {
                     upper_warning_limit: high,
                     lower_warning_limit: low,
                     lower_alarm_limit: lolo,
+                    ..Default::default()
                 });
             }
             "longin" | "longout" => {
@@ -182,6 +183,7 @@ impl RecordInstance {
                     upper_warning_limit: high,
                     lower_warning_limit: low,
                     lower_alarm_limit: lolo,
+                    ..Default::default()
                 });
             }
             "motor" => {
@@ -220,6 +222,7 @@ impl RecordInstance {
                     upper_warning_limit: 0.0,
                     lower_warning_limit: 0.0,
                     lower_alarm_limit: 0.0,
+                    ..Default::default()
                 });
             }
             _ => {}

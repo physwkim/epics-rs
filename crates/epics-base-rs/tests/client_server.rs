@@ -37,9 +37,15 @@ async fn setup(pvs: Vec<(&str, EpicsValue)>) -> CaResult<epics_ca_rs::client::Ca
     let acf_clone = acf.clone();
     tokio::spawn(async move {
         let beacon_reset = std::sync::Arc::new(tokio::sync::Notify::new());
-        let _ =
-            epics_ca_rs::server::tcp::run_tcp_listener(db_tcp, 0, acf_clone, tcp_tx, beacon_reset)
-                .await;
+        let _ = epics_ca_rs::server::tcp::run_tcp_listener(
+            db_tcp,
+            0,
+            acf_clone,
+            tcp_tx,
+            beacon_reset,
+            None, // conn_events: not subscribed in this test
+        )
+        .await;
     });
     let tcp_port = tcp_rx.await.expect("TCP listener started");
 

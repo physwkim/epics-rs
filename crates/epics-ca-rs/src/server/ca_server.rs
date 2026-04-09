@@ -140,6 +140,7 @@ impl CaServerBuilder {
             acf,
             autosave_config,
             autosave_manager: None,
+            conn_events: None,
         })
     }
 }
@@ -151,6 +152,9 @@ pub struct CaServer {
     acf: Arc<Option<access_security::AccessSecurityConfig>>,
     autosave_config: Option<autosave::SaveSetConfig>,
     autosave_manager: Option<Arc<autosave::AutosaveManager>>,
+    /// Optional broadcast channel for connection lifecycle events.
+    /// Subscribers (e.g. ca-gateway) get one event per accept/disconnect.
+    conn_events: Option<tokio::sync::broadcast::Sender<crate::server::tcp::ServerConnectionEvent>>,
 }
 
 impl CaServer {
@@ -174,6 +178,25 @@ impl CaServer {
             acf: Arc::new(acf),
             autosave_config,
             autosave_manager,
+            conn_events: None,
+        }
+    }
+
+    /// Subscribe to connection lifecycle events. Returns a broadcast
+    /// receiver that receives [`ServerConnectionEvent::Connected`] /
+    /// `Disconnected` for each accepted client.
+    ///
+    /// Idempotent: calling multiple times shares the same broadcast sender.
+    pub fn connection_events(
+        &mut self,
+    ) -> tokio::sync::broadcast::Receiver<crate::server::tcp::ServerConnectionEvent> {
+        match &self.conn_events {
+            Some(tx) => tx.subscribe(),
+            None => {
+                let (tx, rx) = tokio::sync::broadcast::channel(64);
+                self.conn_events = Some(tx);
+                rx
+            }
         }
     }
 
@@ -289,8 +312,9 @@ impl CaServer {
         let beacon_reset = std::sync::Arc::new(tokio::sync::Notify::new());
         let beacon_reset_tcp = beacon_reset.clone();
 
+        let conn_events = self.conn_events.clone();
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
-            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp).await
+            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp, conn_events).await
         });
 
         let tcp_port = tcp_rx.await.map_err(|_| {

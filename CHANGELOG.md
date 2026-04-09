@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.8.2
+
+### epics-bridge-rs (new crate)
+
+New umbrella crate for EPICS protocol bridges. Hosts feature-gated sub-modules:
+
+- **`qsrv`** (default) — Record ↔ pvAccess channels (C++ EPICS QSRV equivalent). Single PVs (NTScalar/NTEnum/NTScalarArray) and multi-record group PVs with full metadata, pvRequest filtering, process/block put options, AccessControl enforcement on get/put/monitor, nested field paths, info(Q:group, ...) parsing, and trigger validation.
+- **`ca-gateway`** (default) — CA fan-out gateway (C++ ca-gateway equivalent). Includes `.pvlist` parser with regex backreferences, ACF integration, lazy on-demand resolution via search hook, per-host connection tracking, statistics PVs, beacon throttle, putlog, runtime command interface, and an auto-restart supervisor.
+- **`pvalink`**, **`pva-gateway`** — placeholders for future implementations.
+
+The `ca-gateway-rs` daemon binary builds via `cargo build --release -p epics-bridge-rs --bin ca-gateway-rs` and lands in `target/release/ca-gateway-rs`.
+
+The umbrella `epics-rs` crate gains a `bridge` feature that re-exports `epics-bridge-rs` as `epics_rs::bridge`.
+
+### epics-base-rs
+
+#### **Behavior change**: `PvDatabase::has_name()` / `find_entry()` now invoke an optional async search resolver on miss
+
+`PvDatabase` gained `set_search_resolver(SearchResolver)` / `clear_search_resolver()` plus a new `SearchResolver` type alias. When set, both `has_name()` and `find_entry()` invoke the resolver on a database miss; the resolver may populate the database (e.g. by subscribing to an upstream IOC) and return `true` to make the lookup succeed on the immediate re-check.
+
+**Compatibility**: with no resolver installed (the default), behavior is unchanged. However, callers that previously assumed `has_name()`/`find_entry()` were *cheap, side-effect-free* lookups should be aware these methods can now `.await` arbitrary work when a resolver is registered. The current in-tree usage (CA UDP search responder, TCP create-channel handler) is consistent with this design.
+
+This hook is what enables `epics-bridge-rs::ca_gateway` to lazily subscribe upstream PVs on first downstream search instead of requiring a `--preload` file.
+
+#### `Snapshot` / `DisplayInfo` — additive fields
+
+- `DisplayInfo` gained `form: i16` (display format hint, from `Q:form` info tag) and `description: String` (DESC). Existing initializers need `..Default::default()` to remain forward-compatible — internal call sites have been updated.
+- `Snapshot` gained `user_tag: i32` (from `Q:time:tag` nsec LSB splitting). Defaults to 0.
+
+These fields propagate into PVA NTScalar `display.form` / `display.description` and `timeStamp.userTag` via `epics-bridge-rs::qsrv::pvif`.
+
+### epics-ca-rs
+
+#### **Breaking**: `tcp::run_tcp_listener()` signature changed
+
+Added a 6th parameter:
+
+```rust
+pub async fn run_tcp_listener(
+    db: Arc<PvDatabase>,
+    port: u16,
+    acf: Arc<Option<AccessSecurityConfig>>,
+    tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
+    beacon_reset: Arc<tokio::sync::Notify>,
+    conn_events: Option<broadcast::Sender<ServerConnectionEvent>>, // ← new
+) -> CaResult<()>;
+```
+
+External callers of `run_tcp_listener()` must pass `None` (opt out of connection lifecycle events) or a `broadcast::Sender` to subscribe.
+
+In-workspace consumers (`server::ca_server::CaServer::run` and `crates/epics-base-rs/tests/client_server.rs`) have been updated.
+
+#### Additive: `CaServer::connection_events()` and `ServerConnectionEvent`
+
+`CaServer` now exposes `connection_events()` which returns a `broadcast::Receiver<ServerConnectionEvent>` (`Connected(SocketAddr)` / `Disconnected(SocketAddr)`). Used by `epics-bridge-rs::ca_gateway` for per-host downstream client tracking. Servers that don't subscribe see no behavior change.
+
 ## v0.8.1
 
 ### Fix: Plugin param update re-entrancy (CPU 100% on idle)

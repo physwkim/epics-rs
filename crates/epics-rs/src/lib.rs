@@ -14,6 +14,7 @@
 //! |---------|-------------|---------|
 //! | `ca` | Channel Access client & server | yes |
 //! | `pva` | pvAccess client (experimental) | no |
+//! | `bridge` | Record ↔ PVA bridge (QSRV equivalent) | no |
 //! | `asyn` | Async port driver framework | no |
 //! | `motor` | Motor record + SimMotor | no |
 //! | `ad` | areaDetector (core + plugins) | no |
@@ -34,6 +35,10 @@ pub use epics_ca_rs as ca;
 /// pvAccess protocol — client (experimental).
 #[cfg(feature = "pva")]
 pub use epics_pva_rs as pva;
+
+/// Bridge: exposes EPICS records as pvAccess channels (QSRV equivalent).
+#[cfg(feature = "bridge")]
+pub use epics_bridge_rs as bridge;
 
 /// Async port driver framework.
 #[cfg(feature = "asyn")]
