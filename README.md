@@ -36,6 +36,7 @@ The wire protocol is identical to C EPICS, so existing clients (`caget`, `camoni
 epics-rs reimplements the core components of C/C++ EPICS in Rust:
 
 - **Channel Access protocol** — client & server (UDP name resolution + TCP virtual circuit)
+- **pvAccess bridge** — QSRV equivalent, exposes records as PVA channels (NTScalar, NTEnum, Group PV)
 - **IOC runtime** — 23 record types, .db file loading, link chains, scan scheduling
 - **asyn framework** — actor-based async port driver model
 - **Motor record** — 9-phase state machine, coordinate transforms, backlash compensation
@@ -70,6 +71,7 @@ use epics_rs::asyn;        // port driver framework
 |---------|-------------|---------|
 | `ca` | Channel Access client & server | **yes** |
 | `pva` | pvAccess client (experimental) | no |
+| `bridge` | Record <-> PVA bridge (QSRV equivalent) | no |
 | `asyn` | Async port driver framework | no |
 | `motor` | Motor record + SimMotor | no |
 | `ad` | areaDetector (core + 23 plugins) | no |
@@ -108,6 +110,7 @@ epics-rs/
 │   ├── epics-base-rs/    # Core: IOC runtime, 23 record types, iocsh, db loader
 │   ├── epics-ca-rs/      # Channel Access protocol (client + server)
 │   ├── epics-pva-rs/     # pvAccess protocol (experimental)
+│   ├── epics-bridge-rs/  # Record <-> PVA bridge (QSRV equivalent)
 │   ├── epics-macros-rs/  # #[derive(EpicsRecord)] proc macro
 │   ├── asyn-rs/          # Async device I/O framework (port driver model)
 │   ├── motor-rs/         # Motor record + SimMotor
@@ -140,7 +143,10 @@ epics-rs (umbrella — feature-gated re-exports)
     │       └── optics-rs (table, monochromator, slit, filter, BPM)
     │
     ├── epics-ca-rs (Channel Access protocol)
-    └── epics-pva-rs (pvAccess protocol, experimental)
+    ├── epics-pva-rs (pvAccess protocol, experimental)
+    └── epics-bridge-rs (Record <-> PVA bridge)
+             ├── epics-base-rs
+             └── epics-pva-rs
 ```
 
 ## Architecture: C EPICS vs epics-rs
@@ -427,6 +433,17 @@ Channel Access protocol client and server.
 ### epics-pva-rs (experimental)
 
 pvAccess protocol client.
+
+### epics-bridge-rs (experimental)
+
+QSRV equivalent — bridges EPICS database records to pvAccess channels:
+
+- **Single record channels** — NTScalar, NTEnum (with choices), NTScalarArray with full metadata (alarm, timeStamp, display, control, valueAlarm)
+- **Group PV channels** — composite PvStructure from multiple records (C++ QSRV JSON format compatible)
+- **Monitor bridge** — full Snapshot on every update, initial snapshot on connect, fan-in group monitor with trigger rules
+- **pvRequest support** — field selection, `record._options.process`/`block`
+- **Group config** — external JSON files + `info(Q:group, ...)` record tags, member merge
+- **Infrastructure** — ChannelProvider/Channel/PvaMonitor traits, record metadata cache, pluggable access control
 
 ### asyn-rs
 

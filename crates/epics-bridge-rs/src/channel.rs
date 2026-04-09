@@ -115,6 +115,21 @@ pub struct BridgeChannel {
 }
 
 impl BridgeChannel {
+    /// Create from cached metadata (no DB introspection needed).
+    pub fn from_cached(
+        db: Arc<PvDatabase>,
+        record_name: String,
+        nt_type: NtType,
+        value_dbf: DbFieldType,
+    ) -> Self {
+        Self {
+            db,
+            record_name,
+            nt_type,
+            value_dbf,
+        }
+    }
+
     /// Create a new channel for a record.
     ///
     /// Reads the record type to determine the NormativeType mapping.

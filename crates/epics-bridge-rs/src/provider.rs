@@ -11,10 +11,13 @@ use std::sync::Arc;
 use epics_base_rs::server::database::PvDatabase;
 use epics_pva_rs::pvdata::{FieldDesc, PvStructure};
 
+use epics_base_rs::types::DbFieldType;
+
 use crate::channel::BridgeChannel;
 use crate::error::{BridgeError, BridgeResult};
 use crate::group::GroupChannel;
 use crate::group_config::GroupPvDef;
+use crate::pvif::NtType;
 
 // ---------------------------------------------------------------------------
 // Access control
@@ -180,9 +183,10 @@ impl Channel for AnyChannel {
 pub struct BridgeProvider {
     db: Arc<PvDatabase>,
     groups: HashMap<String, GroupPvDef>,
-    /// Channel cache: reuse channels for repeated requests.
+    /// Metadata cache for single-record channels: (NtType, DbFieldType).
+    /// Avoids repeated record introspection on every create_channel() call.
     /// Corresponds to C++ PDBProvider's transient_pv_map.
-    channel_cache: tokio::sync::RwLock<HashMap<String, Arc<AnyChannel>>>,
+    record_cache: tokio::sync::RwLock<HashMap<String, (NtType, DbFieldType)>>,
     /// Access control policy.
     access: Box<dyn AccessControl>,
 }
@@ -192,7 +196,7 @@ impl BridgeProvider {
         Self {
             db,
             groups: HashMap::new(),
-            channel_cache: tokio::sync::RwLock::new(HashMap::new()),
+            record_cache: tokio::sync::RwLock::new(HashMap::new()),
             access: Box::new(AllowAllAccess),
         }
     }
@@ -244,9 +248,9 @@ impl BridgeProvider {
         &self.groups
     }
 
-    /// Clear the channel cache.
+    /// Clear the record metadata cache.
     pub async fn clear_cache(&self) {
-        self.channel_cache.write().await.clear();
+        self.record_cache.write().await.clear();
     }
 }
 
@@ -278,9 +282,33 @@ impl ChannelProvider for BridgeProvider {
             )));
         }
 
-        // Single record channel
+        // Single record channel — use metadata cache to avoid repeated introspection
+        let (record_name, _) = epics_base_rs::server::database::parse_pv_name(name);
+
+        // Check cache first
+        {
+            let cache = self.record_cache.read().await;
+            if let Some(&(nt_type, value_dbf)) = cache.get(record_name) {
+                return Ok(AnyChannel::Single(BridgeChannel::from_cached(
+                    self.db.clone(),
+                    record_name.to_string(),
+                    nt_type,
+                    value_dbf,
+                )));
+            }
+        }
+
+        // Cache miss — introspect and create
         if self.db.has_name(name).await {
             let channel = BridgeChannel::new(self.db.clone(), name).await?;
+
+            // Populate cache
+            let mut cache = self.record_cache.write().await;
+            cache.insert(
+                record_name.to_string(),
+                (channel.nt_type(), channel.value_dbf()),
+            );
+
             return Ok(AnyChannel::Single(channel));
         }
 

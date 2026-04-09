@@ -104,9 +104,9 @@ pub fn snapshot_to_nt_enum(snapshot: &Snapshot) -> PvStructure {
 
     // value sub-structure with index + choices
     let index = match &snapshot.value {
-        EpicsValue::Enum(v) => *v as i32,
-        EpicsValue::Short(v) => *v as i32,
-        other => other.to_f64().map(|f| f as i32).unwrap_or(0),
+        EpicsValue::Enum(v) => *v,
+        EpicsValue::Short(v) => *v as u16,
+        other => other.to_f64().map(|f| f as u16).unwrap_or(0),
     };
 
     let choices: Vec<ScalarValue> = snapshot
@@ -118,7 +118,7 @@ pub fn snapshot_to_nt_enum(snapshot: &Snapshot) -> PvStructure {
     let mut value_struct = PvStructure::new("enum_t");
     value_struct
         .fields
-        .push(("index".into(), PvField::Scalar(ScalarValue::Int(index))));
+        .push(("index".into(), PvField::Scalar(ScalarValue::UShort(index))));
     value_struct
         .fields
         .push(("choices".into(), PvField::ScalarArray(choices)));
@@ -190,8 +190,12 @@ pub fn pv_structure_to_epics(pv: &PvStructure) -> Option<EpicsValue> {
         PvField::ScalarArray(_) => crate::convert::pv_field_to_epics(field),
         PvField::Structure(s) => {
             // NTEnum: value is a sub-structure with "index" field
-            if let Some(PvField::Scalar(ScalarValue::Int(idx))) = s.get_field("index") {
-                Some(EpicsValue::Enum(*idx as u16))
+            if let Some(PvField::Scalar(sv)) = s.get_field("index") {
+                let idx = crate::convert::scalar_to_epics(sv);
+                match idx {
+                    EpicsValue::Enum(v) => Some(EpicsValue::Enum(v)),
+                    other => Some(EpicsValue::Enum(other.to_f64().map(|f| f as u16).unwrap_or(0))),
+                }
             } else {
                 None
             }
@@ -261,7 +265,7 @@ pub fn build_nt_enum_desc() -> FieldDesc {
                 FieldDesc::Structure {
                     struct_id: "enum_t".into(),
                     fields: vec![
-                        ("index".into(), FieldDesc::Scalar(ScalarType::Int)),
+                        ("index".into(), FieldDesc::Scalar(ScalarType::UShort)),
                         ("choices".into(), FieldDesc::ScalarArray(ScalarType::String)),
                     ],
                 },
@@ -549,7 +553,7 @@ mod tests {
         assert_eq!(pv.struct_id, "epics:nt/NTEnum:1.0");
         // value is a sub-structure
         if let Some(PvField::Structure(val)) = pv.get_field("value") {
-            if let Some(PvField::Scalar(ScalarValue::Int(idx))) = val.get_field("index") {
+            if let Some(PvField::Scalar(ScalarValue::UShort(idx))) = val.get_field("index") {
                 assert_eq!(*idx, 1);
             } else {
                 panic!("expected index scalar");
@@ -620,5 +624,78 @@ mod tests {
         let desc = build_nt_scalar_desc(ScalarType::Double);
         assert_eq!(desc.value_scalar_type(), Some(ScalarType::Double));
         assert_eq!(desc.field_count(), 6); // value, alarm, timeStamp, display, control, valueAlarm
+    }
+
+    #[test]
+    fn filter_by_request_empty() {
+        let snap = test_snapshot(EpicsValue::Double(1.0));
+        let pv = snapshot_to_nt_scalar(&snap);
+
+        // Empty request → return everything
+        let req = PvStructure::new("");
+        let filtered = filter_by_request(&pv, &req);
+        assert_eq!(filtered.fields.len(), pv.fields.len());
+    }
+
+    #[test]
+    fn filter_by_request_value_only() {
+        let snap = test_snapshot(EpicsValue::Double(1.0));
+        let pv = snapshot_to_nt_scalar(&snap);
+
+        // Request only "value" field
+        let mut field_spec = PvStructure::new("");
+        field_spec.fields.push((
+            "value".into(),
+            PvField::Structure(PvStructure::new("")),
+        ));
+        let mut req = PvStructure::new("");
+        req.fields
+            .push(("field".into(), PvField::Structure(field_spec)));
+
+        let filtered = filter_by_request(&pv, &req);
+        assert_eq!(filtered.fields.len(), 1);
+        assert_eq!(filtered.fields[0].0, "value");
+    }
+
+    #[test]
+    fn filter_by_request_multiple_fields() {
+        let snap = test_snapshot(EpicsValue::Double(1.0));
+        let pv = snapshot_to_nt_scalar(&snap);
+
+        let mut field_spec = PvStructure::new("");
+        field_spec.fields.push((
+            "value".into(),
+            PvField::Structure(PvStructure::new("")),
+        ));
+        field_spec.fields.push((
+            "alarm".into(),
+            PvField::Structure(PvStructure::new("")),
+        ));
+        let mut req = PvStructure::new("");
+        req.fields
+            .push(("field".into(), PvField::Structure(field_spec)));
+
+        let filtered = filter_by_request(&pv, &req);
+        assert_eq!(filtered.fields.len(), 2);
+    }
+
+    #[test]
+    fn field_desc_nt_enum_index_ushort() {
+        let desc = build_nt_enum_desc();
+        if let FieldDesc::Structure { fields, .. } = &desc {
+            if let Some((_, FieldDesc::Structure { fields: val_fields, .. })) =
+                fields.iter().find(|(n, _)| n == "value")
+            {
+                let index_field = val_fields.iter().find(|(n, _)| n == "index");
+                assert!(matches!(
+                    index_field,
+                    Some((_, FieldDesc::Scalar(ScalarType::UShort)))
+                ));
+            } else {
+                panic!("expected value structure");
+            }
+        } else {
+            panic!("expected structure");
+        }
     }
 }

@@ -249,11 +249,15 @@ impl crate::provider::Channel for GroupChannel {
         &self.def.name
     }
 
-    async fn get(&self, _request: &PvStructure) -> BridgeResult<PvStructure> {
-        self.read_group().await
+    async fn get(&self, request: &PvStructure) -> BridgeResult<PvStructure> {
+        let full = self.read_group().await?;
+        Ok(pvif::filter_by_request(&full, request))
     }
 
     async fn put(&self, value: &PvStructure) -> BridgeResult<()> {
+        let opts = crate::channel::PutOptions::from_pv_request(value);
+        let use_process = opts.process != crate::channel::ProcessMode::Inhibit;
+
         let mut ordered: Vec<&GroupMember> = self.def.members.iter().collect();
         ordered.sort_by_key(|m| m.put_order);
 
@@ -287,10 +291,17 @@ impl crate::provider::Channel for GroupChannel {
                         .await
                         .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
                 } else if let Some(epics_val) = val {
-                    self.db
-                        .put_record_field_from_ca(record_name, field_name, epics_val)
-                        .await
-                        .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
+                    if use_process {
+                        self.db
+                            .put_record_field_from_ca(record_name, field_name, epics_val)
+                            .await
+                            .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
+                    } else {
+                        self.db
+                            .put_pv(&format!("{record_name}.{field_name}"), epics_val)
+                            .await
+                            .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
+                    }
                 }
             }
         } else {
@@ -314,10 +325,17 @@ impl crate::provider::Channel for GroupChannel {
                         Some(v) => v,
                         None => continue,
                     };
-                    self.db
-                        .put_record_field_from_ca(record_name, field_name, epics_val)
-                        .await
-                        .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
+                    if use_process {
+                        self.db
+                            .put_record_field_from_ca(record_name, field_name, epics_val)
+                            .await
+                            .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
+                    } else {
+                        self.db
+                            .put_pv(&format!("{record_name}.{field_name}"), epics_val)
+                            .await
+                            .map_err(|e| BridgeError::PutRejected(e.to_string()))?;
+                    }
                 }
             }
         }
@@ -634,14 +652,50 @@ mod tests {
     }
 
     #[test]
-    fn nested_field_get() {
+    fn nested_field_roundtrip() {
+        use epics_pva_rs::pvdata::ScalarValue;
+
         let mut pv = PvStructure::new("test");
         set_nested_field(
             &mut pv,
             "a.b",
-            PvField::Scalar(epics_pva_rs::pvdata::ScalarValue::Int(99)),
+            PvField::Scalar(ScalarValue::Int(99)),
         );
+
+        // Verify get_nested_field returns the same value
         let field = get_nested_field(&pv, "a.b");
         assert!(field.is_some());
+        if let Some(PvField::Scalar(ScalarValue::Int(v))) = field {
+            assert_eq!(*v, 99);
+        } else {
+            panic!("expected Int(99)");
+        }
+    }
+
+    #[test]
+    fn nested_field_overwrite() {
+        use epics_pva_rs::pvdata::ScalarValue;
+
+        let mut pv = PvStructure::new("test");
+        set_nested_field(&mut pv, "x.y", PvField::Scalar(ScalarValue::Int(1)));
+        set_nested_field(&mut pv, "x.y", PvField::Scalar(ScalarValue::Int(2)));
+
+        if let Some(PvField::Scalar(ScalarValue::Int(v))) = get_nested_field(&pv, "x.y") {
+            assert_eq!(*v, 2);
+        } else {
+            panic!("expected Int(2)");
+        }
+    }
+
+    #[test]
+    fn nested_field_siblings() {
+        use epics_pva_rs::pvdata::ScalarValue;
+
+        let mut pv = PvStructure::new("test");
+        set_nested_field(&mut pv, "a.x", PvField::Scalar(ScalarValue::Int(1)));
+        set_nested_field(&mut pv, "a.y", PvField::Scalar(ScalarValue::Int(2)));
+
+        assert!(get_nested_field(&pv, "a.x").is_some());
+        assert!(get_nested_field(&pv, "a.y").is_some());
     }
 }
