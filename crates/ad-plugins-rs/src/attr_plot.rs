@@ -136,7 +136,7 @@ impl NDPluginProcess for AttrPlotProcessor {
                 .attributes
                 .get(name)
                 .and_then(|attr| attr.value.as_f64())
-                .unwrap_or(0.0);
+                .unwrap_or(f64::NAN);
             Self::push_capped(&mut self.buffers[i], value, self.max_points);
         }
 
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_attribute_uses_zero() {
+    fn test_missing_attribute_uses_nan() {
         let mut proc = AttrPlotProcessor::new(100);
         let pool = NDArrayPool::new(1_000_000);
 
@@ -289,7 +289,7 @@ mod tests {
         let buf = proc.buffer(idx).unwrap();
         assert_eq!(buf.len(), 2);
         assert!((buf[0] - 25.0).abs() < 1e-10);
-        assert!((buf[1] - 0.0).abs() < 1e-10);
+        assert!(buf[1].is_nan());
     }
 
     #[test]

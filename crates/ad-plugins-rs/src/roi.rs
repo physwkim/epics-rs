@@ -234,8 +234,14 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
         NDDataBuffer::F64(v) => NDDataBuffer::F64(extract!(v, f64, 0.0)),
     };
 
-    let out_dims = if config.collapse_dims && out_y == 1 {
-        vec![NDDimension::new(out_x)]
+    let out_dims = if config.collapse_dims {
+        let all_dims = vec![NDDimension::new(out_x), NDDimension::new(out_y)];
+        let filtered: Vec<NDDimension> = all_dims.into_iter().filter(|d| d.size > 1).collect();
+        if filtered.is_empty() {
+            vec![NDDimension::new(out_x)]
+        } else {
+            filtered
+        }
     } else {
         vec![NDDimension::new(out_x), NDDimension::new(out_y)]
     };

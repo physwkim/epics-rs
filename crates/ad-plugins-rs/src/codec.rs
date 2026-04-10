@@ -472,6 +472,10 @@ impl NDPluginProcess for CodecProcessor {
         let original_bytes = array.data.as_u8_slice().len();
 
         let result = match self.mode {
+            CodecMode::Compress { .. } if array.codec.is_some() => {
+                // Already compressed — pass through unchanged
+                Some(array.clone())
+            }
             CodecMode::Compress {
                 codec: CodecName::LZ4,
                 ..

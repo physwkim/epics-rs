@@ -434,7 +434,8 @@ impl CircularBuffer {
             return false;
         }
 
-        // Check trigger condition
+        // Check trigger condition BEFORE adding to pre-buffer,
+        // so the triggering frame becomes the first post-trigger frame.
         let trigger = match &self.trigger_condition {
             TriggerCondition::AttributeThreshold { name, threshold } => array
                 .attributes
@@ -452,24 +453,40 @@ impl CircularBuffer {
                     .attributes
                     .get(attr_a)
                     .and_then(|a| a.value.as_f64())
-                    .unwrap_or(0.0);
+                    .unwrap_or(f64::NAN);
                 let b = array
                     .attributes
                     .get(attr_b)
                     .and_then(|a| a.value.as_f64())
-                    .unwrap_or(0.0);
+                    .unwrap_or(f64::NAN);
                 expression.evaluate(a, b) != 0.0
             }
         };
+
+        if trigger {
+            // Trigger fires before adding this frame to the pre-buffer,
+            // so the triggering frame will be the first post-trigger frame.
+            self.trigger();
+            // The triggering frame is the first post-trigger capture.
+            self.captured.push(array);
+            self.post_remaining -= 1;
+            if self.post_remaining == 0 {
+                self.triggered = false;
+                if self.preset_trigger_count > 0 && self.trigger_count >= self.preset_trigger_count
+                {
+                    self.status = BufferStatus::AcquisitionCompleted;
+                } else {
+                    self.status = BufferStatus::BufferFilling;
+                }
+                return true;
+            }
+            return false;
+        }
 
         // Maintain pre-trigger ring buffer
         self.buffer.push_back(array);
         if self.buffer.len() > self.pre_count {
             self.buffer.pop_front();
-        }
-
-        if trigger {
-            self.trigger();
         }
 
         false
@@ -807,7 +824,7 @@ mod tests {
     fn test_attribute_trigger() {
         let mut cb = CircularBuffer::new(
             1,
-            1,
+            2,
             TriggerCondition::AttributeThreshold {
                 name: "trigger".into(),
                 threshold: 5.0,
@@ -818,7 +835,7 @@ mod tests {
         cb.push(make_array_with_attr(2, 2.0));
         assert!(!cb.is_triggered());
 
-        // This should trigger (attr >= 5.0)
+        // This should trigger (attr >= 5.0); triggering frame is first post-trigger
         cb.push(make_array_with_attr(3, 5.0));
         assert!(cb.is_triggered());
 
@@ -826,7 +843,11 @@ mod tests {
         assert!(done);
 
         let captured = cb.take_captured();
-        assert_eq!(captured.len(), 2); // 1 pre + 1 post
+        // 1 pre (id=2) + 2 post (id=3 triggering frame + id=4)
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0].unique_id, 2);
+        assert_eq!(captured[1].unique_id, 3);
+        assert_eq!(captured[2].unique_id, 4);
     }
 
     // --- New tests ---
@@ -837,7 +858,7 @@ mod tests {
         let expr = CalcExpression::parse("A>5").unwrap();
         let mut cb = CircularBuffer::new(
             1,
-            1,
+            2,
             TriggerCondition::Calc {
                 attr_a: "attr_a".into(),
                 attr_b: "attr_b".into(),
@@ -849,7 +870,7 @@ mod tests {
         cb.push(make_array_with_attrs(1, 3.0, 0.0));
         assert!(!cb.is_triggered());
 
-        // A=6, should trigger
+        // A=6, should trigger; triggering frame is first post-trigger
         cb.push(make_array_with_attrs(2, 6.0, 0.0));
         assert!(cb.is_triggered());
 
@@ -857,7 +878,11 @@ mod tests {
         assert!(done);
 
         let captured = cb.take_captured();
-        assert_eq!(captured.len(), 2); // 1 pre + 1 post
+        // 1 pre (id=1) + 2 post (id=2 triggering frame + id=3)
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0].unique_id, 1);
+        assert_eq!(captured[1].unique_id, 2);
+        assert_eq!(captured[2].unique_id, 3);
     }
 
     #[test]

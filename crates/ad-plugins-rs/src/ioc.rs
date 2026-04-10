@@ -157,7 +157,7 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
             let config = ColorConvertConfig {
                 target_mode: NDColorMode::Mono,
                 bayer_pattern: NDBayerPattern::RGGB,
-                false_color: false,
+                false_color: 0,
             };
             create_plugin_runtime(
                 port_name,

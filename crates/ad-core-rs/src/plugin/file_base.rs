@@ -42,6 +42,8 @@ pub struct NDPluginFileBase {
     pub auto_increment: bool,
     pub temp_suffix: String,
     pub create_dir: i32,
+    pub lazy_open: bool,
+    pub delete_driver_file: bool,
     capture_buffer: Vec<Arc<NDArray>>,
     num_capture: usize,
     num_captured: usize,
@@ -60,6 +62,8 @@ impl NDPluginFileBase {
             auto_increment: false,
             temp_suffix: String::new(),
             create_dir: 0,
+            lazy_open: false,
+            delete_driver_file: false,
             capture_buffer: Vec::new(),
             num_capture: 1,
             num_captured: 0,
@@ -208,6 +212,14 @@ impl NDPluginFileBase {
                 if let Some(final_path) = final_path {
                     Self::rename_temp(&write_path, &final_path)?;
                 }
+                if self.delete_driver_file {
+                    if let Some(attr) = array.attributes.get("DriverFileName") {
+                        let driver_file = attr.value.as_string();
+                        if !driver_file.is_empty() {
+                            let _ = std::fs::remove_file(&driver_file);
+                        }
+                    }
+                }
                 if self.auto_increment {
                     self.file_number += 1;
                 }
@@ -220,13 +232,27 @@ impl NDPluginFileBase {
                 }
             }
             NDFileMode::Stream => {
-                if !self.is_open {
+                if !self.is_open && !self.lazy_open {
+                    self.last_written_name = self.create_file_name();
+                    let (write_path, _) = self.write_path();
+                    writer.open_file(&write_path, NDFileMode::Stream, &array)?;
+                    self.is_open = true;
+                }
+                if self.lazy_open && !self.is_open {
                     self.last_written_name = self.create_file_name();
                     let (write_path, _) = self.write_path();
                     writer.open_file(&write_path, NDFileMode::Stream, &array)?;
                     self.is_open = true;
                 }
                 writer.write_file(&array)?;
+                if self.delete_driver_file {
+                    if let Some(attr) = array.attributes.get("DriverFileName") {
+                        let driver_file = attr.value.as_string();
+                        if !driver_file.is_empty() {
+                            let _ = std::fs::remove_file(&driver_file);
+                        }
+                    }
+                }
                 self.num_captured += 1;
             }
         }
