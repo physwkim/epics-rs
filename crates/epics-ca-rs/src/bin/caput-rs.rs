@@ -17,6 +17,7 @@ struct Args {
     pv_name: String,
 
     /// Value to write
+    #[arg(allow_hyphen_values = true)]
     value: String,
 }
 
