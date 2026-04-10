@@ -50,6 +50,10 @@ pub struct FilePluginController<W: NDFileWriter> {
     pub lazy_open: bool,
     pub delete_driver_file: bool,
     pub latest_array: Option<Arc<NDArray>>,
+    /// Recorded dimensions from the first frame in a stream, for validation.
+    stream_dims: Option<Vec<usize>>,
+    /// Recorded data type from the first frame in a stream, for validation.
+    stream_data_type: Option<NDDataType>,
 }
 
 impl<W: NDFileWriter> FilePluginController<W> {
@@ -63,6 +67,8 @@ impl<W: NDFileWriter> FilePluginController<W> {
             lazy_open: false,
             delete_driver_file: false,
             latest_array: None,
+            stream_dims: None,
+            stream_data_type: None,
         }
     }
 
@@ -136,6 +142,21 @@ impl<W: NDFileWriter> FilePluginController<W> {
             }
             NDFileMode::Stream => {
                 if self.capture_active {
+                    // Validate frame dimensions and data type against the first frame.
+                    let frame_dims: Vec<usize> = array.dims.iter().map(|d| d.size).collect();
+                    let frame_dtype = array.data.data_type();
+                    if let (Some(expected_dims), Some(expected_dtype)) =
+                        (&self.stream_dims, self.stream_data_type)
+                    {
+                        if &frame_dims != expected_dims || frame_dtype != expected_dtype {
+                            // Mismatched frame: skip silently (C parity behavior).
+                            return proc_result;
+                        }
+                    } else {
+                        // First frame in stream: record dimensions and data type.
+                        self.stream_dims = Some(frame_dims);
+                        self.stream_data_type = Some(frame_dtype);
+                    }
                     let r = self.file_base.process_array(array, &mut self.writer);
                     let target = self.file_base.num_capture_target();
                     if r.is_ok() && target > 0 && self.file_base.num_captured() >= target {
@@ -147,6 +168,8 @@ impl<W: NDFileWriter> FilePluginController<W> {
                             ));
                         }
                         self.capture_active = false;
+                        self.stream_dims = None;
+                        self.stream_data_type = None;
                         self.push_full_file_name_update(&mut proc_result.param_updates);
                         self.push_num_captured_update(&mut proc_result.param_updates);
                     }
@@ -314,6 +337,8 @@ impl<W: NDFileWriter> FilePluginController<W> {
                     }
                     NDFileMode::Stream => {
                         self.capture_active = true;
+                        self.stream_dims = None;
+                        self.stream_data_type = None;
                         self.push_num_captured_update(&mut updates);
                     }
                 }
@@ -328,6 +353,8 @@ impl<W: NDFileWriter> FilePluginController<W> {
                     }
                 }
                 self.capture_active = false;
+                self.stream_dims = None;
+                self.stream_data_type = None;
             }
         }
 
