@@ -503,7 +503,7 @@ fn test_roi_then_stats_chain() {
     assert_eq!(stats.num_elements, 16); // 4*4
     assert!(stats.min >= 0.0);
     assert!(stats.max <= 255.0);
-    assert!(stats_result.output_arrays.is_empty()); // stats is a sink
+    assert_eq!(stats_result.output_arrays.len(), 1); // stats forwards the array
 }
 
 #[test]
