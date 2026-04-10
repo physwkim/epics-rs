@@ -6,6 +6,17 @@ use crate::types::{DbFieldType, EpicsValue};
 pub struct CalcRecord {
     pub val: f64,
     pub calc: String,
+    // Display/engineering
+    pub egu: String,
+    pub prec: i16,
+    pub hopr: f64,
+    pub lopr: f64,
+    // Alarm/monitor
+    pub adel: f64,
+    pub mdel: f64,
+    pub lalm: f64,
+    pub alst: f64,
+    pub mlst: f64,
     // Input link strings (INPA..INPL)
     pub inpa: String,
     pub inpb: String,
@@ -45,6 +56,8 @@ pub struct CalcRecord {
     pub lj: f64,
     pub lk: f64,
     pub ll: f64,
+    // CALC_ALARM flag: set when calcPerform fails
+    pub calc_alarm: bool,
 }
 
 impl Default for CalcRecord {
@@ -52,6 +65,15 @@ impl Default for CalcRecord {
         Self {
             val: 0.0,
             calc: String::new(),
+            egu: String::new(),
+            prec: 0,
+            hopr: 0.0,
+            lopr: 0.0,
+            adel: 0.0,
+            mdel: 0.0,
+            lalm: 0.0,
+            alst: 0.0,
+            mlst: 0.0,
             inpa: String::new(),
             inpb: String::new(),
             inpc: String::new(),
@@ -88,6 +110,7 @@ impl Default for CalcRecord {
             lj: 0.0,
             lk: 0.0,
             ll: 0.0,
+            calc_alarm: false,
         }
     }
 }
@@ -162,6 +185,51 @@ static CALC_FIELDS: &[FieldDesc] = &[
         name: "CALC",
         dbf_type: DbFieldType::String,
         read_only: false,
+    },
+    FieldDesc {
+        name: "EGU",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "PREC",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "HOPR",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LOPR",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ADEL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "MDEL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LALM",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "ALST",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "MLST",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
     },
     FieldDesc {
         name: "INPA",
@@ -355,8 +423,16 @@ impl Record for CalcRecord {
             let vars = self.get_vars();
             let mut inputs = crate::calc::NumericInputs::new();
             inputs.vars[..12].copy_from_slice(&vars);
-            self.val = crate::calc::calc(&self.calc, &mut inputs)
-                .map_err(|e| CaError::CalcError(e.to_string()))?;
+            // C sets CALC_ALARM on failure but continues processing
+            match crate::calc::calc(&self.calc, &mut inputs) {
+                Ok(v) => {
+                    self.val = v;
+                    self.calc_alarm = false;
+                }
+                Err(_) => {
+                    self.calc_alarm = true;
+                }
+            }
         }
         // Save current values to LA-LL for next cycle
         self.la = self.a;
@@ -378,6 +454,15 @@ impl Record for CalcRecord {
         match name {
             "VAL" => Some(EpicsValue::Double(self.val)),
             "CALC" => Some(EpicsValue::String(self.calc.clone())),
+            "EGU" => Some(EpicsValue::String(self.egu.clone())),
+            "PREC" => Some(EpicsValue::Short(self.prec)),
+            "HOPR" => Some(EpicsValue::Double(self.hopr)),
+            "LOPR" => Some(EpicsValue::Double(self.lopr)),
+            "ADEL" => Some(EpicsValue::Double(self.adel)),
+            "MDEL" => Some(EpicsValue::Double(self.mdel)),
+            "LALM" => Some(EpicsValue::Double(self.lalm)),
+            "ALST" => Some(EpicsValue::Double(self.alst)),
+            "MLST" => Some(EpicsValue::Double(self.mlst)),
             "INPA" => Some(EpicsValue::String(self.inpa.clone())),
             "INPB" => Some(EpicsValue::String(self.inpb.clone())),
             "INPC" => Some(EpicsValue::String(self.inpc.clone())),
@@ -433,6 +518,42 @@ impl Record for CalcRecord {
                     Ok(())
                 }
                 _ => Err(CaError::TypeMismatch("CALC".into())),
+            },
+            "EGU" => match value {
+                EpicsValue::String(s) => { self.egu = s; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "PREC" => match value {
+                EpicsValue::Short(v) => { self.prec = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "HOPR" => match value {
+                EpicsValue::Double(v) => { self.hopr = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "LOPR" => match value {
+                EpicsValue::Double(v) => { self.lopr = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ADEL" => match value {
+                EpicsValue::Double(v) => { self.adel = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MDEL" => match value {
+                EpicsValue::Double(v) => { self.mdel = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "LALM" => match value {
+                EpicsValue::Double(v) => { self.lalm = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ALST" => match value {
+                EpicsValue::Double(v) => { self.alst = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MLST" => match value {
+                EpicsValue::Double(v) => { self.mlst = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
             },
             "INPA" => match value {
                 EpicsValue::String(s) => {
