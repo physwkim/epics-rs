@@ -3,6 +3,7 @@ use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Analog output record with conversion and output policy support.
+/// LINR: 0=NO_CONVERSION, 1=SLOPE, 2=LINEAR
 pub struct AoRecord {
     // Display
     pub val: f64,
@@ -14,13 +15,17 @@ pub struct AoRecord {
     pub drvl: f64,
     // Conversion
     pub rval: i32,
+    pub oraw: i32,  // old raw value for monitor
+    pub rbv: i32,    // readback value
+    pub orbv: i32,   // old readback value
     pub oval: f64,
-    pub linr: i16, // 0=NO_CONVERSION, 1=LINEAR
+    pub linr: i16,   // 0=NO_CONVERSION, 1=SLOPE, 2=LINEAR
     pub eguf: f64,
     pub egul: f64,
-    pub eslo: f64, // default 1.0
+    pub eslo: f64,   // default 1.0
+    pub eoff: f64,   // engineering offset (defaults to egul for LINEAR)
     pub roff: i32,
-    pub aslo: f64, // default 1.0
+    pub aslo: f64,   // default 1.0
     pub aoff: f64,
     // Output control
     pub omsl: i16,   // 0=supervisory, 1=closed_loop
@@ -57,11 +62,15 @@ impl Default for AoRecord {
             drvh: 0.0,
             drvl: 0.0,
             rval: 0,
+            oraw: 0,
+            rbv: 0,
+            orbv: 0,
             oval: 0.0,
             linr: 0,
             eguf: 0.0,
             egul: 0.0,
             eslo: 1.0,
+            eoff: 0.0,
             roff: 0,
             aslo: 1.0,
             aoff: 0.0,
@@ -137,6 +146,21 @@ static FIELDS: &[FieldDesc] = &[
         read_only: false,
     },
     FieldDesc {
+        name: "ORAW",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "RBV",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "ORBV",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
         name: "OVAL",
         dbf_type: DbFieldType::Double,
         read_only: false,
@@ -158,6 +182,11 @@ static FIELDS: &[FieldDesc] = &[
     },
     FieldDesc {
         name: "ESLO",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "EOFF",
         dbf_type: DbFieldType::Double,
         read_only: false,
     },
@@ -280,13 +309,34 @@ impl Record for AoRecord {
 
     fn init_record(&mut self, pass: u8) -> CaResult<()> {
         if pass == 0 {
+            // Legacy compatibility: if eslo==1.0 && eoff==0.0, set eoff from egul
+            let saved_eoff = self.eoff;
+            let saved_eslo = self.eslo;
+
+            if self.eslo == 1.0 && self.eoff == 0.0 {
+                self.eoff = self.egul;
+            }
+
+            // For SLOPE mode, restore user-configured eoff/eslo
+            if self.linr == 1 {
+                self.eoff = saved_eoff;
+                self.eslo = saved_eslo;
+            }
+
             // If DOL contains a constant value, use it as the initial VAL.
-            // This matches C EPICS: when DOL is a constant (not a link),
-            // init_record sets VAL from DOL and marks UDF=false.
             if let Some(v) = dol_as_constant(&self.dol) {
                 self.val = v;
-                self.oval = v;
             }
+
+            // Initialize tracking fields from current val
+            self.oval = self.val;
+            self.pval = self.val;
+            self.mlst = self.val;
+            self.alst = self.val;
+            self.lalm = self.val;
+            self.oraw = self.rval;
+            self.orbv = self.rbv;
+            self.init = true;
         }
         Ok(())
     }
@@ -303,24 +353,66 @@ impl Record for AoRecord {
             }
             // PV link DOL: framework already applied the value
         }
-        if self.drvh != self.drvl && self.drvh > self.drvl {
+
+        // Drive limits
+        if self.drvh > self.drvl {
             self.val = self.val.clamp(self.drvl, self.drvh);
         }
 
-        if self.oroc != 0.0 && self.init {
-            let delta = self.val - self.oval;
-            if delta.abs() > self.oroc {
-                self.val = self.oval + delta.signum() * self.oroc;
+        // C: value = prec->val, then OROC modifies value (not VAL)
+        let mut value = self.val;
+        self.pval = value; // pval = drive-limited desired value (like C)
+
+        // OROC: rate of change limiting (C applies unconditionally when oroc != 0)
+        if self.oroc != 0.0 {
+            let diff = value - self.oval;
+            if diff < 0.0 {
+                if self.oroc < -diff {
+                    value = self.oval - self.oroc;
+                }
+            } else if self.oroc < diff {
+                value = self.oval + self.oroc;
             }
         }
 
-        self.pval = self.oval;
-        self.oval = self.val;
+        self.oval = value; // oval = rate-limited output value
 
-        if self.linr == 1 && self.eslo != 0.0 {
-            self.rval = ((self.oval - self.egul) / self.eslo) as i32 - self.roff;
+        // convert(): engineering units to raw value
+        // Step 1: linearization (SLOPE or LINEAR)
+        match self.linr {
+            1 | 2 => {
+                // SLOPE/LINEAR: (value - eoff) / eslo
+                if self.eslo == 0.0 {
+                    value = 0.0;
+                } else {
+                    value = (value - self.eoff) / self.eslo;
+                }
+            }
+            0 => {} // NO_CONVERSION
+            _ => {} // breakpoint tables not yet supported
         }
 
+        // Step 2: AOFF/ASLO adjustment
+        value -= self.aoff;
+        if self.aslo != 0.0 {
+            value /= self.aslo;
+        }
+
+        // Step 3: ROFF subtraction and rounding with i32 saturation
+        value -= self.roff as f64;
+        if value >= 0.0 {
+            if value >= (i32::MAX as f64 - 0.5) {
+                self.rval = i32::MAX;
+            } else {
+                self.rval = (value + 0.5) as i32;
+            }
+        } else if value > (0.5 - i32::MIN as f64) {
+            self.rval = (value - 0.5) as i32;
+        } else {
+            self.rval = i32::MIN;
+        }
+
+        self.oraw = self.rval;
         self.init = true;
         Ok(ProcessOutcome::complete())
     }
@@ -335,11 +427,15 @@ impl Record for AoRecord {
             "DRVH" => Some(EpicsValue::Double(self.drvh)),
             "DRVL" => Some(EpicsValue::Double(self.drvl)),
             "RVAL" => Some(EpicsValue::Long(self.rval)),
+            "ORAW" => Some(EpicsValue::Long(self.oraw)),
+            "RBV" => Some(EpicsValue::Long(self.rbv)),
+            "ORBV" => Some(EpicsValue::Long(self.orbv)),
             "OVAL" => Some(EpicsValue::Double(self.oval)),
             "LINR" => Some(EpicsValue::Short(self.linr)),
             "EGUF" => Some(EpicsValue::Double(self.eguf)),
             "EGUL" => Some(EpicsValue::Double(self.egul)),
             "ESLO" => Some(EpicsValue::Double(self.eslo)),
+            "EOFF" => Some(EpicsValue::Double(self.eoff)),
             "ROFF" => Some(EpicsValue::Long(self.roff)),
             "ASLO" => Some(EpicsValue::Double(self.aslo)),
             "AOFF" => Some(EpicsValue::Double(self.aoff)),
@@ -453,6 +549,13 @@ impl Record for AoRecord {
             "ESLO" => match value {
                 EpicsValue::Double(v) => {
                     self.eslo = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "EOFF" => match value {
+                EpicsValue::Double(v) => {
+                    self.eoff = v;
                     Ok(())
                 }
                 _ => Err(CaError::TypeMismatch(name.into())),
