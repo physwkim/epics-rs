@@ -126,11 +126,33 @@ impl MotorRecord {
         self.pos.diff = self.pos.dval - self.pos.drbv;
         self.pos.rdif = self.pos.val - self.pos.rbv;
 
-        // MOVN: true if phase is active OR driver reports moving
-        self.stat.movn = self.stat.phase != MotionPhase::Idle || status.moving;
+        // Limit switches: map raw -> user based on DIR and MRES sign
+        // Must be done before MOVN check which uses HLS/LLS
+        // C: hls = ((dir == Pos) == (mres >= 0)) ? rhls : rlls
+        let same_polarity = (self.conv.dir == MotorDir::Pos) == (self.conv.mres >= 0.0);
+        if same_polarity {
+            self.limits.hls = status.high_limit;
+            self.limits.lls = status.low_limit;
+        } else {
+            self.limits.hls = status.low_limit;
+            self.limits.lls = status.high_limit;
+        }
+
+        // MOVN: C checks ls_active (limit in direction of motion), DONE, and PROBLEM
+        // ls_active = (hls && cdir) || (lls && !cdir)
+        let ls_active =
+            (self.limits.hls && self.stat.cdir) || (self.limits.lls && !self.stat.cdir);
+        if ls_active || status.done || status.problem {
+            self.stat.movn = false;
+        } else {
+            self.stat.movn = true;
+        }
 
         // Build MSTA from driver status
         let mut msta = MstaFlags::empty();
+        if status.direction {
+            msta |= MstaFlags::DIRECTION;
+        }
         if status.done {
             msta |= MstaFlags::DONE;
         }
@@ -147,23 +169,35 @@ impl MotorRecord {
             msta |= MstaFlags::HOME_LS;
         }
         if status.powered {
-            msta |= MstaFlags::GAIN_SUPPORT;
+            msta |= MstaFlags::POSITION;
         }
         if status.problem {
             msta |= MstaFlags::PROBLEM;
         }
+        if status.slip_stall {
+            msta |= MstaFlags::SLIP_STALL;
+        }
+        if status.comms_error {
+            msta |= MstaFlags::COMM_ERR;
+        }
+        if status.gain_support {
+            msta |= MstaFlags::GAIN_SUPPORT;
+        }
+        if status.has_encoder {
+            msta |= MstaFlags::ENCODER_PRESENT;
+        }
         // Preserve record-managed bits
-        if self.stat.msta.contains(MstaFlags::HOMED) {
+        if self.stat.msta.contains(MstaFlags::HOMED) || status.homed {
             msta |= MstaFlags::HOMED;
         }
+        // Preserve ENCODER_PRESENT if record set it (via UEIP)
         if self.stat.msta.contains(MstaFlags::ENCODER_PRESENT) {
             msta |= MstaFlags::ENCODER_PRESENT;
         }
         self.stat.msta = msta;
 
-        // Limit switches
-        self.limits.hls = status.high_limit;
-        self.limits.lls = status.low_limit;
+        // C: tdir = msta.RA_DIRECTION (from driver on every poll)
+        self.stat.tdir = status.direction;
 
         // Recompute LVIO from current position and soft limits
         self.limits.lvio =

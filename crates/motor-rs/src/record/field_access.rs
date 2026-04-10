@@ -660,6 +660,9 @@ pub(crate) fn motor_put_field(
                     // Recalculate user coords from dial
                     rec.pos.val = coordinate::dial_to_user(rec.pos.dval, rec.conv.dir, rec.pos.off);
                     rec.pos.rbv = coordinate::dial_to_user(rec.pos.drbv, rec.conv.dir, rec.pos.off);
+                    // C: also update LVAL so offset change doesn't trigger false retarget
+                    rec.internal.lval =
+                        coordinate::dial_to_user(rec.internal.ldvl, rec.conv.dir, rec.pos.off);
                     let (hlm, llm) = coordinate::dial_limits_to_user(
                         rec.limits.dhlm,
                         rec.limits.dllm,
@@ -678,9 +681,21 @@ pub(crate) fn motor_put_field(
             match value {
                 EpicsValue::Short(v) => {
                     rec.conv.dir = MotorDir::from_i16(v);
-                    // Recalculate user coords from dial using new direction
-                    rec.pos.val = coordinate::dial_to_user(rec.pos.dval, rec.conv.dir, rec.pos.off);
-                    rec.pos.rbv = coordinate::dial_to_user(rec.pos.drbv, rec.conv.dir, rec.pos.off);
+                    // C: branch on FOFF
+                    match rec.conv.foff {
+                        FreezeOffset::Frozen => {
+                            // FOFF=Frozen: recalculate VAL from DVAL
+                            rec.pos.val =
+                                coordinate::dial_to_user(rec.pos.dval, rec.conv.dir, rec.pos.off);
+                        }
+                        FreezeOffset::Variable => {
+                            // FOFF=Variable: recalculate OFF to preserve VAL
+                            rec.pos.off =
+                                coordinate::calc_offset(rec.pos.val, rec.pos.dval, rec.conv.dir);
+                        }
+                    }
+                    rec.pos.rbv =
+                        coordinate::dial_to_user(rec.pos.drbv, rec.conv.dir, rec.pos.off);
                     let (hlm, llm) = coordinate::dial_limits_to_user(
                         rec.limits.dhlm,
                         rec.limits.dllm,
@@ -717,21 +732,67 @@ pub(crate) fn motor_put_field(
         },
         "MRES" => match value {
             EpicsValue::Double(v) => {
+                if v == 0.0 {
+                    return Ok(()); // C: reject zero MRES
+                }
+                let old_mres = rec.conv.mres;
                 rec.conv.mres = v;
+                // C: cascade UREV from MRES
+                rec.conv.urev = v * rec.conv.srev as f64;
+                // C: recalculate velocities from rev/s fields
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    if rec.vel.s > 0.0 {
+                        rec.vel.velo = urev_abs * rec.vel.s;
+                    }
+                    if rec.vel.sbas > 0.0 {
+                        rec.vel.vbas = urev_abs * rec.vel.sbas;
+                    }
+                    if rec.vel.sbak > 0.0 {
+                        rec.vel.bvel = urev_abs * rec.vel.sbak;
+                    }
+                    if rec.vel.smax > 0.0 {
+                        rec.vel.vmax = urev_abs * rec.vel.smax;
+                    }
+                }
+                // C: recalculate dial limits from raw limits
+                // Use ratio of new/old MRES to scale existing dial limits
+                if old_mres != 0.0 {
+                    let ratio = v / old_mres;
+                    rec.limits.dhlm *= ratio;
+                    rec.limits.dllm *= ratio;
+                    // Update user limits
+                    let (hlm, llm) = coordinate::dial_limits_to_user(
+                        rec.limits.dhlm,
+                        rec.limits.dllm,
+                        rec.conv.dir,
+                        rec.pos.off,
+                    );
+                    rec.limits.hlm = hlm;
+                    rec.limits.llm = llm;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "ERES" => match value {
             EpicsValue::Double(v) => {
-                rec.conv.eres = v;
+                // C: if ERES==0, set to MRES
+                rec.conv.eres = if v == 0.0 { rec.conv.mres } else { v };
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "SREV" => match value {
             EpicsValue::Long(v) => {
+                if v <= 0 {
+                    return Ok(()); // C: reject non-positive SREV
+                }
                 rec.conv.srev = v;
+                // C: recalculate MRES from UREV/SREV
+                if rec.conv.urev != 0.0 {
+                    rec.conv.mres = rec.conv.urev / v as f64;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -739,20 +800,57 @@ pub(crate) fn motor_put_field(
         "UREV" => match value {
             EpicsValue::Double(v) => {
                 rec.conv.urev = v;
+                // C: recalculate MRES from UREV/SREV
+                if rec.conv.srev > 0 {
+                    rec.conv.mres = v / rec.conv.srev as f64;
+                }
+                // C: cascade velocities from new UREV
+                let urev_abs = v.abs();
+                if urev_abs > 0.0 {
+                    if rec.vel.s > 0.0 {
+                        rec.vel.velo = urev_abs * rec.vel.s;
+                    }
+                    if rec.vel.sbas > 0.0 {
+                        rec.vel.vbas = urev_abs * rec.vel.sbas;
+                    }
+                    if rec.vel.sbak > 0.0 {
+                        rec.vel.bvel = urev_abs * rec.vel.sbak;
+                    }
+                    if rec.vel.smax > 0.0 {
+                        rec.vel.vmax = urev_abs * rec.vel.smax;
+                    }
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "UEIP" => match value {
             EpicsValue::Short(v) => {
-                rec.conv.ueip = v != 0;
+                let ueip = v != 0;
+                if ueip {
+                    // C: if UEIP=Yes and encoder present, set URIP=No
+                    // If no encoder present, override UEIP back to No
+                    if rec.stat.msta.contains(MstaFlags::ENCODER_PRESENT) {
+                        rec.conv.urip = false;
+                    } else {
+                        // No encoder available, cannot use UEIP
+                        rec.conv.ueip = false;
+                        return Ok(());
+                    }
+                }
+                rec.conv.ueip = ueip;
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "URIP" => match value {
             EpicsValue::Short(v) => {
-                rec.conv.urip = v != 0;
+                let urip = v != 0;
+                if urip {
+                    // C: if URIP=Yes and UEIP=Yes, set UEIP=No
+                    rec.conv.ueip = false;
+                }
+                rec.conv.urip = urip;
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -764,10 +862,14 @@ pub(crate) fn motor_put_field(
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
-        // Velocity
+        // Velocity -- C: cross-calculate EGU/s <-> rev/s pairs
         "VELO" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.velo = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.s = v / urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -775,6 +877,10 @@ pub(crate) fn motor_put_field(
         "VBAS" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.vbas = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.sbas = v / urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -782,6 +888,10 @@ pub(crate) fn motor_put_field(
         "VMAX" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.vmax = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.smax = v / urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -789,6 +899,10 @@ pub(crate) fn motor_put_field(
         "S" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.s = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.velo = v * urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -796,6 +910,10 @@ pub(crate) fn motor_put_field(
         "SBAS" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.sbas = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.vbas = v * urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -803,13 +921,18 @@ pub(crate) fn motor_put_field(
         "SMAX" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.smax = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.vmax = v * urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "ACCL" => match value {
             EpicsValue::Double(v) => {
-                rec.vel.accl = v;
+                // C: ACCL must be > 0 (forces to 0.1 if <= 0)
+                rec.vel.accl = if v <= 0.0 { 0.1 } else { v };
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -817,13 +940,18 @@ pub(crate) fn motor_put_field(
         "BVEL" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.bvel = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.sbak = v / urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "BACC" => match value {
             EpicsValue::Double(v) => {
-                rec.vel.bacc = v;
+                // C: BACC must be > 0 (forces to 0.1 if <= 0)
+                rec.vel.bacc = if v <= 0.0 { 0.1 } else { v };
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -852,6 +980,10 @@ pub(crate) fn motor_put_field(
         "SBAK" => match value {
             EpicsValue::Double(v) => {
                 rec.vel.sbak = v;
+                let urev_abs = rec.conv.urev.abs();
+                if urev_abs > 0.0 {
+                    rec.vel.bvel = v * urev_abs;
+                }
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -866,14 +998,17 @@ pub(crate) fn motor_put_field(
         },
         "FRAC" => match value {
             EpicsValue::Double(v) => {
-                rec.retry.frac = v;
+                // C: FRAC clamped to [0.1, 1.5]
+                rec.retry.frac = v.clamp(0.1, 1.5);
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "RDBD" => match value {
             EpicsValue::Double(v) => {
-                rec.retry.rdbd = v;
+                // C: enforceMinRetryDeadband - RDBD must be >= |MRES|
+                let min_rdbd = rec.conv.mres.abs();
+                rec.retry.rdbd = if v < min_rdbd { min_rdbd } else { v };
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -1133,7 +1268,8 @@ pub(crate) fn motor_put_field(
         },
         "NTMF" => match value {
             EpicsValue::Double(v) => {
-                rec.timing.ntmf = v;
+                // C: NTMF minimum is 2.0
+                rec.timing.ntmf = if v < 2.0 { 2.0 } else { v };
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),

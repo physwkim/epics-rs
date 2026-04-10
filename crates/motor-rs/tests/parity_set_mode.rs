@@ -67,26 +67,50 @@ fn set_mode_dval_produces_set_position() {
 }
 
 #[test]
-fn dir_change_recalculates_user_coords() {
+fn dir_change_foff_variable_preserves_val() {
     let mut rec = make_record();
     rec.pos.dval = 10.0;
     rec.pos.drbv = 10.0;
     rec.pos.val = 10.0;
     rec.pos.rbv = 10.0;
     rec.pos.off = 0.0;
+    // FOFF defaults to Variable
 
     // Change DIR to Neg
     rec.put_field("DIR", EpicsValue::Short(1)).unwrap();
 
-    // VAL = dir.sign() * DVAL + OFF = -1*10 + 0 = -10
-    assert_eq!(rec.pos.val, -10.0);
-    assert_eq!(rec.pos.rbv, -10.0);
+    // C: FOFF=Variable → OFF is recalculated to preserve VAL
+    // OFF = VAL - dir.sign() * DVAL = 10 - (-1)*10 = 20
+    assert_eq!(rec.pos.val, 10.0); // preserved
+    assert_eq!(rec.pos.off, 20.0);
+    // RBV = dir.sign() * DRBV + OFF = -1*10 + 20 = 10
+    assert_eq!(rec.pos.rbv, 10.0);
     // DVAL, DRBV unchanged
     assert_eq!(rec.pos.dval, 10.0);
     assert_eq!(rec.pos.drbv, 10.0);
     // Limits recalculated
     let (hlm, llm) = (rec.limits.hlm, rec.limits.llm);
     assert!(hlm >= llm);
+}
+
+#[test]
+fn dir_change_foff_frozen_recalculates_val() {
+    let mut rec = make_record();
+    rec.pos.dval = 10.0;
+    rec.pos.drbv = 10.0;
+    rec.pos.val = 10.0;
+    rec.pos.rbv = 10.0;
+    rec.pos.off = 0.0;
+    rec.conv.foff = FreezeOffset::Frozen;
+
+    // Change DIR to Neg
+    rec.put_field("DIR", EpicsValue::Short(1)).unwrap();
+
+    // C: FOFF=Frozen → VAL is recalculated from DVAL
+    // VAL = dir.sign() * DVAL + OFF = -1*10 + 0 = -10
+    assert_eq!(rec.pos.val, -10.0);
+    assert_eq!(rec.pos.rbv, -10.0);
+    assert_eq!(rec.pos.off, 0.0); // unchanged
 }
 
 #[test]

@@ -226,9 +226,8 @@ impl AxisRuntime {
                     velocity,
                     acceleration,
                 } => {
-                    let target = if *direction { 1e9 } else { -1e9 };
-                    self.motor
-                        .move_absolute(&user, target, *velocity, *acceleration)
+                    let signed_vel = if *direction { *velocity } else { -*velocity };
+                    self.motor.move_velocity(&user, signed_vel, *acceleration)
                 }
                 MotorCommand::Home {
                     forward,

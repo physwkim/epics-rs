@@ -157,11 +157,27 @@ impl AsynMotor for SimMotor {
         Ok(())
     }
 
+    fn move_velocity(
+        &mut self,
+        _user: &AsynUser,
+        velocity: f64,
+        _acceleration: f64,
+    ) -> AsynResult<()> {
+        self.velocity = velocity.abs().max(0.001);
+        self.velocity_direction = velocity >= 0.0;
+        self.velocity_mode = true;
+        self.start_position = self.position;
+        self.moving = true;
+        self.move_start = Some(Instant::now());
+        Ok(())
+    }
+
     fn poll(&mut self, _user: &AsynUser) -> AsynResult<MotorStatus> {
         self.update();
         Ok(MotorStatus {
             position: self.position,
             encoder_position: self.encoder_position,
+            velocity: if self.moving { self.velocity } else { 0.0 },
             done: !self.moving,
             moving: self.moving,
             high_limit: self.position >= self.high_limit,
@@ -169,6 +185,9 @@ impl AsynMotor for SimMotor {
             home: self.position == 0.0,
             powered: self.powered,
             problem: false,
+            direction: self.velocity_direction,
+            homed: self.homed,
+            ..MotorStatus::default()
         })
     }
 }

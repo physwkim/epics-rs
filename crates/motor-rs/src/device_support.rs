@@ -91,9 +91,9 @@ impl MotorDeviceSupport {
                     velocity,
                     acceleration,
                 } => {
-                    let target = if *direction { 1e9 } else { -1e9 };
+                    let signed_vel = if *direction { *velocity } else { -*velocity };
                     tracing::info!("motor command: MoveVelocity dir={direction}, vel={velocity}");
-                    motor.move_absolute(&user, target, *velocity, *acceleration)
+                    motor.move_velocity(&user, signed_vel, *acceleration)
                 }
                 MotorCommand::Home {
                     forward,

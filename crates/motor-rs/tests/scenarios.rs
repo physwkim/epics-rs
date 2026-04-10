@@ -196,9 +196,10 @@ fn retry_modes_arithmetic_geometric_inposition() {
     complete_move(&mut rec, 9.0);
     let effects = rec.check_completion();
 
-    // Arithmetic: target = 9.0 + (10.0 - 9.0) * 0.5 = 9.5
+    // C Arithmetic: factor = (rtry - rcnt + 1) / rtry = (5 - 1 + 1) / 5 = 1.0
+    // target = drbv + (dval - drbv) * factor = 9.0 + 1.0 * 1.0 = 10.0
     if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((position - 9.5).abs() < 1e-6);
+        assert!((position - 10.0).abs() < 1e-6);
     } else {
         panic!("expected MoveAbsolute");
     }
@@ -319,22 +320,31 @@ fn spmg_stop_blocks_new_commands() {
 }
 
 #[test]
-fn spmg_pause_retains_target() {
+fn spmg_pause_sends_stop_and_syncs_after_completion() {
     let mut rec = make_record();
 
     // Start a move
     rec.pos.dval = 50.0;
     rec.plan_motion(CommandSource::Val);
     assert!(!rec.stat.dmov);
-    let saved_dval = rec.pos.dval;
 
-    // Pause
+    // Motor moving at 25
+    motor_moving(&mut rec, 25.0);
+
+    // Pause: sends STOP, sets MIP_STOP, motor still running
     rec.ctrl.spmg = SpmgMode::Pause;
     let effects = rec.plan_motion(CommandSource::Spmg);
     assert!(matches!(effects.commands[0], MotorCommand::Stop { .. }));
+    assert!(!rec.stat.dmov); // still moving
+    assert!(rec.stat.mip.contains(MipFlags::STOP));
+
+    // Motor stops at 25
+    complete_move(&mut rec, 25.0);
+    let _effects = rec.check_completion();
+    // C: postProcess syncs VAL=RBV, DVAL=DRBV
     assert!(rec.stat.dmov);
-    // Target retained
-    assert_eq!(rec.pos.dval, saved_dval);
+    assert_eq!(rec.pos.dval, 25.0);
+    assert_eq!(rec.pos.val, 25.0);
 }
 
 #[test]
@@ -351,14 +361,18 @@ fn ntm_retargets_while_in_motion() {
     // Motor moving at position 25
     motor_moving(&mut rec, 25.0);
 
+    // Ensure MIP and CDIR are set (plan_motion sets these)
+    assert!(rec.stat.mip.contains(MipFlags::MOVE));
+    assert!(rec.stat.cdir); // positive direction
+
     // New target: 80 (same direction, farther)
     assert_eq!(rec.handle_retarget(80.0), RetargetAction::ExtendMove);
 
-    // New target: -10 (opposite direction)
+    // New target: -10 (opposite direction, beyond deadband)
     assert_eq!(rec.handle_retarget(-10.0), RetargetAction::StopAndReplan);
 
-    // New target: 30 (same direction, closer than current)
-    assert_eq!(rec.handle_retarget(30.0), RetargetAction::StopAndReplan);
+    // New target: 30 (same direction, closer) -> ExtendMove (same dir in C)
+    assert_eq!(rec.handle_retarget(30.0), RetargetAction::ExtendMove);
 }
 
 #[test]
@@ -405,11 +419,7 @@ fn startup_syncs_positions_from_driver() {
         encoder_position: 25.0,
         done: true,
         moving: false,
-        high_limit: false,
-        low_limit: false,
-        home: false,
-        powered: true,
-        problem: false,
+        ..Default::default()
     };
 
     let effects = rec.initial_readback(&status);

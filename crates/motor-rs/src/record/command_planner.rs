@@ -42,26 +42,14 @@ impl MotorRecord {
                             return effects;
                         }
                         RetargetAction::ExtendMove => {
-                            // Cancel any pending backlash/retry state, issue new move
-                            self.internal.backlash_pending = false;
-                            self.retry.rcnt = 0;
-                            // Re-evaluate backlash for new target
-                            let backlash =
-                                self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
-                            let move_target = if backlash {
-                                Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst)
-                            } else {
-                                self.pos.dval
-                            };
-                            self.internal.backlash_pending = backlash;
-                            self.stat.tdir = move_target > self.pos.drbv;
+                            // C: same-direction target changes are simply accepted.
+                            // The new DVAL is stored and the motor continues to the
+                            // current target; backlash/retry will be re-evaluated
+                            // when the current move completes.
                             self.internal.ldvl = self.pos.dval;
-                            effects.commands.push(MotorCommand::MoveAbsolute {
-                                position: move_target,
-                                velocity: self.vel.velo,
-                                acceleration: self.vel.accl,
-                            });
-                            effects.request_poll = true;
+                            // Re-evaluate backlash for new target
+                            self.internal.backlash_pending =
+                                self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
                             effects.suppress_forward_link = true;
                             return effects;
                         }
@@ -124,10 +112,12 @@ impl MotorRecord {
                 self.pos.rbv = coordinate::dial_to_user(self.pos.drbv, self.conv.dir, self.pos.off);
                 self.pos.diff = self.pos.dval - self.pos.drbv;
                 self.pos.rdif = self.pos.val - self.pos.rbv;
-                let raw_pos = self.pos.dval;
-                effects
-                    .commands
-                    .push(MotorCommand::SetPosition { position: raw_pos });
+                // Convert dial to raw steps for the driver (C: dval / mres)
+                if let Ok(raw) = coordinate::dial_to_raw(self.pos.dval, self.conv.mres) {
+                    effects.commands.push(MotorCommand::SetPosition {
+                        position: raw as f64,
+                    });
+                }
             }
             CommandSource::Cnen => {
                 effects.commands.push(MotorCommand::SetClosedLoop {
@@ -141,16 +131,57 @@ impl MotorRecord {
 
     /// Plan an absolute move to current DVAL.
     pub(crate) fn plan_absolute_move(&mut self, effects: &mut ProcessEffects) {
-        // Check soft limits
-        if coordinate::check_soft_limits(self.pos.dval, self.limits.dhlm, self.limits.dllm) {
-            self.limits.lvio = true;
-            tracing::warn!(
-                "limit violation: dval={:.4}, limits=[{:.4}, {:.4}]",
-                self.pos.dval,
-                self.limits.dllm,
-                self.limits.dhlm
-            );
-            return;
+        // Check soft limits (disabled when dhlm == dllm)
+        if self.limits.dhlm != self.limits.dllm {
+            // C: DLLM > DHLM means limits are inverted => always violation
+            if self.limits.dllm > self.limits.dhlm {
+                self.limits.lvio = true;
+                tracing::warn!("limit violation: inverted limits dllm={:.4} > dhlm={:.4}",
+                    self.limits.dllm, self.limits.dhlm);
+                return;
+            }
+
+            let target_outside = self.pos.dval > self.limits.dhlm
+                || self.pos.dval < self.limits.dllm;
+
+            if target_outside {
+                // C: allow move if heading toward the valid range
+                // Compares dval against ldvl (previous target), but we use drbv
+                // as an approximation since we don't track ldvl separately
+                let currently_above = self.pos.drbv > self.limits.dhlm;
+                let currently_below = self.pos.drbv < self.limits.dllm;
+                let moving_toward_valid = (currently_above && self.pos.dval < self.pos.drbv)
+                    || (currently_below && self.pos.dval > self.pos.drbv);
+
+                if !moving_toward_valid {
+                    self.limits.lvio = true;
+                    tracing::warn!(
+                        "limit violation: dval={:.4}, limits=[{:.4}, {:.4}]",
+                        self.pos.dval,
+                        self.limits.dllm,
+                        self.limits.dhlm
+                    );
+                    return;
+                }
+            }
+
+            // C: for non-preferred direction (backlash), also check pretarget
+            if self.retry.bdst != 0.0 {
+                let backlash_needed = self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
+                if backlash_needed {
+                    let pretarget = Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
+                    if pretarget > self.limits.dhlm || pretarget < self.limits.dllm {
+                        self.limits.lvio = true;
+                        tracing::warn!(
+                            "limit violation: backlash pretarget={:.4}, limits=[{:.4}, {:.4}]",
+                            pretarget,
+                            self.limits.dllm,
+                            self.limits.dhlm
+                        );
+                        return;
+                    }
+                }
+            }
         }
         self.limits.lvio = false;
 
@@ -188,6 +219,9 @@ impl MotorRecord {
 
         // tdir reflects the actual first-command direction
         self.stat.tdir = move_target > self.pos.drbv;
+        // CDIR: commanded direction from the position error
+        // C: cdir = (rdif < 0.0) ? 0 : 1
+        self.stat.cdir = self.pos.diff >= 0.0;
 
         // Set MIP and phase
         self.stat.mip = MipFlags::MOVE;
@@ -241,6 +275,19 @@ impl MotorRecord {
         }
         self.set_phase(MotionPhase::Jog);
 
+        // CDIR for jog: account for DIR and MRES sign
+        // C: cdir computed from jog direction considering dir polarity and MRES sign
+        let user_forward = if self.conv.dir == MotorDir::Neg {
+            !forward
+        } else {
+            forward
+        };
+        self.stat.cdir = if self.conv.mres >= 0.0 {
+            user_forward
+        } else {
+            !user_forward
+        };
+
         effects.commands.push(MotorCommand::MoveVelocity {
             direction: forward,
             velocity: self.vel.jvel,
@@ -265,6 +312,30 @@ impl MotorRecord {
 
     /// Start homing.
     fn start_home(&mut self, forward: bool, effects: &mut ProcessEffects) {
+        // C: check limit switch in direction of home before starting
+        // HOMF blocked by HLS (when DIR=Pos) or LLS (when DIR=Neg)
+        let blocked = if forward {
+            if self.conv.dir == MotorDir::Pos {
+                self.limits.hls
+            } else {
+                self.limits.lls
+            }
+        } else {
+            if self.conv.dir == MotorDir::Pos {
+                self.limits.lls
+            } else {
+                self.limits.hls
+            }
+        };
+        if blocked {
+            if forward {
+                self.ctrl.homf = false;
+            } else {
+                self.ctrl.homr = false;
+            }
+            return;
+        }
+
         self.stat.dmov = false;
         self.suppress_flnk = true;
 
@@ -277,8 +348,15 @@ impl MotorRecord {
         }
         self.set_phase(MotionPhase::Homing);
 
+        // C: home direction is inverted when MRES is negative
+        // if ((MIP_HOMF && mres>0) || (MIP_HOMR && mres<0)) => HOME_FOR else HOME_REV
+        let hw_forward = if self.conv.mres >= 0.0 { forward } else { !forward };
+
+        // CDIR for homing
+        self.stat.cdir = forward;
+
         effects.commands.push(MotorCommand::Home {
-            forward,
+            forward: hw_forward,
             velocity: self.vel.hvel,
             acceleration: self.vel.accl,
         });
@@ -351,15 +429,15 @@ impl MotorRecord {
             }
             SpmgMode::Pause => {
                 if self.stat.phase != MotionPhase::Idle {
-                    self.internal.backlash_pending = false;
+                    // C: Pause sends STOP and sets MIP_STOP, but does NOT
+                    // clear phase/MIP or set DMOV here. The normal stop
+                    // completion pipeline handles that. DVAL is preserved
+                    // for potential resume via Go.
+                    self.stat.mip.insert(MipFlags::STOP);
+                    self.internal.pending_retarget = None;
                     effects.commands.push(MotorCommand::Stop {
                         acceleration: self.vel.accl,
                     });
-                    // Keep target (DVAL preserved) for potential resume via Go
-                    self.set_phase(MotionPhase::Idle);
-                    self.stat.mip = MipFlags::empty();
-                    self.stat.dmov = true;
-                    self.suppress_flnk = false;
                 }
             }
             SpmgMode::Go => {
@@ -389,17 +467,27 @@ impl MotorRecord {
             return RetargetAction::Ignore;
         }
 
-        let _deadband = self.timing.ntmf * (self.retry.bdst.abs() + self.retry.rdbd);
-        let old_dval = self.internal.ldvl;
-        let direction_changed =
-            (new_dval - self.pos.drbv).signum() != (old_dval - self.pos.drbv).signum();
+        // Only retarget during active move or retry phases
+        let in_move = self.stat.mip.intersects(MipFlags::MOVE | MipFlags::RETRY);
+        if !in_move || self.stat.mip.contains(MipFlags::STOP) {
+            return RetargetAction::Ignore;
+        }
 
-        if direction_changed {
+        let diff = new_dval - self.pos.drbv;
+        let deadband = self.timing.ntmf * (self.retry.bdst.abs() + self.retry.rdbd);
+
+        // C: retarget only if direction changed AND error exceeds deadband
+        let sign_diff = if diff >= 0.0 { true } else { false };
+        let direction_changed = sign_diff != self.stat.cdir;
+
+        if direction_changed && diff.abs() > deadband {
             RetargetAction::StopAndReplan
-        } else if (new_dval - self.pos.drbv).abs() < (old_dval - self.pos.drbv).abs() {
-            RetargetAction::StopAndReplan
-        } else {
+        } else if !direction_changed {
+            // Same direction: extend the move without stopping
             RetargetAction::ExtendMove
+        } else {
+            // Direction changed but within deadband: ignore
+            RetargetAction::Ignore
         }
     }
 

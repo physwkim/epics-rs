@@ -27,7 +27,9 @@ impl MotorRecord {
                 self.plan_absolute_move(&mut effects);
                 return effects;
             } else {
-                // Plain stop -- finalize
+                // Plain stop -- sync target to readback then finalize
+                // C: postProcess syncs VAL<-RBV, DVAL<-DRBV after stop
+                self.sync_positions();
                 self.finalize_or_delay(&mut effects);
                 return effects;
             }
@@ -51,6 +53,8 @@ impl MotorRecord {
                 if self.needs_jog_backlash() {
                     self.start_jog_backlash(&mut effects);
                 } else {
+                    // C: postProcess syncs VAL<-RBV after jog stop
+                    self.sync_positions();
                     self.finalize_or_delay(&mut effects);
                 }
             }
@@ -148,18 +152,33 @@ impl MotorRecord {
     }
 
     /// Compute retry target based on retry mode.
+    /// Matches C motorRecord.cc do_work() retry logic.
     fn compute_retry_target(&self) -> f64 {
-        let diff = self.pos.dval - self.pos.drbv;
         match self.retry.rmod {
             RetryMode::Default => {
-                // C default: move to drbv + rdbd in direction of error
-                self.pos.drbv + self.retry.rdbd * diff.signum()
+                // C default: move to the original target position (dval)
+                self.pos.dval
             }
             RetryMode::Arithmetic => {
-                let correction = diff * self.retry.frac;
-                self.pos.drbv + correction
+                // C: relpos *= (rtry - rcnt + 1) / rtry
+                // relpos is the remaining distance from current position to target
+                let relpos = self.pos.dval - self.pos.drbv;
+                let rtry = self.retry.rtry as f64;
+                let rcnt = self.retry.rcnt as f64;
+                let factor = if rtry > 0.0 {
+                    (rtry - rcnt + 1.0) / rtry
+                } else {
+                    1.0
+                };
+                self.pos.drbv + relpos * factor
             }
-            RetryMode::Geometric => self.pos.dval,
+            RetryMode::Geometric => {
+                // C: relpos *= 1 / (2 ^ (rcnt - 1))
+                let relpos = self.pos.dval - self.pos.drbv;
+                let power = (self.retry.rcnt - 1).max(0) as u32;
+                let factor = 1.0 / (2.0_f64.powi(power as i32));
+                self.pos.drbv + relpos * factor
+            }
             RetryMode::InPosition => {
                 // InPosition: don't reissue move, just wait for driver
                 self.pos.dval
@@ -171,6 +190,10 @@ impl MotorRecord {
     /// Backlash is needed when the direction of travel opposes the BDST sign direction.
     pub(crate) fn needs_backlash_for_move(&self, dval: f64, drbv: f64) -> bool {
         if self.retry.bdst == 0.0 {
+            return false;
+        }
+        // C: disable backlash when |BDST| < |MRES| (less than one step)
+        if self.retry.bdst.abs() < self.conv.mres.abs() {
             return false;
         }
         let move_direction = dval - drbv;

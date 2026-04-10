@@ -145,11 +145,7 @@ fn test_process_motor_info() {
         encoder_position: 10.001,
         done: true,
         moving: false,
-        high_limit: false,
-        low_limit: false,
-        home: false,
-        powered: true,
-        problem: false,
+        ..Default::default()
     };
     rec.process_motor_info(&status);
     assert_eq!(rec.pos.rmp, 10000);
@@ -359,11 +355,16 @@ fn test_ntm_retarget_direction_change() {
     rec.retry.rdbd = 0.0;
     rec.internal.ldvl = 10.0;
     rec.pos.drbv = 5.0;
+    // Set up active motion state (required for NTM)
+    rec.stat.mip = MipFlags::MOVE;
+    rec.stat.phase = MotionPhase::MainMove;
+    // CDIR: moving positive (dval > drbv)
+    rec.stat.cdir = true;
 
     // Same direction, farther -> ExtendMove
     assert_eq!(rec.handle_retarget(15.0), RetargetAction::ExtendMove);
 
-    // Opposite direction -> StopAndReplan
+    // Opposite direction (negative, deadband=0) -> StopAndReplan
     assert_eq!(rec.handle_retarget(-5.0), RetargetAction::StopAndReplan);
 }
 
