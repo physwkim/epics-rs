@@ -38,7 +38,7 @@ pub(crate) static FIELDS: &[FieldDesc] = &[
     },
     FieldDesc {
         name: "RDIF",
-        dbf_type: DbFieldType::Double,
+        dbf_type: DbFieldType::Long,
         read_only: true,
     },
     FieldDesc {
@@ -435,7 +435,7 @@ pub(crate) fn motor_get_field(rec: &MotorRecord, name: &str) -> Option<EpicsValu
         "RLV" => Some(EpicsValue::Double(rec.pos.rlv)),
         "OFF" => Some(EpicsValue::Double(rec.pos.off)),
         "DIFF" => Some(EpicsValue::Double(rec.pos.diff)),
-        "RDIF" => Some(EpicsValue::Double(rec.pos.rdif)),
+        "RDIF" => Some(EpicsValue::Long(rec.pos.rdif)),
         "DVAL" => Some(EpicsValue::Double(rec.pos.dval)),
         "DRBV" => Some(EpicsValue::Double(rec.pos.drbv)),
         "RVAL" => Some(EpicsValue::Long(rec.pos.rval)),
@@ -536,8 +536,8 @@ pub(crate) fn motor_put_field(
                 EpicsValue::Double(v) => v,
                 _ => return Err(CaError::TypeMismatch(name.into())),
             };
-            if rec.conv.set && !rec.conv.igset {
-                // SET mode: recalculate offset, signal SetPosition
+            if rec.conv.set && !rec.conv.igset && rec.conv.foff == FreezeOffset::Variable {
+                // SET mode (FOFF=Variable): recalculate offset, signal SetPosition
                 if let Ok((dval, rval, off)) = coordinate::cascade_from_val(
                     v,
                     rec.conv.dir,
@@ -554,6 +554,7 @@ pub(crate) fn motor_put_field(
                 }
                 rec.last_write = Some(CommandSource::Set);
             } else {
+                // Normal move, or SET+FOFF=Frozen (which performs a move)
                 if let Ok((dval, rval, off)) = coordinate::cascade_from_val(
                     v,
                     rec.conv.dir,
@@ -577,7 +578,8 @@ pub(crate) fn motor_put_field(
                 EpicsValue::Double(v) => v,
                 _ => return Err(CaError::TypeMismatch(name.into())),
             };
-            if rec.conv.set && !rec.conv.igset {
+            if rec.conv.set && !rec.conv.igset && rec.conv.foff == FreezeOffset::Variable {
+                // SET mode (FOFF=Variable): recalculate offset, signal SetPosition
                 if let Ok((val, rval, off)) = coordinate::cascade_from_dval(
                     v,
                     rec.conv.dir,
@@ -594,6 +596,7 @@ pub(crate) fn motor_put_field(
                 }
                 rec.last_write = Some(CommandSource::Set);
             } else {
+                // Normal move, or SET+FOFF=Frozen (which performs a move)
                 if let Ok((val, rval, off)) = coordinate::cascade_from_dval(
                     v,
                     rec.conv.dir,
@@ -617,7 +620,8 @@ pub(crate) fn motor_put_field(
                 EpicsValue::Long(v) => v,
                 _ => return Err(CaError::TypeMismatch(name.into())),
             };
-            if rec.conv.set && !rec.conv.igset {
+            if rec.conv.set && !rec.conv.igset && rec.conv.foff == FreezeOffset::Variable {
+                // SET mode (FOFF=Variable): recalculate offset, signal SetPosition
                 let (val, dval, off) = coordinate::cascade_from_rval(
                     v,
                     rec.conv.dir,
@@ -633,6 +637,7 @@ pub(crate) fn motor_put_field(
                 rec.pos.off = off;
                 rec.last_write = Some(CommandSource::Set);
             } else {
+                // Normal move, or SET+FOFF=Frozen (which performs a move)
                 let (val, dval, off) = coordinate::cascade_from_rval(
                     v,
                     rec.conv.dir,
@@ -745,38 +750,7 @@ pub(crate) fn motor_put_field(
                 rec.conv.mres = v;
                 // C: cascade UREV from MRES
                 rec.conv.urev = v * rec.conv.srev as f64;
-                // C: recalculate velocities from rev/s fields
-                let urev_abs = rec.conv.urev.abs();
-                if urev_abs > 0.0 {
-                    if rec.vel.s > 0.0 {
-                        rec.vel.velo = urev_abs * rec.vel.s;
-                    }
-                    if rec.vel.sbas > 0.0 {
-                        rec.vel.vbas = urev_abs * rec.vel.sbas;
-                    }
-                    if rec.vel.sbak > 0.0 {
-                        rec.vel.bvel = urev_abs * rec.vel.sbak;
-                    }
-                    if rec.vel.smax > 0.0 {
-                        rec.vel.vmax = urev_abs * rec.vel.smax;
-                    }
-                }
-                // C: recalculate dial limits from raw limits
-                // Use ratio of new/old MRES to scale existing dial limits
-                if old_mres != 0.0 {
-                    let ratio = v / old_mres;
-                    rec.limits.dhlm *= ratio;
-                    rec.limits.dllm *= ratio;
-                    // Update user limits
-                    let (hlm, llm) = coordinate::dial_limits_to_user(
-                        rec.limits.dhlm,
-                        rec.limits.dllm,
-                        rec.conv.dir,
-                        rec.pos.off,
-                    );
-                    rec.limits.hlm = hlm;
-                    rec.limits.llm = llm;
-                }
+                apply_mres_cascade(rec, old_mres);
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -794,38 +768,28 @@ pub(crate) fn motor_put_field(
                 if v <= 0 {
                     return Ok(()); // C: reject non-positive SREV
                 }
+                let old_mres = rec.conv.mres;
                 rec.conv.srev = v;
                 // C: recalculate MRES from UREV/SREV
                 if rec.conv.urev != 0.0 {
                     rec.conv.mres = rec.conv.urev / v as f64;
                 }
+                // Cascade velocity and limits like MRES handler
+                apply_mres_cascade(rec, old_mres);
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
         },
         "UREV" => match value {
             EpicsValue::Double(v) => {
+                let old_mres = rec.conv.mres;
                 rec.conv.urev = v;
                 // C: recalculate MRES from UREV/SREV
                 if rec.conv.srev > 0 {
                     rec.conv.mres = v / rec.conv.srev as f64;
                 }
-                // C: cascade velocities from new UREV
-                let urev_abs = v.abs();
-                if urev_abs > 0.0 {
-                    if rec.vel.s > 0.0 {
-                        rec.vel.velo = urev_abs * rec.vel.s;
-                    }
-                    if rec.vel.sbas > 0.0 {
-                        rec.vel.vbas = urev_abs * rec.vel.sbas;
-                    }
-                    if rec.vel.sbak > 0.0 {
-                        rec.vel.bvel = urev_abs * rec.vel.sbak;
-                    }
-                    if rec.vel.smax > 0.0 {
-                        rec.vel.vmax = urev_abs * rec.vel.smax;
-                    }
-                }
+                // C: cascade velocities and limits from new UREV
+                apply_mres_cascade(rec, old_mres);
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),
@@ -1293,5 +1257,30 @@ pub(crate) fn motor_put_field(
             Ok(())
         }
         _ => Err(CaError::FieldNotFound(name.into())),
+    }
+}
+
+/// Apply velocity and limit cascade after MRES changes.
+/// Used by MRES, SREV, and UREV handlers to avoid duplication.
+fn apply_mres_cascade(rec: &mut MotorRecord, old_mres: f64) {
+    let urev_abs = rec.conv.urev.abs();
+    if urev_abs > 0.0 {
+        rec.vel.velo = urev_abs * rec.vel.s;
+        rec.vel.vbas = urev_abs * rec.vel.sbas;
+        rec.vel.bvel = urev_abs * rec.vel.sbak;
+        rec.vel.vmax = urev_abs * rec.vel.smax;
+    }
+    if old_mres != 0.0 {
+        let ratio = rec.conv.mres / old_mres;
+        rec.limits.dhlm *= ratio;
+        rec.limits.dllm *= ratio;
+        let (hlm, llm) = coordinate::dial_limits_to_user(
+            rec.limits.dhlm,
+            rec.limits.dllm,
+            rec.conv.dir,
+            rec.pos.off,
+        );
+        rec.limits.hlm = hlm;
+        rec.limits.llm = llm;
     }
 }

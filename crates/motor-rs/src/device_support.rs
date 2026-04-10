@@ -190,17 +190,29 @@ impl DeviceSupport for MotorDeviceSupport {
             motor_rec.set_device_state(self.device_state.clone());
         }
 
-        // Sync driver position with pass0-restored VAL (if any).
-        // This matches C EPICS init_record which calls set_position so
-        // that motors without absolute encoders start at the saved position.
+        // Sync driver position with pass0-restored DVAL (if any).
+        // C: set_position uses dval/mres (raw steps), not val (user coordinates)
         let user = self.make_user();
-        if let Some(EpicsValue::Double(val)) = record.get_field("VAL") {
-            if val != 0.0 {
-                let mut motor = self.motor.lock().map_err(|e| {
-                    epics_base_rs::error::CaError::InvalidValue(format!("motor lock: {e}"))
-                })?;
-                let _ = motor.set_position(&user, val);
-            }
+        let dval = record
+            .get_field("DVAL")
+            .and_then(|v| match v {
+                EpicsValue::Double(d) => Some(d),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let mres = record
+            .get_field("MRES")
+            .and_then(|v| match v {
+                EpicsValue::Double(d) => Some(d),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        if dval != 0.0 && mres != 0.0 {
+            let mut motor = self.motor.lock().map_err(|e| {
+                epics_base_rs::error::CaError::InvalidValue(format!("motor lock: {e}"))
+            })?;
+            let raw_pos = dval / mres;
+            let _ = motor.set_position(&user, raw_pos);
         }
 
         let status = {

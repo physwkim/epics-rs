@@ -111,7 +111,12 @@ impl MotorRecord {
                 // SET mode: recalculate RBV from new offset, then issue SetPosition
                 self.pos.rbv = coordinate::dial_to_user(self.pos.drbv, self.conv.dir, self.pos.off);
                 self.pos.diff = self.pos.dval - self.pos.drbv;
-                self.pos.rdif = self.pos.val - self.pos.rbv;
+                // C: rdif = NINT(diff / mres)
+                self.pos.rdif = if self.conv.mres != 0.0 {
+                    (self.pos.diff / self.conv.mres).round() as i32
+                } else {
+                    0
+                };
                 // Convert dial to raw steps for the driver (C: dval / mres)
                 if let Ok(raw) = coordinate::dial_to_raw(self.pos.dval, self.conv.mres) {
                     effects.commands.push(MotorCommand::SetPosition {
@@ -220,8 +225,13 @@ impl MotorRecord {
         // tdir reflects the actual first-command direction
         self.stat.tdir = move_target > self.pos.drbv;
         // CDIR: commanded direction from the position error
-        // C: cdir = (rdif < 0.0) ? 0 : 1
-        self.stat.cdir = self.pos.diff >= 0.0;
+        // C: cdir = (rdif < 0) ? 0 : 1, where rdif = diff/mres
+        // When MRES < 0, the sign inverts
+        self.stat.cdir = if self.conv.mres >= 0.0 {
+            self.pos.diff >= 0.0
+        } else {
+            self.pos.diff < 0.0
+        };
 
         // Set MIP and phase
         self.stat.mip = MipFlags::MOVE;

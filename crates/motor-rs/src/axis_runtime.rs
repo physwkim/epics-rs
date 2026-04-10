@@ -114,12 +114,47 @@ pub struct AxisRuntime {
     power_off_time: Option<tokio::time::Instant>,
 }
 
+/// Configuration for AxisRuntime auto power on/off.
+#[derive(Debug, Clone)]
+pub struct AutoPowerConfig {
+    pub enabled: bool,
+    pub on_delay: Duration,
+    pub off_delay: Duration,
+}
+
+impl Default for AutoPowerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            on_delay: Duration::ZERO,
+            off_delay: Duration::ZERO,
+        }
+    }
+}
+
 /// Create an AxisRuntime and its handle.
 pub fn create_axis_runtime(
     motor: Box<dyn AsynMotor>,
     moving_poll_interval: Duration,
     idle_poll_interval: Duration,
     forced_fast_polls: u32,
+) -> (AxisRuntime, AxisHandle) {
+    create_axis_runtime_with_auto_power(
+        motor,
+        moving_poll_interval,
+        idle_poll_interval,
+        forced_fast_polls,
+        AutoPowerConfig::default(),
+    )
+}
+
+/// Create an AxisRuntime and its handle with auto power configuration.
+pub fn create_axis_runtime_with_auto_power(
+    motor: Box<dyn AsynMotor>,
+    moving_poll_interval: Duration,
+    idle_poll_interval: Duration,
+    forced_fast_polls: u32,
+    auto_power: AutoPowerConfig,
 ) -> (AxisRuntime, AxisHandle) {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (io_intr_tx, io_intr_rx) = mpsc::channel(16);
@@ -135,9 +170,9 @@ pub fn create_axis_runtime(
         latest_status: None,
         active_polling: false,
         status_seq: 0,
-        auto_power: false,
-        power_on_delay: Duration::ZERO,
-        power_off_delay: Duration::ZERO,
+        auto_power: auto_power.enabled,
+        power_on_delay: auto_power.on_delay,
+        power_off_delay: auto_power.off_delay,
         was_moving: false,
         power_off_time: None,
     };

@@ -19,7 +19,7 @@ pub mod profile;
 pub mod record;
 pub mod sim_motor;
 
-pub use axis_runtime::{AxisHandle, AxisRuntime};
+pub use axis_runtime::{AutoPowerConfig, AxisHandle, AxisRuntime};
 pub use builder::MotorBuilder;
 pub use record::MotorRecord;
 

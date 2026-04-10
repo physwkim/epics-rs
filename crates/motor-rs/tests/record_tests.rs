@@ -14,7 +14,7 @@ fn test_default_values() {
     assert_eq!(rec.ctrl.spmg, SpmgMode::Go);
     assert_eq!(rec.conv.mres, 1.0);
     assert_eq!(rec.vel.velo, 1.0);
-    assert_eq!(rec.vel.accl, 0.5);
+    assert_eq!(rec.vel.accl, 0.2);
     assert_eq!(rec.retry.rtry, 10);
     assert!(rec.limits.lvio); // default true (no limits set)
 }

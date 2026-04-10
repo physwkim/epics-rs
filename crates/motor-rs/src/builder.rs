@@ -27,6 +27,8 @@ pub struct MotorBuilder {
     forced_fast_polls: u32,
     poll_channel_capacity: usize,
     configure_record: Option<Box<dyn FnOnce(&mut MotorRecord)>>,
+    auto_power_on_delay: Option<Duration>,
+    auto_power_off_delay: Option<Duration>,
 }
 
 impl MotorBuilder {
@@ -40,6 +42,8 @@ impl MotorBuilder {
             forced_fast_polls: 10,
             poll_channel_capacity: 16,
             configure_record: None,
+            auto_power_on_delay: None,
+            auto_power_off_delay: None,
         }
     }
 
@@ -81,6 +85,12 @@ impl MotorBuilder {
 
     pub fn configure_record(mut self, f: impl FnOnce(&mut MotorRecord) + 'static) -> Self {
         self.configure_record = Some(Box::new(f));
+        self
+    }
+
+    pub fn auto_power(mut self, on_delay: Duration, off_delay: Duration) -> Self {
+        self.auto_power_on_delay = Some(on_delay);
+        self.auto_power_off_delay = Some(off_delay);
         self
     }
 

@@ -132,7 +132,12 @@ impl MotorRecord {
 
         // DIFF and RDIF
         self.pos.diff = self.pos.dval - self.pos.drbv;
-        self.pos.rdif = self.pos.val - self.pos.rbv;
+        // C: rdif = NINT(diff / mres) -- raw step difference
+        self.pos.rdif = if self.conv.mres != 0.0 {
+            (self.pos.diff / self.conv.mres).round() as i32
+        } else {
+            0
+        };
 
         // Limit switches: map raw -> user based on DIR and MRES sign
         // Must be done before MOVN check which uses HLS/LLS
@@ -218,7 +223,7 @@ impl MotorRecord {
         self.pos.val = self.pos.rbv;
         self.pos.rval = self.pos.rrbv;
         self.pos.diff = 0.0;
-        self.pos.rdif = 0.0;
+        self.pos.rdif = 0;
         self.internal.lval = self.pos.val;
         self.internal.ldvl = self.pos.dval;
         self.internal.lrvl = self.pos.rval;
