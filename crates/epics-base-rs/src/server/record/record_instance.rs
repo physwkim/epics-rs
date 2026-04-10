@@ -957,21 +957,43 @@ impl RecordInstance {
                     })
                     .unwrap_or(0);
 
-                let state_sev = if val == 0 { zsv } else { osv };
-                let sev = AlarmSeverity::from_u16(state_sev as u16);
-                let cos_sev = AlarmSeverity::from_u16(cosv as u16);
-                let final_sev = if cos_sev as u16 > sev as u16 {
-                    cos_sev
-                } else {
-                    sev
-                };
+                // Guard: val > 1 means no alarm check (like C)
+                if val <= 1 {
+                    // State alarm: ZSV for val==0, OSV for val==1
+                    let state_sev = if val == 0 { zsv } else { osv };
+                    let sev = AlarmSeverity::from_u16(state_sev as u16);
+                    if sev != AlarmSeverity::NoAlarm {
+                        recgbl::rec_gbl_set_sevr(
+                            &mut self.common,
+                            alarm_status::STATE_ALARM,
+                            sev,
+                        );
+                    }
 
-                if final_sev != AlarmSeverity::NoAlarm {
-                    recgbl::rec_gbl_set_sevr(
-                        &mut self.common,
-                        alarm_status::STATE_ALARM,
-                        final_sev,
-                    );
+                    // COS alarm: only fires when val changed from LALM
+                    let lalm = self
+                        .record
+                        .get_field("LALM")
+                        .and_then(|v| {
+                            if let EpicsValue::Enum(s) = v {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(val);
+
+                    if val != lalm {
+                        let cos_sev = AlarmSeverity::from_u16(cosv as u16);
+                        if cos_sev != AlarmSeverity::NoAlarm {
+                            recgbl::rec_gbl_set_sevr(
+                                &mut self.common,
+                                alarm_status::COS_ALARM,
+                                cos_sev,
+                            );
+                        }
+                        let _ = self.record.put_field("LALM", EpicsValue::Enum(val));
+                    }
                 }
             }
             "mbbi" | "mbbo" => {
