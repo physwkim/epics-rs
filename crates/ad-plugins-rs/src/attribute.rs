@@ -91,10 +91,11 @@ impl AttributeProcessor {
         &self.params
     }
 
-    /// Reset the accumulated sum for a channel.
-    pub fn reset(&mut self, addr: usize) {
-        if addr < MAX_ATTR_CHANNELS {
-            self.channels[addr].value_sum = 0.0;
+    /// Reset value and value_sum for all channels (C parity: resets all, not just one).
+    pub fn reset(&mut self) {
+        for ch in self.channels.iter_mut() {
+            ch.value = 0.0;
+            ch.value_sum = 0.0;
         }
     }
 
@@ -176,9 +177,15 @@ impl NDPluginProcess for AttributeProcessor {
             }
         } else if reason == self.params.reset {
             if params.value.as_i32() != 0 {
-                if addr < MAX_ATTR_CHANNELS {
-                    self.channels[addr].value_sum = 0.0;
+                let mut updates = Vec::new();
+                for (i, ch) in self.channels.iter_mut().enumerate() {
+                    ch.value = 0.0;
+                    ch.value_sum = 0.0;
+                    let a = i as i32;
+                    updates.push(ParamUpdate::float64_addr(self.params.value, a, 0.0));
+                    updates.push(ParamUpdate::float64_addr(self.params.value_sum, a, 0.0));
                 }
+                return ParamChangeResult::updates(updates);
             }
         }
 
@@ -295,9 +302,9 @@ mod tests {
         proc.process_array(&arr1, &pool);
         assert!((proc.value_sum() - 100.0).abs() < 1e-10);
 
-        proc.reset(0);
+        proc.reset();
         assert!((proc.value_sum() - 0.0).abs() < 1e-10);
-        assert!((proc.value() - 100.0).abs() < 1e-10);
+        assert!((proc.value() - 0.0).abs() < 1e-10);
     }
 
     #[test]

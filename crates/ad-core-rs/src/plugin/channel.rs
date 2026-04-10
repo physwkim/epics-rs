@@ -150,6 +150,16 @@ impl NDArraySender {
         self.dropped_count.load(Ordering::Relaxed)
     }
 
+    /// Clone the shared dropped-array counter (for monitoring from the data thread).
+    pub(crate) fn dropped_count_shared(&self) -> Arc<AtomicU64> {
+        self.dropped_count.clone()
+    }
+
+    /// Clone the underlying tokio sender (for queue capacity checks from the data thread).
+    pub(crate) fn tx_clone(&self) -> tokio::sync::mpsc::Sender<ArrayMessage> {
+        self.tx.clone()
+    }
+
     /// Set the queued-array counter for tracking in-flight arrays.
     pub fn set_queued_counter(&mut self, counter: Arc<QueuedArrayCounter>) {
         self.queued_counter = Some(counter);
