@@ -182,11 +182,13 @@ impl NDFileWriter for NetcdfWriter {
         // Build DataSet definition
         let mut ds = DataSet::new();
 
-        // Fixed dimensions: dim0, dim1, ...
+        // Fixed dimensions in reversed order (matching C++ NDFileNetCDF)
+        let ndims = first.dims.len();
         let mut dim_names: Vec<String> = Vec::new();
-        for (i, &size) in first.dims.iter().enumerate() {
+        for i in 0..ndims {
+            let dim_idx = ndims - 1 - i;
             let name = format!("dim{}", i);
-            ds.add_fixed_dim(&name, size).map_err(map_def)?;
+            ds.add_fixed_dim(&name, first.dims[dim_idx]).map_err(map_def)?;
             dim_names.push(name);
         }
 

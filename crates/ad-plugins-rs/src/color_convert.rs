@@ -434,7 +434,27 @@ impl NDPluginProcess for ColorConvertProcessor {
         };
 
         match result {
-            Some(out) => ProcessResult::arrays(vec![Arc::new(out)]),
+            Some(mut out) => {
+                // C++: set ColorMode attribute on output array
+                let color_mode_val = match target {
+                    NDColorMode::Mono => 0i32,
+                    NDColorMode::Bayer => 1,
+                    NDColorMode::RGB1 => 2,
+                    NDColorMode::RGB2 => 3,
+                    NDColorMode::RGB3 => 4,
+                    NDColorMode::YUV444 => 5,
+                    NDColorMode::YUV422 => 6,
+                    NDColorMode::YUV411 => 7,
+                };
+                use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+                out.attributes.add(NDAttribute {
+                    name: "ColorMode".into(),
+                    description: "Color Mode".into(),
+                    source: NDAttrSource::Driver,
+                    value: NDAttrValue::Int32(color_mode_val),
+                });
+                ProcessResult::arrays(vec![Arc::new(out)])
+            }
             None => ProcessResult::empty(),
         }
     }
