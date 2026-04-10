@@ -238,8 +238,16 @@ impl NDArrayDriverBase {
     }
 
     /// Check if the file path directory exists.
+    /// Normalizes the path to ensure it has a trailing '/'.
     pub fn check_path(&mut self) -> AsynResult<bool> {
-        let path = self.port_base.get_string_param(self.params.file_path, 0)?;
+        let path_ref = self.port_base.get_string_param(self.params.file_path, 0)?;
+        let mut path = path_ref.to_string();
+        // Ensure trailing separator (C++ checkPath does this)
+        if !path.is_empty() && !path.ends_with('/') && !path.ends_with(std::path::MAIN_SEPARATOR) {
+            path.push('/');
+            self.port_base
+                .set_string_param(self.params.file_path, 0, path.clone())?;
+        }
         let exists = Path::new(&path).is_dir();
         self.port_base
             .set_int32_param(self.params.file_path_exists, 0, exists as i32)?;

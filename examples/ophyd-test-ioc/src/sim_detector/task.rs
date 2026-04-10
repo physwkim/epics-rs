@@ -161,6 +161,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             let mut frame = NDArray {
                 unique_id: 0,
                 timestamp: ad_core_rs::timestamp::EpicsTimestamp::default(),
+                time_stamp: 0.0,
                 dims,
                 data: NDDataBuffer::F64(img_data),
                 attributes: ad_core_rs::attributes::NDAttributeList::new(),

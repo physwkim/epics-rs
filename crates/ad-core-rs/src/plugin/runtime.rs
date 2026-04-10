@@ -246,13 +246,32 @@ struct SharedProcessorInner<P: NDPluginProcess> {
     array_counter: i32,
     /// Param index for STD_ARRAY_DATA (if this is a StdArrays plugin).
     std_array_data_param: Option<usize>,
+    /// MinCallbackTime throttling: minimum seconds between process calls.
+    min_callback_time: f64,
+    /// Last time process_and_publish was called (for throttling).
+    last_process_time: Option<std::time::Instant>,
 }
 
 impl<P: NDPluginProcess> SharedProcessorInner<P> {
+    fn should_throttle(&self) -> bool {
+        if self.min_callback_time <= 0.0 {
+            return false;
+        }
+        if let Some(last) = self.last_process_time {
+            last.elapsed().as_secs_f64() < self.min_callback_time
+        } else {
+            false
+        }
+    }
+
     fn process_and_publish(&mut self, array: &NDArray) {
+        if self.should_throttle() {
+            return;
+        }
         let t0 = std::time::Instant::now();
         let result = self.processor.process_array(array, &self.pool);
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        self.last_process_time = Some(t0);
         self.publish_result(
             result.output_arrays,
             result.param_updates,
@@ -842,6 +861,7 @@ pub fn create_plugin_runtime_multi_addr<P: NDPluginProcess>(
 
     let enable_callbacks_reason = driver.plugin_params.enable_callbacks;
     let blocking_callbacks_reason = driver.plugin_params.blocking_callbacks;
+    let min_callback_time_reason = driver.plugin_params.min_callback_time;
     let ndarray_params = driver.ndarray_params;
     let plugin_params = driver.plugin_params;
     let std_array_data_param = driver.std_array_data_param;
@@ -871,6 +891,8 @@ pub fn create_plugin_runtime_multi_addr<P: NDPluginProcess>(
         port_handle,
         array_counter: 0,
         std_array_data_param,
+        min_callback_time: 0.0,
+        last_process_time: None,
     }));
 
     // Type-erased handle for blocking mode
@@ -902,6 +924,7 @@ pub fn create_plugin_runtime_multi_addr<P: NDPluginProcess>(
                 param_rx,
                 enable_callbacks_reason,
                 blocking_callbacks_reason,
+                min_callback_time_reason,
                 data_enabled,
                 data_blocking,
                 nd_array_port_reason,
@@ -932,6 +955,7 @@ fn plugin_data_loop<P: NDPluginProcess>(
     mut param_rx: tokio::sync::mpsc::Receiver<(usize, i32, ParamChangeValue)>,
     enable_callbacks_reason: usize,
     blocking_callbacks_reason: usize,
+    min_callback_time_reason: usize,
     enabled: Arc<AtomicBool>,
     blocking_mode: Arc<AtomicBool>,
     nd_array_port_reason: usize,
@@ -982,6 +1006,10 @@ fn plugin_data_loop<P: NDPluginProcess>(
                             }
                             if reason == blocking_callbacks_reason {
                                 blocking_mode.store(value.as_i32() != 0, Ordering::Release);
+                            }
+                            // Handle MinCallbackTime param change
+                            if reason == min_callback_time_reason {
+                                shared.lock().min_callback_time = value.as_f64();
                             }
                             // Handle NDArrayPort rewiring
                             if reason == nd_array_port_reason {
@@ -1051,6 +1079,7 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
 
     let enable_callbacks_reason = driver.plugin_params.enable_callbacks;
     let blocking_callbacks_reason = driver.plugin_params.blocking_callbacks;
+    let min_callback_time_reason = driver.plugin_params.min_callback_time;
     let ndarray_params = driver.ndarray_params;
     let plugin_params = driver.plugin_params;
     let std_array_data_param = driver.std_array_data_param;
@@ -1075,6 +1104,8 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
         port_handle,
         array_counter: 0,
         std_array_data_param,
+        min_callback_time: 0.0,
+        last_process_time: None,
     }));
 
     let bp: Arc<dyn BlockingProcessFn> = Arc::new(BlockingProcessorHandle {
@@ -1104,6 +1135,7 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
                 param_rx,
                 enable_callbacks_reason,
                 blocking_callbacks_reason,
+                min_callback_time_reason,
                 data_enabled,
                 data_blocking,
                 nd_array_port_reason,

@@ -30,7 +30,9 @@ impl ColorLayout {
         match self.color_mode {
             ColorMode::Mono => y * self.size_x + x,
             ColorMode::RGB1 => (y * self.size_x + x) * 3 + channel,
-            _ => unreachable!("v1 only supports Mono and RGB1"),
+            ColorMode::RGB2 => y * self.size_x * 3 + channel * self.size_x + x,
+            ColorMode::RGB3 => channel * self.size_x * self.size_y + y * self.size_x + x,
+            _ => y * self.size_x + x, // fallback: treat as mono
         }
     }
 
@@ -46,7 +48,17 @@ impl ColorLayout {
                 NDDimension::new(self.size_x),
                 NDDimension::new(self.size_y),
             ],
-            _ => unreachable!("v1 only supports Mono and RGB1"),
+            ColorMode::RGB2 => vec![
+                NDDimension::new(self.size_x),
+                NDDimension::new(3),
+                NDDimension::new(self.size_y),
+            ],
+            ColorMode::RGB3 => vec![
+                NDDimension::new(self.size_x),
+                NDDimension::new(self.size_y),
+                NDDimension::new(3),
+            ],
+            _ => vec![NDDimension::new(self.size_x), NDDimension::new(self.size_y)],
         }
     }
 }
