@@ -9,6 +9,12 @@ pub struct SeqRecord {
     pub selm: i16,
     #[field(type = "Short")]
     pub seln: i16,
+    #[field(type = "String")]
+    pub sell: String,
+    #[field(type = "Short")]
+    pub offs: i16,
+    #[field(type = "Short")]
+    pub shft: i16,
     #[field(type = "Double")]
     pub dly1: f64,
     #[field(type = "Double")]
@@ -77,6 +83,9 @@ impl Default for SeqRecord {
             val: 0,
             selm: 0,
             seln: 0,
+            sell: String::new(),
+            offs: 0,
+            shft: 0,
             dly1: 0.0,
             dly2: 0.0,
             dly3: 0.0,

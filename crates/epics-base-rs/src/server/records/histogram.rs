@@ -8,7 +8,7 @@ pub struct HistogramRecord {
     pub nelm: i32,     // Number of buckets
     pub ulim: f64,     // Upper limit
     pub llim: f64,     // Lower limit
-    pub sgnl: String,  // Signal input link
+    pub sgnl: f64,     // Signal value to bin (C: DBF_DOUBLE)
     pub cmd: i16,      // 0=Read, 1=Clear
     pub sdel: f64,     // Signal deadband
 }
@@ -20,7 +20,7 @@ impl Default for HistogramRecord {
             nelm: 10,
             ulim: 10.0,
             llim: 0.0,
-            sgnl: String::new(),
+            sgnl: 0.0,
             cmd: 0,
             sdel: 0.0,
         }
@@ -76,7 +76,7 @@ static HISTOGRAM_FIELDS: &[FieldDesc] = &[
     },
     FieldDesc {
         name: "SGNL",
-        dbf_type: DbFieldType::String,
+        dbf_type: DbFieldType::Double,
         read_only: false,
     },
     FieldDesc {
@@ -112,7 +112,7 @@ impl Record for HistogramRecord {
             "NELM" => Some(EpicsValue::Long(self.nelm)),
             "ULIM" => Some(EpicsValue::Double(self.ulim)),
             "LLIM" => Some(EpicsValue::Double(self.llim)),
-            "SGNL" => Some(EpicsValue::String(self.sgnl.clone())),
+            "SGNL" => Some(EpicsValue::Double(self.sgnl)),
             "CMD" => Some(EpicsValue::Short(self.cmd)),
             "SDEL" => Some(EpicsValue::Double(self.sdel)),
             _ => None,
@@ -142,13 +142,7 @@ impl Record for HistogramRecord {
                 }
                 _ => Err(CaError::TypeMismatch("LLIM".into())),
             },
-            "SGNL" => match value {
-                EpicsValue::String(s) => {
-                    self.sgnl = s;
-                    Ok(())
-                }
-                _ => Err(CaError::TypeMismatch("SGNL".into())),
-            },
+            "SGNL" => { self.sgnl = value.to_f64().unwrap_or(0.0); Ok(()) }
             "CMD" => match value {
                 EpicsValue::Short(v) => {
                     self.cmd = v;
