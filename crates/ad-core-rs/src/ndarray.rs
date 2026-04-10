@@ -273,7 +273,7 @@ impl NDDimension {
     }
 }
 
-/// Computed info about an NDArray's layout.
+/// Computed info about an NDArray's layout (matching C++ NDArrayInfo_t).
 #[derive(Debug, Clone)]
 pub struct NDArrayInfo {
     pub total_bytes: usize,
@@ -282,6 +282,20 @@ pub struct NDArrayInfo {
     pub x_size: usize,
     pub y_size: usize,
     pub color_size: usize,
+    /// Which dimension index is X.
+    pub x_dim: usize,
+    /// Which dimension index is Y.
+    pub y_dim: usize,
+    /// Which dimension index is color (0 if mono).
+    pub color_dim: usize,
+    /// Elements between successive X values.
+    pub x_stride: usize,
+    /// Elements between successive Y values.
+    pub y_stride: usize,
+    /// Elements between successive color values.
+    pub color_stride: usize,
+    /// Resolved color mode.
+    pub color_mode: crate::color::NDColorMode,
 }
 
 /// N-dimensional array with typed data buffer.
@@ -309,23 +323,70 @@ impl NDArray {
         }
     }
 
-    /// Compute layout info for this array.
+    /// Compute layout info for this array (matching C++ NDArray::getInfo).
+    ///
+    /// For 3D arrays, reads the `ColorMode` attribute to determine which
+    /// dimension is X, Y, and color (RGB1, RGB2, or RGB3 layout).
     pub fn info(&self) -> NDArrayInfo {
+        use crate::color::NDColorMode;
+
         let bytes_per_element = self.data.data_type().element_size();
         let num_elements = self.data.len();
         let total_bytes = num_elements * bytes_per_element;
 
         let ndims = self.dims.len();
-        let (x_size, y_size, color_size) = match ndims {
-            0 => (0, 0, 0),
-            1 => (self.dims[0].size, 1, 1),
-            2 => (self.dims[0].size, self.dims[1].size, 1),
-            _ => {
-                // 3D: interpret as color image
-                // NDColorMode convention: dim[0]=color for RGB1
-                (self.dims[1].size, self.dims[2].size, self.dims[0].size)
-            }
-        };
+
+        // Read ColorMode attribute if present (C++ does this for 3D arrays)
+        let color_mode = self
+            .attributes
+            .get("ColorMode")
+            .and_then(|a| a.value.as_i64())
+            .map(|v| NDColorMode::from_i32(v as i32))
+            .unwrap_or(NDColorMode::Mono);
+
+        let (x_size, y_size, color_size, x_dim, y_dim, color_dim, x_stride, y_stride, color_stride) =
+            match ndims {
+                0 => (0, 0, 0, 0, 0, 0, 0, 0, 0),
+                1 => (self.dims[0].size, 1, 1, 0, 0, 0, 1, self.dims[0].size, 0),
+                2 => {
+                    let xs = self.dims[0].size;
+                    let ys = self.dims[1].size;
+                    (xs, ys, 1, 0, 1, 0, 1, xs, 0)
+                }
+                _ => {
+                    // 3D: layout depends on ColorMode
+                    match color_mode {
+                        NDColorMode::RGB1 => {
+                            // dim[0]=color, dim[1]=X, dim[2]=Y
+                            let cs = self.dims[0].size;
+                            let xs = self.dims[1].size;
+                            let ys = self.dims[2].size;
+                            (xs, ys, cs, 1, 2, 0, cs, xs * cs, 1)
+                        }
+                        NDColorMode::RGB2 => {
+                            // dim[0]=X, dim[1]=color, dim[2]=Y
+                            let xs = self.dims[0].size;
+                            let cs = self.dims[1].size;
+                            let ys = self.dims[2].size;
+                            (xs, ys, cs, 0, 2, 1, 1, xs * cs, xs)
+                        }
+                        NDColorMode::RGB3 => {
+                            // dim[0]=X, dim[1]=Y, dim[2]=color
+                            let xs = self.dims[0].size;
+                            let ys = self.dims[1].size;
+                            let cs = self.dims[2].size;
+                            (xs, ys, cs, 0, 1, 2, 1, xs, xs * ys)
+                        }
+                        _ => {
+                            // Mono or other: treat as dim[0]=X, dim[1]=Y, dim[2]=Z
+                            let xs = self.dims[0].size;
+                            let ys = self.dims[1].size;
+                            let cs = self.dims[2].size;
+                            (xs, ys, cs, 0, 1, 2, 1, xs, xs * ys)
+                        }
+                    }
+                }
+            };
 
         NDArrayInfo {
             total_bytes,
@@ -334,6 +395,13 @@ impl NDArray {
             x_size,
             y_size,
             color_size,
+            x_dim,
+            y_dim,
+            color_dim,
+            x_stride,
+            y_stride,
+            color_stride,
+            color_mode,
         }
     }
 
@@ -446,6 +514,10 @@ mod tests {
 
     #[test]
     fn test_ndarray_info_3d_rgb() {
+        use crate::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+        use crate::color::NDColorMode;
+
+        // Without ColorMode attribute: defaults to Mono (x=dim0, y=dim1, color=dim2)
         let dims = vec![
             NDDimension::new(3),
             NDDimension::new(640),
@@ -453,9 +525,30 @@ mod tests {
         ];
         let arr = NDArray::new(dims, NDDataType::UInt8);
         let info = arr.info();
+        assert_eq!(info.x_size, 3);
+        assert_eq!(info.y_size, 640);
+        assert_eq!(info.color_size, 480);
+
+        // With ColorMode=RGB1: dim[0]=color, dim[1]=x, dim[2]=y
+        let dims = vec![
+            NDDimension::new(3),
+            NDDimension::new(640),
+            NDDimension::new(480),
+        ];
+        let mut arr = NDArray::new(dims, NDDataType::UInt8);
+        arr.attributes.add(NDAttribute {
+            name: "ColorMode".into(),
+            description: "Color Mode".into(),
+            source: NDAttrSource::Driver,
+            value: NDAttrValue::Int32(NDColorMode::RGB1 as i32),
+        });
+        let info = arr.info();
         assert_eq!(info.color_size, 3);
         assert_eq!(info.x_size, 640);
         assert_eq!(info.y_size, 480);
+        assert_eq!(info.x_dim, 1);
+        assert_eq!(info.y_dim, 2);
+        assert_eq!(info.color_dim, 0);
         assert_eq!(info.num_elements, 3 * 640 * 480);
     }
 

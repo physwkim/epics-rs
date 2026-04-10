@@ -642,6 +642,7 @@ mod tests {
     }
 
     fn make_rgb_array(width: usize, height: usize) -> NDArray {
+        use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
         let mut arr = NDArray::new(
             vec![
                 NDDimension::new(3),
@@ -650,6 +651,13 @@ mod tests {
             ],
             NDDataType::UInt8,
         );
+        // info() reads ColorMode for 3D arrays
+        arr.attributes.add(NDAttribute {
+            name: "ColorMode".into(),
+            description: "Color Mode".into(),
+            source: NDAttrSource::Driver,
+            value: NDAttrValue::Int32(2), // RGB1
+        });
         if let NDDataBuffer::U8(ref mut v) = arr.data {
             for i in 0..v.len() {
                 v[i] = (i % 256) as u8;

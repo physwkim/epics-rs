@@ -9,6 +9,93 @@ use crate::ndarray_pool::NDArrayPool;
 use crate::params::ndarray_driver::NDArrayDriverParams;
 use crate::plugin::channel::{NDArrayOutput, NDArraySender, QueuedArrayCounter};
 
+/// Parse a C printf-style template with two `%s` and one `%d`-like specifier.
+///
+/// Handles format specifiers like `%s`, `%d`, `%3.3d`, `%04d`, `%06d`, etc.
+/// The C++ original does: `epicsSnprintf(buf, max, template, path, name, number)`.
+fn sprintf_template(template: &str, path: &str, name: &str, number: i32) -> String {
+    let mut result = String::with_capacity(template.len() + path.len() + name.len() + 16);
+    let mut chars = template.chars().peekable();
+    let mut string_arg_idx = 0; // 0 = path, 1 = name
+
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            // Collect the format specifier
+            let mut spec = String::new();
+            // Collect flags, width, precision
+            while let Some(&c) = chars.peek() {
+                if c == 's' || c == 'd' || c == 'i' || c == 'o' || c == 'x' || c == 'X' {
+                    break;
+                }
+                if c == '%' {
+                    break;
+                }
+                spec.push(c);
+                chars.next();
+            }
+            match chars.next() {
+                Some('s') => {
+                    let s = if string_arg_idx == 0 { path } else { name };
+                    string_arg_idx += 1;
+                    result.push_str(s);
+                }
+                Some('d') | Some('i') => {
+                    // Parse width and precision from spec like "3.3", "04", "06"
+                    let formatted = format_int_spec(&spec, number);
+                    result.push_str(&formatted);
+                }
+                Some('%') => {
+                    result.push('%');
+                }
+                Some(c) => {
+                    result.push('%');
+                    result.push_str(&spec);
+                    result.push(c);
+                }
+                None => {
+                    result.push('%');
+                    result.push_str(&spec);
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Format an integer with a printf-style width/precision spec.
+/// Handles specs like "", "3.3", "04", "06", "3", ".3", etc.
+fn format_int_spec(spec: &str, value: i32) -> String {
+    if spec.is_empty() {
+        return value.to_string();
+    }
+
+    let zero_pad = spec.starts_with('0');
+    let spec_clean = spec.trim_start_matches('0');
+
+    // Split on '.' for width.precision
+    let (width_str, prec_str) = if let Some(dot_pos) = spec_clean.find('.') {
+        (&spec_clean[..dot_pos], Some(&spec_clean[dot_pos + 1..]))
+    } else {
+        (spec_clean, None)
+    };
+
+    let width: usize = width_str.parse().unwrap_or(0);
+    let precision: usize = prec_str.and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let min_digits = width.max(precision);
+    if min_digits == 0 {
+        return value.to_string();
+    }
+
+    if zero_pad || precision > 0 {
+        format!("{:0>width$}", value, width = min_digits)
+    } else {
+        format!("{:>width$}", value, width = min_digits)
+    }
+}
+
 /// Base state for asynNDArrayDriver (file handling, attribute mgmt, pool).
 pub struct NDArrayDriverBase {
     pub port_base: PortDriverBase,
@@ -115,6 +202,10 @@ impl NDArrayDriverBase {
     }
 
     /// Construct a file path from template, path, name, and number.
+    ///
+    /// Matches C++ `asynNDArrayDriver::createFileName` which uses
+    /// `epicsSnprintf(fullFileName, maxChars, fileTemplate, filePath, fileName, fileNumber)`.
+    /// The template is a C printf format string, e.g., `"%s%s_%3.3d.dat"`.
     pub fn create_file_name(&mut self) -> AsynResult<String> {
         let path = self.port_base.get_string_param(self.params.file_path, 0)?;
         let name = self.port_base.get_string_param(self.params.file_name, 0)?;
@@ -122,18 +213,26 @@ impl NDArrayDriverBase {
         let template = self
             .port_base
             .get_string_param(self.params.file_template, 0)?;
+        let auto_increment = self
+            .port_base
+            .get_int32_param(self.params.auto_increment, 0)
+            .unwrap_or(0);
 
         let full = if template.is_empty() {
             format!("{}{}{:04}", path, name, number)
         } else {
-            // Simple template: replace %s with path+name, %d with number
-            template
-                .replace("%s%s", &format!("{}{}", path, name))
-                .replace("%d", &number.to_string())
+            // Parse C printf-style template: two %s args (path, name) and one %d-like arg (number)
+            sprintf_template(&template, &path, &name, number)
         };
 
         self.port_base
             .set_string_param(self.params.full_file_name, 0, full.clone())?;
+
+        // C++: auto-increment file number after creating filename
+        if auto_increment != 0 {
+            self.port_base
+                .set_int32_param(self.params.file_number, 0, number + 1)?;
+        }
 
         Ok(full)
     }

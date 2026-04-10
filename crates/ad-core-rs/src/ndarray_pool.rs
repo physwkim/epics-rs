@@ -91,14 +91,30 @@ impl NDArrayPool {
             reused.codec = None;
             reused
         } else {
-            // Fresh allocation
-            // C++: maxMemory_ == 0 means unlimited
-            let current = self.allocated_bytes.load(Ordering::Relaxed);
-            if self.max_memory > 0 && current + needed_bytes as u64 > self.max_memory as u64 {
-                return Err(ADError::PoolExhausted(needed_bytes, self.max_memory));
+            // Fresh allocation with CAS loop to avoid TOCTOU race
+            if self.max_memory > 0 {
+                loop {
+                    let current = self.allocated_bytes.load(Ordering::Relaxed);
+                    if current + needed_bytes as u64 > self.max_memory as u64 {
+                        return Err(ADError::PoolExhausted(needed_bytes, self.max_memory));
+                    }
+                    if self
+                        .allocated_bytes
+                        .compare_exchange_weak(
+                            current,
+                            current + needed_bytes as u64,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+            } else {
+                self.allocated_bytes
+                    .fetch_add(needed_bytes as u64, Ordering::Relaxed);
             }
-            self.allocated_bytes
-                .fetch_add(needed_bytes as u64, Ordering::Relaxed);
             self.num_alloc_buffers.fetch_add(1, Ordering::Relaxed);
             NDArray::new(dims, data_type)
         };
