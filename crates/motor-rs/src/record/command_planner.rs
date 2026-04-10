@@ -395,8 +395,8 @@ impl MotorRecord {
         // if ((MIP_HOMF && mres>0) || (MIP_HOMR && mres<0)) => HOME_FOR else HOME_REV
         let hw_forward = if self.conv.mres >= 0.0 { forward } else { !forward };
 
-        // CDIR for homing
-        self.stat.cdir = forward;
+        // CDIR for homing: C accounts for MRES sign
+        self.stat.cdir = if self.conv.mres >= 0.0 { forward } else { !forward };
 
         effects.commands.push(MotorCommand::Home {
             forward: hw_forward,

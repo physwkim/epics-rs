@@ -536,25 +536,37 @@ pub(crate) fn motor_put_field(
                 EpicsValue::Double(v) => v,
                 _ => return Err(CaError::TypeMismatch(name.into())),
             };
-            if rec.conv.set && !rec.conv.igset && rec.conv.foff == FreezeOffset::Variable {
-                // SET mode (FOFF=Variable): recalculate offset, signal SetPosition
-                if let Ok((dval, rval, off)) = coordinate::cascade_from_val(
-                    v,
-                    rec.conv.dir,
-                    rec.pos.off,
-                    rec.conv.foff,
-                    rec.conv.mres,
-                    true,
-                    rec.pos.dval,
-                ) {
-                    rec.pos.val = v;
-                    rec.pos.dval = dval;
-                    rec.pos.rval = rval;
-                    rec.pos.off = off;
+            if rec.conv.set && !rec.conv.igset {
+                if rec.conv.foff == FreezeOffset::Variable {
+                    // SET+FOFF=Variable: recalculate offset, DVAL stays, SetPosition
+                    if let Ok((dval, rval, off)) = coordinate::cascade_from_val(
+                        v,
+                        rec.conv.dir,
+                        rec.pos.off,
+                        rec.conv.foff,
+                        rec.conv.mres,
+                        true,
+                        rec.pos.dval,
+                    ) {
+                        rec.pos.val = v;
+                        rec.pos.dval = dval;
+                        rec.pos.rval = rval;
+                        rec.pos.off = off;
+                    }
+                    rec.last_write = Some(CommandSource::Set);
+                } else {
+                    // SET+FOFF=Frozen: cascade VAL->DVAL normally, then SetPosition
+                    // C: dval = (val - off) / dir, then load_pos(dval/mres)
+                    let dval = coordinate::user_to_dial(v, rec.conv.dir, rec.pos.off);
+                    if let Ok(rval) = coordinate::dial_to_raw(dval, rec.conv.mres) {
+                        rec.pos.val = v;
+                        rec.pos.dval = dval;
+                        rec.pos.rval = rval;
+                    }
+                    rec.last_write = Some(CommandSource::Set);
                 }
-                rec.last_write = Some(CommandSource::Set);
             } else {
-                // Normal move, or SET+FOFF=Frozen (which performs a move)
+                // Normal move (not in SET mode)
                 if let Ok((dval, rval, off)) = coordinate::cascade_from_val(
                     v,
                     rec.conv.dir,
@@ -578,25 +590,35 @@ pub(crate) fn motor_put_field(
                 EpicsValue::Double(v) => v,
                 _ => return Err(CaError::TypeMismatch(name.into())),
             };
-            if rec.conv.set && !rec.conv.igset && rec.conv.foff == FreezeOffset::Variable {
-                // SET mode (FOFF=Variable): recalculate offset, signal SetPosition
-                if let Ok((val, rval, off)) = coordinate::cascade_from_dval(
-                    v,
-                    rec.conv.dir,
-                    rec.pos.off,
-                    rec.conv.foff,
-                    rec.conv.mres,
-                    true,
-                    rec.pos.val,
-                ) {
-                    rec.pos.dval = v;
-                    rec.pos.val = val;
-                    rec.pos.rval = rval;
-                    rec.pos.off = off;
+            if rec.conv.set && !rec.conv.igset {
+                if rec.conv.foff == FreezeOffset::Variable {
+                    // SET+FOFF=Variable: recalculate offset, signal SetPosition
+                    if let Ok((val, rval, off)) = coordinate::cascade_from_dval(
+                        v,
+                        rec.conv.dir,
+                        rec.pos.off,
+                        rec.conv.foff,
+                        rec.conv.mres,
+                        true,
+                        rec.pos.val,
+                    ) {
+                        rec.pos.dval = v;
+                        rec.pos.val = val;
+                        rec.pos.rval = rval;
+                        rec.pos.off = off;
+                    }
+                } else {
+                    // SET+FOFF=Frozen: DVAL changes directly, SetPosition
+                    if let Ok(rval) = coordinate::dial_to_raw(v, rec.conv.mres) {
+                        rec.pos.dval = v;
+                        rec.pos.val =
+                            coordinate::dial_to_user(v, rec.conv.dir, rec.pos.off);
+                        rec.pos.rval = rval;
+                    }
                 }
                 rec.last_write = Some(CommandSource::Set);
             } else {
-                // Normal move, or SET+FOFF=Frozen (which performs a move)
+                // Normal move
                 if let Ok((val, rval, off)) = coordinate::cascade_from_dval(
                     v,
                     rec.conv.dir,
@@ -620,24 +642,33 @@ pub(crate) fn motor_put_field(
                 EpicsValue::Long(v) => v,
                 _ => return Err(CaError::TypeMismatch(name.into())),
             };
-            if rec.conv.set && !rec.conv.igset && rec.conv.foff == FreezeOffset::Variable {
-                // SET mode (FOFF=Variable): recalculate offset, signal SetPosition
-                let (val, dval, off) = coordinate::cascade_from_rval(
-                    v,
-                    rec.conv.dir,
-                    rec.pos.off,
-                    rec.conv.foff,
-                    rec.conv.mres,
-                    true,
-                    rec.pos.val,
-                );
-                rec.pos.rval = v;
-                rec.pos.val = val;
-                rec.pos.dval = dval;
-                rec.pos.off = off;
+            if rec.conv.set && !rec.conv.igset {
+                if rec.conv.foff == FreezeOffset::Variable {
+                    // SET+FOFF=Variable: recalculate offset, signal SetPosition
+                    let (val, dval, off) = coordinate::cascade_from_rval(
+                        v,
+                        rec.conv.dir,
+                        rec.pos.off,
+                        rec.conv.foff,
+                        rec.conv.mres,
+                        true,
+                        rec.pos.val,
+                    );
+                    rec.pos.rval = v;
+                    rec.pos.val = val;
+                    rec.pos.dval = dval;
+                    rec.pos.off = off;
+                } else {
+                    // SET+FOFF=Frozen: RVAL->DVAL directly, SetPosition
+                    let dval = coordinate::raw_to_dial(v, rec.conv.mres);
+                    rec.pos.rval = v;
+                    rec.pos.dval = dval;
+                    rec.pos.val =
+                        coordinate::dial_to_user(dval, rec.conv.dir, rec.pos.off);
+                }
                 rec.last_write = Some(CommandSource::Set);
             } else {
-                // Normal move, or SET+FOFF=Frozen (which performs a move)
+                // Normal move
                 let (val, dval, off) = coordinate::cascade_from_rval(
                     v,
                     rec.conv.dir,
