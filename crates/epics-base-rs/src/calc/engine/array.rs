@@ -36,7 +36,7 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut ArrayInputs) -> Result<ArrayStackV
                 CoreOp::R2D => stack.push(ArrayStackValue::Double(180.0 / std::f64::consts::PI)),
 
                 CoreOp::Random => stack.push(ArrayStackValue::Double(simple_random())),
-                CoreOp::NormalRandom => {
+                CoreOp::NormalRandom | CoreOp::FetchVal => {
                     let u1 = simple_random();
                     let u2 = simple_random();
                     let n = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
@@ -194,7 +194,7 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut ArrayInputs) -> Result<ArrayStackV
                     let a = pop1(&mut stack)?;
                     stack.push(zip_map(a, b, |x, y| ((x as i64) << (y as i64)) as f64)?);
                 }
-                CoreOp::Shr => {
+                CoreOp::Shr | CoreOp::ShrLogical => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
                     stack.push(zip_map(a, b, |x, y| ((x as i64) >> (y as i64)) as f64)?);
@@ -326,7 +326,7 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut ArrayInputs) -> Result<ArrayStackV
                     stack.push(ArrayStackValue::Double(if result { 1.0 } else { 0.0 }));
                 }
 
-                CoreOp::Atan2 => {
+                CoreOp::Atan2 | CoreOp::Fmod => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
                     stack.push(zip_map(a, b, |x, y| y.atan2(x))?);

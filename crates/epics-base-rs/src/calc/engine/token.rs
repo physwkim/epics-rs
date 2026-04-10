@@ -17,6 +17,7 @@ pub enum FuncName {
     Acos,
     Atan,
     Atan2,
+    Fmod,
     Sinh,
     Cosh,
     Tanh,
@@ -90,6 +91,7 @@ pub enum Token {
     DoubleVar(u8), // AA=0..LL=11
     Rndm,
     Nrndm,
+    FetchVal,
 
     StringLiteral(String),
 
@@ -115,7 +117,8 @@ pub enum Token {
     BitXor, // XOR
     Tilde,  // ~
     Shl,    // <<
-    Shr,    // >>
+    Shr,        // >>
+    ShrLogical, // >>>
 
     Bang, // !
     Question,
@@ -221,6 +224,7 @@ impl<'a> Tokenizer<'a> {
             (b"ISNAN", Token::Func(FuncName::IsNan)),
             (b"ISINF", Token::Func(FuncName::IsInf)),
             (b"ATAN2", Token::Func(FuncName::Atan2)),
+            (b"FMOD", Token::Func(FuncName::Fmod)),
             (b"SQRT", Token::Func(FuncName::Sqrt)),
             (b"ACOS", Token::Func(FuncName::Acos)),
             (b"ASIN", Token::Func(FuncName::Asin)),
@@ -233,6 +237,7 @@ impl<'a> Tokenizer<'a> {
             (b"LOGE", Token::Func(FuncName::LogE)),
             (b"LOG2", Token::Func(FuncName::Log2)),
             (b"RNDM", Token::Rndm),
+            (b"VAL", Token::FetchVal),
             (b"ABS", Token::Func(FuncName::Abs)),
             (b"SQR", Token::Func(FuncName::Sqr)),
             (b"EXP", Token::Func(FuncName::Exp)),
@@ -496,7 +501,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CalcError> {
                     tokens.push(Token::Ge);
                 } else if tokenizer.peek() == Some(b'>') {
                     tokenizer.advance();
-                    tokens.push(Token::Shr);
+                    if tokenizer.peek() == Some(b'>') {
+                        tokenizer.advance();
+                        tokens.push(Token::ShrLogical);
+                    } else {
+                        tokens.push(Token::Shr);
+                    }
                 } else if tokenizer.peek() == Some(b'?') {
                     tokenizer.advance();
                     tokens.push(Token::MaxOp);

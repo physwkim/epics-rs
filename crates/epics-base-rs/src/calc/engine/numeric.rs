@@ -31,6 +31,10 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                 CoreOp::Random => {
                     stack.push(simple_random());
                 }
+                CoreOp::FetchVal => {
+                    let v = stack.last().copied().unwrap_or(0.0);
+                    stack.push(v);
+                }
                 CoreOp::NormalRandom => {
                     let u1 = simple_random();
                     let u2 = simple_random();
@@ -138,8 +142,11 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                 }
                 CoreOp::Shr => {
                     let (a, b) = pop2(&mut stack)?;
-                    // C masks shift amount to 5 bits: d2i(top) & 31
                     stack.push(((a as i32) >> ((b as i32) & 31)) as f64);
+                }
+                CoreOp::ShrLogical => {
+                    let (a, b) = pop2(&mut stack)?;
+                    stack.push(((a as u32) >> ((b as u32) & 31)) as f64);
                 }
 
                 // Conditional
@@ -269,6 +276,10 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                 CoreOp::Atan2 => {
                     let (a, b) = pop2(&mut stack)?;
                     stack.push(b.atan2(a));
+                }
+                CoreOp::Fmod => {
+                    let (a, b) = pop2(&mut stack)?;
+                    stack.push(a % b);
                 }
 
                 // Vararg min/max

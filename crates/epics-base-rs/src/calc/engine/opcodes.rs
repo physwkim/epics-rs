@@ -34,6 +34,7 @@ pub enum CoreOp {
     BitNot,
     Shl,
     Shr,
+    ShrLogical,
 
     // Conditional
     CondIf,
@@ -65,6 +66,7 @@ pub enum CoreOp {
 
     // Functions (2 arg)
     Atan2,
+    Fmod,
 
     // Vararg functions
     Max(u8), // number of args
@@ -82,6 +84,7 @@ pub enum CoreOp {
     // Special
     Random,
     NormalRandom,
+    FetchVal,
 
     // Assignment
     StoreVar(u8),       // 0..15 = A..P

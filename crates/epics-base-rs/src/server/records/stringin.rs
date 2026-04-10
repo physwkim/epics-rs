@@ -5,6 +5,8 @@ use epics_macros_rs::EpicsRecord;
 pub struct StringinRecord {
     #[field(type = "String")]
     pub val: String,
+    #[field(type = "String")]
+    pub oval: String,
     #[field(type = "Short")]
     pub simm: i16,
     #[field(type = "String")]
@@ -19,6 +21,7 @@ impl Default for StringinRecord {
     fn default() -> Self {
         Self {
             val: String::new(),
+            oval: String::new(),
             simm: 0,
             siml: String::new(),
             siol: String::new(),
