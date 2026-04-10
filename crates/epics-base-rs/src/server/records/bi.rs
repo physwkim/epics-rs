@@ -24,6 +24,8 @@ pub struct BiRecord {
     pub siml: String,
     pub siol: String,
     pub sims: i16,
+    // Internal: skip RVAL->VAL when soft INP set VAL directly
+    skip_convert: bool,
 }
 
 impl Default for BiRecord {
@@ -44,6 +46,7 @@ impl Default for BiRecord {
             siml: String::new(),
             siol: String::new(),
             sims: 0,
+            skip_convert: false,
         }
     }
 }
@@ -151,16 +154,22 @@ impl Record for BiRecord {
     }
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
-        // Convert RVAL to VAL: RVAL==0 -> VAL=0, RVAL!=0 -> VAL=1
-        // This matches C: if(prec->rval==0) prec->val=0; else prec->val=1;
-        if self.rval == 0 {
-            self.val = 0;
-        } else {
-            self.val = 1;
+        // Skip RVAL->VAL conversion when soft INP already set VAL (C: status==2)
+        if !self.skip_convert {
+            if self.rval == 0 {
+                self.val = 0;
+            } else {
+                self.val = 1;
+            }
         }
+        self.skip_convert = false; // reset for next cycle
 
         self.oraw = self.rval;
         Ok(ProcessOutcome::complete())
+    }
+
+    fn set_device_did_compute(&mut self, did_compute: bool) {
+        self.skip_convert = did_compute;
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

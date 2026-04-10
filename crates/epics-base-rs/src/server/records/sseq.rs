@@ -434,19 +434,44 @@ impl Record for SseqRecord {
     }
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
-        // In a real EPICS implementation, processing would:
-        // 1. Read SELL link to get SELN
-        // 2. For each selected step: wait DLY, read DOL→DO, write DO/STR→LNK
-        // Since we can't do async delays or link I/O in process(),
-        // we just mark which steps would execute.
-        // The actual link processing is handled by the database layer.
         self.busy = 1;
-
-        // Steps are processed by the database layer reading DOL links
-        // and writing to LNK links. Our process() just validates state.
-
+        // For each selected step, prepare the output value.
+        // DOL reads are handled by pre_process_actions().
+        // LNK writes are handled by the framework via multi_output_links().
+        // The step's DOV is used as the output value for numeric outputs.
         self.busy = 0;
         Ok(ProcessOutcome::complete())
+    }
+
+    fn pre_process_actions(&mut self) -> Vec<crate::server::record::ProcessAction> {
+        use crate::server::record::ProcessAction;
+
+        static DOL_DOV: [(&str, &str); NUM_STEPS] = [
+            ("DOL1", "DO1"), ("DOL2", "DO2"), ("DOL3", "DO3"), ("DOL4", "DO4"),
+            ("DOL5", "DO5"), ("DOL6", "DO6"), ("DOL7", "DO7"), ("DOL8", "DO8"),
+            ("DOL9", "DO9"), ("DOLA", "DOA"),
+        ];
+
+        let mut actions = Vec::new();
+        for i in 0..NUM_STEPS {
+            if self.should_execute_step(i) && !self.steps[i].dol.is_empty() {
+                actions.push(ProcessAction::ReadDbLink {
+                    link_field: DOL_DOV[i].0,
+                    target_field: DOL_DOV[i].1,
+                });
+            }
+        }
+        actions
+    }
+
+    fn multi_output_links(&self) -> &[(&'static str, &'static str)] {
+        // Return all possible output links; the framework writes non-empty ones.
+        static LINKS: [(&str, &str); NUM_STEPS] = [
+            ("LNK1", "DO1"), ("LNK2", "DO2"), ("LNK3", "DO3"), ("LNK4", "DO4"),
+            ("LNK5", "DO5"), ("LNK6", "DO6"), ("LNK7", "DO7"), ("LNK8", "DO8"),
+            ("LNK9", "DO9"), ("LNKA", "DOA"),
+        ];
+        &LINKS
     }
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {

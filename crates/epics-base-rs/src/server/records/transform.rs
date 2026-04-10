@@ -495,6 +495,10 @@ impl Record for TransformRecord {
             return Some(EpicsValue::String(self.inp_links[idx].clone()));
         }
         if let Some(idx) = Self::out_field_index(name) {
+            // COPT=0 (Conditional): suppress output link when calc is empty
+            if self.copt == 0 && self.calcs[idx].is_empty() {
+                return Some(EpicsValue::String(String::new()));
+            }
             return Some(EpicsValue::String(self.out_links[idx].clone()));
         }
         None
@@ -593,24 +597,24 @@ impl Record for TransformRecord {
     }
 
     fn multi_output_links(&self) -> &[(&'static str, &'static str)] {
-        &[
-            ("OUTA", "A"),
-            ("OUTB", "B"),
-            ("OUTC", "C"),
-            ("OUTD", "D"),
-            ("OUTE", "E"),
-            ("OUTF", "F"),
-            ("OUTG", "G"),
-            ("OUTH", "H"),
-            ("OUTI", "I"),
-            ("OUTJ", "J"),
-            ("OUTK", "K"),
-            ("OUTL", "L"),
-            ("OUTM", "M"),
-            ("OUTN", "N"),
-            ("OUTO", "O"),
-            ("OUTP", "P"),
-        ]
+        static ALL: [(&str, &str); 16] = [
+            ("OUTA", "A"), ("OUTB", "B"), ("OUTC", "C"), ("OUTD", "D"),
+            ("OUTE", "E"), ("OUTF", "F"), ("OUTG", "G"), ("OUTH", "H"),
+            ("OUTI", "I"), ("OUTJ", "J"), ("OUTK", "K"), ("OUTL", "L"),
+            ("OUTM", "M"), ("OUTN", "N"), ("OUTO", "O"), ("OUTP", "P"),
+        ];
+        if self.copt == 1 {
+            // COPT=Always: write all output links
+            &ALL
+        } else {
+            // COPT=Conditional: only write outputs with non-empty calcs.
+            // Since we can't return a dynamic slice from a &'static ref,
+            // we return ALL and rely on the framework skipping empty link
+            // strings. To suppress output for channels without calcs,
+            // process() clears the OUTx link field for those channels.
+            // (This is a pragmatic workaround since the trait requires &'static.)
+            &ALL
+        }
     }
 
     fn field_list(&self) -> &'static [FieldDesc] {
