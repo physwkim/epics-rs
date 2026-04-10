@@ -1028,6 +1028,7 @@ impl RecordInstance {
                     })
                     .unwrap_or(0);
 
+                // State alarm: per-state severity or UNSV for unknown states
                 let state_sev = if val < 16 {
                     self.record
                         .get_field(sv_fields[val])
@@ -1038,25 +1039,45 @@ impl RecordInstance {
                                 None
                             }
                         })
-                        .unwrap_or(unsv)
+                        .unwrap_or(0)
                 } else {
                     unsv
                 };
 
                 let sev = AlarmSeverity::from_u16(state_sev as u16);
-                let cos_sev = AlarmSeverity::from_u16(cosv as u16);
-                let final_sev = if cos_sev as u16 > sev as u16 {
-                    cos_sev
-                } else {
-                    sev
-                };
-
-                if final_sev != AlarmSeverity::NoAlarm {
+                if sev != AlarmSeverity::NoAlarm {
                     recgbl::rec_gbl_set_sevr(
                         &mut self.common,
                         alarm_status::STATE_ALARM,
-                        final_sev,
+                        sev,
                     );
+                }
+
+                // COS alarm: only when val changed from LALM (like bi/bo)
+                let lalm = self
+                    .record
+                    .get_field("LALM")
+                    .and_then(|v| {
+                        if let EpicsValue::Enum(s) = v {
+                            Some(s as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(val);
+
+                if val != lalm {
+                    let cos_sev = AlarmSeverity::from_u16(cosv as u16);
+                    if cos_sev != AlarmSeverity::NoAlarm {
+                        recgbl::rec_gbl_set_sevr(
+                            &mut self.common,
+                            alarm_status::COS_ALARM,
+                            cos_sev,
+                        );
+                    }
+                    let _ = self
+                        .record
+                        .put_field("LALM", EpicsValue::Enum(val as u16));
                 }
             }
             _ => {} // no-op for other types
