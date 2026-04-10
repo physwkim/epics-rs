@@ -906,7 +906,19 @@ impl RecordInstance {
         // Check UDF first
         recgbl::rec_gbl_check_udf(&mut self.common);
 
+        // Check CALC_ALARM for calc/calcout records
         let rtype = self.record.record_type();
+        if rtype == "calc" || rtype == "calcout" || rtype == "scalcout" {
+            // calc_alarm is exposed as a boolean field - check it
+            if let Some(EpicsValue::Char(1)) = self.record.get_field("CALC_ALARM") {
+                recgbl::rec_gbl_set_sevr(
+                    &mut self.common,
+                    alarm_status::CALC_ALARM,
+                    crate::server::record::AlarmSeverity::Invalid,
+                );
+            }
+        }
+
         match rtype {
             "ai" | "ao" | "longin" | "longout" => {
                 if let Some(ref alarm_cfg) = self.common.analog_alarm.clone() {

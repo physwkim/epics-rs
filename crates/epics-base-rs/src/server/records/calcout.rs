@@ -66,6 +66,9 @@ pub struct CalcoutRecord {
     pub pval: f64,   // previous VAL (externally readable like C)
     // CALC_ALARM flag
     pub calc_alarm: bool,
+    // Cached compiled expressions (RPCL/ORPC equivalents)
+    rpcl: Option<crate::calc::CompiledExpr>,
+    orpc: Option<crate::calc::CompiledExpr>,
 }
 
 impl Default for CalcoutRecord {
@@ -126,6 +129,8 @@ impl Default for CalcoutRecord {
             mlst: 0.0,
             pval: 0.0,
             calc_alarm: false,
+            rpcl: None,
+            orpc: None,
         }
     }
 }
@@ -429,32 +434,48 @@ impl Record for CalcoutRecord {
         "calcout"
     }
 
+    fn init_record(&mut self, pass: u8) -> CaResult<()> {
+        if pass == 0 {
+            if !self.calc.is_empty() {
+                self.rpcl = crate::calc::compile(&self.calc).ok();
+            }
+            if !self.ocal.is_empty() {
+                self.orpc = crate::calc::compile(&self.ocal).ok();
+            }
+            self.pval = self.val;
+            self.mlst = self.val;
+            self.alst = self.val;
+            self.lalm = self.val;
+        }
+        Ok(())
+    }
+
     fn process(&mut self) -> CaResult<ProcessOutcome> {
         self.pval = self.val;
-        if !self.calc.is_empty() {
+
+        // Evaluate CALC using cached RPCL
+        if let Some(ref compiled) = self.rpcl {
             let vars = self.get_vars();
             let mut inputs = crate::calc::NumericInputs::new();
             inputs.vars[..12].copy_from_slice(&vars);
-            // C sets CALC_ALARM on failure but continues processing
-            match crate::calc::calc(&self.calc, &mut inputs) {
-                Ok(v) => {
-                    self.val = v;
-                    self.calc_alarm = false;
-                }
-                Err(_) => {
-                    self.calc_alarm = true;
-                }
+            match crate::calc::eval(compiled, &mut inputs) {
+                Ok(v) => { self.val = v; self.calc_alarm = false; }
+                Err(_) => { self.calc_alarm = true; }
             }
         }
 
+        // Determine output and evaluate OCAL if needed
         if self.should_output() {
-            if self.dopt == 1 && !self.ocal.is_empty() {
-                let vars = self.get_vars();
-                let mut inputs = crate::calc::NumericInputs::new();
-                inputs.vars[..12].copy_from_slice(&vars);
-                match crate::calc::calc(&self.ocal, &mut inputs) {
-                    Ok(v) => self.oval = v,
-                    Err(_) => self.calc_alarm = true,
+            if self.dopt == 1 {
+                // Use OCAL
+                if let Some(ref compiled) = self.orpc {
+                    let vars = self.get_vars();
+                    let mut inputs = crate::calc::NumericInputs::new();
+                    inputs.vars[..12].copy_from_slice(&vars);
+                    match crate::calc::eval(compiled, &mut inputs) {
+                        Ok(v) => self.oval = v,
+                        Err(_) => self.calc_alarm = true,
+                    }
                 }
             } else {
                 self.oval = self.val;
@@ -489,6 +510,7 @@ impl Record for CalcoutRecord {
             "LALM" => Some(EpicsValue::Double(self.lalm)),
             "ALST" => Some(EpicsValue::Double(self.alst)),
             "MLST" => Some(EpicsValue::Double(self.mlst)),
+            "CALC_ALARM" => Some(EpicsValue::Char(if self.calc_alarm { 1 } else { 0 })),
             "PVAL" => Some(EpicsValue::Double(self.pval)),
             "OOPT" => Some(EpicsValue::Short(self.oopt)),
             "DOPT" => Some(EpicsValue::Short(self.dopt)),
@@ -547,6 +569,7 @@ impl Record for CalcoutRecord {
             },
             "CALC" => match value {
                 EpicsValue::String(s) => {
+                    self.rpcl = crate::calc::compile(&s).ok();
                     self.calc = s;
                     Ok(())
                 }
@@ -604,6 +627,7 @@ impl Record for CalcoutRecord {
             },
             "OCAL" => match value {
                 EpicsValue::String(s) => {
+                    self.orpc = crate::calc::compile(&s).ok();
                     self.ocal = s;
                     Ok(())
                 }

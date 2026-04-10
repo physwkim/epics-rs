@@ -69,6 +69,10 @@ pub struct MbboRecord {
     pub ttst: String,
     pub ftst: String,
     pub ffst: String,
+    pub simm: i16,
+    pub siml: String,
+    pub siol: String,
+    pub sims: i16,
 }
 
 impl Default for MbboRecord {
@@ -132,6 +136,7 @@ impl Default for MbboRecord {
             ttst: String::new(),
             ftst: String::new(),
             ffst: String::new(),
+            simm: 0, siml: String::new(), siol: String::new(), sims: 0,
         }
     }
 }

@@ -63,6 +63,10 @@ pub struct MbbiRecord {
     pub ttst: String,
     pub ftst: String,
     pub ffst: String,
+    pub simm: i16,
+    pub siml: String,
+    pub siol: String,
+    pub sims: i16,
 }
 
 impl Default for MbbiRecord {
@@ -122,6 +126,7 @@ impl Default for MbbiRecord {
             ttst: String::new(),
             ftst: String::new(),
             ffst: String::new(),
+            simm: 0, siml: String::new(), siol: String::new(), sims: 0,
         }
     }
 }

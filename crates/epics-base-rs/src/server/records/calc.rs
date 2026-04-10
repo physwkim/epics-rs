@@ -58,6 +58,8 @@ pub struct CalcRecord {
     pub ll: f64,
     // CALC_ALARM flag: set when calcPerform fails
     pub calc_alarm: bool,
+    // Cached compiled expression (RPCL equivalent)
+    rpcl: Option<crate::calc::CompiledExpr>,
 }
 
 impl Default for CalcRecord {
@@ -111,6 +113,7 @@ impl Default for CalcRecord {
             lk: 0.0,
             ll: 0.0,
             calc_alarm: false,
+            rpcl: None,
         }
     }
 }
@@ -418,16 +421,45 @@ impl Record for CalcRecord {
         "calc"
     }
 
+    fn init_record(&mut self, pass: u8) -> CaResult<()> {
+        if pass == 0 && !self.calc.is_empty() {
+            // Compile CALC expression and cache it (like C's RPCL)
+            self.rpcl = crate::calc::compile(&self.calc).ok();
+            self.mlst = self.val;
+            self.alst = self.val;
+            self.lalm = self.val;
+        }
+        Ok(())
+    }
+
     fn process(&mut self) -> CaResult<ProcessOutcome> {
-        if !self.calc.is_empty() {
+        if let Some(ref compiled) = self.rpcl {
             let vars = self.get_vars();
             let mut inputs = crate::calc::NumericInputs::new();
             inputs.vars[..12].copy_from_slice(&vars);
             // C sets CALC_ALARM on failure but continues processing
-            match crate::calc::calc(&self.calc, &mut inputs) {
+            match crate::calc::eval(compiled, &mut inputs) {
                 Ok(v) => {
                     self.val = v;
                     self.calc_alarm = false;
+                }
+                Err(_) => {
+                    self.calc_alarm = true;
+                }
+            }
+        } else if !self.calc.is_empty() {
+            // Fallback: try to compile and eval (e.g., if CALC was set after init)
+            match crate::calc::calc(&self.calc, &mut {
+                let vars = self.get_vars();
+                let mut inputs = crate::calc::NumericInputs::new();
+                inputs.vars[..12].copy_from_slice(&vars);
+                inputs
+            }) {
+                Ok(v) => {
+                    self.val = v;
+                    self.calc_alarm = false;
+                    // Cache for next time
+                    self.rpcl = crate::calc::compile(&self.calc).ok();
                 }
                 Err(_) => {
                     self.calc_alarm = true;
@@ -463,6 +495,7 @@ impl Record for CalcRecord {
             "LALM" => Some(EpicsValue::Double(self.lalm)),
             "ALST" => Some(EpicsValue::Double(self.alst)),
             "MLST" => Some(EpicsValue::Double(self.mlst)),
+            "CALC_ALARM" => Some(EpicsValue::Char(if self.calc_alarm { 1 } else { 0 })),
             "INPA" => Some(EpicsValue::String(self.inpa.clone())),
             "INPB" => Some(EpicsValue::String(self.inpb.clone())),
             "INPC" => Some(EpicsValue::String(self.inpc.clone())),
@@ -514,6 +547,8 @@ impl Record for CalcRecord {
             },
             "CALC" => match value {
                 EpicsValue::String(s) => {
+                    // Recompile on CALC change (like C special SPC_CALC)
+                    self.rpcl = crate::calc::compile(&s).ok();
                     self.calc = s;
                     Ok(())
                 }
