@@ -55,18 +55,10 @@ impl Default for SelRecord {
             inpj: String::new(),
             inpk: String::new(),
             inpl: String::new(),
-            a: 0.0,
-            b: 0.0,
-            c: 0.0,
-            d: 0.0,
-            e: 0.0,
-            f: 0.0,
-            g: 0.0,
-            h: 0.0,
-            i: 0.0,
-            j: 0.0,
-            k: 0.0,
-            l: 0.0,
+            // C initializes inputs to epicsNAN; NaN values are skipped by algorithms
+            a: f64::NAN, b: f64::NAN, c: f64::NAN, d: f64::NAN,
+            e: f64::NAN, f: f64::NAN, g: f64::NAN, h: f64::NAN,
+            i: f64::NAN, j: f64::NAN, k: f64::NAN, l: f64::NAN,
         }
     }
 }
@@ -234,18 +226,30 @@ impl Record for SelRecord {
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
         let vals = self.get_values();
+        // C skips NaN values in all algorithms
+        let valid: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
         self.val = match self.selm {
-            0 => self.get_value_by_index(self.seln as usize),
-            1 => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-            2 => vals.iter().cloned().fold(f64::INFINITY, f64::min),
+            0 => {
+                // Specified: use SELN index, but check NaN
+                let v = self.get_value_by_index(self.seln as usize);
+                if v.is_finite() { v } else { self.val }
+            }
+            1 => {
+                // High Signal: max of non-NaN values
+                valid.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            }
+            2 => {
+                // Low Signal: min of non-NaN values
+                valid.iter().copied().fold(f64::INFINITY, f64::min)
+            }
             3 => {
-                let mut sorted = vals.to_vec();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let mid = sorted.len() / 2;
-                if sorted.len() % 2 == 0 {
-                    (sorted[mid - 1] + sorted[mid]) / 2.0
+                // Median: C uses order[count/2] (no averaging)
+                if valid.is_empty() {
+                    self.val
                 } else {
-                    sorted[mid]
+                    let mut sorted = valid;
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    sorted[sorted.len() / 2]
                 }
             }
             _ => self.val,
