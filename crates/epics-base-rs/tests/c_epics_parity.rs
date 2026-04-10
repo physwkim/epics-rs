@@ -55,12 +55,12 @@ fn ai_no_conversion_uses_rval_directly() {
 #[test]
 fn ai_linear_conversion() {
     let mut rec = AiRecord::new(0.0);
-    rec.linr = 1; // LINEAR
+    rec.linr = 2; // LINEAR (C: menuConvertLINEAR=2)
     rec.roff = 10;
     rec.aslo = 2.0;
     rec.aoff = 4.0;
     rec.eslo = 3.0;
-    rec.egul = 100.0;
+    rec.eoff = 100.0;
 
     rec.rval = 5;
     let _ = rec.process();
@@ -1144,7 +1144,10 @@ fn mbbo_state_strings_and_values() {
     rec.put_field("TWST", EpicsValue::String("High".into()))
         .unwrap();
 
-    // Default ZRVL=0, ONVL=1, TWVL=2
+    // C defaults all *VL to 0. Set them explicitly.
+    rec.put_field("ZRVL", EpicsValue::Long(0)).unwrap();
+    rec.put_field("ONVL", EpicsValue::Long(1)).unwrap();
+    rec.put_field("TWVL", EpicsValue::Long(2)).unwrap();
     assert_eq!(rec.get_field("ZRVL"), Some(EpicsValue::Long(0)));
     assert_eq!(rec.get_field("ONVL"), Some(EpicsValue::Long(1)));
     assert_eq!(rec.get_field("TWVL"), Some(EpicsValue::Long(2)));
@@ -1156,8 +1159,10 @@ fn mbbo_state_strings_and_values() {
 /// C EPICS: mbbi 16 state values
 #[test]
 fn mbbi_all_16_states() {
-    let rec = MbbiRecord::default();
-    // Default values: ZRVL=0, ONVL=1, ..., FFVL=15
+    let mut rec = MbbiRecord::default();
+    // C defaults all *VL to 0. Set them explicitly for this test.
+    let vl_fields = ["ZRVL","ONVL","TWVL","THVL","FRVL","FVVL","SXVL","SVVL","EIVL","NIVL","TEVL","ELVL","TVVL","TTVL","FTVL","FFVL"];
+    for (i, f) in vl_fields.iter().enumerate() { rec.put_field(f, EpicsValue::Long(i as i32)).unwrap(); }
     for i in 0..16u16 {
         let field = match i {
             0 => "ZRVL",

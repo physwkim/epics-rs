@@ -495,10 +495,6 @@ impl Record for TransformRecord {
             return Some(EpicsValue::String(self.inp_links[idx].clone()));
         }
         if let Some(idx) = Self::out_field_index(name) {
-            // COPT=0 (Conditional): suppress output link when calc is empty
-            if self.copt == 0 && self.calcs[idx].is_empty() {
-                return Some(EpicsValue::String(String::new()));
-            }
             return Some(EpicsValue::String(self.out_links[idx].clone()));
         }
         None

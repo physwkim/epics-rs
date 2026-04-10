@@ -393,6 +393,14 @@ impl PvDatabase {
             }
         }
 
+        // When CA put writes directly to VAL, skip built-in conversion
+        if field == "VAL" {
+            let recs = self.inner.records.read().await;
+            if let Some(rec_arc) = recs.get(record_name) {
+                rec_arc.write().await.record.set_device_did_compute(true);
+            }
+        }
+
         // Process the record after field put.
         {
             let mut visited = HashSet::new();

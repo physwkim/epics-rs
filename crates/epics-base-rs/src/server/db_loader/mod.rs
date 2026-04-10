@@ -831,7 +831,7 @@ mod tests {
         rec.put_field("SELM", EpicsValue::Short(2)).unwrap();
         rec.process().unwrap();
         match rec.get_field("VAL") {
-            Some(EpicsValue::Double(v)) => assert!(v <= 0.001), // min of all 12 values (most are 0)
+            Some(EpicsValue::Double(v)) => assert!((v - 10.0).abs() < 1e-10), // min of finite values (A=10,B=30,C=20)
             other => panic!("expected near 0.0, got {:?}", other),
         }
     }

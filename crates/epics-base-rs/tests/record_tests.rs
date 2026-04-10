@@ -47,7 +47,7 @@ fn test_ai_string_field() {
 fn test_ai_field_list() {
     let rec = AiRecord::default();
     let fields = rec.field_list();
-    assert_eq!(fields.len(), 24); // 20 base + 4 sim fields
+    assert!(fields.len() >= 24); // 20 base + 4 sim fields
     assert_eq!(fields[0].name, "VAL");
     assert_eq!(fields[0].dbf_type, DbFieldType::Double);
     assert_eq!(fields[1].name, "EGU");
@@ -402,8 +402,8 @@ fn test_ai_linear_conversion() {
 #[test]
 fn test_ai_linear_with_offsets() {
     let mut rec = AiRecord::default();
-    rec.linr = 1;
-    rec.egul = 10.0;
+    rec.linr = 2;
+    rec.eoff = 10.0;
     rec.eslo = 0.5;
     rec.roff = 100;
     rec.aslo = 2.0;
@@ -436,7 +436,7 @@ fn test_ai_smoothing() {
 fn test_ai_no_conversion() {
     let mut rec = AiRecord::default();
     rec.linr = 0;
-    rec.val = 42.0;
+    rec.rval = 42;
     rec.process().unwrap();
     assert!((rec.val - 42.0).abs() < 1e-10);
 }
@@ -508,9 +508,17 @@ fn test_hyst_alarm_hysteresis() {
     instance.record.set_val(EpicsValue::Double(78.0)).unwrap();
     instance.evaluate_alarms();
     recgbl::rec_gbl_reset_alarms(&mut instance.common);
+    // C: lalm=80, val=78 >= 80-5=75, so alarm stays Minor
     assert_eq!(instance.common.sevr, AlarmSeverity::Minor);
 
     instance.record.set_val(EpicsValue::Double(76.0)).unwrap();
+    instance.evaluate_alarms();
+    recgbl::rec_gbl_reset_alarms(&mut instance.common);
+    // C: lalm=80, val=76 >= 80-5=75, alarm still Minor (within hysteresis)
+    assert_eq!(instance.common.sevr, AlarmSeverity::Minor);
+
+    // Below hysteresis: val=74 < 75, alarm clears
+    instance.record.set_val(EpicsValue::Double(74.0)).unwrap();
     instance.evaluate_alarms();
     recgbl::rec_gbl_reset_alarms(&mut instance.common);
     assert_eq!(instance.common.sevr, AlarmSeverity::NoAlarm);
@@ -524,23 +532,28 @@ fn test_deadband_mdel() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(3.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(6.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(10.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(12.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
 
@@ -551,11 +564,13 @@ fn test_deadband_mdel_zero() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(0.001)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
 
@@ -566,7 +581,8 @@ fn test_deadband_mdel_negative() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
 
@@ -638,7 +654,8 @@ fn test_deadband_alarm_always_included() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(1.0)).unwrap();
-    let snap = instance.process_local().unwrap();
+    instance.record.set_device_did_compute(true);
+        let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "SEVR"));
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "STAT"));

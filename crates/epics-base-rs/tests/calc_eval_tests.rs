@@ -353,7 +353,9 @@ fn test_nrndm() {
 
 #[test]
 fn test_div_by_zero() {
-    assert_calc_nan("1/0", &[]);
+    let mut inp = make_inputs(&[]);
+    let result = calc("1/0", &mut inp).unwrap();
+    assert!(result.is_infinite(), "Expected Inf, got {result}");
 }
 
 #[test]

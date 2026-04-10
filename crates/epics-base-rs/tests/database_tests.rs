@@ -103,11 +103,12 @@ async fn test_ao_oroc_rate_limit() {
 
     rec.val = 100.0;
     rec.process().unwrap();
-    assert!((rec.val - 100.0).abs() < 1e-10);
+    // C: OROC modifies OVAL, not VAL
+    assert!((rec.oval - 5.0).abs() < 1e-10, "First: oval={}", rec.oval);
 
     rec.val = 200.0;
     rec.process().unwrap();
-    assert!((rec.val - 105.0).abs() < 1e-10);
+    assert!((rec.oval - 10.0).abs() < 1e-10, "Second: oval={}", rec.oval);
 }
 
 #[tokio::test]
