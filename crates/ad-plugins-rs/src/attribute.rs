@@ -54,6 +54,8 @@ impl AttrChannel {
         match self.name.as_str() {
             "NDArrayUniqueId" => Some(array.unique_id as f64),
             "NDArrayTimeStamp" => Some(array.timestamp.as_f64()),
+            "NDArrayEpicsTSSec" => Some(array.timestamp.sec as f64),
+            "NDArrayEpicsTSnSec" => Some(array.timestamp.nsec as f64),
             _ => array
                 .attributes
                 .get(&self.name)
@@ -152,7 +154,7 @@ impl NDPluginProcess for AttributeProcessor {
     }
 
     fn register_params(&mut self, base: &mut PortDriverBase) -> Result<(), AsynError> {
-        self.params.attr_name = base.create_param("ATTR_NAME", ParamType::Octet)?;
+        self.params.attr_name = base.create_param("ATTR_ATTRNAME", ParamType::Octet)?;
         self.params.value = base.create_param("ATTR_VAL", ParamType::Float64)?;
         self.params.value_sum = base.create_param("ATTR_VAL_SUM", ParamType::Float64)?;
         self.params.reset = base.create_param("ATTR_RESET", ParamType::Int32)?;

@@ -141,7 +141,7 @@ impl JpegFileProcessor {
 
 impl Default for JpegFileProcessor {
     fn default() -> Self {
-        Self::new(90)
+        Self::new(50)
     }
 }
 
