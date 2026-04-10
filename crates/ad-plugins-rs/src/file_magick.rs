@@ -369,6 +369,8 @@ mod tests {
 
     #[test]
     fn test_write_read_bmp_rgb() {
+        use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+
         let path = temp_path("bmp");
         let mut writer = MagickWriter::new();
 
@@ -380,6 +382,12 @@ mod tests {
             ],
             NDDataType::UInt8,
         );
+        arr.attributes.add(NDAttribute {
+            name: "ColorMode".into(),
+            description: "Color Mode".into(),
+            source: NDAttrSource::Driver,
+            value: NDAttrValue::Int32(2), // RGB1
+        });
         if let NDDataBuffer::U8(ref mut v) = arr.data {
             for i in 0..48 {
                 v[i] = (i * 5) as u8;

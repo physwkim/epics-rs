@@ -906,7 +906,19 @@ impl RecordInstance {
         // Check UDF first
         recgbl::rec_gbl_check_udf(&mut self.common);
 
+        // Check CALC_ALARM for calc/calcout records
         let rtype = self.record.record_type();
+        if rtype == "calc" || rtype == "calcout" || rtype == "scalcout" {
+            // calc_alarm is exposed as a boolean field - check it
+            if let Some(EpicsValue::Char(1)) = self.record.get_field("CALC_ALARM") {
+                recgbl::rec_gbl_set_sevr(
+                    &mut self.common,
+                    alarm_status::CALC_ALARM,
+                    crate::server::record::AlarmSeverity::Invalid,
+                );
+            }
+        }
+
         match rtype {
             "ai" | "ao" | "longin" | "longout" => {
                 if let Some(ref alarm_cfg) = self.common.analog_alarm.clone() {
@@ -957,21 +969,43 @@ impl RecordInstance {
                     })
                     .unwrap_or(0);
 
-                let state_sev = if val == 0 { zsv } else { osv };
-                let sev = AlarmSeverity::from_u16(state_sev as u16);
-                let cos_sev = AlarmSeverity::from_u16(cosv as u16);
-                let final_sev = if cos_sev as u16 > sev as u16 {
-                    cos_sev
-                } else {
-                    sev
-                };
+                // Guard: val > 1 means no alarm check (like C)
+                if val <= 1 {
+                    // State alarm: ZSV for val==0, OSV for val==1
+                    let state_sev = if val == 0 { zsv } else { osv };
+                    let sev = AlarmSeverity::from_u16(state_sev as u16);
+                    if sev != AlarmSeverity::NoAlarm {
+                        recgbl::rec_gbl_set_sevr(
+                            &mut self.common,
+                            alarm_status::STATE_ALARM,
+                            sev,
+                        );
+                    }
 
-                if final_sev != AlarmSeverity::NoAlarm {
-                    recgbl::rec_gbl_set_sevr(
-                        &mut self.common,
-                        alarm_status::STATE_ALARM,
-                        final_sev,
-                    );
+                    // COS alarm: only fires when val changed from LALM
+                    let lalm = self
+                        .record
+                        .get_field("LALM")
+                        .and_then(|v| {
+                            if let EpicsValue::Enum(s) = v {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(val);
+
+                    if val != lalm {
+                        let cos_sev = AlarmSeverity::from_u16(cosv as u16);
+                        if cos_sev != AlarmSeverity::NoAlarm {
+                            recgbl::rec_gbl_set_sevr(
+                                &mut self.common,
+                                alarm_status::COS_ALARM,
+                                cos_sev,
+                            );
+                        }
+                        let _ = self.record.put_field("LALM", EpicsValue::Enum(val));
+                    }
                 }
             }
             "mbbi" | "mbbo" => {
@@ -1006,6 +1040,7 @@ impl RecordInstance {
                     })
                     .unwrap_or(0);
 
+                // State alarm: per-state severity or UNSV for unknown states
                 let state_sev = if val < 16 {
                     self.record
                         .get_field(sv_fields[val])
@@ -1016,25 +1051,45 @@ impl RecordInstance {
                                 None
                             }
                         })
-                        .unwrap_or(unsv)
+                        .unwrap_or(0)
                 } else {
                     unsv
                 };
 
                 let sev = AlarmSeverity::from_u16(state_sev as u16);
-                let cos_sev = AlarmSeverity::from_u16(cosv as u16);
-                let final_sev = if cos_sev as u16 > sev as u16 {
-                    cos_sev
-                } else {
-                    sev
-                };
-
-                if final_sev != AlarmSeverity::NoAlarm {
+                if sev != AlarmSeverity::NoAlarm {
                     recgbl::rec_gbl_set_sevr(
                         &mut self.common,
                         alarm_status::STATE_ALARM,
-                        final_sev,
+                        sev,
                     );
+                }
+
+                // COS alarm: only when val changed from LALM (like bi/bo)
+                let lalm = self
+                    .record
+                    .get_field("LALM")
+                    .and_then(|v| {
+                        if let EpicsValue::Enum(s) = v {
+                            Some(s as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(val);
+
+                if val != lalm {
+                    let cos_sev = AlarmSeverity::from_u16(cosv as u16);
+                    if cos_sev != AlarmSeverity::NoAlarm {
+                        recgbl::rec_gbl_set_sevr(
+                            &mut self.common,
+                            alarm_status::COS_ALARM,
+                            cos_sev,
+                        );
+                    }
+                    let _ = self
+                        .record
+                        .put_field("LALM", EpicsValue::Enum(val as u16));
                 }
             }
             _ => {} // no-op for other types
@@ -1051,33 +1106,36 @@ impl RecordInstance {
             .and_then(|v| v.to_f64())
             .unwrap_or(val);
 
-        let (new_sevr, new_stat) =
-            if cfg.hhsv != AlarmSeverity::NoAlarm && val >= cfg.hihi && cfg.hihi != 0.0 {
-                (cfg.hhsv, alarm_status::HIHI_ALARM)
-            } else if cfg.llsv != AlarmSeverity::NoAlarm && val <= cfg.lolo && cfg.lolo != 0.0 {
-                (cfg.llsv, alarm_status::LOLO_ALARM)
-            } else if cfg.hsv != AlarmSeverity::NoAlarm && val >= cfg.high && cfg.high != 0.0 {
-                (cfg.hsv, alarm_status::HIGH_ALARM)
-            } else if cfg.lsv != AlarmSeverity::NoAlarm && val <= cfg.low && cfg.low != 0.0 {
-                (cfg.lsv, alarm_status::LOW_ALARM)
+        // C-style per-level hysteresis: alarm fires if val passes the level,
+        // OR if we were already at that alarm level (lalm == alev) and val
+        // hasn't retreated past the hysteresis margin.
+        let (new_sevr, new_stat, alev) =
+            if cfg.hhsv != AlarmSeverity::NoAlarm
+                && (val >= cfg.hihi || (lalm == cfg.hihi && val >= cfg.hihi - hyst))
+            {
+                (cfg.hhsv, alarm_status::HIHI_ALARM, cfg.hihi)
+            } else if cfg.llsv != AlarmSeverity::NoAlarm
+                && (val <= cfg.lolo || (lalm == cfg.lolo && val <= cfg.lolo + hyst))
+            {
+                (cfg.llsv, alarm_status::LOLO_ALARM, cfg.lolo)
+            } else if cfg.hsv != AlarmSeverity::NoAlarm
+                && (val >= cfg.high || (lalm == cfg.high && val >= cfg.high - hyst))
+            {
+                (cfg.hsv, alarm_status::HIGH_ALARM, cfg.high)
+            } else if cfg.lsv != AlarmSeverity::NoAlarm
+                && (val <= cfg.low || (lalm == cfg.low && val <= cfg.low + hyst))
+            {
+                (cfg.lsv, alarm_status::LOW_ALARM, cfg.low)
             } else {
-                (AlarmSeverity::NoAlarm, alarm_status::NO_ALARM)
+                (AlarmSeverity::NoAlarm, alarm_status::NO_ALARM, 0.0)
             };
-
-        // Apply hysteresis: only change alarm if value moved enough from LALM
-        if hyst > 0.0 && self.common.sevr != AlarmSeverity::NoAlarm {
-            if new_sevr == AlarmSeverity::NoAlarm && (val - lalm).abs() < hyst {
-                // Stay in current alarm (hysteresis prevents clearing)
-                // Re-raise the current alarm into nsta/nsev
-                let cur_stat = self.common.stat;
-                let cur_sevr = self.common.sevr;
-                recgbl::rec_gbl_set_sevr(&mut self.common, cur_stat, cur_sevr);
-                return;
-            }
-        }
 
         if new_sevr != AlarmSeverity::NoAlarm {
             recgbl::rec_gbl_set_sevr(&mut self.common, new_stat, new_sevr);
+            // C sets LALM to the alarm threshold level, not the current value
+            let _ = self.record.put_field("LALM", EpicsValue::Double(alev));
+        } else {
+            // No alarm condition: reset LALM to current value (like C)
             let _ = self.record.put_field("LALM", EpicsValue::Double(val));
         }
     }

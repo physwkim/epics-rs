@@ -54,6 +54,8 @@ impl AttrChannel {
         match self.name.as_str() {
             "NDArrayUniqueId" => Some(array.unique_id as f64),
             "NDArrayTimeStamp" => Some(array.timestamp.as_f64()),
+            "NDArrayEpicsTSSec" => Some(array.timestamp.sec as f64),
+            "NDArrayEpicsTSnSec" => Some(array.timestamp.nsec as f64),
             _ => array
                 .attributes
                 .get(&self.name)
@@ -89,10 +91,11 @@ impl AttributeProcessor {
         &self.params
     }
 
-    /// Reset the accumulated sum for a channel.
-    pub fn reset(&mut self, addr: usize) {
-        if addr < MAX_ATTR_CHANNELS {
-            self.channels[addr].value_sum = 0.0;
+    /// Reset value and value_sum for all channels (C parity: resets all, not just one).
+    pub fn reset(&mut self) {
+        for ch in self.channels.iter_mut() {
+            ch.value = 0.0;
+            ch.value_sum = 0.0;
         }
     }
 
@@ -152,7 +155,7 @@ impl NDPluginProcess for AttributeProcessor {
     }
 
     fn register_params(&mut self, base: &mut PortDriverBase) -> Result<(), AsynError> {
-        self.params.attr_name = base.create_param("ATTR_NAME", ParamType::Octet)?;
+        self.params.attr_name = base.create_param("ATTR_ATTRNAME", ParamType::Octet)?;
         self.params.value = base.create_param("ATTR_VAL", ParamType::Float64)?;
         self.params.value_sum = base.create_param("ATTR_VAL_SUM", ParamType::Float64)?;
         self.params.reset = base.create_param("ATTR_RESET", ParamType::Int32)?;
@@ -174,9 +177,15 @@ impl NDPluginProcess for AttributeProcessor {
             }
         } else if reason == self.params.reset {
             if params.value.as_i32() != 0 {
-                if addr < MAX_ATTR_CHANNELS {
-                    self.channels[addr].value_sum = 0.0;
+                let mut updates = Vec::new();
+                for (i, ch) in self.channels.iter_mut().enumerate() {
+                    ch.value = 0.0;
+                    ch.value_sum = 0.0;
+                    let a = i as i32;
+                    updates.push(ParamUpdate::float64_addr(self.params.value, a, 0.0));
+                    updates.push(ParamUpdate::float64_addr(self.params.value_sum, a, 0.0));
                 }
+                return ParamChangeResult::updates(updates);
             }
         }
 
@@ -293,9 +302,9 @@ mod tests {
         proc.process_array(&arr1, &pool);
         assert!((proc.value_sum() - 100.0).abs() < 1e-10);
 
-        proc.reset(0);
+        proc.reset();
         assert!((proc.value_sum() - 0.0).abs() < 1e-10);
-        assert!((proc.value() - 100.0).abs() < 1e-10);
+        assert!((proc.value() - 0.0).abs() < 1e-10);
     }
 
     #[test]

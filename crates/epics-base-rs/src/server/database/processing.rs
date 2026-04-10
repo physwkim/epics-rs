@@ -102,6 +102,9 @@ impl PvDatabase {
             let disa = rec.read().await.common.disa;
             if disa == disv {
                 let mut instance = rec.write().await;
+                // Reset nsta/nsev to prevent stale alarm from bleeding into next cycle
+                instance.common.nsta = 0;
+                instance.common.nsev = crate::server::record::AlarmSeverity::NoAlarm;
                 let prev_sevr = instance.common.sevr;
                 let prev_stat = instance.common.stat;
                 instance.common.sevr = diss;
@@ -553,8 +556,15 @@ impl PvDatabase {
                     1 => true, // Don't drive outputs
                     2 => {
                         // Set output to IVOV
+                        // For calcout records, IVOV should be written to OVAL (the
+                        // output value), not VAL. C: prec->oval = prec->ivov
                         if let Some(ivov) = instance.record.get_field("IVOV") {
-                            let _ = instance.record.set_val(ivov);
+                            let rtype = instance.record.record_type();
+                            if rtype == "calcout" {
+                                let _ = instance.record.put_field("OVAL", ivov);
+                            } else {
+                                let _ = instance.record.set_val(ivov);
+                            }
                         }
                         false
                     }

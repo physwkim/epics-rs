@@ -110,6 +110,8 @@ mod tests {
 
     #[test]
     fn test_rgb1_make_dims_consistency() {
+        use crate::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+
         let layout = ColorLayout {
             color_mode: ColorMode::RGB1,
             size_x: 320,
@@ -117,7 +119,14 @@ mod tests {
         };
         let dims = layout.make_dims();
         assert_eq!(dims.len(), 3);
-        let arr = NDArray::new(dims, NDDataType::UInt8);
+        let mut arr = NDArray::new(dims, NDDataType::UInt8);
+        // info() reads ColorMode attribute for 3D arrays
+        arr.attributes.add(NDAttribute {
+            name: "ColorMode".into(),
+            description: "Color Mode".into(),
+            source: NDAttrSource::Driver,
+            value: NDAttrValue::Int32(ColorMode::RGB1 as i32),
+        });
         let info = arr.info();
         assert_eq!(info.x_size, 320);
         assert_eq!(info.y_size, 240);

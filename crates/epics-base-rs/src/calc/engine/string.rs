@@ -37,7 +37,7 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut StringInputs) -> Result<StackValue
                 CoreOp::Random => {
                     stack.push(StackValue::Double(simple_random()));
                 }
-                CoreOp::NormalRandom => {
+                CoreOp::NormalRandom | CoreOp::FetchVal => {
                     let u1 = simple_random();
                     let u2 = simple_random();
                     let n = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
@@ -219,7 +219,7 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut StringInputs) -> Result<StackValue
                     let (a, b) = pop2_f64(&mut stack)?;
                     stack.push(StackValue::Double(((a as i64) << (b as i64)) as f64));
                 }
-                CoreOp::Shr => {
+                CoreOp::Shr | CoreOp::ShrLogical => {
                     let (a, b) = pop2_f64(&mut stack)?;
                     stack.push(StackValue::Double(((a as i64) >> (b as i64)) as f64));
                 }
@@ -342,7 +342,7 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut StringInputs) -> Result<StackValue
                     }
                     stack.push(StackValue::Double(if result { 1.0 } else { 0.0 }));
                 }
-                CoreOp::Atan2 => {
+                CoreOp::Atan2 | CoreOp::Fmod => {
                     let (a, b) = pop2_f64(&mut stack)?;
                     stack.push(StackValue::Double(b.atan2(a)));
                 }

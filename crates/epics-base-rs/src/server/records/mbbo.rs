@@ -1,11 +1,22 @@
 use crate::error::{CaError, CaResult};
-use crate::server::record::{FieldDesc, Record};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
 use crate::types::{DbFieldType, EpicsValue};
 
 /// Multi-bit binary output record — manual Record impl for raw↔index conversion.
 pub struct MbboRecord {
     pub val: u16,
+    pub rval: i32,
+    pub oraw: i32,
+    pub rbv: i32,
+    pub orbv: i32,
+    pub mask: i32,
+    pub shft: i16,
+    pub sdef: bool,
     pub nobt: i16,
+    pub mlst: u16,
+    pub lalm: u16,
+    pub ivoa: i16,
+    pub ivov: u16,
     pub zrsv: i16,
     pub onsv: i16,
     pub twsv: i16,
@@ -58,13 +69,21 @@ pub struct MbboRecord {
     pub ttst: String,
     pub ftst: String,
     pub ffst: String,
+    pub simm: i16,
+    pub siml: String,
+    pub siol: String,
+    pub sims: i16,
 }
 
 impl Default for MbboRecord {
     fn default() -> Self {
         Self {
             val: 0,
+            rval: 0, oraw: 0, rbv: 0, orbv: 0,
+            mask: 0, shft: 0, sdef: false,
             nobt: 0,
+            mlst: 0, lalm: 0,
+            ivoa: 0, ivov: 0,
             zrsv: 0,
             onsv: 0,
             twsv: 0,
@@ -86,21 +105,21 @@ impl Default for MbboRecord {
             omsl: 0,
             dol: String::new(),
             zrvl: 0,
-            onvl: 1,
-            twvl: 2,
-            thvl: 3,
-            frvl: 4,
-            fvvl: 5,
-            sxvl: 6,
-            svvl: 7,
-            eivl: 8,
-            nivl: 9,
-            tevl: 10,
-            elvl: 11,
-            tvvl: 12,
-            ttvl: 13,
-            ftvl: 14,
-            ffvl: 15,
+            onvl: 0,
+            twvl: 0,
+            thvl: 0,
+            frvl: 0,
+            fvvl: 0,
+            sxvl: 0,
+            svvl: 0,
+            eivl: 0,
+            nivl: 0,
+            tevl: 0,
+            elvl: 0,
+            tvvl: 0,
+            ttvl: 0,
+            ftvl: 0,
+            ffvl: 0,
             zrst: String::new(),
             onst: String::new(),
             twst: String::new(),
@@ -117,6 +136,7 @@ impl Default for MbboRecord {
             ttst: String::new(),
             ftst: String::new(),
             ffst: String::new(),
+            simm: 0, siml: String::new(), siol: String::new(), sims: 0,
         }
     }
 }
@@ -136,23 +156,50 @@ impl MbboRecord {
         ]
     }
 
-    /// Convert enum index → raw value via *VL fields.
-    fn index_to_raw(&self, index: u16) -> i32 {
+    fn compute_sdef(&mut self) {
         let rvs = self.raw_values();
-        if (index as usize) < 16 {
-            rvs[index as usize]
+        let sts: [&String; 16] = [
+            &self.zrst, &self.onst, &self.twst, &self.thst,
+            &self.frst, &self.fvst, &self.sxst, &self.svst,
+            &self.eist, &self.nist, &self.test, &self.elst,
+            &self.tvst, &self.ttst, &self.ftst, &self.ffst,
+        ];
+        self.sdef = false;
+        for i in 0..16 {
+            if rvs[i] != 0 || !sts[i].is_empty() {
+                self.sdef = true;
+                return;
+            }
+        }
+    }
+
+    /// C convert(): VAL -> RVAL with SDEF check and SHFT
+    fn convert(&mut self) {
+        if self.sdef {
+            if self.val > 15 { return; }
+            let rvs = self.raw_values();
+            self.rval = rvs[self.val as usize];
         } else {
-            index as i32
+            self.rval = self.val as i32;
+        }
+        if self.shft > 0 {
+            self.rval = ((self.rval as u32) << (self.shft as u32)) as i32;
         }
     }
 }
 
 static MBBO_FIELDS: &[FieldDesc] = &[
-    FieldDesc {
-        name: "VAL",
-        dbf_type: DbFieldType::Enum,
-        read_only: false,
-    },
+    FieldDesc { name: "VAL", dbf_type: DbFieldType::Enum, read_only: false },
+    FieldDesc { name: "RVAL", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "ORAW", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "RBV", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "ORBV", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "MASK", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "SHFT", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc { name: "MLST", dbf_type: DbFieldType::Enum, read_only: true },
+    FieldDesc { name: "LALM", dbf_type: DbFieldType::Enum, read_only: true },
+    FieldDesc { name: "IVOA", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc { name: "IVOV", dbf_type: DbFieldType::Enum, read_only: false },
     FieldDesc {
         name: "NOBT",
         dbf_type: DbFieldType::Short,
@@ -462,8 +509,35 @@ impl Record for MbboRecord {
         MBBO_FIELDS
     }
 
+    fn init_record(&mut self, pass: u8) -> CaResult<()> {
+        if pass == 0 {
+            if self.mask == 0 && self.nobt > 0 && self.nobt <= 32 {
+                self.mask = ((1i64 << self.nobt) - 1) as i32;
+            }
+            self.compute_sdef();
+            self.convert();
+            self.mlst = self.val;
+            self.lalm = self.val;
+            self.oraw = self.rval;
+            self.orbv = self.rbv;
+        }
+        Ok(())
+    }
+
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
+        self.convert();
+        self.oraw = self.rval;
+        self.orbv = self.rbv;
+        Ok(ProcessOutcome::complete())
+    }
+
     fn get_field(&self, name: &str) -> Option<EpicsValue> {
         mbb_get_field!(self, name,
+            "RVAL" => rval: Long, "ORAW" => oraw: Long,
+            "RBV" => rbv: Long, "ORBV" => orbv: Long,
+            "MASK" => mask: Long, "SHFT" => shft: Short,
+            "MLST" => mlst: Enum, "LALM" => lalm: Enum,
+            "IVOA" => ivoa: Short, "IVOV" => ivov: Enum,
             "NOBT" => nobt: Short,
             "ZRSV" => zrsv: Short, "ONSV" => onsv: Short, "TWSV" => twsv: Short, "THSV" => thsv: Short,
             "FRSV" => frsv: Short, "FVSV" => fvsv: Short, "SXSV" => sxsv: Short, "SVSV" => svsv: Short,
@@ -484,6 +558,11 @@ impl Record for MbboRecord {
 
     fn put_field(&mut self, name: &str, value: EpicsValue) -> CaResult<()> {
         mbb_put_field!(self, name, value,
+            "RVAL" => rval: Long, "ORAW" => oraw: Long,
+            "RBV" => rbv: Long, "ORBV" => orbv: Long,
+            "MASK" => mask: Long, "SHFT" => shft: Short,
+            "MLST" => mlst: Enum, "LALM" => lalm: Enum,
+            "IVOA" => ivoa: Short, "IVOV" => ivov: Enum,
             "NOBT" => nobt: Short,
             "ZRSV" => zrsv: Short, "ONSV" => onsv: Short, "TWSV" => twsv: Short, "THSV" => thsv: Short,
             "FRSV" => frsv: Short, "FVSV" => fvsv: Short, "SXSV" => sxsv: Short, "SVSV" => svsv: Short,
@@ -507,8 +586,4 @@ impl Record for MbboRecord {
         true
     }
 
-    /// Override val: return raw value (via *VL lookup) for device support to write to hardware.
-    fn val(&self) -> Option<EpicsValue> {
-        Some(EpicsValue::Long(self.index_to_raw(self.val)))
-    }
 }

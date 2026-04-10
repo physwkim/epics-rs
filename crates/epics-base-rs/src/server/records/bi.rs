@@ -1,27 +1,28 @@
-use epics_macros_rs::EpicsRecord;
+use crate::error::{CaError, CaResult};
+use crate::server::record::{FieldDesc, ProcessOutcome, Record};
+use crate::types::{DbFieldType, EpicsValue};
 
-#[derive(EpicsRecord)]
-#[record(type = "bi")]
+/// Binary input record matching C biRecord behavior.
+/// RVAL from device support is converted to VAL (0 or 1).
 pub struct BiRecord {
-    #[field(type = "Enum")]
     pub val: u16,
-    #[field(type = "String")]
+    pub rval: i32,
+    pub oraw: i32, // old raw value for monitor
+    pub mask: i32, // hardware mask from device support
+    // Strings
     pub znam: String,
-    #[field(type = "String")]
     pub onam: String,
-    #[field(type = "Short")]
+    // Alarm
     pub zsv: i16,
-    #[field(type = "Short")]
     pub osv: i16,
-    #[field(type = "Short")]
     pub cosv: i16,
-    #[field(type = "Short")]
+    pub lalm: u16, // last alarm value (for COS alarm)
+    // Monitor
+    pub mlst: u16, // last monitored value
+    // Simulation
     pub simm: i16,
-    #[field(type = "String")]
     pub siml: String,
-    #[field(type = "String")]
     pub siol: String,
-    #[field(type = "Short")]
     pub sims: i16,
 }
 
@@ -29,11 +30,16 @@ impl Default for BiRecord {
     fn default() -> Self {
         Self {
             val: 0,
+            rval: 0,
+            oraw: 0,
+            mask: 0,
             znam: String::new(),
             onam: String::new(),
             zsv: 0,
             osv: 0,
             cosv: 0,
+            lalm: 0,
+            mlst: 0,
             simm: 0,
             siml: String::new(),
             siol: String::new(),
@@ -48,5 +54,241 @@ impl BiRecord {
             val,
             ..Default::default()
         }
+    }
+}
+
+static FIELDS: &[FieldDesc] = &[
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Enum,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "RVAL",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ORAW",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "MASK",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ZNAM",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ONAM",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ZSV",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "OSV",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "COSV",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LALM",
+        dbf_type: DbFieldType::Enum,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "MLST",
+        dbf_type: DbFieldType::Enum,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "SIMM",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "SIML",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "SIOL",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "SIMS",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+];
+
+impl Record for BiRecord {
+    fn record_type(&self) -> &'static str {
+        "bi"
+    }
+
+    fn init_record(&mut self, pass: u8) -> CaResult<()> {
+        if pass == 0 {
+            // Initialize tracking fields from current val
+            self.mlst = self.val;
+            self.lalm = self.val;
+            self.oraw = self.rval;
+        }
+        Ok(())
+    }
+
+    fn process(&mut self) -> CaResult<ProcessOutcome> {
+        // Convert RVAL to VAL: RVAL==0 -> VAL=0, RVAL!=0 -> VAL=1
+        // This matches C: if(prec->rval==0) prec->val=0; else prec->val=1;
+        if self.rval == 0 {
+            self.val = 0;
+        } else {
+            self.val = 1;
+        }
+
+        self.oraw = self.rval;
+        Ok(ProcessOutcome::complete())
+    }
+
+    fn get_field(&self, name: &str) -> Option<EpicsValue> {
+        match name {
+            "VAL" => Some(EpicsValue::Enum(self.val)),
+            "RVAL" => Some(EpicsValue::Long(self.rval)),
+            "ORAW" => Some(EpicsValue::Long(self.oraw)),
+            "MASK" => Some(EpicsValue::Long(self.mask)),
+            "ZNAM" => Some(EpicsValue::String(self.znam.clone())),
+            "ONAM" => Some(EpicsValue::String(self.onam.clone())),
+            "ZSV" => Some(EpicsValue::Short(self.zsv)),
+            "OSV" => Some(EpicsValue::Short(self.osv)),
+            "COSV" => Some(EpicsValue::Short(self.cosv)),
+            "LALM" => Some(EpicsValue::Enum(self.lalm)),
+            "MLST" => Some(EpicsValue::Enum(self.mlst)),
+            "SIMM" => Some(EpicsValue::Short(self.simm)),
+            "SIML" => Some(EpicsValue::String(self.siml.clone())),
+            "SIOL" => Some(EpicsValue::String(self.siol.clone())),
+            "SIMS" => Some(EpicsValue::Short(self.sims)),
+            _ => None,
+        }
+    }
+
+    fn put_field(&mut self, name: &str, value: EpicsValue) -> CaResult<()> {
+        match name {
+            "VAL" => match value {
+                EpicsValue::Enum(v) => {
+                    self.val = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "RVAL" => match value {
+                EpicsValue::Long(v) => {
+                    self.rval = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MASK" => match value {
+                EpicsValue::Long(v) => {
+                    self.mask = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ZNAM" => match value {
+                EpicsValue::String(v) => {
+                    self.znam = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ONAM" => match value {
+                EpicsValue::String(v) => {
+                    self.onam = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ZSV" => match value {
+                EpicsValue::Short(v) => {
+                    self.zsv = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "OSV" => match value {
+                EpicsValue::Short(v) => {
+                    self.osv = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "COSV" => match value {
+                EpicsValue::Short(v) => {
+                    self.cosv = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "LALM" => match value {
+                EpicsValue::Enum(v) => {
+                    self.lalm = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MLST" => match value {
+                EpicsValue::Enum(v) => {
+                    self.mlst = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "SIMM" => match value {
+                EpicsValue::Short(v) => {
+                    self.simm = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "SIML" => match value {
+                EpicsValue::String(v) => {
+                    self.siml = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "SIOL" => match value {
+                EpicsValue::String(v) => {
+                    self.siol = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "SIMS" => match value {
+                EpicsValue::Short(v) => {
+                    self.sims = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            _ => Err(CaError::FieldNotFound(name.into())),
+        }
+    }
+
+    fn field_list(&self) -> &'static [FieldDesc] {
+        FIELDS
     }
 }

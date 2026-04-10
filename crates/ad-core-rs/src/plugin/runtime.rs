@@ -880,6 +880,11 @@ pub fn create_plugin_runtime_multi_addr<P: NDPluginProcess>(
 
     let data_enabled = enabled.clone();
     let data_blocking = blocking_mode.clone();
+
+    // Capture queue metrics before with_blocking_support consumes the sender
+    let dropped_count = array_sender.dropped_count_shared();
+    let queue_tx = array_sender.tx_clone();
+
     let array_sender = array_sender.with_blocking_support(enabled, blocking_mode, bp);
 
     // Capture wiring info for data loop
@@ -903,6 +908,8 @@ pub fn create_plugin_runtime_multi_addr<P: NDPluginProcess>(
                 sender_port_name,
                 initial_upstream,
                 wiring,
+                dropped_count,
+                queue_tx,
             );
         })
         .expect("failed to spawn plugin data thread");
@@ -931,6 +938,8 @@ fn plugin_data_loop<P: NDPluginProcess>(
     sender_port_name: String,
     initial_upstream: String,
     wiring: Arc<WiringRegistry>,
+    dropped_count: Arc<std::sync::atomic::AtomicU64>,
+    queue_tx: tokio::sync::mpsc::Sender<super::channel::ArrayMessage>,
 ) {
     let mut current_upstream = initial_upstream;
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -949,6 +958,18 @@ fn plugin_data_loop<P: NDPluginProcess>(
                                 shared.lock().process_and_publish(&msg.array);
                             }
                             // msg dropped here → completion signaled (if tracked)
+
+                            // Update queue metrics (C parity: DroppedArrays + QueueFree)
+                            let guard = shared.lock();
+                            let queue_free = queue_tx.capacity() as i32;
+                            let dropped = dropped_count.load(Ordering::Relaxed) as i32;
+                            guard.port_handle.write_int32_no_wait(
+                                guard.plugin_params.queue_use, 0, queue_free,
+                            );
+                            guard.port_handle.write_int32_no_wait(
+                                guard.plugin_params.dropped_arrays, 0, dropped,
+                            );
+                            drop(guard);
                         }
                         None => break,
                     }
@@ -1062,6 +1083,11 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
 
     let data_enabled = enabled.clone();
     let data_blocking = blocking_mode.clone();
+
+    // Capture queue metrics before with_blocking_support consumes the sender
+    let dropped_count = array_sender.dropped_count_shared();
+    let queue_tx = array_sender.tx_clone();
+
     let array_sender = array_sender.with_blocking_support(enabled, blocking_mode, bp);
 
     // Capture wiring info for data loop
@@ -1084,6 +1110,8 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
                 sender_port_name,
                 initial_upstream,
                 wiring,
+                dropped_count,
+                queue_tx,
             );
         })
         .expect("failed to spawn plugin data thread");

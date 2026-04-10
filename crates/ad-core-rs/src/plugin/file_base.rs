@@ -29,7 +29,7 @@ pub trait NDFileWriter: Send + Sync {
     fn read_file(&mut self) -> ADResult<NDArray>;
     fn close_file(&mut self) -> ADResult<()>;
     fn supports_multiple_arrays(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -234,25 +234,52 @@ impl NDPluginFileBase {
     }
 
     /// Flush capture buffer: open file, write all buffered arrays, close.
+    ///
+    /// For writers that support multiple arrays (HDF5, NeXus), we open once,
+    /// write all frames, and close once.
+    /// For single-image writers (JPEG, TIFF), we open/write/close for each
+    /// frame individually, auto-incrementing the filename between each.
     pub fn flush_capture(&mut self, writer: &mut dyn NDFileWriter) -> ADResult<()> {
         if self.capture_buffer.is_empty() {
             return Ok(());
         }
-        self.last_written_name = self.create_file_name();
-        let (write_path, final_path) = self.write_path();
-        writer.open_file(&write_path, NDFileMode::Capture, &self.capture_buffer[0])?;
-        for arr in &self.capture_buffer {
-            writer.write_file(arr)?;
+
+        if writer.supports_multiple_arrays() {
+            // Multi-array format: open once, write all, close once.
+            self.last_written_name = self.create_file_name();
+            let (write_path, final_path) = self.write_path();
+            writer.open_file(&write_path, NDFileMode::Capture, &self.capture_buffer[0])?;
+            for arr in &self.capture_buffer {
+                writer.write_file(arr)?;
+            }
+            writer.close_file()?;
+            if let Some(final_path) = final_path {
+                Self::rename_temp(&write_path, &final_path)?;
+            }
+            if self.auto_increment {
+                self.file_number += 1;
+            }
+        } else {
+            // Single-image format: open/write/close per frame with auto-increment.
+            let buffer = std::mem::take(&mut self.capture_buffer);
+            for arr in &buffer {
+                self.last_written_name = self.create_file_name();
+                let (write_path, final_path) = self.write_path();
+                writer.open_file(&write_path, NDFileMode::Single, arr)?;
+                writer.write_file(arr)?;
+                writer.close_file()?;
+                if let Some(final_path) = final_path {
+                    Self::rename_temp(&write_path, &final_path)?;
+                }
+                if self.auto_increment {
+                    self.file_number += 1;
+                }
+            }
+            self.capture_buffer = buffer;
         }
-        writer.close_file()?;
-        if let Some(final_path) = final_path {
-            Self::rename_temp(&write_path, &final_path)?;
-        }
+
         self.capture_buffer.clear();
         self.num_captured = 0;
-        if self.auto_increment {
-            self.file_number += 1;
-        }
         Ok(())
     }
 
@@ -400,6 +427,28 @@ mod tests {
         assert_eq!(writer.opens.len(), 1);
         assert_eq!(writer.writes, 3);
         assert_eq!(writer.closes, 1);
+    }
+
+    #[test]
+    fn test_capture_mode_single_image_format() {
+        let mut fb = NDPluginFileBase::new();
+        fb.file_path = "/tmp/".into();
+        fb.file_name = "jpeg_".into();
+        fb.file_number = 0;
+        fb.auto_increment = true;
+        fb.set_mode(NDFileMode::Capture);
+        fb.set_num_capture(3);
+
+        let mut writer = MockWriter::new(false); // single-image format
+
+        fb.process_array(make_array(1), &mut writer).unwrap();
+        fb.process_array(make_array(2), &mut writer).unwrap();
+        fb.process_array(make_array(3), &mut writer).unwrap();
+        // Should have flushed with open/write/close per frame
+        assert_eq!(writer.opens.len(), 3);
+        assert_eq!(writer.writes, 3);
+        assert_eq!(writer.closes, 3);
+        assert_eq!(fb.file_number, 3); // auto-incremented 3 times
     }
 
     #[test]

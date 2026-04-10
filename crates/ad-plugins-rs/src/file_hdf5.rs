@@ -15,14 +15,15 @@ use rust_hdf5::format::messages::filter::{
 };
 use rust_hdf5::swmr::SwmrFileWriter;
 
-/// C ADCore compression type enum values.
+/// C ADCore compression type enum values (matching NDFileHDF5.h).
 const COMPRESS_NONE: i32 = 0;
 const COMPRESS_NBIT: i32 = 1;
 const COMPRESS_SZIP: i32 = 2;
 const COMPRESS_ZLIB: i32 = 3;
 const COMPRESS_BLOSC: i32 = 4;
-const COMPRESS_JPEG: i32 = 5;
+const COMPRESS_BSHUF: i32 = 5;
 const COMPRESS_LZ4: i32 = 6;
+const COMPRESS_JPEG: i32 = 7;
 
 /// C ADCore BLOSC compressor sub-types.
 const BLOSC_LZ: i32 = 0;

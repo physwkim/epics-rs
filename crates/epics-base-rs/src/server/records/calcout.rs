@@ -51,8 +51,24 @@ pub struct CalcoutRecord {
     pub lj: f64,
     pub lk: f64,
     pub ll: f64,
-    // Previous value for transition detection
-    prev_val: f64,
+    // Display/engineering
+    pub egu: String,
+    pub prec: i16,
+    pub hopr: f64,
+    pub lopr: f64,
+    // Monitor deadband
+    pub adel: f64,
+    pub mdel: f64,
+    pub lalm: f64,
+    pub alst: f64,
+    pub mlst: f64,
+    // Previous values for output determination
+    pub pval: f64,   // previous VAL (externally readable like C)
+    // CALC_ALARM flag
+    pub calc_alarm: bool,
+    // Cached compiled expressions (RPCL/ORPC equivalents)
+    rpcl: Option<crate::calc::CompiledExpr>,
+    orpc: Option<crate::calc::CompiledExpr>,
 }
 
 impl Default for CalcoutRecord {
@@ -102,7 +118,19 @@ impl Default for CalcoutRecord {
             lj: 0.0,
             lk: 0.0,
             ll: 0.0,
-            prev_val: 0.0,
+            egu: String::new(),
+            prec: 0,
+            hopr: 0.0,
+            lopr: 0.0,
+            adel: 0.0,
+            mdel: 0.0,
+            lalm: 0.0,
+            alst: 0.0,
+            mlst: 0.0,
+            pval: 0.0,
+            calc_alarm: false,
+            rpcl: None,
+            orpc: None,
         }
     }
 }
@@ -117,13 +145,13 @@ impl CalcoutRecord {
 
     fn should_output(&self) -> bool {
         match self.oopt {
-            0 => true,                                            // Every Time
-            1 => (self.val - self.prev_val).abs() > f64::EPSILON, // On Change
-            2 => self.val == 0.0,                                 // When Zero
-            3 => self.val != 0.0,                                 // When Non-zero
-            4 => self.prev_val != 0.0 && self.val == 0.0,         // Transition to Zero
-            5 => self.prev_val == 0.0 && self.val != 0.0,         // Transition to Non-zero
-            _ => true,
+            0 => true,                                                        // Every Time
+            1 => (self.pval - self.val).abs() > self.mdel, // On Change (use MDEL like C)
+            2 => self.val == 0.0,                                             // When Zero
+            3 => self.val != 0.0,                                             // When Non-zero
+            4 => self.pval != 0.0 && self.val == 0.0,      // Transition to Zero
+            5 => self.pval == 0.0 && self.val != 0.0,      // Transition to Non-zero
+            _ => false,                                                       // Unknown: don't output (like C)
         }
     }
 }
@@ -138,6 +166,56 @@ static CALCOUT_FIELDS: &[FieldDesc] = &[
         name: "CALC",
         dbf_type: DbFieldType::String,
         read_only: false,
+    },
+    FieldDesc {
+        name: "EGU",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "PREC",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "HOPR",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LOPR",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ADEL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "MDEL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LALM",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "ALST",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "MLST",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "PVAL",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
     },
     FieldDesc {
         name: "OOPT",
@@ -356,23 +434,49 @@ impl Record for CalcoutRecord {
         "calcout"
     }
 
+    fn init_record(&mut self, pass: u8) -> CaResult<()> {
+        if pass == 0 {
+            if !self.calc.is_empty() {
+                self.rpcl = crate::calc::compile(&self.calc).ok();
+            }
+            if !self.ocal.is_empty() {
+                self.orpc = crate::calc::compile(&self.ocal).ok();
+            }
+            self.pval = self.val;
+            self.mlst = self.val;
+            self.alst = self.val;
+            self.lalm = self.val;
+        }
+        Ok(())
+    }
+
     fn process(&mut self) -> CaResult<ProcessOutcome> {
-        self.prev_val = self.val;
-        if !self.calc.is_empty() {
+        self.pval = self.val;
+
+        // Evaluate CALC using cached RPCL
+        if let Some(ref compiled) = self.rpcl {
             let vars = self.get_vars();
             let mut inputs = crate::calc::NumericInputs::new();
             inputs.vars[..12].copy_from_slice(&vars);
-            self.val = crate::calc::calc(&self.calc, &mut inputs)
-                .map_err(|e| CaError::CalcError(e.to_string()))?;
+            match crate::calc::eval(compiled, &mut inputs) {
+                Ok(v) => { self.val = v; self.calc_alarm = false; }
+                Err(_) => { self.calc_alarm = true; }
+            }
         }
 
+        // Determine output and evaluate OCAL if needed
         if self.should_output() {
-            if self.dopt == 1 && !self.ocal.is_empty() {
-                let vars = self.get_vars();
-                let mut inputs = crate::calc::NumericInputs::new();
-                inputs.vars[..12].copy_from_slice(&vars);
-                self.oval = crate::calc::calc(&self.ocal, &mut inputs)
-                    .map_err(|e| CaError::CalcError(e.to_string()))?;
+            if self.dopt == 1 {
+                // Use OCAL
+                if let Some(ref compiled) = self.orpc {
+                    let vars = self.get_vars();
+                    let mut inputs = crate::calc::NumericInputs::new();
+                    inputs.vars[..12].copy_from_slice(&vars);
+                    match crate::calc::eval(compiled, &mut inputs) {
+                        Ok(v) => self.oval = v,
+                        Err(_) => self.calc_alarm = true,
+                    }
+                }
             } else {
                 self.oval = self.val;
             }
@@ -397,6 +501,17 @@ impl Record for CalcoutRecord {
         match name {
             "VAL" => Some(EpicsValue::Double(self.val)),
             "CALC" => Some(EpicsValue::String(self.calc.clone())),
+            "EGU" => Some(EpicsValue::String(self.egu.clone())),
+            "PREC" => Some(EpicsValue::Short(self.prec)),
+            "HOPR" => Some(EpicsValue::Double(self.hopr)),
+            "LOPR" => Some(EpicsValue::Double(self.lopr)),
+            "ADEL" => Some(EpicsValue::Double(self.adel)),
+            "MDEL" => Some(EpicsValue::Double(self.mdel)),
+            "LALM" => Some(EpicsValue::Double(self.lalm)),
+            "ALST" => Some(EpicsValue::Double(self.alst)),
+            "MLST" => Some(EpicsValue::Double(self.mlst)),
+            "CALC_ALARM" => Some(EpicsValue::Char(if self.calc_alarm { 1 } else { 0 })),
+            "PVAL" => Some(EpicsValue::Double(self.pval)),
             "OOPT" => Some(EpicsValue::Short(self.oopt)),
             "DOPT" => Some(EpicsValue::Short(self.dopt)),
             "OCAL" => Some(EpicsValue::String(self.ocal.clone())),
@@ -454,10 +569,47 @@ impl Record for CalcoutRecord {
             },
             "CALC" => match value {
                 EpicsValue::String(s) => {
+                    self.rpcl = crate::calc::compile(&s).ok();
                     self.calc = s;
                     Ok(())
                 }
                 _ => Err(CaError::TypeMismatch("CALC".into())),
+            },
+            "EGU" => match value {
+                EpicsValue::String(s) => { self.egu = s; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "PREC" => match value {
+                EpicsValue::Short(v) => { self.prec = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "HOPR" => match value {
+                EpicsValue::Double(v) => { self.hopr = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "LOPR" => match value {
+                EpicsValue::Double(v) => { self.lopr = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ADEL" => match value {
+                EpicsValue::Double(v) => { self.adel = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MDEL" => match value {
+                EpicsValue::Double(v) => { self.mdel = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "LALM" => match value {
+                EpicsValue::Double(v) => { self.lalm = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ALST" => match value {
+                EpicsValue::Double(v) => { self.alst = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MLST" => match value {
+                EpicsValue::Double(v) => { self.mlst = v; Ok(()) }
+                _ => Err(CaError::TypeMismatch(name.into())),
             },
             "OOPT" => match value {
                 EpicsValue::Short(v) => {
@@ -475,6 +627,7 @@ impl Record for CalcoutRecord {
             },
             "OCAL" => match value {
                 EpicsValue::String(s) => {
+                    self.orpc = crate::calc::compile(&s).ok();
                     self.ocal = s;
                     Ok(())
                 }

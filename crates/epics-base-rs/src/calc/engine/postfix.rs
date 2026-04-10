@@ -47,7 +47,7 @@ impl StackEntry {
 fn binary_op(token: &Token) -> Option<(u8, u8)> {
     match token {
         Token::OrOr | Token::BitOr | Token::OrKeyword | Token::BitXor => Some((2, 2)),
-        Token::AndAnd | Token::BitAnd | Token::AndKeyword | Token::Shr | Token::Shl => Some((3, 3)),
+        Token::AndAnd | Token::BitAnd | Token::AndKeyword | Token::Shr | Token::ShrLogical | Token::Shl => Some((3, 3)),
         Token::MaxOp | Token::MinOp => Some((4, 4)),
         Token::Eq | Token::Ne | Token::Lt | Token::Le | Token::Gt | Token::Ge => Some((5, 5)),
         Token::Plus | Token::Minus => Some((6, 6)),
@@ -78,6 +78,7 @@ fn token_to_binary_opcode(token: &Token) -> Opcode {
         Token::BitXor => CoreOp::BitXor,
         Token::Shl => CoreOp::Shl,
         Token::Shr => CoreOp::Shr,
+        Token::ShrLogical => CoreOp::ShrLogical,
         Token::MaxOp => CoreOp::MaxVal,
         Token::MinOp => CoreOp::MinVal,
         Token::PipeMinus => {
@@ -110,6 +111,7 @@ fn func_to_opcode(func: &FuncName, nargs: u8) -> Opcode {
         FuncName::Acos => CoreOp::Acos,
         FuncName::Atan => CoreOp::Atan,
         FuncName::Atan2 => CoreOp::Atan2,
+        FuncName::Fmod => CoreOp::Fmod,
         FuncName::Sinh => CoreOp::Sinh,
         FuncName::Cosh => CoreOp::Cosh,
         FuncName::Tanh => CoreOp::Tanh,
@@ -253,6 +255,11 @@ pub fn compile(tokens: &[Token]) -> Result<CompiledExpr, CalcError> {
                 }
                 Token::DoubleVar(idx) => {
                     output.push(Opcode::Core(CoreOp::PushDoubleVar(*idx)));
+                    runtime_depth += 1;
+                    operand_needed = false;
+                }
+                Token::FetchVal => {
+                    output.push(Opcode::Core(CoreOp::FetchVal));
                     runtime_depth += 1;
                     operand_needed = false;
                 }
@@ -626,7 +633,7 @@ fn stack_effect(entry: &StackEntry) -> i32 {
             token: Token::Func(f),
             ..
         } => match f {
-            FuncName::Atan2 => -1,
+            FuncName::Atan2 | FuncName::Fmod => -1,
             _ => 0,
         },
         StackEntry::Op { .. } => -1,

@@ -73,7 +73,7 @@ impl NDArrayPool {
                 if new_cap > old_cap {
                     let diff = new_cap - old_cap;
                     let current = self.allocated_bytes.load(Ordering::Relaxed);
-                    if current + diff as u64 > self.max_memory as u64 {
+                    if self.max_memory > 0 && current + diff as u64 > self.max_memory as u64 {
                         return Err(ADError::PoolExhausted(needed_bytes, self.max_memory));
                     }
                     self.allocated_bytes
@@ -91,13 +91,30 @@ impl NDArrayPool {
             reused.codec = None;
             reused
         } else {
-            // Fresh allocation
-            let current = self.allocated_bytes.load(Ordering::Relaxed);
-            if current + needed_bytes as u64 > self.max_memory as u64 {
-                return Err(ADError::PoolExhausted(needed_bytes, self.max_memory));
+            // Fresh allocation with CAS loop to avoid TOCTOU race
+            if self.max_memory > 0 {
+                loop {
+                    let current = self.allocated_bytes.load(Ordering::Relaxed);
+                    if current + needed_bytes as u64 > self.max_memory as u64 {
+                        return Err(ADError::PoolExhausted(needed_bytes, self.max_memory));
+                    }
+                    if self
+                        .allocated_bytes
+                        .compare_exchange_weak(
+                            current,
+                            current + needed_bytes as u64,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+            } else {
+                self.allocated_bytes
+                    .fetch_add(needed_bytes as u64, Ordering::Relaxed);
             }
-            self.allocated_bytes
-                .fetch_add(needed_bytes as u64, Ordering::Relaxed);
             self.num_alloc_buffers.fetch_add(1, Ordering::Relaxed);
             NDArray::new(dims, data_type)
         };
@@ -111,7 +128,7 @@ impl NDArrayPool {
     pub fn alloc_copy(&self, source: &NDArray) -> ADResult<NDArray> {
         let bytes = source.data.total_bytes();
         let current = self.allocated_bytes.load(Ordering::Relaxed);
-        if current + bytes as u64 > self.max_memory as u64 {
+        if self.max_memory > 0 && current + bytes as u64 > self.max_memory as u64 {
             return Err(ADError::PoolExhausted(bytes, self.max_memory));
         }
         self.allocated_bytes
@@ -132,8 +149,9 @@ impl NDArrayPool {
         self.num_free_buffers.fetch_add(1, Ordering::Relaxed);
 
         // If total allocated exceeds max_memory, drop largest free entries
+        // (max_memory == 0 means unlimited, skip trimming)
         let total = self.allocated_bytes.load(Ordering::Relaxed) as usize;
-        if total > self.max_memory && !free.is_empty() {
+        if self.max_memory > 0 && total > self.max_memory && !free.is_empty() {
             // Sort descending by capacity so we drop largest first
             free.sort_by(|a, b| b.data.capacity_bytes().cmp(&a.data.capacity_bytes()));
             let mut excess = total.saturating_sub(self.max_memory);

@@ -8,6 +8,14 @@ pub struct WaveformRecord {
     pub nelm: i32,
     pub nord: i32,
     pub ftvl: i16,
+    pub mpst: i16, // Monitor Post Mode: 0=Always, 1=OnChange
+    pub apst: i16, // Archive Post Mode: 0=Always, 1=OnChange
+    pub hash: u32,  // Hash of array for OnChange detection
+    pub busy: bool, // Record is busy (async operation pending)
+    pub egu: String,
+    pub hopr: f64,
+    pub lopr: f64,
+    pub prec: i16,
 }
 
 /// menuFtype constants for FTVL field.
@@ -20,6 +28,14 @@ impl Default for WaveformRecord {
             nelm: 1,
             nord: 0,
             ftvl: MENU_FTYPE_DOUBLE,
+            mpst: 0,
+            apst: 0,
+            hash: 0,
+            busy: false,
+            egu: String::new(),
+            hopr: 0.0,
+            lopr: 0.0,
+            prec: 0,
         }
     }
 }
@@ -41,6 +57,7 @@ impl WaveformRecord {
             nelm,
             nord: 0,
             ftvl: ftvl_idx,
+            ..Default::default()
         }
     }
 

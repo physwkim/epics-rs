@@ -102,10 +102,10 @@ impl PosPluginProcessor {
         match self.mode {
             PosMode::Discard => self.positions.front(),
             PosMode::Keep => {
-                if self.all_positions.is_empty() {
-                    None
+                if self.index < self.all_positions.len() {
+                    Some(&self.all_positions[self.index])
                 } else {
-                    Some(&self.all_positions[self.index % self.all_positions.len()])
+                    None
                 }
             }
         }
@@ -278,16 +278,10 @@ mod tests {
             .unwrap();
         assert!((x - 20.0).abs() < 1e-10);
 
-        // Wraps around
+        // Stops at end of list (no wrapping)
         let result = proc.process_array(&make_array(3), &pool);
-        let x = result.output_arrays[0]
-            .attributes
-            .get("X")
-            .unwrap()
-            .value
-            .as_f64()
-            .unwrap();
-        assert!((x - 10.0).abs() < 1e-10);
+        assert_eq!(result.output_arrays.len(), 1);
+        assert!(result.output_arrays[0].attributes.get("X").is_none());
     }
 
     #[test]

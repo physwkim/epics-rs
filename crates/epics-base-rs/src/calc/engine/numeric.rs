@@ -31,6 +31,10 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                 CoreOp::Random => {
                     stack.push(simple_random());
                 }
+                CoreOp::FetchVal => {
+                    let v = stack.last().copied().unwrap_or(0.0);
+                    stack.push(v);
+                }
                 CoreOp::NormalRandom => {
                     let u1 = simple_random();
                     let u2 = simple_random();
@@ -53,11 +57,8 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                 }
                 CoreOp::Div => {
                     let (a, b) = pop2(&mut stack)?;
-                    if b == 0.0 {
-                        stack.push(f64::NAN);
-                    } else {
-                        stack.push(a / b);
-                    }
+                    // C uses IEEE 754: 1.0/0.0 = Inf, 0.0/0.0 = NaN
+                    stack.push(a / b);
                 }
                 CoreOp::Mod => {
                     let (a, b) = pop2(&mut stack)?;
@@ -76,38 +77,30 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                     stack.push(a.powf(b));
                 }
 
-                // Comparison
+                // Comparison - exact comparison like C (no epsilon)
                 CoreOp::Eq => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(if (a - b).abs() < 1e-11 { 1.0 } else { 0.0 });
+                    stack.push(if a == b { 1.0 } else { 0.0 });
                 }
                 CoreOp::Ne => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(if (a - b).abs() > 1e-11 { 1.0 } else { 0.0 });
+                    stack.push(if a != b { 1.0 } else { 0.0 });
                 }
                 CoreOp::Lt => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(if (b - a) > 1e-11 { 1.0 } else { 0.0 });
+                    stack.push(if a < b { 1.0 } else { 0.0 });
                 }
                 CoreOp::Le => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(if (a - b).abs() < 1e-11 || a < b {
-                        1.0
-                    } else {
-                        0.0
-                    });
+                    stack.push(if a <= b { 1.0 } else { 0.0 });
                 }
                 CoreOp::Gt => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(if (a - b) > 1e-11 { 1.0 } else { 0.0 });
+                    stack.push(if a > b { 1.0 } else { 0.0 });
                 }
                 CoreOp::Ge => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(if (a - b).abs() < 1e-11 || a > b {
-                        1.0
-                    } else {
-                        0.0
-                    });
+                    stack.push(if a >= b { 1.0 } else { 0.0 });
                 }
 
                 // Logical
@@ -124,30 +117,36 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                     stack.push(if a == 0.0 { 1.0 } else { 0.0 });
                 }
 
-                // Bitwise
+                // Bitwise - use i32 like C's epicsInt32
+                // C uses: #define d2i(x) ((x)<0?(epicsInt32)(x):(epicsInt32)(epicsUInt32)(x))
                 CoreOp::BitAnd => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(((a as i64) & (b as i64)) as f64);
+                    stack.push(((a as i32) & (b as i32)) as f64);
                 }
                 CoreOp::BitOr => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(((a as i64) | (b as i64)) as f64);
+                    stack.push(((a as i32) | (b as i32)) as f64);
                 }
                 CoreOp::BitXor => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(((a as i64) ^ (b as i64)) as f64);
+                    stack.push(((a as i32) ^ (b as i32)) as f64);
                 }
                 CoreOp::BitNot => {
                     let a = pop1(&mut stack)?;
-                    stack.push(!(a as i64) as f64);
+                    stack.push(!(a as i32) as f64);
                 }
                 CoreOp::Shl => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(((a as i64) << (b as i64)) as f64);
+                    // C masks shift amount to 5 bits: d2i(top) & 31
+                    stack.push(((a as i32) << ((b as i32) & 31)) as f64);
                 }
                 CoreOp::Shr => {
                     let (a, b) = pop2(&mut stack)?;
-                    stack.push(((a as i64) >> (b as i64)) as f64);
+                    stack.push(((a as i32) >> ((b as i32) & 31)) as f64);
+                }
+                CoreOp::ShrLogical => {
+                    let (a, b) = pop2(&mut stack)?;
+                    stack.push(((a as u32) >> ((b as u32) & 31)) as f64);
                 }
 
                 // Conditional
@@ -277,6 +276,10 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut NumericInputs) -> Result<f64, Calc
                 CoreOp::Atan2 => {
                     let (a, b) = pop2(&mut stack)?;
                     stack.push(b.atan2(a));
+                }
+                CoreOp::Fmod => {
+                    let (a, b) = pop2(&mut stack)?;
+                    stack.push(a % b);
                 }
 
                 // Vararg min/max

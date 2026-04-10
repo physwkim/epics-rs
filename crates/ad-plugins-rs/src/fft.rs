@@ -42,7 +42,8 @@ impl Default for FFTConfig {
 }
 
 /// Compute 1D FFT magnitude for each row of a 2D array using rustfft.
-/// Returns a Float64 array with the same dimensions.
+/// Returns a Float64 array with half the width (positive frequencies only, matching C++).
+/// Magnitudes are normalized by N (C++: `FFTAbsValue[j] = sqrt(...) / nTimeX`).
 pub fn fft_1d_rows(src: &NDArray, suppress_dc: bool) -> Option<NDArray> {
     if src.dims.is_empty() {
         return None;
@@ -62,7 +63,14 @@ pub fn fft_1d_rows(src: &NDArray, suppress_dc: bool) -> Option<NDArray> {
     let mut planner = FftPlanner::<f64>::new();
     let fft = planner.plan_fft_forward(width);
 
-    let mut magnitudes = vec![0.0f64; width * height];
+    // C++: nFreqX = nTimeX / 2 (only positive frequencies)
+    let n_freq = width / 2;
+    if n_freq == 0 {
+        return None;
+    }
+    let scale = 1.0 / width as f64;
+
+    let mut magnitudes = vec![0.0f64; n_freq * height];
     let mut row_buf = vec![Complex::new(0.0, 0.0); width];
 
     for row in 0..height {
@@ -73,17 +81,21 @@ pub fn fft_1d_rows(src: &NDArray, suppress_dc: bool) -> Option<NDArray> {
 
         fft.process(&mut row_buf);
 
-        // Compute magnitudes
-        for (i, c) in row_buf.iter().enumerate() {
-            magnitudes[row * width + i] = c.norm();
+        // Compute magnitudes (normalized by N, only first half)
+        for i in 0..n_freq {
+            magnitudes[row * n_freq + i] = row_buf[i].norm() * scale;
         }
 
         if suppress_dc {
-            magnitudes[row * width] = 0.0;
+            magnitudes[row * n_freq] = 0.0;
         }
     }
 
-    let dims = src.dims.clone();
+    let dims = if height > 1 {
+        vec![NDDimension::new(n_freq), NDDimension::new(height)]
+    } else {
+        vec![NDDimension::new(n_freq)]
+    };
     let mut arr = NDArray::new(dims, NDDataType::Float64);
     arr.data = NDDataBuffer::F64(magnitudes);
     arr.unique_id = src.unique_id;
@@ -136,14 +148,26 @@ pub fn fft_2d(src: &NDArray, suppress_dc: bool) -> Option<NDArray> {
         }
     }
 
-    // Step 3: Compute magnitudes
-    let mut magnitudes: Vec<f64> = data.iter().map(|c| c.norm()).collect();
+    // Step 3: Compute magnitudes (half spectrum, normalized by N*M)
+    let n_freq_x = w / 2;
+    let n_freq_y = h / 2;
+    if n_freq_x == 0 || n_freq_y == 0 {
+        return None;
+    }
+    let scale = 1.0 / (w * h) as f64;
+
+    let mut magnitudes = vec![0.0f64; n_freq_x * n_freq_y];
+    for fy in 0..n_freq_y {
+        for fx in 0..n_freq_x {
+            magnitudes[fy * n_freq_x + fx] = data[fy * w + fx].norm() * scale;
+        }
+    }
 
     if suppress_dc {
         magnitudes[0] = 0.0;
     }
 
-    let dims = vec![NDDimension::new(w), NDDimension::new(h)];
+    let dims = vec![NDDimension::new(n_freq_x), NDDimension::new(n_freq_y)];
     let mut arr = NDArray::new(dims, NDDataType::Float64);
     arr.data = NDDataBuffer::F64(magnitudes);
     arr.unique_id = src.unique_id;
@@ -250,7 +274,14 @@ impl FFTProcessor {
 
         let fft = self.planner.plan_fft_forward(width);
 
-        let mut magnitudes = vec![0.0f64; width * height];
+        // C++: nFreqX = nTimeX / 2 (only positive frequencies)
+        let n_freq = width / 2;
+        if n_freq == 0 {
+            return None;
+        }
+        let scale = 1.0 / width as f64;
+
+        let mut magnitudes = vec![0.0f64; n_freq * height];
         let mut row_buf = vec![Complex::new(0.0, 0.0); width];
 
         for row in 0..height {
@@ -258,15 +289,19 @@ impl FFTProcessor {
                 row_buf[i] = Complex::new(src.data.get_as_f64(row * width + i).unwrap_or(0.0), 0.0);
             }
             fft.process(&mut row_buf);
-            for (i, c) in row_buf.iter().enumerate() {
-                magnitudes[row * width + i] = c.norm();
+            for i in 0..n_freq {
+                magnitudes[row * n_freq + i] = row_buf[i].norm() * scale;
             }
             if suppress_dc {
-                magnitudes[row * width] = 0.0;
+                magnitudes[row * n_freq] = 0.0;
             }
         }
 
-        let dims = src.dims.clone();
+        let dims = if height > 1 {
+            vec![NDDimension::new(n_freq), NDDimension::new(height)]
+        } else {
+            vec![NDDimension::new(n_freq)]
+        };
         let mut arr = NDArray::new(dims, NDDataType::Float64);
         arr.data = NDDataBuffer::F64(magnitudes);
         arr.unique_id = src.unique_id;
@@ -356,13 +391,26 @@ impl FFTProcessor {
             }
         }
 
-        let mut magnitudes: Vec<f64> = data.iter().map(|c| c.norm()).collect();
+        // C++: nFreqX = nTimeX/2, nFreqY = nTimeY/2; normalize by N*M
+        let n_freq_x = w / 2;
+        let n_freq_y = h / 2;
+        if n_freq_x == 0 || n_freq_y == 0 {
+            return None;
+        }
+        let scale = 1.0 / (w * h) as f64;
+
+        let mut magnitudes = vec![0.0f64; n_freq_x * n_freq_y];
+        for fy in 0..n_freq_y {
+            for fx in 0..n_freq_x {
+                magnitudes[fy * n_freq_x + fx] = data[fy * w + fx].norm() * scale;
+            }
+        }
 
         if suppress_dc {
             magnitudes[0] = 0.0;
         }
 
-        let dims = vec![NDDimension::new(w), NDDimension::new(h)];
+        let dims = vec![NDDimension::new(n_freq_x), NDDimension::new(n_freq_y)];
         let mut arr = NDArray::new(dims, NDDataType::Float64);
         arr.data = NDDataBuffer::F64(magnitudes);
         arr.unique_id = src.unique_id;
@@ -425,7 +473,10 @@ impl FFTProcessor {
         Some(arr)
     }
 
-    /// Apply magnitude averaging. Returns the averaged magnitudes if ready.
+    /// Apply magnitude averaging using exponential moving average (matching C++).
+    ///
+    /// C++: `FFTAbsValue_[j] = FFTAbsValue_[j] * oldFraction + new[j] * newFraction`
+    /// where `oldFraction = 1 - 1/numAveraged`, `newFraction = 1/numAveraged`.
     fn apply_averaging(&mut self, magnitudes: &[f64]) -> Vec<f64> {
         let num_avg = self.config.num_average;
         if num_avg <= 1 {
@@ -436,28 +487,24 @@ impl FFTProcessor {
             .avg_buffer
             .get_or_insert_with(|| vec![0.0; magnitudes.len()]);
 
-        // Reset if buffer size changed (shouldn't happen after check_dims_changed, but guard)
+        // Reset if buffer size changed
         if buf.len() != magnitudes.len() {
             *buf = vec![0.0; magnitudes.len()];
             self.avg_count = 0;
         }
 
-        // Accumulate
-        for (b, &m) in buf.iter_mut().zip(magnitudes.iter()) {
-            *b += m;
-        }
         self.avg_count += 1;
+        // Cap at num_average for the weighting
+        let n = self.avg_count.min(num_avg) as f64;
+        let new_fraction = 1.0 / n;
+        let old_fraction = 1.0 - new_fraction;
 
-        if self.avg_count >= num_avg {
-            // Output averaged result and reset
-            let result: Vec<f64> = buf.iter().map(|&v| v / self.avg_count as f64).collect();
-            buf.iter_mut().for_each(|v| *v = 0.0);
-            self.avg_count = 0;
-            result
-        } else {
-            // Not enough frames yet — return current partial average
-            buf.iter().map(|&v| v / self.avg_count as f64).collect()
+        // C++ exponential moving average
+        for (b, &m) in buf.iter_mut().zip(magnitudes.iter()) {
+            *b = *b * old_fraction + m * new_fraction;
         }
+
+        buf.clone()
     }
 }
 
@@ -559,9 +606,11 @@ mod tests {
         }
 
         let result = fft_1d_rows(&arr, false).unwrap();
+        // Output is half spectrum: N/2 = 4 bins
+        assert_eq!(result.dims[0].size, 4);
         if let NDDataBuffer::F64(ref v) = result.data {
-            // DC component (k=0) should be 8.0
-            assert!((v[0] - 8.0).abs() < 1e-10);
+            // DC component normalized by N: 8/8 = 1.0
+            assert!((v[0] - 1.0).abs() < 1e-10);
             // Other components should be ~0
             assert!(v[1].abs() < 1e-10);
         }
@@ -579,11 +628,13 @@ mod tests {
         }
 
         let result = fft_1d_rows(&arr, false).unwrap();
+        // Output is N/2 = 8 bins
+        assert_eq!(result.dims[0].size, 8);
         if let NDDataBuffer::F64(ref v) = result.data {
             // DC should be ~0
             assert!(v[0].abs() < 1e-10);
-            // Peak at k=1
-            assert!(v[1] > 7.0);
+            // Peak at k=1, normalized by N: magnitude = N/2 / N = 0.5
+            assert!((v[1] - 0.5).abs() < 1e-10);
             // k=2 should be small
             assert!(v[2].abs() < 1e-10);
         }
@@ -596,8 +647,9 @@ mod tests {
             NDDataType::UInt8,
         );
         let result = fft_2d(&arr, false).unwrap();
-        assert_eq!(result.dims[0].size, 4);
-        assert_eq!(result.dims[1].size, 4);
+        // Half spectrum: 4/2 x 4/2 = 2x2
+        assert_eq!(result.dims[0].size, 2);
+        assert_eq!(result.dims[1].size, 2);
         assert_eq!(result.data.data_type(), NDDataType::Float64);
     }
 
@@ -646,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_fft_2d_known_dc() {
-        // 4x4 constant=2.0 => DC should be 4*4*2 = 32
+        // 4x4 constant=2.0 => DC = 4*4*2 = 32, normalized by 4*4 = 16 => 2.0
         let mut arr = NDArray::new(
             vec![NDDimension::new(4), NDDimension::new(4)],
             NDDataType::Float64,
@@ -658,8 +710,12 @@ mod tests {
         }
 
         let result = fft_2d(&arr, false).unwrap();
+        // Half spectrum: 2x2
+        assert_eq!(result.dims[0].size, 2);
+        assert_eq!(result.dims[1].size, 2);
         if let NDDataBuffer::F64(ref v) = result.data {
-            assert!((v[0] - 32.0).abs() < 1e-10, "DC = {}, expected 32", v[0]);
+            // DC normalized by N*M: 32 / 16 = 2.0
+            assert!((v[0] - 2.0).abs() < 1e-10, "DC = {}, expected 2", v[0]);
             // All other bins should be ~0
             for i in 1..v.len() {
                 assert!(v[i].abs() < 1e-10, "bin {} = {}, expected ~0", i, v[i]);
@@ -681,22 +737,19 @@ mod tests {
         }
 
         let result = fft_1d_rows(&arr, false).unwrap();
+        // Half spectrum: 8 bins
+        assert_eq!(result.dims[0].size, 8);
         if let NDDataBuffer::F64(ref v) = result.data {
             // DC should be ~0
             assert!(v[0].abs() < 1e-10);
-            // k=3 and k=13 should have magnitude N/2 = 8
+            // k=3 should have magnitude N/2 / N = 8/16 = 0.5
             assert!(
-                (v[3] - 8.0).abs() < 1e-10,
-                "k=3 magnitude = {}, expected 8",
+                (v[3] - 0.5).abs() < 1e-10,
+                "k=3 magnitude = {}, expected 0.5",
                 v[3]
             );
-            assert!(
-                (v[13] - 8.0).abs() < 1e-10,
-                "k=13 magnitude = {}, expected 8",
-                v[13]
-            );
-            // Other bins should be ~0
-            for k in [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15] {
+            // Other bins in first half should be ~0
+            for k in [1, 2, 4, 5, 6, 7] {
                 assert!(
                     v[k].abs() < 1e-10,
                     "k={} magnitude = {}, expected ~0",
@@ -748,7 +801,7 @@ mod tests {
         let mut proc = FFTProcessor::with_config(config);
         let pool = NDArrayPool::new(0);
 
-        // Frame 1: constant = 2.0 => DC magnitude = 8*2 = 16
+        // Frame 1: constant = 2.0 => DC magnitude (normalized) = 2.0
         let mut arr1 = NDArray::new(vec![NDDimension::new(8)], NDDataType::Float64);
         if let NDDataBuffer::F64(ref mut v) = arr1.data {
             for i in 0..8 {
@@ -756,7 +809,7 @@ mod tests {
             }
         }
 
-        // Frame 2: constant = 4.0 => DC magnitude = 8*4 = 32
+        // Frame 2: constant = 4.0 => DC magnitude (normalized) = 4.0
         let mut arr2 = NDArray::new(vec![NDDimension::new(8)], NDDataType::Float64);
         if let NDDataBuffer::F64(ref mut v) = arr2.data {
             for i in 0..8 {
@@ -766,16 +819,16 @@ mod tests {
 
         let r1 = proc.process_array(&arr1, &pool);
         assert_eq!(r1.output_arrays.len(), 1);
-        // After 1 frame with num_average=2, partial average = 16/1 = 16
+        // After 1 frame: exponential avg with N=1, so output = 2.0
         if let NDDataBuffer::F64(ref v) = r1.output_arrays[0].data {
-            assert!((v[0] - 16.0).abs() < 1e-10, "partial avg DC = {}", v[0]);
+            assert!((v[0] - 2.0).abs() < 1e-10, "partial avg DC = {}", v[0]);
         }
 
         let r2 = proc.process_array(&arr2, &pool);
         assert_eq!(r2.output_arrays.len(), 1);
-        // After 2 frames: average = (16+32)/2 = 24, then reset
+        // After 2 frames: exp avg = 2.0*(1-1/2) + 4.0*(1/2) = 1.0 + 2.0 = 3.0
         if let NDDataBuffer::F64(ref v) = r2.output_arrays[0].data {
-            assert!((v[0] - 24.0).abs() < 1e-10, "averaged DC = {}", v[0]);
+            assert!((v[0] - 3.0).abs() < 1e-10, "averaged DC = {}", v[0]);
         }
     }
 
@@ -833,11 +886,13 @@ mod tests {
         }
 
         let result = fft_1d_rows(&arr, false).unwrap();
+        let n_freq = w / 2; // half spectrum
+        assert_eq!(result.dims[0].size, n_freq);
         if let NDDataBuffer::F64(ref v) = result.data {
-            // Row 0 DC = 4*1 = 4
-            assert!((v[0] - 4.0).abs() < 1e-10);
-            // Row 1 DC = 4*3 = 12
-            assert!((v[w] - 12.0).abs() < 1e-10);
+            // Row 0 DC = 4*1/4 = 1.0 (normalized by N=4)
+            assert!((v[0] - 1.0).abs() < 1e-10);
+            // Row 1 DC = 4*3/4 = 3.0
+            assert!((v[n_freq] - 3.0).abs() < 1e-10);
         } else {
             panic!("expected F64 data");
         }

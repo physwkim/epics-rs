@@ -5,6 +5,12 @@ use epics_macros_rs::EpicsRecord;
 pub struct StringoutRecord {
     #[field(type = "String")]
     pub val: String,
+    #[field(type = "String")]
+    pub oval: String,
+    #[field(type = "Short")]
+    pub ivoa: i16,
+    #[field(type = "String")]
+    pub ivov: String,
     #[field(type = "Short")]
     pub omsl: i16,
     #[field(type = "String")]
@@ -23,6 +29,9 @@ impl Default for StringoutRecord {
     fn default() -> Self {
         Self {
             val: String::new(),
+            oval: String::new(),
+            ivoa: 0,
+            ivov: String::new(),
             omsl: 0,
             dol: String::new(),
             simm: 0,
