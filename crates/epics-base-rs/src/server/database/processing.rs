@@ -801,11 +801,18 @@ impl PvDatabase {
             }
         }
 
-        // 5. FLNK
-        if let Some(flnk) = flnk_name {
-            let _ = self
-                .process_record_with_links(&flnk, visited, depth + 1)
-                .await;
+        // 5. FLNK -- only process if target is Passive (like C dbScanFwdLink)
+        if let Some(ref flnk) = flnk_name {
+            let is_passive = if let Some(rec) = self.get_record(flnk).await {
+                rec.read().await.common.scan == crate::server::record::ScanType::Passive
+            } else {
+                false
+            };
+            if is_passive {
+                let _ = self
+                    .process_record_with_links(flnk, visited, depth + 1)
+                    .await;
+            }
         }
 
         // 6. CP link targets -- process records that have CP input links from this record
@@ -1255,11 +1262,18 @@ impl PvDatabase {
             }
         }
 
-        // FLNK
-        if let Some(flnk) = flnk_name {
-            let _ = self
-                .process_record_with_links(&flnk, visited, depth + 1)
-                .await;
+        // FLNK -- only process if target is Passive
+        if let Some(ref flnk) = flnk_name {
+            let is_passive = if let Some(rec) = self.get_record(flnk).await {
+                rec.read().await.common.scan == crate::server::record::ScanType::Passive
+            } else {
+                false
+            };
+            if is_passive {
+                let _ = self
+                    .process_record_with_links(flnk, visited, depth + 1)
+                    .await;
+            }
         }
 
         // CP link targets
