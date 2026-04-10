@@ -86,6 +86,14 @@ impl MotorDeviceSupport {
                     tracing::info!("motor command: MoveAbsolute pos={position}, vel={velocity}");
                     motor.move_absolute(&user, *position, *velocity, *acceleration)
                 }
+                MotorCommand::MoveRelative {
+                    distance,
+                    velocity,
+                    acceleration,
+                } => {
+                    tracing::info!("motor command: MoveRelative dist={distance}, vel={velocity}");
+                    motor.move_relative(&user, *distance, *velocity, *acceleration)
+                }
                 MotorCommand::MoveVelocity {
                     direction,
                     velocity,
@@ -114,6 +122,30 @@ impl MotorDeviceSupport {
                 MotorCommand::SetClosedLoop { enable } => {
                     tracing::info!("motor command: SetClosedLoop enable={enable}");
                     motor.set_closed_loop(&user, *enable)
+                }
+                MotorCommand::DeferMoves { defer } => {
+                    tracing::info!("motor command: DeferMoves defer={defer}");
+                    motor.set_deferred_moves(&user, *defer)
+                }
+                MotorCommand::ProfileInitialize { max_points } => {
+                    tracing::info!("motor command: ProfileInitialize max_points={max_points}");
+                    motor.initialize_profile(&user, *max_points)
+                }
+                MotorCommand::ProfileBuild => {
+                    tracing::info!("motor command: ProfileBuild");
+                    motor.build_profile(&user)
+                }
+                MotorCommand::ProfileExecute => {
+                    tracing::info!("motor command: ProfileExecute");
+                    motor.execute_profile(&user)
+                }
+                MotorCommand::ProfileAbort => {
+                    tracing::info!("motor command: ProfileAbort");
+                    motor.abort_profile(&user)
+                }
+                MotorCommand::ProfileReadback => {
+                    tracing::info!("motor command: ProfileReadback");
+                    motor.readback_profile(&user).map(|_| ())
                 }
                 MotorCommand::Poll => Ok(()),
             };

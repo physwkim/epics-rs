@@ -50,6 +50,7 @@ pub struct ConversionFields {
     pub ueip: bool,
     pub urip: bool,
     pub rres: f64,
+    pub rdbl_value: Option<f64>,
 }
 
 impl Default for ConversionFields {
@@ -66,6 +67,7 @@ impl Default for ConversionFields {
             ueip: false,
             urip: false,
             rres: 0.0,
+            rdbl_value: None,
         }
     }
 }

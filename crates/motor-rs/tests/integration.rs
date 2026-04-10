@@ -274,6 +274,8 @@ async fn test_poll_loop_lifecycle() {
         motor,
         device_state.clone(),
         Duration::from_millis(5),
+        Duration::from_millis(5),
+        0,
     );
 
     let poll_handle = tokio::spawn(poll_loop.run());

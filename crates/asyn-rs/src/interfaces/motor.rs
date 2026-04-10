@@ -77,6 +77,19 @@ pub trait AsynMotor: Send + Sync {
         acceleration: f64,
     ) -> AsynResult<()>;
 
+    /// Move a relative distance.
+    fn move_relative(
+        &mut self,
+        user: &AsynUser,
+        distance: f64,
+        velocity: f64,
+        acceleration: f64,
+    ) -> AsynResult<()> {
+        // Default: convert to absolute using current position from poll
+        let status = self.poll(user)?;
+        self.move_absolute(user, status.position + distance, velocity, acceleration)
+    }
+
     /// Move at a constant velocity (jog).
     /// Default implementation uses move_absolute to a very large target.
     fn move_velocity(
@@ -103,6 +116,41 @@ pub trait AsynMotor: Send + Sync {
         Ok(())
     }
 
+    /// Enable or disable deferred moves for coordinated multi-axis motion.
+    fn set_deferred_moves(&mut self, _user: &AsynUser, _defer: bool) -> AsynResult<()> {
+        Ok(())
+    }
+
     /// Poll the motor for current status.
     fn poll(&mut self, user: &AsynUser) -> AsynResult<MotorStatus>;
+
+    /// Initialize profile move with maximum number of points.
+    fn initialize_profile(&mut self, _user: &AsynUser, _max_points: usize) -> AsynResult<()> {
+        Ok(())
+    }
+
+    /// Define profile positions for this axis.
+    fn define_profile(&mut self, _user: &AsynUser, _positions: &[f64]) -> AsynResult<()> {
+        Ok(())
+    }
+
+    /// Build the profile trajectory.
+    fn build_profile(&mut self, _user: &AsynUser) -> AsynResult<()> {
+        Ok(())
+    }
+
+    /// Execute the profile move.
+    fn execute_profile(&mut self, _user: &AsynUser) -> AsynResult<()> {
+        Ok(())
+    }
+
+    /// Abort the profile move.
+    fn abort_profile(&mut self, _user: &AsynUser) -> AsynResult<()> {
+        Ok(())
+    }
+
+    /// Read back actual positions after profile execution.
+    fn readback_profile(&mut self, _user: &AsynUser) -> AsynResult<Vec<f64>> {
+        Ok(vec![])
+    }
 }

@@ -228,11 +228,44 @@ impl MotorRecord {
         self.set_phase(MotionPhase::MainMove);
         self.internal.backlash_pending = backlash;
 
-        effects.commands.push(MotorCommand::MoveAbsolute {
-            position: move_target,
-            velocity: self.vel.velo,
-            acceleration: self.vel.accl,
-        });
+        let use_rel = self.use_relative_moves();
+        let frac = self.retry.frac;
+        let preferred = self.is_preferred_direction(self.pos.dval, self.pos.drbv);
+        let position_error = self.pos.dval - self.pos.drbv;
+
+        // C has 3 cases (do_work lines 2479-2524):
+        // Case 1: No backlash OR (preferred + same vel/accel): slew vel, FRAC
+        // Case 2: Preferred + within backlash range: backlash vel, FRAC
+        // Case 3: Non-preferred (backlash): pretarget, no FRAC
+        let same_vel = (self.vel.bvel - self.vel.velo).abs() < 1e-12
+            && (self.vel.bacc - self.vel.accl).abs() < 1e-12;
+        let within_backlash_range = preferred
+            && self.retry.bdst != 0.0
+            && position_error.abs() <= self.retry.bdst.abs();
+
+        if backlash && !preferred {
+            // Case 3: Non-preferred direction: move to pretarget, no FRAC
+            self.emit_move(effects, use_rel, move_target - self.pos.drbv, move_target,
+                self.vel.velo, self.vel.accl);
+        } else if !backlash || (preferred && same_vel) {
+            // Case 1: No backlash or preferred with matching vel/accel
+            // Apply FRAC scaling
+            self.emit_move(effects, use_rel, position_error * frac,
+                self.pos.drbv + position_error * frac,
+                self.vel.velo, self.vel.accl);
+        } else if within_backlash_range {
+            // Case 2: Preferred direction, within backlash range
+            // Use backlash velocity, apply FRAC
+            self.emit_move(effects, use_rel, position_error * frac,
+                self.pos.drbv + position_error * frac,
+                self.vel.bvel, self.vel.bacc);
+        } else {
+            // Preferred direction, outside backlash range, vel differs
+            // Use slew velocity, apply FRAC
+            self.emit_move(effects, use_rel, position_error * frac,
+                self.pos.drbv + position_error * frac,
+                self.vel.velo, self.vel.accl);
+        }
         effects.request_poll = true;
         effects.suppress_forward_link = true;
     }
@@ -459,6 +492,58 @@ impl MotorRecord {
                 }
             }
         }
+    }
+
+    /// Helper to emit either MoveRelative or MoveAbsolute.
+    fn emit_move(
+        &self,
+        effects: &mut ProcessEffects,
+        use_rel: bool,
+        rel_distance: f64,
+        abs_position: f64,
+        velocity: f64,
+        acceleration: f64,
+    ) {
+        if use_rel {
+            effects.commands.push(MotorCommand::MoveRelative {
+                distance: rel_distance,
+                velocity,
+                acceleration,
+            });
+        } else {
+            effects.commands.push(MotorCommand::MoveAbsolute {
+                position: abs_position,
+                velocity,
+                acceleration,
+            });
+        }
+    }
+
+    /// C: use_rel = rtry != 0 && rmod != InPosition && (ueip || urip)
+    pub(crate) fn use_relative_moves(&self) -> bool {
+        self.retry.rtry != 0
+            && self.retry.rmod != RetryMode::InPosition
+            && (self.conv.ueip || self.conv.urip)
+    }
+
+    /// Check if move is in the preferred direction (same as BDST sign).
+    /// C: when use_rel=false, compares dval vs ldvl (previous target).
+    ///    when use_rel=true, compares diff (dval - drbv) vs 0.
+    fn is_preferred_direction(&self, dval: f64, drbv: f64) -> bool {
+        if self.retry.bdst == 0.0 {
+            return true;
+        }
+        let move_dir = if self.use_relative_moves() {
+            // use_rel: compare target vs current position
+            dval - drbv
+        } else {
+            // !use_rel: compare target vs previous target (ldvl)
+            dval - self.internal.ldvl
+        };
+        if move_dir == 0.0 {
+            return true;
+        }
+        (move_dir > 0.0) == (self.retry.bdst > 0.0)
     }
 
     /// Handle retarget (NTM) -- new target while moving.

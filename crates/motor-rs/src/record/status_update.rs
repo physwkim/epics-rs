@@ -111,6 +111,14 @@ impl MotorRecord {
             self.pos.rmp
         };
 
+        // URIP path: use external readback link value with RRES conversion
+        if !self.conv.ueip && self.conv.urip && self.initialized {
+            if let Some(rdbl_value) = self.conv.rdbl_value {
+                let rres = if self.conv.rres != 0.0 { self.conv.rres } else { 1.0 };
+                self.pos.rrbv = ((rdbl_value * rres) / self.conv.mres).round() as i32;
+            }
+        }
+
         // DRBV: use ERES for encoder path (UEIP), MRES for motor position path
         let resolution = if self.conv.ueip && eres_valid {
             self.conv.eres

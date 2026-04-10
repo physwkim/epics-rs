@@ -181,6 +181,11 @@ pub enum MotorCommand {
         velocity: f64,
         acceleration: f64,
     },
+    MoveRelative {
+        distance: f64,
+        velocity: f64,
+        acceleration: f64,
+    },
     MoveVelocity {
         direction: bool,
         velocity: f64,
@@ -200,7 +205,17 @@ pub enum MotorCommand {
     SetClosedLoop {
         enable: bool,
     },
+    DeferMoves {
+        defer: bool,
+    },
     Poll,
+    ProfileInitialize {
+        max_points: usize,
+    },
+    ProfileBuild,
+    ProfileExecute,
+    ProfileAbort,
+    ProfileReadback,
 }
 
 /// Effects returned by process logic.

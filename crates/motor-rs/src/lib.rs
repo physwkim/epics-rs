@@ -15,6 +15,7 @@ pub(crate) mod fields;
 pub mod flags;
 pub mod ioc;
 pub mod poll_loop;
+pub mod profile;
 pub mod record;
 pub mod sim_motor;
 

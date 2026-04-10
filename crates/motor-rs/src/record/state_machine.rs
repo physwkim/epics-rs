@@ -136,11 +136,22 @@ impl MotorRecord {
             self.stat.mip = MipFlags::RETRY;
 
             let retry_target = self.compute_retry_target();
-            effects.commands.push(MotorCommand::MoveAbsolute {
-                position: retry_target,
-                velocity: self.vel.velo,
-                acceleration: self.vel.accl,
-            });
+            let frac = self.retry.frac;
+            // C: FRAC applied to retry move distance
+            let position_error = retry_target - self.pos.drbv;
+            if self.use_relative_moves() {
+                effects.commands.push(MotorCommand::MoveRelative {
+                    distance: position_error * frac,
+                    velocity: self.vel.velo,
+                    acceleration: self.vel.accl,
+                });
+            } else {
+                effects.commands.push(MotorCommand::MoveAbsolute {
+                    position: self.pos.drbv + position_error * frac,
+                    velocity: self.vel.velo,
+                    acceleration: self.vel.accl,
+                });
+            }
             effects.request_poll = true;
             effects.suppress_forward_link = true;
         } else {
@@ -227,18 +238,32 @@ impl MotorRecord {
         self.internal.backlash_pending = false;
         self.set_phase(MotionPhase::BacklashFinal);
         self.stat.mip = MipFlags::MOVE_BL;
-        effects.commands.push(MotorCommand::MoveAbsolute {
-            position: self.pos.dval,
-            velocity: self.vel.bvel,
-            acceleration: self.vel.bacc,
-        });
+        // C: FRAC applied to backlash final move
+        let frac = self.retry.frac;
+        let position_error = self.pos.dval - self.pos.drbv;
+        if self.use_relative_moves() {
+            effects.commands.push(MotorCommand::MoveRelative {
+                distance: position_error * frac,
+                velocity: self.vel.bvel,
+                acceleration: self.vel.bacc,
+            });
+        } else {
+            effects.commands.push(MotorCommand::MoveAbsolute {
+                position: self.pos.drbv + position_error * frac,
+                velocity: self.vel.bvel,
+                acceleration: self.vel.bacc,
+            });
+        }
         effects.request_poll = true;
         effects.suppress_forward_link = true;
     }
 
     /// Start jog backlash correction.
     fn start_jog_backlash(&mut self, effects: &mut ProcessEffects) {
-        let target = self.pos.drbv + self.retry.bdst;
+        // C: jog backlash applies FRAC to the distance
+        let frac = self.retry.frac;
+        let distance = self.retry.bdst * frac;
+        let target = self.pos.drbv + distance;
         self.set_phase(MotionPhase::JogBacklash);
         self.stat.mip.insert(MipFlags::JOG_BL1);
         effects.commands.push(MotorCommand::MoveAbsolute {

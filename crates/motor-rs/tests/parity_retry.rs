@@ -72,9 +72,10 @@ fn rmod_arithmetic_retry() {
 
     assert_eq!(rec.stat.phase, MotionPhase::Retry);
     // C Arithmetic: factor = (rtry - rcnt + 1) / rtry = (5 - 1 + 1) / 5 = 1.0
-    // target = drbv + (dval - drbv) * factor = 9.0 + 1.0 * 1.0 = 10.0
+    // retry_target = 9.0 + (10.0 - 9.0) * 1.0 = 10.0
+    // Then FRAC=0.5 applied: position = 9.0 + (10.0 - 9.0) * 0.5 = 9.5
     if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((*position - 10.0).abs() < 1e-10);
+        assert!((*position - 9.5).abs() < 1e-10);
     } else {
         panic!("expected MoveAbsolute");
     }

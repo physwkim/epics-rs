@@ -127,6 +127,11 @@ pub(crate) static FIELDS: &[FieldDesc] = &[
         dbf_type: DbFieldType::Double,
         read_only: false,
     },
+    FieldDesc {
+        name: "RDBL_VAL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
     // Velocity
     FieldDesc {
         name: "VELO",
@@ -449,6 +454,7 @@ pub(crate) fn motor_get_field(rec: &MotorRecord, name: &str) -> Option<EpicsValu
         "UEIP" => Some(EpicsValue::Short(if rec.conv.ueip { 1 } else { 0 })),
         "URIP" => Some(EpicsValue::Short(if rec.conv.urip { 1 } else { 0 })),
         "RRES" => Some(EpicsValue::Double(rec.conv.rres)),
+        "RDBL_VAL" => Some(EpicsValue::Double(rec.conv.rdbl_value.unwrap_or(0.0))),
         // Velocity
         "VELO" => Some(EpicsValue::Double(rec.vel.velo)),
         "VBAS" => Some(EpicsValue::Double(rec.vel.vbas)),
@@ -858,6 +864,13 @@ pub(crate) fn motor_put_field(
         "RRES" => match value {
             EpicsValue::Double(v) => {
                 rec.conv.rres = v;
+                Ok(())
+            }
+            _ => Err(CaError::TypeMismatch(name.into())),
+        },
+        "RDBL_VAL" => match value {
+            EpicsValue::Double(v) => {
+                rec.conv.rdbl_value = Some(v);
                 Ok(())
             }
             _ => Err(CaError::TypeMismatch(name.into())),

@@ -21,6 +21,12 @@ pub struct SimMotor {
     /// If true, velocity move mode (JOG)
     velocity_mode: bool,
     velocity_direction: bool,
+    /// Deferred moves support
+    deferred: bool,
+    deferred_moves: Vec<(f64, f64, f64)>, // (position, velocity, acceleration)
+    /// Profile move support
+    profile_positions: Vec<f64>,
+    profile_readbacks: Vec<f64>,
 }
 
 impl SimMotor {
@@ -40,6 +46,10 @@ impl SimMotor {
             closed_loop_enabled: false,
             velocity_mode: false,
             velocity_direction: true,
+            deferred: false,
+            deferred_moves: Vec::new(),
+            profile_positions: Vec::new(),
+            profile_readbacks: Vec::new(),
         }
     }
 
@@ -115,9 +125,29 @@ impl AsynMotor for SimMotor {
         _user: &AsynUser,
         position: f64,
         velocity: f64,
+        acceleration: f64,
+    ) -> AsynResult<()> {
+        if self.deferred {
+            self.deferred_moves.push((position, velocity, acceleration));
+            return Ok(());
+        }
+        self.target = position;
+        self.velocity = velocity.abs().max(0.001);
+        self.start_position = self.position;
+        self.moving = true;
+        self.velocity_mode = false;
+        self.move_start = Some(Instant::now());
+        Ok(())
+    }
+
+    fn move_relative(
+        &mut self,
+        _user: &AsynUser,
+        distance: f64,
+        velocity: f64,
         _acceleration: f64,
     ) -> AsynResult<()> {
-        self.target = position;
+        self.target = self.position + distance;
         self.velocity = velocity.abs().max(0.001);
         self.start_position = self.position;
         self.moving = true;
@@ -151,6 +181,25 @@ impl AsynMotor for SimMotor {
         Ok(())
     }
 
+    fn set_deferred_moves(&mut self, _user: &AsynUser, defer: bool) -> AsynResult<()> {
+        if defer {
+            self.deferred = true;
+        } else {
+            self.deferred = false;
+            // Execute queued moves: use the last one's target position
+            if let Some(&(position, velocity, _acceleration)) = self.deferred_moves.last() {
+                self.target = position;
+                self.velocity = velocity.abs().max(0.001);
+                self.start_position = self.position;
+                self.moving = true;
+                self.velocity_mode = false;
+                self.move_start = Some(Instant::now());
+            }
+            self.deferred_moves.clear();
+        }
+        Ok(())
+    }
+
     fn set_position(&mut self, _user: &AsynUser, position: f64) -> AsynResult<()> {
         self.position = position;
         self.encoder_position = position;
@@ -170,6 +219,45 @@ impl AsynMotor for SimMotor {
         self.moving = true;
         self.move_start = Some(Instant::now());
         Ok(())
+    }
+
+    fn initialize_profile(&mut self, _user: &AsynUser, max_points: usize) -> AsynResult<()> {
+        self.profile_positions = Vec::with_capacity(max_points);
+        self.profile_readbacks = Vec::with_capacity(max_points);
+        Ok(())
+    }
+
+    fn define_profile(&mut self, _user: &AsynUser, positions: &[f64]) -> AsynResult<()> {
+        self.profile_positions = positions.to_vec();
+        Ok(())
+    }
+
+    fn build_profile(&mut self, _user: &AsynUser) -> AsynResult<()> {
+        Ok(()) // SimMotor: no-op build
+    }
+
+    fn execute_profile(&mut self, _user: &AsynUser) -> AsynResult<()> {
+        // Simulate: just move to the last position
+        if let Some(&last) = self.profile_positions.last() {
+            self.target = last;
+            self.velocity = 1.0;
+            self.start_position = self.position;
+            self.moving = true;
+            self.velocity_mode = false;
+            self.move_start = Some(Instant::now());
+        }
+        self.profile_readbacks = self.profile_positions.clone();
+        Ok(())
+    }
+
+    fn abort_profile(&mut self, _user: &AsynUser) -> AsynResult<()> {
+        self.moving = false;
+        self.target = self.position;
+        Ok(())
+    }
+
+    fn readback_profile(&mut self, _user: &AsynUser) -> AsynResult<Vec<f64>> {
+        Ok(self.profile_readbacks.clone())
     }
 
     fn poll(&mut self, _user: &AsynUser) -> AsynResult<MotorStatus> {
