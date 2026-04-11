@@ -224,10 +224,11 @@ impl MotorRecord {
     fn evaluate_position_error(&mut self, effects: &mut ProcessEffects) {
         let diff = (self.pos.dval - self.pos.drbv).abs();
 
-        // C: check if limit switch blocks retry direction
-        let retry_dir_positive = (self.pos.dval - self.pos.drbv) >= 0.0;
-        let ls_blocks_retry = (self.limits.hls && retry_dir_positive)
-            || (self.limits.lls && !retry_dir_positive);
+        // C: compute user_cdir for retry direction check with mapped limit switches
+        let same_polarity = (self.conv.dir == MotorDir::Pos) == (self.conv.mres >= 0.0);
+        let user_cdir = if same_polarity { self.stat.cdir } else { !self.stat.cdir };
+        let ls_blocks_retry = (self.limits.hls && user_cdir)
+            || (self.limits.lls && !user_cdir);
 
         if diff > self.retry.rdbd && self.retry.rcnt < self.retry.rtry && self.retry.rdbd > 0.0
             && !ls_blocks_retry {
