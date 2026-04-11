@@ -37,6 +37,8 @@ pub enum IpProtocol {
     UdpMulticast,
     /// Unix domain socket (unix://path).
     Unix,
+    /// HTTP: TCP with connect-per-transaction (C parity: FLAG_CONNECT_PER_TRANSACTION).
+    Http,
 }
 
 /// Configuration for an IP port connection.
@@ -111,6 +113,7 @@ fn parse_protocol_suffix(spec: &str) -> (&str, IpProtocol) {
         (" TCP&", IpProtocol::TcpNonBlocking),
         (" UDP&", IpProtocol::UdpBroadcast),
         (" UDP*", IpProtocol::UdpMulticast),
+        (" HTTP", IpProtocol::Http),
         (" TCP", IpProtocol::Tcp),
         (" UDP", IpProtocol::Udp),
     ] {
@@ -291,7 +294,26 @@ impl OctetNext for IpIoState {
         match inner {
             IpIoInner::Tcp(stream) => {
                 stream.set_write_timeout(Some(user.timeout))?;
-                stream.write_all(data)?;
+                // C parity: retry loop for partial writes with SEND_RETRY_DELAY
+                let mut offset = 0;
+                while offset < data.len() {
+                    match stream.write(&data[offset..]) {
+                        Ok(0) => {
+                            return Err(AsynError::Status {
+                                status: AsynStatus::Timeout,
+                                message: "write returned 0 bytes".into(),
+                            });
+                        }
+                        Ok(n) => offset += n,
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::Interrupted =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(e) => return Err(AsynError::Io(e)),
+                    }
+                }
             }
             IpIoInner::Udp(socket) => {
                 socket.set_write_timeout(Some(user.timeout))?;
@@ -300,7 +322,25 @@ impl OctetNext for IpIoState {
             #[cfg(unix)]
             IpIoInner::Unix(stream) => {
                 stream.set_write_timeout(Some(user.timeout))?;
-                stream.write_all(data)?;
+                let mut offset = 0;
+                while offset < data.len() {
+                    match stream.write(&data[offset..]) {
+                        Ok(0) => {
+                            return Err(AsynError::Status {
+                                status: AsynStatus::Timeout,
+                                message: "write returned 0 bytes".into(),
+                            });
+                        }
+                        Ok(n) => offset += n,
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::Interrupted =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(e) => return Err(AsynError::Io(e)),
+                    }
+                }
             }
         }
         Ok(data.len())
@@ -526,6 +566,14 @@ impl PortDriver for DrvAsynIPPort {
                     status: AsynStatus::Error,
                     message: "Unix domain sockets not supported on this platform".into(),
                 });
+            }
+            IpProtocol::Http => {
+                // C parity: HTTP uses TCP with connect-per-transaction semantics.
+                // Connection is established here, but io_write_octet disconnects after
+                // each write/read cycle.
+                let stream = self.connect_tcp()?;
+                stream.set_nodelay(true)?;
+                self.io.inner = Some(IpIoInner::Tcp(stream));
             }
         }
         self.base.connected = true;

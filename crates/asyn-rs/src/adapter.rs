@@ -658,6 +658,7 @@ impl DeviceSupport for AsynDeviceSupport {
         let filter = InterruptFilter {
             reason: Some(self.reason),
             addr: Some(self.addr),
+            uint32_mask: None,
         };
 
         let (sub, intr_rx) = self.handle.interrupts().register_interrupt_user(filter);

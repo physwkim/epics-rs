@@ -109,6 +109,9 @@ struct ParamEntry {
     alarm_severity: u16,
     value_changed: bool,
     timestamp: Option<SystemTime>,
+    /// UInt32Digital: bitmask of bits that changed (for interrupt filtering).
+    /// C parity: uInt32CallbackMask in paramVal.
+    uint32_interrupt_mask: u32,
 }
 
 impl ParamEntry {
@@ -149,6 +152,7 @@ impl ParamEntry {
             alarm_severity: 0,
             value_changed: false,
             timestamp: None,
+            uint32_interrupt_mask: 0,
         }
     }
 }
@@ -390,9 +394,11 @@ impl ParamList {
         if let ParamValue::UInt32Digital(ref old) = entry.value {
             let new_val = (*old & !mask) | (value & mask);
             if *old != new_val {
+                // C parity: track which bits changed for per-callback interrupt filtering
+                entry.uint32_interrupt_mask = *old ^ new_val;
                 entry.value = ParamValue::UInt32Digital(new_val);
                 entry.value_changed = true;
-                    entry.defined = true;
+                entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -401,6 +407,11 @@ impl ParamList {
             });
         }
         Ok(())
+    }
+
+    /// Get the UInt32Digital interrupt mask (which bits changed on last set).
+    pub fn get_uint32_interrupt_mask(&self, index: usize, addr: i32) -> AsynResult<u32> {
+        Ok(self.get_entry(index, addr)?.uint32_interrupt_mask)
     }
 
     // --- Array getters/setters ---

@@ -433,11 +433,16 @@ impl PortDriverBase {
         for reason in changed {
             let value = self.params.get_value(reason, addr)?.clone();
             let ts = self.params.get_timestamp(reason, addr)?.unwrap_or(now);
+            let uint32_mask = self
+                .params
+                .get_uint32_interrupt_mask(reason, addr)
+                .unwrap_or(0);
             self.interrupts.notify(InterruptValue {
                 reason,
                 addr,
                 value,
                 timestamp: ts,
+                uint32_changed_mask: uint32_mask,
             });
         }
         Ok(())
@@ -451,11 +456,16 @@ impl PortDriverBase {
             let now = self.current_timestamp();
             let value = self.params.get_value(reason, addr)?.clone();
             let ts = self.params.get_timestamp(reason, addr)?.unwrap_or(now);
+            let uint32_mask = self
+                .params
+                .get_uint32_interrupt_mask(reason, addr)
+                .unwrap_or(0);
             self.interrupts.notify(InterruptValue {
                 reason,
                 addr,
                 value,
                 timestamp: ts,
+                uint32_changed_mask: uint32_mask,
             });
         }
         Ok(())

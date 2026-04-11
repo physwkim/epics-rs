@@ -100,10 +100,13 @@ impl Default for TraceConfig {
     }
 }
 
-/// Global trace manager with per-port override support.
+/// Global trace manager with per-port and per-device override support.
+/// C parity: 3-level hierarchy: device → port → global.
 pub struct TraceManager {
     global_config: Mutex<TraceConfig>,
     port_configs: Mutex<HashMap<String, TraceConfig>>,
+    /// Per-device overrides keyed by (portName, addr).
+    device_configs: Mutex<HashMap<(String, i32), TraceConfig>>,
 }
 
 impl TraceManager {
@@ -111,10 +114,11 @@ impl TraceManager {
         Self {
             global_config: Mutex::new(TraceConfig::default()),
             port_configs: Mutex::new(HashMap::new()),
+            device_configs: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Check if a trace level is enabled for a port.
+    /// Check if a trace level is enabled for a port (optionally device).
     ///
     /// `mask` should be a single trace level (e.g. `TraceMask::ERROR`), not a
     /// combination. In debug builds, passing a multi-bit mask triggers a
@@ -136,6 +140,51 @@ impl TraceManager {
         false
     }
 
+    /// Check if a trace level is enabled for a specific device address.
+    /// Hierarchy: device → port → global (C parity).
+    pub fn is_enabled_device(&self, port: &str, addr: i32, mask: TraceMask) -> bool {
+        if let Ok(configs) = self.device_configs.lock() {
+            if let Some(cfg) = configs.get(&(port.to_string(), addr)) {
+                return cfg.trace_mask.intersects(mask);
+            }
+        }
+        self.is_enabled(port, mask)
+    }
+
+    /// Set trace configuration for a specific device address.
+    pub fn set_device_trace_mask(&self, port: &str, addr: i32, mask: TraceMask) {
+        if let Ok(mut configs) = self.device_configs.lock() {
+            configs
+                .entry((port.to_string(), addr))
+                .or_insert_with(TraceConfig::default)
+                .trace_mask = mask;
+        }
+    }
+
+    /// Resolve the effective TraceConfig: device → port → global.
+    fn resolve_config<'a>(
+        &'a self,
+        port: &str,
+        device_cfgs: &'a Option<std::sync::MutexGuard<'a, HashMap<(String, i32), TraceConfig>>>,
+        port_cfgs: &'a Option<std::sync::MutexGuard<'a, HashMap<String, TraceConfig>>>,
+        global_cfg: &'a Option<std::sync::MutexGuard<'a, TraceConfig>>,
+        addr: Option<i32>,
+    ) -> Option<&'a TraceConfig> {
+        if let Some(a) = addr {
+            if let Some(cfgs) = device_cfgs {
+                if let Some(cfg) = cfgs.get(&(port.to_string(), a)) {
+                    return Some(cfg);
+                }
+            }
+        }
+        if let Some(cfgs) = port_cfgs {
+            if let Some(cfg) = cfgs.get(port) {
+                return Some(cfg);
+            }
+        }
+        global_cfg.as_deref()
+    }
+
     /// Output a trace message.
     pub fn output(&self, port: &str, mask: TraceMask, msg: &str) {
         let configs = self.port_configs.lock().ok();
@@ -148,6 +197,33 @@ impl TraceManager {
             let prefix = format_prefix(port, mask, cfg);
             let line = format!("{prefix}{msg}\n");
             cfg.file.write_line(&line);
+        }
+    }
+
+    /// Output a trace message with source file/line info (C parity: __FILE__/__LINE__).
+    pub fn output_with_source(
+        &self,
+        port: &str,
+        mask: TraceMask,
+        file: &str,
+        line: u32,
+        msg: &str,
+    ) {
+        let configs = self.port_configs.lock().ok();
+        let port_cfg = configs.as_ref().and_then(|c| c.get(port));
+
+        let global_cfg = self.global_config.lock().ok();
+        let cfg = port_cfg.or(global_cfg.as_deref());
+
+        if let Some(cfg) = cfg {
+            let prefix = format_prefix(port, mask, cfg);
+            let source = if cfg.trace_info_mask.contains(TraceInfoMask::SOURCE) {
+                format!("[{file}:{line}] ")
+            } else {
+                String::new()
+            };
+            let out = format!("{prefix}{source}{msg}\n");
+            cfg.file.write_line(&out);
         }
     }
 
@@ -413,13 +489,13 @@ macro_rules! asyn_trace {
         if let Some(ref __mgr) = $mgr {
             let __mgr: &$crate::trace::TraceManager = __mgr;
             if __mgr.is_enabled($port, $mask) {
-                __mgr.output($port, $mask, &format!($($arg)*));
+                __mgr.output_with_source($port, $mask, file!(), line!(), &format!($($arg)*));
             }
         }
     };
     ($mgr:expr, $port:expr, $mask:expr, $($arg:tt)*) => {
         if $mgr.is_enabled($port, $mask) {
-            $mgr.output($port, $mask, &format!($($arg)*));
+            $mgr.output_with_source($port, $mask, file!(), line!(), &format!($($arg)*));
         }
     };
 }

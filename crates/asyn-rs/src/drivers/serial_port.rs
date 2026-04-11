@@ -776,6 +776,10 @@ impl PortDriver for DrvAsynSerialPort {
                     }
                 }
             }
+            #[cfg(target_os = "linux")]
+            "rs485_enable" | "rs485_rts_on_send" | "rs485_rts_after_send" => {
+                self.set_rs485_option(key, value)?;
+            }
             _ => {
                 self.base.options.insert(key.to_string(), value.to_string());
             }
@@ -804,6 +808,49 @@ impl PortDriver for DrvAsynSerialPort {
                 StopBits::Two => "2",
             }
             .to_string()),
+            "clocal" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_cflag & libc::CLOCAL != 0 { "Y" } else { "N" }.to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
+            "crtscts" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_cflag & libc::CRTSCTS != 0 { "Y" } else { "N" }.to_string())
+                } else {
+                    Ok(match self.config.flow_control {
+                        FlowControl::Hardware => "Y",
+                        _ => "N",
+                    }.to_string())
+                }
+            }
+            "ixon" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_iflag & libc::IXON != 0 { "Y" } else { "N" }.to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
+            "ixoff" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_iflag & libc::IXOFF != 0 { "Y" } else { "N" }.to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
+            "ixany" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_iflag & libc::IXANY != 0 { "Y" } else { "N" }.to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
             _ => self
                 .base
                 .options
@@ -811,6 +858,52 @@ impl PortDriver for DrvAsynSerialPort {
                 .cloned()
                 .ok_or_else(|| AsynError::OptionNotFound(key.to_string())),
         }
+    }
+
+    // --- RS485 support (Linux only) ---
+
+    #[cfg(target_os = "linux")]
+    fn set_rs485_option(&mut self, key: &str, value: &str) -> AsynResult<()> {
+        use std::mem::MaybeUninit;
+
+        let fd = self.io.fd.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Disconnected,
+            message: "not connected".into(),
+        })?;
+
+        // Read current RS485 config
+        let mut rs485 = unsafe {
+            let mut buf = MaybeUninit::<libc::c_ulong>::zeroed();
+            // SER_RS485_ENABLED = 1, ioctl TIOCGRS485 = 0x542E
+            let ret = libc::ioctl(fd, 0x542E_u64, buf.as_mut_ptr());
+            if ret < 0 {
+                return Err(AsynError::Io(std::io::Error::last_os_error()));
+            }
+            buf.assume_init()
+        };
+
+        let enabled = parse_bool_option(value).unwrap_or(false);
+        match key {
+            "rs485_enable" => {
+                if enabled { rs485 |= 1; } else { rs485 &= !1; } // SER_RS485_ENABLED
+            }
+            "rs485_rts_on_send" => {
+                if enabled { rs485 |= 2; } else { rs485 &= !2; } // SER_RS485_RTS_ON_SEND
+            }
+            "rs485_rts_after_send" => {
+                if enabled { rs485 |= 4; } else { rs485 &= !4; } // SER_RS485_RTS_AFTER_SEND
+            }
+            _ => {}
+        }
+
+        // Apply
+        unsafe {
+            let ret = libc::ioctl(fd, 0x542F_u64, &rs485); // TIOCSRS485
+            if ret < 0 {
+                return Err(AsynError::Io(std::io::Error::last_os_error()));
+            }
+        }
+        Ok(())
     }
 }
 

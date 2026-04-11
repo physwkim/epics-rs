@@ -82,7 +82,8 @@ pub(crate) struct PortActor {
     driver: Box<dyn PortDriver>,
     rx: mpsc::Receiver<ActorMessage>,
     heap: BinaryHeap<ActorMessage>,
-    blocked_by: Option<u64>,
+    /// (token, nesting_count) — C parity: blockPortCount with nested lock support.
+    blocked_by: Option<(u64, u32)>,
     pending_while_blocked: Vec<ActorMessage>,
 }
 
@@ -165,7 +166,7 @@ impl PortActor {
     }
 
     fn enqueue_message(&mut self, msg: ActorMessage) {
-        if let Some(owner) = self.blocked_by {
+        if let Some((owner, _)) = self.blocked_by {
             let is_owner = msg.block_token == Some(owner);
             let is_unblock = matches!(msg.op, RequestOp::UnblockProcess);
             if !is_owner && !is_unblock {
@@ -357,14 +358,40 @@ impl PortActor {
             }
             RequestOp::BlockProcess => {
                 let token = user.block_token.unwrap_or(user.reason as u64);
-                self.blocked_by = Some(token);
+                if let Some((existing, ref mut count)) = self.blocked_by {
+                    if existing == token {
+                        // C parity: nested lock — increment counter
+                        *count += 1;
+                    } else {
+                        return Err(AsynError::Status {
+                            status: AsynStatus::Error,
+                            message: "port already blocked by another user".into(),
+                        });
+                    }
+                } else {
+                    self.blocked_by = Some((token, 1));
+                }
                 Ok(RequestResult::write_ok())
             }
             RequestOp::UnblockProcess => {
-                self.blocked_by = None;
-                let pending = std::mem::take(&mut self.pending_while_blocked);
-                for msg in pending {
-                    self.heap.push(msg);
+                let token = user.block_token.unwrap_or(user.reason as u64);
+                if let Some((owner, count)) = self.blocked_by {
+                    if owner != token {
+                        // C parity: only the block holder can unblock
+                        return Err(AsynError::Status {
+                            status: AsynStatus::Error,
+                            message: "unblock rejected: not the block holder".into(),
+                        });
+                    }
+                    if count > 1 {
+                        self.blocked_by = Some((owner, count - 1));
+                    } else {
+                        self.blocked_by = None;
+                        let pending = std::mem::take(&mut self.pending_while_blocked);
+                        for msg in pending {
+                            self.heap.push(msg);
+                        }
+                    }
                 }
                 Ok(RequestResult::write_ok())
             }
@@ -689,8 +716,9 @@ mod tests {
         user.block_token = Some(42);
         send_and_wait(&tx, RequestOp::Int32Write { value: 99 }, user).unwrap();
 
-        // Unblock
-        let user = AsynUser::new(0).with_timeout(Duration::from_secs(1));
+        // Unblock (must use same token as the block holder)
+        let mut user = AsynUser::new(0).with_timeout(Duration::from_secs(1));
+        user.block_token = Some(42);
         send_and_wait(&tx, RequestOp::UnblockProcess, user).unwrap();
 
         // Non-owner should now work

@@ -397,6 +397,7 @@ mod tests {
             addr: 2,
             value: crate::param::ParamValue::Float64(1.5),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         };
         let payload = EventPayload::from(&iv);
         match payload {
