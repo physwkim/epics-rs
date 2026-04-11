@@ -1,5 +1,88 @@
 # Changelog
 
+## v0.9.0
+
+### motor-rs — Complete C parity (~95 fixes across 12 review rounds)
+
+#### State machine
+- Fix MSTA bit positions for wire compatibility with C clients
+- Fix all 4 retry modes (Default/Arithmetic/Geometric/InPosition)
+- Fix SPMG Pause/Stop/Go transitions to match C postProcess pipeline
+- Add MIP_EXTERNAL detection for externally-initiated motion
+- Add clear_buttons on limit switch hit or PROBLEM
+- Add stop-first pattern for home-while-moving and jog-while-moving
+- Add DLY → DELAY_ACK → fresh poll → retry evaluation flow
+- Add limit switch direction guard before retries (user_cdir)
+- Implement two-phase jog backlash (BL1 slew + BL2 backlash velocity)
+- Add sub-step deadband check with DMOV pulse for ophyd compatibility
+
+#### Coordinate system
+- Fix CDIR to account for MRES sign
+- Fix DIR handler FOFF branching (Variable preserves VAL)
+- Fix SET+FOFF=Frozen cascade for VAL/DVAL/RVAL
+- Fix FOFF=Frozen in non-SET mode (no effect, matches C)
+- Fix RDIF type (i32) and formula (NINT(diff/mres))
+- Fix LVIO escape logic using ldvl, pretarget only for non-preferred direction
+- Fix soft limit disable only when dhlm==dllm==0
+- Add RHLM/RLLM fields for MRES cascade invariance
+
+#### New features
+- Add MoveRelative command and use_rel logic (ueip/urip)
+- Add FRAC progressive approach scaling
+- Add dual poll rate (moving/idle intervals, forced fast polls)
+- Add auto power on/off with configurable delays
+- Add deferred moves and profile moves framework
+- Add RDBL/URIP readback link support
+- Add velocity cross-calculation and range validation
+
+#### Driver interface
+- Expand MotorStatus with direction, slip_stall, comms_error, homed, gain_support, has_encoder, velocity
+- Add move_velocity, move_relative, set_deferred_moves trait methods
+- Add profile move trait methods (initialize, define, build, execute, abort, readback)
+- Fix SetPosition to send dial coordinates (not raw steps)
+- Fix MOVN ls_active to use raw limit switches before user mapping
+
+### asyn-rs
+- Fix race condition in PortManager register/unregister
+- Fix COMM_ALARM constant, HTTP connect-per-transaction
+- Fix write retry timeout, HTTP write reconnect, EOS storage
+- Fix param defined tracking, IP port auto-disconnect
+- Fix trace masks, serial flush, baud rates, break/ixany
+- Fix asyn_record connect_device clearing drv_user_create error
+- Add PortHandle convenience methods for new operations
+- Add `set_params_and_notify` for atomic background thread parameter updates
+- Add ParamSetValue::Float64Array for waveform parameter updates
+- Add AsynMotor::move_relative, set_deferred_moves, profile move methods
+- Move set_rs485_option out of PortDriver trait impl
+- Document `set_params_and_notify` vs `write_int32_no_wait` for driver authors
+
+### epics-base-rs
+- Fix ai/ao conversion pipeline (ASLO/AOFF/ESLO/EOFF)
+- Fix bi/bo records and COS alarm
+- Fix calc division by zero to return NaN
+- Fix mbbi/mbbo state handling and field access
+- Fix sel record High/Low/Median algorithms
+- Fix calcout missing OUT link write (pval timing + cached should_output)
+- Fix WriteDbLink to use resolve_field for common fields (OUT/DOL)
+- Fix monitor deadband for binary records (bi/bo/busy/mbbi/mbbo always post)
+- Document DeviceReadOutcome ok() vs computed() convention
+
+### ad-core-rs
+- Fix ADDriverBase MaxSizeX/Y init from constructor args
+- Fix NDArrayPool threshold and free-list logic
+- Fix plugin runtime interrupt notifications
+- Add ParamUpdate::Float64Array for waveform param updates in plugins
+
+### ad-plugins-rs
+- Fix ROIStat time series waveform readback (was accumulating but never writing to params)
+- Fix ROI, Stats, Process, HDF5, TIFF, JPEG, NetCDF, Nexus plugins
+- Add attr_plot param indices and buffer output infrastructure
+
+### examples
+- Migrate all acquisition tasks to set_params_and_notify
+- Fix beam_current and time_of_day DeviceReadOutcome to skip ai conversion
+- Fix moving_dot acquire_busy and status in writeInt32
+
 ## v0.8.3
 
 ### asyn-rs
