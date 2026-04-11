@@ -145,9 +145,14 @@ impl PortDriver for MqttDriver {
     }
 
     fn drv_user_create(&self, drv_info: &str) -> AsynResult<usize> {
-        self.registry
-            .get(drv_info)
-            .map(|(idx, _)| *idx)
+        // Check topic registry first, then fall back to param name lookup
+        // (for internal params like _MQTT_CONNECTED)
+        if let Some((idx, _)) = self.registry.get(drv_info) {
+            return Ok(*idx);
+        }
+        self.base()
+            .params
+            .find_param(drv_info)
             .ok_or_else(|| AsynError::ParamNotFound(drv_info.to_string()))
     }
 
