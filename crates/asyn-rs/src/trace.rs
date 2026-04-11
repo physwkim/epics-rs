@@ -11,14 +11,18 @@ use bitflags::bitflags;
 
 bitflags! {
     /// What to trace — control message categories.
+    /// Values MUST match C asyn's asynDriver.h definitions:
+    ///   ASYN_TRACE_ERROR=0x0001, ASYN_TRACEIO_DEVICE=0x0002,
+    ///   ASYN_TRACEIO_FILTER=0x0004, ASYN_TRACEIO_DRIVER=0x0008,
+    ///   ASYN_TRACE_FLOW=0x0010, ASYN_TRACE_WARNING=0x0020
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct TraceMask: u32 {
         const ERROR      = 0x0001;
-        const FLOW       = 0x0002;
-        const WARNING    = 0x0004;
-        const IO_DEVICE  = 0x0008;
-        const IO_DRIVER  = 0x0010;
-        const IO_FILTER  = 0x0020;
+        const IO_DEVICE  = 0x0002;
+        const IO_FILTER  = 0x0004;
+        const IO_DRIVER  = 0x0008;
+        const FLOW       = 0x0010;
+        const WARNING    = 0x0020;
     }
 }
 

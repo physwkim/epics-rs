@@ -177,6 +177,32 @@ fn baud_to_speed(baud: u32) -> libc::speed_t {
         57600 => libc::B57600,
         115200 => libc::B115200,
         230400 => libc::B230400,
+        // High baud rates: available on Linux/FreeBSD/NetBSD, not macOS.
+        // C parity: conditional on #ifdef B460800 etc.
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        460800 => libc::B460800,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        500000 => libc::B500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        576000 => libc::B576000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        921600 => libc::B921600,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        1000000 => libc::B1000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        1152000 => libc::B1152000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        1500000 => libc::B1500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        2000000 => libc::B2000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        2500000 => libc::B2500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        3000000 => libc::B3000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        3500000 => libc::B3500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        4000000 => libc::B4000000,
         _ => libc::B9600, // fallback
     }
 }
@@ -203,6 +229,30 @@ fn speed_to_baud(speed: libc::speed_t) -> u32 {
         libc::B57600 => 57600,
         libc::B115200 => 115200,
         libc::B230400 => 230400,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B460800 => 460800,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B500000 => 500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B576000 => 576000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B921600 => 921600,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B1000000 => 1000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B1152000 => 1152000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B1500000 => 1500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B2000000 => 2000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B2500000 => 2500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B3000000 => 3000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B3500000 => 3500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B4000000 => 4000000,
         _ => 0,
     }
 }
@@ -340,7 +390,9 @@ impl OctetNext for SerialIoState {
 
     fn flush(&mut self, _user: &mut AsynUser) -> AsynResult<()> {
         if let Some(fd) = self.fd {
-            let ret = unsafe { libc::tcdrain(fd) };
+            // C parity: tcflush(TCIFLUSH) discards received-but-unread input data,
+            // matching C drvAsynSerialPort's flush behavior. NOT tcdrain (output wait).
+            let ret = unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
             if ret < 0 {
                 return Err(AsynError::Io(std::io::Error::last_os_error()));
             }
@@ -691,6 +743,37 @@ impl PortDriver for DrvAsynSerialPort {
                         t.c_iflag &= !libc::IXOFF;
                     }
                     self.apply_termios(&t)?;
+                }
+            }
+            "ixany" => {
+                let enabled = parse_bool_option(value)?;
+                if self.io.fd.is_some() {
+                    let mut t = self.get_current_termios()?;
+                    if enabled {
+                        t.c_iflag |= libc::IXANY;
+                    } else {
+                        t.c_iflag &= !libc::IXANY;
+                    }
+                    self.apply_termios(&t)?;
+                }
+            }
+            "break" => {
+                // C parity: "off" = no-op, "" or "on" = standard break,
+                // numeric = break duration in ms
+                if value == "off" {
+                    // no-op
+                } else if let Some(fd) = self.io.fd {
+                    // Drain output first (C parity: tcdrain before tcsendbreak)
+                    unsafe { libc::tcdrain(fd) };
+                    let duration = if value.is_empty() || value == "on" {
+                        0 // standard break duration
+                    } else {
+                        value.parse::<i32>().unwrap_or(0)
+                    };
+                    let ret = unsafe { libc::tcsendbreak(fd, duration) };
+                    if ret < 0 {
+                        return Err(AsynError::Io(std::io::Error::last_os_error()));
+                    }
                 }
             }
             _ => {
