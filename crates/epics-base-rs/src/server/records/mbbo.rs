@@ -520,6 +520,10 @@ static MBBO_FIELDS: &[FieldDesc] = &[
         dbf_type: DbFieldType::String,
         read_only: false,
     },
+    FieldDesc { name: "SIMM", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc { name: "SIML", dbf_type: DbFieldType::String, read_only: false },
+    FieldDesc { name: "SIOL", dbf_type: DbFieldType::String, read_only: false },
+    FieldDesc { name: "SIMS", dbf_type: DbFieldType::Short, read_only: false },
 ];
 
 /// Helper macro: maps EPICS field name strings to struct fields.
@@ -608,6 +612,7 @@ impl Record for MbboRecord {
             "FRST" => frst: String, "FVST" => fvst: String, "SXST" => sxst: String, "SVST" => svst: String,
             "EIST" => eist: String, "NIST" => nist: String, "TEST" => test: String, "ELST" => elst: String,
             "TVST" => tvst: String, "TTST" => ttst: String, "FTST" => ftst: String, "FFST" => ffst: String,
+            "SIMM" => simm: Short, "SIML" => siml: String, "SIOL" => siol: String, "SIMS" => sims: Short,
         )
     }
 
@@ -633,6 +638,7 @@ impl Record for MbboRecord {
             "FRST" => frst: String, "FVST" => fvst: String, "SXST" => sxst: String, "SVST" => svst: String,
             "EIST" => eist: String, "NIST" => nist: String, "TEST" => test: String, "ELST" => elst: String,
             "TVST" => tvst: String, "TTST" => ttst: String, "FTST" => ftst: String, "FFST" => ffst: String,
+            "SIMM" => simm: Short, "SIML" => siml: String, "SIOL" => siol: String, "SIMS" => sims: Short,
         );
         Ok(())
     }

@@ -80,31 +80,15 @@ impl CompressRecord {
 }
 
 static COMPRESS_FIELDS: &[FieldDesc] = &[
-    FieldDesc {
-        name: "VAL",
-        dbf_type: DbFieldType::Double,
-        read_only: false,
-    },
-    FieldDesc {
-        name: "NSAM",
-        dbf_type: DbFieldType::Long,
-        read_only: true,
-    },
-    FieldDesc {
-        name: "ALG",
-        dbf_type: DbFieldType::Short,
-        read_only: false,
-    },
-    FieldDesc {
-        name: "N",
-        dbf_type: DbFieldType::Long,
-        read_only: false,
-    },
-    FieldDesc {
-        name: "OFF",
-        dbf_type: DbFieldType::Long,
-        read_only: true,
-    },
+    FieldDesc { name: "VAL", dbf_type: DbFieldType::Double, read_only: false },
+    FieldDesc { name: "INP", dbf_type: DbFieldType::String, read_only: false },
+    FieldDesc { name: "NSAM", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "NUSE", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "ALG", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc { name: "N", dbf_type: DbFieldType::Long, read_only: false },
+    FieldDesc { name: "OFF", dbf_type: DbFieldType::Long, read_only: true },
+    FieldDesc { name: "RES", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc { name: "BALG", dbf_type: DbFieldType::Short, read_only: false },
 ];
 
 impl Record for CompressRecord {
@@ -166,7 +150,13 @@ impl Record for CompressRecord {
                 }
                 _ => Err(CaError::TypeMismatch("N".into())),
             },
-            "NSAM" | "OFF" => Err(CaError::ReadOnlyField(name.to_string())),
+            "INP" => match value {
+                EpicsValue::String(s) => { self.inp = s; Ok(()) }
+                _ => Err(CaError::TypeMismatch("INP".into())),
+            },
+            "RES" => { self.res = value.to_f64().unwrap_or(0.0) as i16; Ok(()) }
+            "BALG" => { self.balg = value.to_f64().unwrap_or(0.0) as i16; Ok(()) }
+            "NSAM" | "OFF" | "NUSE" => Err(CaError::ReadOnlyField(name.to_string())),
             _ => Err(CaError::FieldNotFound(name.to_string())),
         }
     }
