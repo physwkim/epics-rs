@@ -4,6 +4,8 @@ MQTT driver for [epics-rs](https://github.com/epics-rs/epics-rs) — publish/sub
 
 An asyn PortDriver that bridges MQTT brokers to the EPICS record layer. Incoming MQTT messages update PVs via I/O Intr scanning; EPICS output record writes are published to the broker.
 
+Inspired by [epicsMQTT](https://github.com/epics-modules/mqtt) (C++ MQTT support for EPICS using autoparamDriver + Paho). This is an independent Rust implementation, not a port.
+
 ## Features
 
 - **FLAT payloads** — single values: `INT`, `FLOAT`, `DIGITAL`, `STRING`, `INTARRAY`, `FLOATARRAY`
