@@ -98,6 +98,7 @@ impl PortActor {
     }
 
     /// Run the actor loop. Returns when the channel is closed (all senders dropped).
+    /// Calls `shutdown()` on the driver before returning.
     #[cfg(test)]
     pub fn run(mut self) {
         loop {
@@ -108,7 +109,7 @@ impl PortActor {
                 // No work — block on the channel
                 match self.rx.blocking_recv() {
                     Some(msg) => self.enqueue_message(msg),
-                    None => return,
+                    None => break,
                 }
                 // Drain any more that arrived
                 self.drain_channel();
@@ -117,9 +118,11 @@ impl PortActor {
             // Process one eligible request from the heap
             self.process_one();
         }
+        let _ = self.driver.shutdown();
     }
 
     /// Run the actor loop with a dedicated shutdown channel.
+    /// Calls `shutdown()` on the driver before returning.
     ///
     /// Returns when either:
     /// - The main request channel is closed (all senders dropped)
@@ -139,10 +142,10 @@ impl PortActor {
                         msg = self.rx.recv() => {
                             match msg {
                                 Some(m) => self.enqueue_message(m),
-                                None => return,
+                                None => break,
                             }
                         }
-                        _ = shutdown_rx.recv() => return,
+                        _ = shutdown_rx.recv() => break,
                     }
                     // Drain any more that arrived
                     self.drain_channel();
@@ -152,6 +155,7 @@ impl PortActor {
                 self.process_one();
             }
         });
+        let _ = self.driver.shutdown();
     }
 
     fn drain_channel(&mut self) {
@@ -206,17 +210,22 @@ impl PortActor {
         }
 
         let is_connect_op = matches!(op, RequestOp::Connect | RequestOp::Disconnect);
+        let is_connect_priority = user.priority == QueuePriority::Connect;
 
-        if !is_connect_op {
-            // Auto-connect
-            let should_auto = if self.driver.base().flags.multi_device {
+        // Connect ops and Connect-priority requests bypass enabled/connected checks
+        // (C parity: Connect priority processed even when disabled/disconnected)
+        if !is_connect_op && !is_connect_priority {
+            // Auto-connect: try to reconnect if disconnected and auto_connect is set
+            if self.driver.base().flags.multi_device {
                 let ds = self.driver.base().device_states.get(&user.addr);
-                !ds.map_or(true, |d| d.connected)
-                    && ds.map_or(self.driver.base().auto_connect, |d| d.auto_connect)
-            } else {
-                !self.driver.base().connected && self.driver.base().auto_connect
-            };
-            if should_auto {
+                let dev_disconnected = !ds.map_or(true, |d| d.connected);
+                let dev_auto = ds.map_or(self.driver.base().auto_connect, |d| d.auto_connect);
+                if dev_disconnected && dev_auto {
+                    // For multi-device, auto-connect the specific address
+                    let connect_user = AsynUser::new(user.reason).with_addr(user.addr);
+                    let _ = self.driver.connect_addr(&connect_user);
+                }
+            } else if !self.driver.base().connected && self.driver.base().auto_connect {
                 let _ = self.driver.connect(&AsynUser::default());
             }
 

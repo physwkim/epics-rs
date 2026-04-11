@@ -148,6 +148,21 @@ impl PortDriverBase {
         }
     }
 
+    /// Query whether the port is connected.
+    pub fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Query whether the port is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Query whether auto-connect is enabled.
+    pub fn is_auto_connect(&self) -> bool {
+        self.auto_connect
+    }
+
     /// Check that the port is both enabled and connected.
     /// Returns `Err(Disabled)` or `Err(Disconnected)` otherwise.
     pub fn check_ready(&self) -> AsynResult<()> {
