@@ -525,6 +525,52 @@ impl PortHandle {
         .await?;
         Ok(())
     }
+
+    // --- Multi-device convenience methods ---
+
+    pub fn connect_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::ConnectAddr, user)?;
+        Ok(())
+    }
+
+    pub fn disconnect_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::DisconnectAddr, user)?;
+        Ok(())
+    }
+
+    pub fn enable_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::EnableAddr, user)?;
+        Ok(())
+    }
+
+    pub fn disable_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::DisableAddr, user)?;
+        Ok(())
+    }
+
+    // --- Bounds convenience methods ---
+
+    pub fn get_bounds_int32_blocking(&self, reason: usize, addr: i32) -> AsynResult<(i64, i64)> {
+        let user = AsynUser::new(reason).with_addr(addr);
+        let result = self.submit_blocking(RequestOp::GetBoundsInt32, user)?;
+        result.bounds.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Error,
+            message: "get_bounds returned no bounds".into(),
+        })
+    }
+
+    pub fn get_bounds_int64_blocking(&self, reason: usize, addr: i32) -> AsynResult<(i64, i64)> {
+        let user = AsynUser::new(reason).with_addr(addr);
+        let result = self.submit_blocking(RequestOp::GetBoundsInt64, user)?;
+        result.bounds.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Error,
+            message: "get_bounds returned no bounds".into(),
+        })
+    }
 }
 
 #[cfg(test)]
