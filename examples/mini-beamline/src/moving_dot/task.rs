@@ -42,12 +42,26 @@ impl AcquisitionContext {
         if wait_for_plugins {
             self.queued_counter.wait_until_zero(Duration::from_secs(5));
         }
-        self.port_handle
-            .write_int32_no_wait(self.ad.acquire_busy, 0, 0);
-        self.port_handle
-            .write_int32_no_wait(self.ad.status, 0, ADStatus::Idle as i32);
-        self.port_handle.write_int32_no_wait(self.ad.acquire, 0, 0);
-        self.port_handle.call_param_callbacks_no_wait(0);
+        self.port_handle.set_params_and_notify(
+            0,
+            vec![
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.acquire_busy,
+                    addr: 0,
+                    value: 0,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.status,
+                    addr: 0,
+                    value: ADStatus::Idle as i32,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.acquire,
+                    addr: 0,
+                    value: 0,
+                },
+            ],
+        );
     }
 }
 
@@ -98,12 +112,26 @@ fn acquisition_loop(ctx: AcquisitionContext) {
         }
 
         // Initialize counters
-        ctx.port_handle
-            .write_int32_no_wait(ctx.ad.num_images_counter, 0, 0);
-        ctx.port_handle
-            .write_int32_no_wait(ctx.ad.status, 0, ADStatus::Acquire as i32);
-        ctx.port_handle
-            .write_int32_no_wait(ctx.ad.acquire_busy, 0, 1);
+        ctx.port_handle.set_params_and_notify(
+            0,
+            vec![
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.num_images_counter,
+                    addr: 0,
+                    value: 0,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.status,
+                    addr: 0,
+                    value: ADStatus::Acquire as i32,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.acquire_busy,
+                    addr: 0,
+                    value: 1,
+                },
+            ],
+        );
 
         let mut num_counter = 0;
         let mut array_counter = ctx
