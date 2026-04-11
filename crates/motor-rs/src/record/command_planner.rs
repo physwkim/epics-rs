@@ -119,9 +119,9 @@ impl MotorRecord {
                     0
                 };
                 // Convert dial to raw steps for the driver (C: dval / mres)
-                if let Ok(raw) = coordinate::dial_to_raw(self.pos.dval, self.conv.mres) {
+                if self.conv.mres != 0.0 {
                     effects.commands.push(MotorCommand::SetPosition {
-                        position: raw as f64,
+                        position: self.pos.dval / self.conv.mres,
                     });
                 }
             }
@@ -137,8 +137,8 @@ impl MotorRecord {
 
     /// Plan an absolute move to current DVAL.
     pub(crate) fn plan_absolute_move(&mut self, effects: &mut ProcessEffects) {
-        // Check soft limits (disabled when dhlm == dllm)
-        if self.limits.dhlm != self.limits.dllm {
+        // Check soft limits (C: disabled only when dhlm == dllm == 0.0)
+        if !(self.limits.dhlm == self.limits.dllm && self.limits.dllm == 0.0) {
             // C: DLLM > DHLM means limits are inverted => always violation
             if self.limits.dllm > self.limits.dhlm {
                 self.limits.lvio = true;

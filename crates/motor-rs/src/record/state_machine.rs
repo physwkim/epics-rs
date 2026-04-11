@@ -143,17 +143,21 @@ impl MotorRecord {
 
             let retry_target = self.compute_retry_target();
             let frac = self.retry.frac;
-            // C: FRAC applied to retry move distance
-            let position_error = retry_target - self.pos.drbv;
             if self.use_relative_moves() {
+                // C: FRAC applied to relative distance
+                let rel_distance = (retry_target - self.pos.drbv) * frac;
                 effects.commands.push(MotorCommand::MoveRelative {
-                    distance: position_error * frac,
+                    distance: rel_distance,
                     velocity: self.vel.velo,
                     acceleration: self.vel.accl,
                 });
             } else {
+                // C: absolute retry uses dval as base, FRAC interpolates
+                // position = dval + frac * (retry_target - dval)
+                let position = self.pos.dval
+                    + frac * (retry_target - self.pos.dval);
                 effects.commands.push(MotorCommand::MoveAbsolute {
-                    position: self.pos.drbv + position_error * frac,
+                    position,
                     velocity: self.vel.velo,
                     acceleration: self.vel.accl,
                 });

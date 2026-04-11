@@ -1300,8 +1300,16 @@ fn apply_mres_cascade(rec: &mut MotorRecord, old_mres: f64) {
     }
     if old_mres != 0.0 {
         let ratio = rec.conv.mres / old_mres;
-        rec.limits.dhlm *= ratio;
-        rec.limits.dllm *= ratio;
+        let new_dhlm = rec.limits.dhlm * ratio;
+        let new_dllm = rec.limits.dllm * ratio;
+        // C: when MRES changes sign, DHLM and DLLM swap
+        if new_dhlm >= new_dllm {
+            rec.limits.dhlm = new_dhlm;
+            rec.limits.dllm = new_dllm;
+        } else {
+            rec.limits.dhlm = new_dllm;
+            rec.limits.dllm = new_dhlm;
+        }
         let (hlm, llm) = coordinate::dial_limits_to_user(
             rec.limits.dhlm,
             rec.limits.dllm,

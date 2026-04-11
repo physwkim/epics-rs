@@ -47,9 +47,10 @@ pub fn dial_limits_to_user(dhlm: f64, dllm: f64, dir: MotorDir, off: f64) -> (f6
 }
 
 /// Check soft limit violation.
-/// Returns true if target violates limits. Limits disabled if dhlm == dllm.
+/// Returns true if target violates limits.
+/// C: limits disabled only when dhlm == dllm == 0.0.
 pub fn check_soft_limits(dval: f64, dhlm: f64, dllm: f64) -> bool {
-    if dhlm == dllm {
+    if dhlm == dllm && dllm == 0.0 {
         return false;
     }
     dval > dhlm || dval < dllm

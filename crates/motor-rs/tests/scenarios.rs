@@ -197,10 +197,10 @@ fn retry_modes_arithmetic_geometric_inposition() {
     let effects = rec.check_completion();
 
     // C Arithmetic: factor = (rtry - rcnt + 1) / rtry = (5 - 1 + 1) / 5 = 1.0
-    // retry_target = 9.0 + 1.0 * 1.0 = 10.0, then FRAC=0.5 applied:
-    // position = 9.0 + (10.0 - 9.0) * 0.5 = 9.5
+    // retry_target = 10.0 (= dval), use_rel=false:
+    // position = dval + frac*(retry_target - dval) = 10.0 + 0.5*0 = 10.0
     if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((position - 9.5).abs() < 1e-6);
+        assert!((position - 10.0).abs() < 1e-6);
     } else {
         panic!("expected MoveAbsolute");
     }
