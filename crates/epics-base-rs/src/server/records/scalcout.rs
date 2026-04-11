@@ -201,6 +201,8 @@ static SCALCOUT_FIELDS: &[FieldDesc] = &[
         dbf_type: DbFieldType::Double,
         read_only: false,
     },
+    FieldDesc { name: "OUT", dbf_type: DbFieldType::String, read_only: false },
+    FieldDesc { name: "WAIT", dbf_type: DbFieldType::Short, read_only: false },
     FieldDesc {
         name: "PREC",
         dbf_type: DbFieldType::Short,
