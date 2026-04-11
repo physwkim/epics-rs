@@ -888,9 +888,11 @@ impl PortDriver for DrvAsynSerialPort {
         }
     }
 
-    // --- RS485 support (Linux only) ---
+}
 
-    #[cfg(target_os = "linux")]
+// --- RS485 support (Linux only) ---
+#[cfg(target_os = "linux")]
+impl DrvAsynSerialPort {
     fn set_rs485_option(&mut self, key: &str, value: &str) -> AsynResult<()> {
         use std::mem::MaybeUninit;
 
