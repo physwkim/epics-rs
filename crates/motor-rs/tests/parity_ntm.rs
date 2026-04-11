@@ -69,7 +69,8 @@ fn val_during_motion_same_direction_accepted() {
 
     // No new command issued (C behavior)
     assert!(effects.commands.is_empty());
-    assert_eq!(rec.internal.ldvl, 80.0); // new target stored
+    // ldvl stays at original target (not updated on ExtendMove)
+    assert_eq!(rec.internal.ldvl, 50.0);
     assert!(!rec.stat.dmov);
 }
 

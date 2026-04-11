@@ -291,4 +291,6 @@ pub struct InternalFields {
     pub backlash_pending: bool,
     /// Pending retarget value (for NTM stop-and-replan)
     pub pending_retarget: Option<f64>,
+    /// Remember jog direction for backlash (cleared by stop_jog)
+    pub jog_was_forward: bool,
 }

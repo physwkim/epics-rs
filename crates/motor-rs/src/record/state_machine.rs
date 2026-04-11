@@ -59,7 +59,13 @@ impl MotorRecord {
                 }
             }
             MotionPhase::JogBacklash => {
-                self.finalize_or_delay(&mut effects);
+                if self.internal.backlash_pending {
+                    // BL1 complete -> start BL2 (final approach)
+                    self.start_jog_backlash_final(&mut effects);
+                } else {
+                    // BL2 complete -> finalize
+                    self.finalize_or_delay(&mut effects);
+                }
             }
             MotionPhase::Homing => {
                 self.stat.athm = true;
@@ -227,10 +233,11 @@ impl MotorRecord {
         if self.retry.bdst == 0.0 {
             return false;
         }
-        // JOG backlash when direction was opposite to BDST direction
-        let jog_was_forward = self.stat.mip.contains(MipFlags::JOGF);
+        // Use saved jog direction (MIP flags are cleared by stop_jog)
+        let jog_was_forward = self.internal.jog_was_forward;
         let bdst_positive = self.retry.bdst > 0.0;
-        !jog_was_forward && bdst_positive || jog_was_forward && !bdst_positive
+        // Backlash needed when jog direction opposes BDST sign
+        (jog_was_forward && !bdst_positive) || (!jog_was_forward && bdst_positive)
     }
 
     /// Start backlash final approach (move from pretarget to dval).
@@ -258,16 +265,33 @@ impl MotorRecord {
         effects.suppress_forward_link = true;
     }
 
-    /// Start jog backlash correction.
+    /// Start jog backlash correction (phase 1: move to pretarget at slew velocity).
+    /// C has two phases: BL1 moves to (dval - bdst) at slew vel, BL2 moves to dval at backlash vel.
     fn start_jog_backlash(&mut self, effects: &mut ProcessEffects) {
-        // C: jog backlash applies FRAC to the distance
-        let frac = self.retry.frac;
-        let distance = self.retry.bdst * frac;
-        let target = self.pos.drbv + distance;
+        // dval was synced to drbv by sync_positions() above
+        // Phase 1 (BL1): move to backlash pretarget (dval - bdst) at slew velocity
+        let pretarget = self.pos.dval - self.retry.bdst;
         self.set_phase(MotionPhase::JogBacklash);
-        self.stat.mip.insert(MipFlags::JOG_BL1);
+        self.stat.mip = MipFlags::JOG_BL1;
+        self.internal.backlash_pending = true; // signal BL2 needed after BL1
         effects.commands.push(MotorCommand::MoveAbsolute {
-            position: target,
+            position: pretarget,
+            velocity: self.vel.velo,
+            acceleration: self.vel.accl,
+        });
+        effects.request_poll = true;
+        effects.suppress_forward_link = true;
+    }
+
+    /// Start jog backlash phase 2 (final approach at backlash velocity).
+    fn start_jog_backlash_final(&mut self, effects: &mut ProcessEffects) {
+        // Phase 2 (BL2): move from pretarget to dval at backlash velocity
+        let frac = self.retry.frac;
+        let position_error = self.pos.dval - self.pos.drbv;
+        self.stat.mip = MipFlags::JOG_BL2;
+        self.internal.backlash_pending = false;
+        effects.commands.push(MotorCommand::MoveAbsolute {
+            position: self.pos.drbv + position_error * frac,
             velocity: self.vel.bvel,
             acceleration: self.vel.bacc,
         });

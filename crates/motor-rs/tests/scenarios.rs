@@ -458,15 +458,20 @@ fn comm_error_sets_alarm_and_safe_state() {
 }
 
 #[test]
-fn dmov_pulse_guaranteed_even_for_noop() {
+fn sub_step_move_is_suppressed() {
     let mut rec = make_record();
 
-    // Move to current position (noop)
+    // Move to current position (< 1 step) -- C: too_small suppresses
     rec.pos.dval = 0.0;
     rec.pos.drbv = 0.0;
-    // Still goes through motion pipeline
     let effects = rec.plan_motion(CommandSource::Val);
-    assert!(!rec.stat.dmov); // DMOV pulsed to false
+    assert!(rec.stat.dmov); // no move initiated
+    assert!(effects.commands.is_empty());
+
+    // Move that is at least 1 step should proceed
+    rec.pos.dval = rec.conv.mres * 2.0; // 2 steps
+    let effects = rec.plan_motion(CommandSource::Val);
+    assert!(!rec.stat.dmov);
     assert!(!effects.commands.is_empty());
 }
 
@@ -548,7 +553,7 @@ fn sim_motor_end_to_end() {
 /// Setting VAL to the current position must still produce a DMOV 1→0→1
 /// transition. ophyd/bluesky rely on this to detect move completion.
 #[test]
-fn move_to_same_position_produces_dmov_transition() {
+fn move_to_same_position_is_suppressed() {
     let mut rec = make_record();
 
     // Start at position 0 with DMOV=1 (idle)
@@ -560,24 +565,16 @@ fn move_to_same_position_produces_dmov_transition() {
     rec.stat.dmov = true;
     rec.stat.phase = MotionPhase::Idle;
 
-    // Write VAL=0 (same position)
+    // Write VAL=0 (same position) -- C: too_small suppresses sub-step moves
     rec.put_field("VAL", EpicsValue::Double(0.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // DMOV must go to 0 even though target == current position
+    // Move is suppressed (less than 1 motor step difference)
     assert!(
-        !rec.stat.dmov,
-        "DMOV should be 0 after move command to same position"
+        rec.stat.dmov,
+        "DMOV should remain 1 for zero-distance move"
     );
-    assert_eq!(rec.stat.phase, MotionPhase::MainMove);
-    assert!(
-        !effects.commands.is_empty(),
-        "should issue move command even for same position"
-    );
-
-    // Simulate motor immediately reporting done (already at target)
-    complete_move(&mut rec, 0.0);
-    let _effects = rec.check_completion();
+    assert!(effects.commands.is_empty());
 
     // DMOV must return to 1
     assert!(rec.stat.dmov, "DMOV should be 1 after completion");
@@ -586,13 +583,7 @@ fn move_to_same_position_produces_dmov_transition() {
 
 /// Same-position DMOV transition with SimMotor end-to-end.
 #[test]
-fn sim_motor_same_position_dmov_transition() {
-    let mut motor = SimMotor::new();
-    let user = AsynUser::new(0);
-
-    // Set SimMotor position to 5.0 first
-    motor.set_position(&user, 5.0).unwrap();
-
+fn sim_motor_same_position_suppressed() {
     let mut rec = make_record();
     rec.pos.val = 5.0;
     rec.pos.dval = 5.0;
@@ -602,42 +593,13 @@ fn sim_motor_same_position_dmov_transition() {
     rec.stat.dmov = true;
     rec.stat.phase = MotionPhase::Idle;
 
-    // Write VAL=5 (same position)
+    // Write VAL=5 (same position) -- C: too_small suppresses sub-step moves
     rec.put_field("VAL", EpicsValue::Double(5.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // DMOV 1→0
-    assert!(!rec.stat.dmov);
-
-    // Execute move command on SimMotor
-    for cmd in &effects.commands {
-        if let MotorCommand::MoveAbsolute {
-            position,
-            velocity,
-            acceleration,
-        } = cmd
-        {
-            motor
-                .move_absolute(&user, *position, *velocity, *acceleration)
-                .unwrap();
-        }
-    }
-
-    // SimMotor should complete immediately (no distance to travel)
-    std::thread::sleep(Duration::from_millis(10));
-    let status = motor.poll(&user).unwrap();
-    assert!(status.done);
-
-    rec.process_motor_info(&status);
-    let _effects = rec.check_completion();
-
-    // DMOV 0→1
-    assert!(
-        rec.stat.dmov,
-        "DMOV must return to 1 after same-position move completes"
-    );
-    assert_eq!(rec.stat.phase, MotionPhase::Idle);
-    assert!((rec.pos.rbv - 5.0).abs() < 1e-6);
+    // Move suppressed (< 1 step difference)
+    assert!(rec.stat.dmov);
+    assert!(effects.commands.is_empty());
 }
 
 /// Sequential moves: move to multiple positions and verify each.
@@ -646,13 +608,13 @@ fn sim_motor_same_position_dmov_transition() {
 fn sequential_moves_verify_position() {
     let mut rec = make_record();
 
-    let positions = [0.1, 0.0, 0.1, 0.1, 0.0, -5.0, 5.0];
+    // C: moves to same position (< 1 step) are suppressed, so skip duplicates
+    let positions = [0.1, 0.0, 0.1, -5.0, 5.0];
 
     for &target in &positions {
         rec.put_field("VAL", EpicsValue::Double(target)).unwrap();
         let _effects = rec.plan_motion(CommandSource::Val);
 
-        // Move should always start (DMOV=0), even for same position
         assert!(!rec.stat.dmov, "DMOV should be 0 after move to {target}");
 
         // Simulate completion

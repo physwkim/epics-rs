@@ -46,8 +46,9 @@ impl MotorRecord {
                             // The new DVAL is stored and the motor continues to the
                             // current target; backlash/retry will be re-evaluated
                             // when the current move completes.
-                            self.internal.ldvl = self.pos.dval;
-                            // Re-evaluate backlash for new target
+                            // NOTE: do NOT update ldvl here -- ldvl must remain the
+                            // original target so is_preferred_direction works correctly
+                            // when the move completes.
                             self.internal.backlash_pending =
                                 self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
                             effects.suppress_forward_link = true;
@@ -193,6 +194,15 @@ impl MotorRecord {
             }
         }
         self.limits.lvio = false;
+
+        // C: too_small check -- suppress moves smaller than one motor step
+        if self.conv.mres != 0.0 {
+            let npos = (self.pos.dval / self.conv.mres).round() as i64;
+            let rpos = (self.pos.drbv / self.conv.mres).round() as i64;
+            if (npos - rpos).abs() < 1 {
+                return;
+            }
+        }
 
         // SPDB deadband: suppress move if already within setpoint deadband
         if self.retry.spdb > 0.0 && (self.pos.dval - self.pos.drbv).abs() <= self.retry.spdb {
@@ -341,6 +351,8 @@ impl MotorRecord {
             self.stat.mip = MipFlags::JOGR;
         }
         self.set_phase(MotionPhase::Jog);
+        // Remember jog direction for backlash (MIP flags get cleared by stop_jog)
+        self.internal.jog_was_forward = forward;
 
         // CDIR for jog: account for DIR and MRES sign
         // C: cdir computed from jog direction considering dir polarity and MRES sign
