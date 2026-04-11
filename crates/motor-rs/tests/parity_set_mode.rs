@@ -163,19 +163,19 @@ fn foff_variable_val_write_changes_dval() {
 }
 
 #[test]
-fn foff_frozen_dval_write_preserves_val() {
+fn foff_frozen_dval_write_cascades_normally() {
     let mut rec = make_record();
     rec.conv.foff = FreezeOffset::Frozen;
     rec.pos.val = 10.0;
     rec.pos.dval = 5.0;
     rec.pos.off = 5.0;
 
-    // Write DVAL=20: FOFF=Frozen → VAL stays 10, OFF adjusts
+    // C: FOFF has no effect in non-SET mode -- VAL recalculated normally
     rec.put_field("DVAL", EpicsValue::Double(20.0)).unwrap();
 
-    assert_eq!(rec.pos.val, 10.0); // preserved
+    assert_eq!(rec.pos.val, 25.0); // dial_to_user(20.0, Pos, 5.0)
     assert_eq!(rec.pos.dval, 20.0);
-    assert_eq!(rec.pos.off, -10.0); // 10 - 1*20
+    assert_eq!(rec.pos.off, 5.0); // unchanged
 }
 
 #[test]

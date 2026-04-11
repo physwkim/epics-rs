@@ -410,18 +410,18 @@ fn set_mode_redefines_coordinates() {
 }
 
 #[test]
-fn frozen_offset_preserves_off() {
+fn frozen_offset_non_set_cascades_normally() {
     let mut rec = make_record();
     rec.conv.foff = FreezeOffset::Frozen;
     rec.pos.val = 10.0;
     rec.pos.off = 5.0;
 
-    // Write DVAL — OFF should change to keep VAL constant
+    // C: FOFF has no effect in non-SET mode -- VAL recalculated, OFF unchanged
     rec.put_field("DVAL", EpicsValue::Double(20.0)).unwrap();
 
-    assert_eq!(rec.pos.val, 10.0); // preserved
+    assert_eq!(rec.pos.val, 25.0); // dial_to_user(20.0, Pos, 5.0)
     assert_eq!(rec.pos.dval, 20.0);
-    assert_eq!(rec.pos.off, -10.0); // 10 - 1*20
+    assert_eq!(rec.pos.off, 5.0); // unchanged
 }
 
 #[test]
