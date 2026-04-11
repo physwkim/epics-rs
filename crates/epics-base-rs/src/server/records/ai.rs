@@ -31,6 +31,7 @@ pub struct AiRecord {
     pub alst: f64,
     pub mlst: f64,
     pub init: bool,
+    skip_convert: bool,
     // Simulation
     pub simm: i16,
     pub siml: String,
@@ -63,6 +64,7 @@ impl Default for AiRecord {
             alst: 0.0,
             mlst: 0.0,
             init: false,
+            skip_convert: false,
             simm: 0,
             siml: String::new(),
             siol: String::new(),
@@ -246,6 +248,7 @@ impl Record for AiRecord {
     }
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
+        if !self.skip_convert {
         // convert() - raw to engineering units conversion
         // Step 1: Apply ROFF, then ASLO/AOFF (always, regardless of LINR)
         let mut v = (self.rval as f64) + (self.roff as f64);
@@ -270,6 +273,8 @@ impl Record for AiRecord {
         } else {
             self.val = v;
         }
+        } // end skip_convert
+        self.skip_convert = false;
 
         self.oraw = self.rval;
         self.init = true;
@@ -485,5 +490,9 @@ impl Record for AiRecord {
 
     fn field_list(&self) -> &'static [FieldDesc] {
         FIELDS
+    }
+
+    fn set_device_did_compute(&mut self, did_compute: bool) {
+        self.skip_convert = did_compute;
     }
 }

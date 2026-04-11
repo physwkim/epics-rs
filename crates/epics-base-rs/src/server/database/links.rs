@@ -26,6 +26,19 @@ impl PvDatabase {
             | crate::server::record::ParsedLink::Pva(name) => self.resolve_external_pv(name).await,
             crate::server::record::ParsedLink::Constant(_) => link.constant_value(),
             crate::server::record::ParsedLink::Db(db) => {
+                // PP: process source record if Passive before reading
+                if db.policy == crate::server::record::LinkProcessPolicy::ProcessPassive {
+                    if let Some(src) = self.get_record(&db.record).await {
+                        let is_passive = src.read().await.common.scan
+                            == crate::server::record::ScanType::Passive;
+                        if is_passive {
+                            let mut visited = std::collections::HashSet::new();
+                            let _ = self
+                                .process_record_with_links(&db.record, &mut visited, 0)
+                                .await;
+                        }
+                    }
+                }
                 let pv_name = if db.field == "VAL" {
                     db.record.clone()
                 } else {
@@ -75,6 +88,19 @@ impl PvDatabase {
         match link {
             crate::server::record::ParsedLink::Constant(_) => link.constant_value(),
             crate::server::record::ParsedLink::Db(db) if is_soft => {
+                // PP: process source record if Passive before reading
+                if db.policy == crate::server::record::LinkProcessPolicy::ProcessPassive {
+                    if let Some(src) = self.get_record(&db.record).await {
+                        let is_passive = src.read().await.common.scan
+                            == crate::server::record::ScanType::Passive;
+                        if is_passive {
+                            let mut visited = std::collections::HashSet::new();
+                            let _ = self
+                                .process_record_with_links(&db.record, &mut visited, 0)
+                                .await;
+                        }
+                    }
+                }
                 let pv_name = if db.field == "VAL" {
                     db.record.clone()
                 } else {

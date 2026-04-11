@@ -318,7 +318,8 @@ impl PvDatabase {
                 }
             }
 
-            // Apply INP value
+            // Apply INP value. Soft channel: equivalent to C status=2.
+            let soft_inp_applied = inp_value.is_some();
             if let Some(inp_val) = inp_value {
                 let _ = instance.record.set_val(inp_val);
             }
@@ -343,7 +344,7 @@ impl PvDatabase {
             let is_soft = instance.common.dtyp.is_empty() || instance.common.dtyp == "Soft Channel";
             let is_output = instance.record.can_device_write();
             let mut device_actions: Vec<crate::server::record::ProcessAction> = Vec::new();
-            let mut device_did_compute = false;
+            let mut device_did_compute = soft_inp_applied && is_soft;
             if !is_soft && !is_output {
                 if let Some(mut dev) = instance.device.take() {
                     match dev.read(&mut *instance.record) {
@@ -398,7 +399,9 @@ impl PvDatabase {
 
             // Tell the record whether device support already computed.
             // Records that override set_device_did_compute() use this to
-            // skip their built-in computation (e.g., epid PID).
+            // skip their built-in computation (e.g., ai skips RVAL->VAL).
+            // Note: field_io.rs may have already called set_device_did_compute(true)
+            // for CA puts to VAL. We only set true here, never reset to false.
             if device_did_compute {
                 instance.record.set_device_did_compute(true);
             }
@@ -798,11 +801,18 @@ impl PvDatabase {
             }
         }
 
-        // 5. FLNK
-        if let Some(flnk) = flnk_name {
-            let _ = self
-                .process_record_with_links(&flnk, visited, depth + 1)
-                .await;
+        // 5. FLNK -- only process if target is Passive (like C dbScanFwdLink)
+        if let Some(ref flnk) = flnk_name {
+            let is_passive = if let Some(rec) = self.get_record(flnk).await {
+                rec.read().await.common.scan == crate::server::record::ScanType::Passive
+            } else {
+                false
+            };
+            if is_passive {
+                let _ = self
+                    .process_record_with_links(flnk, visited, depth + 1)
+                    .await;
+            }
         }
 
         // 6. CP link targets -- process records that have CP input links from this record
@@ -1252,11 +1262,18 @@ impl PvDatabase {
             }
         }
 
-        // FLNK
-        if let Some(flnk) = flnk_name {
-            let _ = self
-                .process_record_with_links(&flnk, visited, depth + 1)
-                .await;
+        // FLNK -- only process if target is Passive
+        if let Some(ref flnk) = flnk_name {
+            let is_passive = if let Some(rec) = self.get_record(flnk).await {
+                rec.read().await.common.scan == crate::server::record::ScanType::Passive
+            } else {
+                false
+            };
+            if is_passive {
+                let _ = self
+                    .process_record_with_links(flnk, visited, depth + 1)
+                    .await;
+            }
         }
 
         // CP link targets

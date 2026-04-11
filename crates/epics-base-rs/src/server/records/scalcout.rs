@@ -25,6 +25,8 @@ pub struct ScalcoutRecord {
     pub osv: String,
     pub ivoa: i16, // 0=Continue, 1=Don't drive, 2=Set to IVOV
     pub ivov: f64,
+    pub out: String,  // output link
+    pub wait: i16,    // wait for output completion
     pub prec: i16,
     // Input link strings (INPA..INPL)
     pub inp_links: [String; 12],
@@ -52,6 +54,8 @@ impl Default for ScalcoutRecord {
             osv: String::new(),
             ivoa: 0,
             ivov: 0.0,
+            out: String::new(),
+            wait: 0,
             prec: 0,
             inp_links: Default::default(),
             num_vals: [0.0; 12],
@@ -455,6 +459,8 @@ impl Record for ScalcoutRecord {
             "OSV" => Some(EpicsValue::String(self.osv.clone())),
             "IVOA" => Some(EpicsValue::Short(self.ivoa)),
             "IVOV" => Some(EpicsValue::Double(self.ivov)),
+            "OUT" => Some(EpicsValue::String(self.out.clone())),
+            "WAIT" => Some(EpicsValue::Short(self.wait)),
             "PREC" => Some(EpicsValue::Short(self.prec)),
             _ => {
                 if let Some(idx) = Self::var_index(name) {
@@ -542,6 +548,8 @@ impl Record for ScalcoutRecord {
                     .ok_or_else(|| CaError::TypeMismatch("IVOV".into()))?;
                 Ok(())
             }
+            "OUT" => { if let EpicsValue::String(s) = value { self.out = s; Ok(()) } else { Err(CaError::TypeMismatch("OUT".into())) } }
+            "WAIT" => { self.wait = value.to_f64().unwrap_or(0.0) as i16; Ok(()) }
             "PREC" => match value {
                 EpicsValue::Short(v) => {
                     self.prec = v;

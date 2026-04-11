@@ -25,6 +25,32 @@ pub struct DfanoutRecord {
     pub outg: String,
     #[field(type = "String")]
     pub outh: String,
+    #[field(type = "String")]
+    pub outi: String,
+    #[field(type = "String")]
+    pub outj: String,
+    #[field(type = "String")]
+    pub outk: String,
+    #[field(type = "String")]
+    pub outl: String,
+    #[field(type = "String")]
+    pub outm: String,
+    #[field(type = "String")]
+    pub outn: String,
+    #[field(type = "String")]
+    pub outo: String,
+    #[field(type = "String")]
+    pub outp: String,
+    #[field(type = "String")]
+    pub dol: String,
+    #[field(type = "Short")]
+    pub omsl: i16,
+    #[field(type = "String")]
+    pub sell: String,
+    #[field(type = "Short")]
+    pub ivoa: i16,
+    #[field(type = "Double")]
+    pub ivov: f64,
 }
 
 impl Default for DfanoutRecord {
@@ -41,6 +67,19 @@ impl Default for DfanoutRecord {
             outf: String::new(),
             outg: String::new(),
             outh: String::new(),
+            outi: String::new(),
+            outj: String::new(),
+            outk: String::new(),
+            outl: String::new(),
+            outm: String::new(),
+            outn: String::new(),
+            outo: String::new(),
+            outp: String::new(),
+            dol: String::new(),
+            omsl: 0,
+            sell: String::new(),
+            ivoa: 0,
+            ivov: 0.0,
         }
     }
 }
@@ -57,7 +96,8 @@ impl DfanoutRecord {
     pub fn output_links(&self) -> Vec<&str> {
         [
             &self.outa, &self.outb, &self.outc, &self.outd, &self.oute, &self.outf, &self.outg,
-            &self.outh,
+            &self.outh, &self.outi, &self.outj, &self.outk, &self.outl, &self.outm, &self.outn,
+            &self.outo, &self.outp,
         ]
         .iter()
         .filter(|s| !s.is_empty())

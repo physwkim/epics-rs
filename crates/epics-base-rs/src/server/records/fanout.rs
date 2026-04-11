@@ -21,6 +21,30 @@ pub struct FanoutRecord {
     pub lnk5: String,
     #[field(type = "String")]
     pub lnk6: String,
+    #[field(type = "String")]
+    pub lnk7: String,
+    #[field(type = "String")]
+    pub lnk8: String,
+    #[field(type = "String")]
+    pub lnk9: String,
+    #[field(type = "String")]
+    pub lnka: String,
+    #[field(type = "String")]
+    pub lnkb: String,
+    #[field(type = "String")]
+    pub lnkc: String,
+    #[field(type = "String")]
+    pub lnkd: String,
+    #[field(type = "String")]
+    pub lnke: String,
+    #[field(type = "String")]
+    pub lnkf: String,
+    #[field(type = "String")]
+    pub sell: String,
+    #[field(type = "Short")]
+    pub offs: i16,
+    #[field(type = "Short")]
+    pub shft: i16,
 }
 
 impl Default for FanoutRecord {
@@ -35,6 +59,18 @@ impl Default for FanoutRecord {
             lnk4: String::new(),
             lnk5: String::new(),
             lnk6: String::new(),
+            lnk7: String::new(),
+            lnk8: String::new(),
+            lnk9: String::new(),
+            lnka: String::new(),
+            lnkb: String::new(),
+            lnkc: String::new(),
+            lnkd: String::new(),
+            lnke: String::new(),
+            lnkf: String::new(),
+            sell: String::new(),
+            offs: 0,
+            shft: 0,
         }
     }
 }
@@ -48,6 +84,8 @@ impl FanoutRecord {
     pub fn links(&self) -> Vec<&str> {
         [
             &self.lnk1, &self.lnk2, &self.lnk3, &self.lnk4, &self.lnk5, &self.lnk6,
+            &self.lnk7, &self.lnk8, &self.lnk9, &self.lnka, &self.lnkb, &self.lnkc,
+            &self.lnkd, &self.lnke, &self.lnkf,
         ]
         .iter()
         .filter(|s| !s.is_empty())
