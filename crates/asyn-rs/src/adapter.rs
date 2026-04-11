@@ -464,9 +464,7 @@ impl AsynDeviceSupport {
                 mask: self.mask,
             }),
             ("asynEnum", EpicsValue::Long(v)) => Some(RequestOp::EnumWrite { index: *v as usize }),
-            ("asynEnum", EpicsValue::Enum(v)) => {
-                Some(RequestOp::EnumWrite { index: *v as usize })
-            }
+            ("asynEnum", EpicsValue::Enum(v)) => Some(RequestOp::EnumWrite { index: *v as usize }),
             ("asynInt8Array", EpicsValue::CharArray(data)) => Some(RequestOp::Int8ArrayWrite {
                 data: data.iter().map(|&x| x as i8).collect(),
             }),

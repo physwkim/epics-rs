@@ -130,7 +130,9 @@ impl Record for MotorRecord {
         }
 
         let effects = self.do_process();
-        let move_started = !self.stat.dmov && !effects.commands.is_empty();
+        // DMOV=0 means a move started (or sub-step pulse).
+        // Flush DMOV=0 even if no commands were emitted (sub-step case).
+        let move_started = !self.stat.dmov;
 
         // Write effects to shared mailbox for DeviceSupport.write() to consume
         if let Some(state) = self.device_state.clone() {

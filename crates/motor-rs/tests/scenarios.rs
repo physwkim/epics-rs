@@ -477,17 +477,22 @@ fn comm_error_sets_alarm_and_safe_state() {
 }
 
 #[test]
-fn sub_step_move_is_suppressed() {
+fn sub_step_move_pulses_dmov() {
     let mut rec = make_record();
 
-    // Move to current position (< 1 step) -- C: too_small suppresses
+    // Move to current position (< 1 step) -- no motor command, but DMOV pulses
     rec.pos.dval = 0.0;
     rec.pos.drbv = 0.0;
     let effects = rec.plan_motion(CommandSource::Val);
-    assert!(rec.stat.dmov); // no move initiated
-    assert!(effects.commands.is_empty());
+    assert!(!rec.stat.dmov); // DMOV pulsed to 0
+    assert!(effects.commands.is_empty()); // no motor command
+    assert!(effects.request_poll); // triggers re-process
 
-    // Move that is at least 1 step should proceed
+    // Next process cycle: finalize restores DMOV=1
+    let _effects = rec.do_process();
+    assert!(rec.stat.dmov);
+
+    // Move that is at least 1 step should proceed normally
     rec.pos.dval = rec.conv.mres * 2.0; // 2 steps
     let effects = rec.plan_motion(CommandSource::Val);
     assert!(!rec.stat.dmov);
@@ -572,10 +577,9 @@ fn sim_motor_end_to_end() {
 /// Setting VAL to the current position must still produce a DMOV 1→0→1
 /// transition. ophyd/bluesky rely on this to detect move completion.
 #[test]
-fn move_to_same_position_is_suppressed() {
+fn move_to_same_position_pulses_dmov() {
     let mut rec = make_record();
 
-    // Start at position 0 with DMOV=1 (idle)
     rec.pos.val = 0.0;
     rec.pos.dval = 0.0;
     rec.pos.rval = 0;
@@ -584,22 +588,22 @@ fn move_to_same_position_is_suppressed() {
     rec.stat.dmov = true;
     rec.stat.phase = MotionPhase::Idle;
 
-    // Write VAL=0 (same position) -- C: too_small suppresses sub-step moves
+    // Write VAL=0 (same position) — DMOV pulses 1→0→1
     rec.put_field("VAL", EpicsValue::Double(0.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // Move is suppressed (less than 1 motor step difference)
-    assert!(rec.stat.dmov, "DMOV should remain 1 for zero-distance move");
-    assert!(effects.commands.is_empty());
+    assert!(!rec.stat.dmov, "DMOV should pulse to 0");
+    assert!(effects.commands.is_empty(), "no motor command for sub-step");
 
-    // DMOV must return to 1
-    assert!(rec.stat.dmov, "DMOV should be 1 after completion");
+    // Next process cycle restores DMOV=1
+    let _effects = rec.do_process();
+    assert!(rec.stat.dmov, "DMOV should return to 1");
     assert_eq!(rec.stat.phase, MotionPhase::Idle);
 }
 
 /// Same-position DMOV transition with SimMotor end-to-end.
 #[test]
-fn sim_motor_same_position_suppressed() {
+fn sim_motor_same_position_pulses_dmov() {
     let mut rec = make_record();
     rec.pos.val = 5.0;
     rec.pos.dval = 5.0;
@@ -609,13 +613,15 @@ fn sim_motor_same_position_suppressed() {
     rec.stat.dmov = true;
     rec.stat.phase = MotionPhase::Idle;
 
-    // Write VAL=5 (same position) -- C: too_small suppresses sub-step moves
+    // Write VAL=5 (same position) — DMOV pulses
     rec.put_field("VAL", EpicsValue::Double(5.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // Move suppressed (< 1 step difference)
-    assert!(rec.stat.dmov);
+    assert!(!rec.stat.dmov, "DMOV should pulse to 0");
     assert!(effects.commands.is_empty());
+
+    let _effects = rec.do_process();
+    assert!(rec.stat.dmov, "DMOV should return to 1");
 }
 
 /// Sequential moves: move to multiple positions and verify each.

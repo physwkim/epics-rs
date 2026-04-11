@@ -460,20 +460,40 @@ impl NDPluginProcess for ROIStatProcessor {
             let addr = i as i32;
             let bufs = &self.ts_buffers[i];
             // stat order: min=0, max=1, mean=2, total=3, net=4
-            if bufs.len() > 0 {
-                updates.push(ParamUpdate::float64_array_addr(p.ts_min_value, addr, bufs[0].clone()));
+            if !bufs.is_empty() {
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_min_value,
+                    addr,
+                    bufs[0].clone(),
+                ));
             }
             if bufs.len() > 1 {
-                updates.push(ParamUpdate::float64_array_addr(p.ts_max_value, addr, bufs[1].clone()));
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_max_value,
+                    addr,
+                    bufs[1].clone(),
+                ));
             }
             if bufs.len() > 2 {
-                updates.push(ParamUpdate::float64_array_addr(p.ts_mean_value, addr, bufs[2].clone()));
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_mean_value,
+                    addr,
+                    bufs[2].clone(),
+                ));
             }
             if bufs.len() > 3 {
-                updates.push(ParamUpdate::float64_array_addr(p.ts_total, addr, bufs[3].clone()));
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_total,
+                    addr,
+                    bufs[3].clone(),
+                ));
             }
             if bufs.len() > 4 {
-                updates.push(ParamUpdate::float64_array_addr(p.ts_net, addr, bufs[4].clone()));
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_net,
+                    addr,
+                    bufs[4].clone(),
+                ));
             }
         }
 
@@ -515,10 +535,8 @@ impl NDPluginProcess for ROIStatProcessor {
         self.params.net = base.create_param("ROISTAT_NET", ParamType::Float64)?;
 
         // Time series waveform arrays (per-ROI)
-        self.params.ts_total =
-            base.create_param("ROISTAT_TS_TOTAL", ParamType::Float64Array)?;
-        self.params.ts_net =
-            base.create_param("ROISTAT_TS_NET", ParamType::Float64Array)?;
+        self.params.ts_total = base.create_param("ROISTAT_TS_TOTAL", ParamType::Float64Array)?;
+        self.params.ts_net = base.create_param("ROISTAT_TS_NET", ParamType::Float64Array)?;
         self.params.ts_mean_value =
             base.create_param("ROISTAT_TS_MEAN_VALUE", ParamType::Float64Array)?;
         self.params.ts_min_value =

@@ -650,7 +650,6 @@ impl PvDatabase {
                 None
             };
 
-
             // Compute event mask (after OUT stage so async writes don't
             // update MLST/ALST prematurely before returning early)
             use crate::server::recgbl::EventMask;

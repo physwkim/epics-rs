@@ -197,11 +197,17 @@ impl MotorRecord {
             let npos = (self.pos.dval / self.conv.mres).round() as i64;
             let rpos = (self.pos.drbv / self.conv.mres).round() as i64;
             if (npos - rpos).abs() < 1 {
-                // Sub-step move: still pulse DMOV 1→0→1 so clients
-                // (ophyd/bluesky) detect the move completed immediately.
+                // Sub-step move: pulse DMOV 1→0→1 so clients
+                // (ophyd/bluesky) detect the move completed.
+                // Set dmov=false now; process() will flush DMOV=0 via
+                // AsyncPendingNotify, then the immediate re-process
+                // (with no pending event) will finalize with DMOV=1.
                 self.stat.dmov = false;
+                self.stat.movn = true;
                 self.suppress_flnk = true;
-                self.finalize_motion(effects);
+                // Request a poll so the next I/O Intr cycle completes
+                effects.request_poll = true;
+                effects.suppress_forward_link = true;
                 return;
             }
         }
@@ -685,6 +691,14 @@ impl MotorRecord {
             self.stat.stup = 0;
             let mut effects = ProcessEffects::default();
             effects.status_refresh = true;
+            return effects;
+        }
+
+        // Sub-step pulse recovery: if DMOV is false but phase is Idle
+        // (no real motion started), finalize to restore DMOV=1.
+        if !self.stat.dmov && self.stat.phase == MotionPhase::Idle && self.stat.mip.is_empty() {
+            let mut effects = ProcessEffects::default();
+            self.finalize_motion(&mut effects);
             return effects;
         }
 
