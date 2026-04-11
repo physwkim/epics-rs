@@ -46,13 +46,15 @@ impl CompressRecord {
 
     /// Push a value into the compress record.
     pub fn push_value(&mut self, input: f64) {
+        if self.nsam <= 0 { return; }
+        let nsam = self.nsam as usize;
         match self.alg {
             3 => {
                 // Circular buffer
-                let idx = self.off as usize % self.nsam as usize;
+                let idx = self.off as usize % nsam;
                 self.val[idx] = input;
                 self.off += 1;
-                if (self.nuse as usize) < self.nsam as usize {
+                if (self.nuse as usize) < nsam {
                     self.nuse += 1;
                 }
             }
@@ -66,10 +68,10 @@ impl CompressRecord {
                         2 => self.accum.iter().sum::<f64>() / self.accum.len() as f64, // Mean
                         _ => 0.0,
                     };
-                    let idx = self.off as usize % self.nsam as usize;
+                    let idx = self.off as usize % nsam;
                     self.val[idx] = compressed;
                     self.off += 1;
-                    if (self.nuse as usize) < self.nsam as usize {
+                    if (self.nuse as usize) < nsam {
                         self.nuse += 1;
                     }
                     self.accum.clear();

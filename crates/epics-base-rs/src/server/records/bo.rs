@@ -33,6 +33,7 @@ pub struct BoRecord {
     pub siml: String,
     pub siol: String,
     pub sims: i16,
+    high_active: bool,
 }
 
 impl Default for BoRecord {
@@ -60,6 +61,7 @@ impl Default for BoRecord {
             siml: String::new(),
             siol: String::new(),
             sims: 0,
+            high_active: false,
         }
     }
 }
@@ -233,6 +235,12 @@ impl Record for BoRecord {
     }
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
+        // HIGH toggle callback: set val=0 on reprocess (C: myCallbackFunc)
+        if self.high_active {
+            self.val = 0;
+            self.high_active = false;
+        }
+
         // DOL/OMSL: constant DOL handling
         if self.omsl == 1 && !self.dol.is_empty() {
             if let Some(v) = dol_as_constant(&self.dol) {
@@ -249,6 +257,7 @@ impl Record for BoRecord {
         // HIGH toggle: if val==1 and high>0, schedule reprocess after HIGH seconds
         let mut actions = Vec::new();
         if self.val == 1 && self.high > 0.0 {
+            self.high_active = true;
             actions.push(ProcessAction::ReprocessAfter(
                 std::time::Duration::from_secs_f64(self.high),
             ));
