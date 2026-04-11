@@ -7,6 +7,7 @@ pub struct CalcoutRecord {
     pub val: f64,
     pub calc: String,
     pub oopt: i16, // Output Option: 0=Every, 1=OnChange, 2=WhenZero, 3=WhenNonzero, 4=TransZero, 5=TransNonzero
+    cached_should_output: bool, // Cached result from process() for framework
     pub dopt: i16, // Data Option: 0=Use CALC, 1=Use OCAL
     pub ocal: String,
     pub oval: f64,
@@ -77,6 +78,7 @@ impl Default for CalcoutRecord {
             val: 0.0,
             calc: String::new(),
             oopt: 0,
+            cached_should_output: false,
             dopt: 0,
             ocal: String::new(),
             oval: 0.0,
@@ -451,7 +453,9 @@ impl Record for CalcoutRecord {
     }
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
-        self.pval = self.val;
+        // NOTE: pval is updated AFTER CALC evaluation (at the end),
+        // not before. It holds the previous cycle's value for
+        // transition detection in should_output().
 
         // Evaluate CALC using cached RPCL
         if let Some(ref compiled) = self.rpcl {
@@ -499,6 +503,15 @@ impl Record for CalcoutRecord {
         self.lj = self.j;
         self.lk = self.k;
         self.ll = self.l;
+
+        // Cache should_output result BEFORE updating pval, because
+        // framework calls should_output() after process() returns,
+        // but by then pval would already equal val.
+        self.cached_should_output = self.should_output();
+
+        // Now update pval for next cycle
+        self.pval = self.val;
+
         Ok(ProcessOutcome::complete())
     }
 
@@ -817,7 +830,7 @@ impl Record for CalcoutRecord {
     }
 
     fn should_output(&self) -> bool {
-        self.should_output()
+        self.cached_should_output
     }
 
     fn can_device_write(&self) -> bool {

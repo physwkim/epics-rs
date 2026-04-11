@@ -586,10 +586,9 @@ impl PvDatabase {
                 // Write OVAL to OUT when the record says should_output().
                 if record_should_output {
                     if let crate::server::record::ParsedLink::Db(ref link) = instance.parsed_out {
-                        let out_val = instance
-                            .record
-                            .get_field("OVAL")
-                            .or_else(|| instance.record.val());
+                        let oval = instance.record.get_field("OVAL");
+                        let val = instance.record.val();
+                        let out_val = oval.or(val);
                         out_val.map(|v| (link.clone(), v))
                     } else {
                         None
@@ -650,6 +649,7 @@ impl PvDatabase {
                 }
                 None
             };
+
 
             // Compute event mask (after OUT stage so async writes don't
             // update MLST/ALST prematurely before returning early)
@@ -750,8 +750,8 @@ impl PvDatabase {
         }
 
         // 4. OUT link
-        if let Some((link, out_val)) = out_info {
-            self.write_db_link_value(&link, out_val, visited, depth)
+        if let Some((ref link, ref out_val)) = out_info {
+            self.write_db_link_value(link, out_val.clone(), visited, depth)
                 .await;
         }
 
@@ -943,12 +943,11 @@ impl PvDatabase {
                     }
                 }
                 ProcessAction::WriteDbLink { link_field, value } => {
-                    // 1. Get the link string from the record
+                    // 1. Get the link string (record fields → common fields)
                     let link_str = {
                         let instance = rec.read().await;
                         instance
-                            .record
-                            .get_field(link_field)
+                            .resolve_field(link_field)
                             .and_then(|v| {
                                 if let EpicsValue::String(s) = v {
                                     Some(s)
