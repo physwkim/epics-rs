@@ -1045,7 +1045,10 @@ impl AsynRecord {
                 self.cnct = 1;
                 self.enbl = 1;
                 self.auct = 1;
-                self.errs.clear();
+                // Only clear errors if drv_user_create succeeded (don't mask the error)
+                if self.errs.is_empty() || self.resolved_reason != 0 || self.drvinfo.is_empty() {
+                    self.errs.clear();
+                }
             }
             None => {
                 self.errs = format!("port '{}' not found", self.port);

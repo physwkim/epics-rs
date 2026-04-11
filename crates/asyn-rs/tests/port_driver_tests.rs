@@ -421,6 +421,7 @@ async fn test_interrupt_on_param_change() {
     let (_sub, mut rx) = h.interrupts().register_interrupt_user(InterruptFilter {
         reason: Some(reason),
         addr: Some(0),
+        ..Default::default()
     });
     h.write_float64(reason, 0, 0.5).await.unwrap();
     let iv = tokio::time::timeout(Duration::from_millis(200), rx.recv())
@@ -449,6 +450,7 @@ async fn test_interrupt_filter_excludes_other_params() {
     let (_sub, mut rx) = h.interrupts().register_interrupt_user(InterruptFilter {
         reason: Some(noise_r),
         addr: Some(0),
+        ..Default::default()
     });
 
     // Write only to UpdateTime — should NOT trigger NoiseAmplitude interrupt
@@ -468,10 +470,12 @@ async fn test_multiple_interrupt_subscribers() {
     let (_sub1, mut rx1) = h.interrupts().register_interrupt_user(InterruptFilter {
         reason: Some(reason),
         addr: Some(0),
+        ..Default::default()
     });
     let (_sub2, mut rx2) = h.interrupts().register_interrupt_user(InterruptFilter {
         reason: Some(reason),
         addr: Some(0),
+        ..Default::default()
     });
     h.write_int32(reason, 0, 1).await.unwrap();
     let iv1 = tokio::time::timeout(Duration::from_millis(200), rx1.recv())

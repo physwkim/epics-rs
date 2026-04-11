@@ -177,6 +177,32 @@ fn baud_to_speed(baud: u32) -> libc::speed_t {
         57600 => libc::B57600,
         115200 => libc::B115200,
         230400 => libc::B230400,
+        // High baud rates: available on Linux/FreeBSD/NetBSD, not macOS.
+        // C parity: conditional on #ifdef B460800 etc.
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        460800 => libc::B460800,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        500000 => libc::B500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        576000 => libc::B576000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        921600 => libc::B921600,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        1000000 => libc::B1000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        1152000 => libc::B1152000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        1500000 => libc::B1500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        2000000 => libc::B2000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        2500000 => libc::B2500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        3000000 => libc::B3000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        3500000 => libc::B3500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        4000000 => libc::B4000000,
         _ => libc::B9600, // fallback
     }
 }
@@ -203,6 +229,30 @@ fn speed_to_baud(speed: libc::speed_t) -> u32 {
         libc::B57600 => 57600,
         libc::B115200 => 115200,
         libc::B230400 => 230400,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B460800 => 460800,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B500000 => 500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B576000 => 576000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B921600 => 921600,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B1000000 => 1000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B1152000 => 1152000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B1500000 => 1500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B2000000 => 2000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B2500000 => 2500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B3000000 => 3000000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B3500000 => 3500000,
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+        libc::B4000000 => 4000000,
         _ => 0,
     }
 }
@@ -340,7 +390,9 @@ impl OctetNext for SerialIoState {
 
     fn flush(&mut self, _user: &mut AsynUser) -> AsynResult<()> {
         if let Some(fd) = self.fd {
-            let ret = unsafe { libc::tcdrain(fd) };
+            // C parity: tcflush(TCIFLUSH) discards received-but-unread input data,
+            // matching C drvAsynSerialPort's flush behavior. NOT tcdrain (output wait).
+            let ret = unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
             if ret < 0 {
                 return Err(AsynError::Io(std::io::Error::last_os_error()));
             }
@@ -693,6 +745,43 @@ impl PortDriver for DrvAsynSerialPort {
                     self.apply_termios(&t)?;
                 }
             }
+            "ixany" => {
+                let enabled = parse_bool_option(value)?;
+                if self.io.fd.is_some() {
+                    let mut t = self.get_current_termios()?;
+                    if enabled {
+                        t.c_iflag |= libc::IXANY;
+                    } else {
+                        t.c_iflag &= !libc::IXANY;
+                    }
+                    self.apply_termios(&t)?;
+                }
+            }
+            "break" => {
+                // C parity: "off" = no-op, "" or "on" = standard break,
+                // numeric = break duration in ms
+                if value == "off" {
+                    // no-op
+                } else if let Some(fd) = self.io.fd {
+                    // Drain output first (C parity: tcdrain before tcsendbreak)
+                    if unsafe { libc::tcdrain(fd) } < 0 {
+                        return Err(AsynError::Io(std::io::Error::last_os_error()));
+                    }
+                    let duration = if value.is_empty() || value == "on" {
+                        0 // standard break duration
+                    } else {
+                        value.parse::<i32>().unwrap_or(0)
+                    };
+                    let ret = unsafe { libc::tcsendbreak(fd, duration) };
+                    if ret < 0 {
+                        return Err(AsynError::Io(std::io::Error::last_os_error()));
+                    }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            "rs485_enable" | "rs485_rts_on_send" | "rs485_rts_after_send" => {
+                self.set_rs485_option(key, value)?;
+            }
             _ => {
                 self.base.options.insert(key.to_string(), value.to_string());
             }
@@ -721,6 +810,75 @@ impl PortDriver for DrvAsynSerialPort {
                 StopBits::Two => "2",
             }
             .to_string()),
+            "clocal" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_cflag & libc::CLOCAL != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
+            "crtscts" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_cflag & libc::CRTSCTS != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
+                } else {
+                    Ok(match self.config.flow_control {
+                        FlowControl::Hardware => "Y",
+                        _ => "N",
+                    }
+                    .to_string())
+                }
+            }
+            "ixon" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_iflag & libc::IXON != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
+            "ixoff" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_iflag & libc::IXOFF != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
+            "ixany" => {
+                if self.io.fd.is_some() {
+                    let t = self.get_current_termios()?;
+                    Ok(if t.c_iflag & libc::IXANY != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
+                } else {
+                    Ok("N".to_string())
+                }
+            }
             _ => self
                 .base
                 .options
@@ -728,6 +886,64 @@ impl PortDriver for DrvAsynSerialPort {
                 .cloned()
                 .ok_or_else(|| AsynError::OptionNotFound(key.to_string())),
         }
+    }
+
+    // --- RS485 support (Linux only) ---
+
+    #[cfg(target_os = "linux")]
+    fn set_rs485_option(&mut self, key: &str, value: &str) -> AsynResult<()> {
+        use std::mem::MaybeUninit;
+
+        let fd = self.io.fd.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Disconnected,
+            message: "not connected".into(),
+        })?;
+
+        // Read current RS485 config
+        let mut rs485 = unsafe {
+            let mut buf = MaybeUninit::<libc::c_ulong>::zeroed();
+            // SER_RS485_ENABLED = 1, ioctl TIOCGRS485 = 0x542E
+            let ret = libc::ioctl(fd, 0x542E_u64, buf.as_mut_ptr());
+            if ret < 0 {
+                return Err(AsynError::Io(std::io::Error::last_os_error()));
+            }
+            buf.assume_init()
+        };
+
+        let enabled = parse_bool_option(value).unwrap_or(false);
+        match key {
+            "rs485_enable" => {
+                if enabled {
+                    rs485 |= 1;
+                } else {
+                    rs485 &= !1;
+                } // SER_RS485_ENABLED
+            }
+            "rs485_rts_on_send" => {
+                if enabled {
+                    rs485 |= 2;
+                } else {
+                    rs485 &= !2;
+                } // SER_RS485_RTS_ON_SEND
+            }
+            "rs485_rts_after_send" => {
+                if enabled {
+                    rs485 |= 4;
+                } else {
+                    rs485 &= !4;
+                } // SER_RS485_RTS_AFTER_SEND
+            }
+            _ => {}
+        }
+
+        // Apply
+        unsafe {
+            let ret = libc::ioctl(fd, 0x542F_u64, &rs485); // TIOCSRS485
+            if ret < 0 {
+                return Err(AsynError::Io(std::io::Error::last_os_error()));
+            }
+        }
+        Ok(())
     }
 }
 

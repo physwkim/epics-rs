@@ -12,6 +12,10 @@ pub struct InterruptFilter {
     pub reason: Option<usize>,
     /// If set, only receive interrupts with this addr.
     pub addr: Option<i32>,
+    /// For UInt32Digital: bitmask of bits this subscriber is interested in.
+    /// If set, only interrupts where changed bits overlap this mask are forwarded.
+    /// C parity: pInterrupt->mask in asynUInt32DigitalInterrupt.
+    pub uint32_mask: Option<u32>,
 }
 
 /// RAII subscription handle. Dropping this cancels the subscription.
@@ -43,6 +47,8 @@ pub struct InterruptValue {
     pub addr: i32,
     pub value: ParamValue,
     pub timestamp: SystemTime,
+    /// For UInt32Digital: bitmask of which bits changed (for per-callback filtering).
+    pub uint32_changed_mask: u32,
 }
 
 /// Manages interrupt/callback delivery via async broadcast channel.
@@ -114,6 +120,10 @@ impl InterruptManager {
                                 if let Some(a) = filter.addr {
                                     if iv.addr != a { continue; }
                                 }
+                                // C parity: UInt32Digital per-callback mask filtering
+                                if let Some(m) = filter.uint32_mask {
+                                    if iv.uint32_changed_mask & m == 0 { continue; }
+                                }
                                 if tx.send(iv).await.is_err() { break; }
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -141,6 +151,7 @@ mod tests {
             addr: 0,
             value: ParamValue::Float64(3.14),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
         let v = rx.recv().await.unwrap();
         assert_eq!(v.reason, 1);
@@ -156,6 +167,7 @@ mod tests {
             addr: 0,
             value: ParamValue::Int32(99),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
         let v1 = rx1.recv().await.unwrap();
         let v2 = rx2.recv().await.unwrap();
@@ -169,6 +181,7 @@ mod tests {
         let (_sub, mut rx) = im.register_interrupt_user(InterruptFilter {
             reason: Some(1),
             addr: None,
+            ..Default::default()
         });
 
         // Send reason 0 — should NOT be received
@@ -177,6 +190,7 @@ mod tests {
             addr: 0,
             value: ParamValue::Int32(10),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
 
         // Send reason 1 — should be received
@@ -185,6 +199,7 @@ mod tests {
             addr: 0,
             value: ParamValue::Int32(20),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
 
         let v = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -205,6 +220,7 @@ mod tests {
         let (_sub, mut rx) = im.register_interrupt_user(InterruptFilter {
             reason: None,
             addr: Some(3),
+            ..Default::default()
         });
 
         im.notify(InterruptValue {
@@ -212,12 +228,14 @@ mod tests {
             addr: 0,
             value: ParamValue::Int32(1),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
         im.notify(InterruptValue {
             reason: 0,
             addr: 3,
             value: ParamValue::Int32(2),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
 
         let v = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -237,6 +255,7 @@ mod tests {
             addr: 2,
             value: ParamValue::Float64(1.5),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
 
         let v = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -263,6 +282,7 @@ mod tests {
             addr: 0,
             value: ParamValue::Int32(999),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
 
         // Should not receive anything (or channel is closed)
@@ -280,10 +300,12 @@ mod tests {
         let (_sub1, mut rx1) = im.register_interrupt_user(InterruptFilter {
             reason: Some(0),
             addr: None,
+            ..Default::default()
         });
         let (_sub2, mut rx2) = im.register_interrupt_user(InterruptFilter {
             reason: Some(1),
             addr: None,
+            ..Default::default()
         });
 
         im.notify(InterruptValue {
@@ -291,12 +313,14 @@ mod tests {
             addr: 0,
             value: ParamValue::Int32(10),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
         im.notify(InterruptValue {
             reason: 1,
             addr: 0,
             value: ParamValue::Int32(20),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
 
         let v1 = tokio::time::timeout(std::time::Duration::from_millis(100), rx1.recv())
@@ -320,6 +344,7 @@ mod tests {
             addr: 0,
             value: ParamValue::Int32(1),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         });
     }
 }

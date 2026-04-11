@@ -64,6 +64,18 @@ pub enum RequestOp {
     Connect,
     /// Disconnect from the port (bypass enabled/connected checks).
     Disconnect,
+    /// Connect a specific device address (multi-device ports).
+    ConnectAddr,
+    /// Disconnect a specific device address (multi-device ports).
+    DisconnectAddr,
+    /// Enable a specific device address (multi-device ports).
+    EnableAddr,
+    /// Disable a specific device address (multi-device ports).
+    DisableAddr,
+    /// Query int32 bounds (low, high).
+    GetBoundsInt32,
+    /// Query int64 bounds (low, high).
+    GetBoundsInt64,
     /// Block the port: only this user's requests will be dequeued until unblocked.
     BlockProcess,
     /// Unblock the port.
@@ -181,6 +193,8 @@ pub struct RequestResult {
     pub timestamp: Option<SystemTime>,
     /// Option value string (from GetOption).
     pub option_value: Option<String>,
+    /// Int64 bounds (from GetBoundsInt32/Int64).
+    pub bounds: Option<(i64, i64)>,
 }
 
 impl RequestResult {
@@ -206,6 +220,7 @@ impl RequestResult {
             alarm_severity: 0,
             timestamp: None,
             option_value: None,
+            bounds: None,
         }
     }
 
@@ -308,6 +323,13 @@ impl RequestResult {
     pub fn option_read(value: String) -> Self {
         Self {
             option_value: Some(value),
+            ..Self::base()
+        }
+    }
+
+    pub fn bounds_read(low: i64, high: i64) -> Self {
+        Self {
+            bounds: Some((low, high)),
             ..Self::base()
         }
     }

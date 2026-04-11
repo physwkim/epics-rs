@@ -177,12 +177,18 @@ pub struct AsynDeviceSupport {
     write_only: bool,
     /// RAII interrupt subscription — dropping unsubscribes.
     interrupt_sub: Option<InterruptSubscription>,
-    /// Shared cache for the latest interrupt value. Written by the I/O Intr
-    /// forwarding task, read by read(). When an I/O Intr record is processed
-    /// due to an interrupt, read() uses this cached value instead of sending
-    /// a blocking read to the port driver. This matches C EPICS behavior
+    /// Shared cache for the latest interrupt value and its timestamp. Written by
+    /// the I/O Intr forwarding task, read by read(). When an I/O Intr record is
+    /// processed due to an interrupt, read() uses this cached value instead of
+    /// sending a blocking read to the port driver. This matches C EPICS behavior
     /// where the interrupt callback directly provides the value.
-    interrupt_cache: Arc<std::sync::Mutex<Option<crate::param::ParamValue>>>,
+    interrupt_cache: Arc<std::sync::Mutex<Option<CachedInterrupt>>>,
+}
+
+/// Cached interrupt value with metadata for alarm/timestamp propagation.
+struct CachedInterrupt {
+    value: crate::param::ParamValue,
+    timestamp: SystemTime,
 }
 
 impl AsynDeviceSupport {
@@ -277,6 +283,30 @@ fn asyn_to_ca_error(e: AsynError) -> CaError {
     CaError::Protocol(e.to_string())
 }
 
+/// Convert an asyn error to EPICS alarm status/severity pair.
+/// Matches C asyn's `asynStatusToEpicsAlarm()` conversion:
+/// - Success → no alarm (0, 0)
+/// - Timeout → READ alarm, MAJOR severity
+/// - Error/Overflow → READ alarm, MAJOR severity
+/// - Disconnected/Disabled → COMM alarm, INVALID severity
+fn asyn_error_to_alarm(e: &AsynError) -> (u16, u16) {
+    match e {
+        AsynError::Status {
+            status: crate::error::AsynStatus::Timeout,
+            ..
+        } => (7, 2), // READ_ALARM=7, MAJOR_ALARM=2
+        AsynError::Status {
+            status: crate::error::AsynStatus::Disconnected,
+            ..
+        }
+        | AsynError::Status {
+            status: crate::error::AsynStatus::Disabled,
+            ..
+        } => (9, 3), // COMM_ALARM=9, INVALID_ALARM=3
+        _ => (7, 2), // Default: READ_ALARM, MAJOR
+    }
+}
+
 /// Convert an asyn ParamValue to an EpicsValue.
 fn param_value_to_epics_value(pv: &crate::param::ParamValue) -> Option<EpicsValue> {
     use crate::param::ParamValue;
@@ -355,14 +385,14 @@ impl AsynDeviceSupport {
     fn result_to_value(&self, result: &RequestResult) -> Option<EpicsValue> {
         match self.iface_type.as_str() {
             "asynInt32" => result.int_val.map(EpicsValue::Long),
-            "asynInt64" => result.int64_val.map(|v| EpicsValue::Long(v as i32)),
+            "asynInt64" => result.int64_val.map(|v| EpicsValue::Double(v as f64)),
             "asynFloat64" => result.float_val.map(EpicsValue::Double),
             "asynOctet" => result.data.as_ref().map(|d| {
                 let n = result.nbytes.min(d.len());
                 EpicsValue::String(String::from_utf8_lossy(&d[..n]).into_owned())
             }),
             "asynUInt32Digital" => result.uint_val.map(|v| EpicsValue::Long(v as i32)),
-            "asynEnum" => result.enum_index.map(|v| EpicsValue::Long(v as i32)),
+            "asynEnum" => result.enum_index.map(|v| EpicsValue::Enum(v as u16)),
             "asynInt8Array" => result
                 .int8_array
                 .clone()
@@ -429,7 +459,14 @@ impl AsynDeviceSupport {
                 value: *v as u32,
                 mask: self.mask,
             }),
+            ("asynUInt32Digital", EpicsValue::Enum(v)) => Some(RequestOp::UInt32DigitalWrite {
+                value: *v as u32,
+                mask: self.mask,
+            }),
             ("asynEnum", EpicsValue::Long(v)) => Some(RequestOp::EnumWrite { index: *v as usize }),
+            ("asynEnum", EpicsValue::Enum(v)) => {
+                Some(RequestOp::EnumWrite { index: *v as usize })
+            }
             ("asynInt8Array", EpicsValue::CharArray(data)) => Some(RequestOp::Int8ArrayWrite {
                 data: data.iter().map(|&x| x as i8).collect(),
             }),
@@ -457,7 +494,9 @@ impl DeviceSupport for AsynDeviceSupport {
     fn init(&mut self, record: &mut dyn Record) -> CaResult<()> {
         if !self.reason_set {
             match self.handle.drv_user_create_blocking(&self.drv_info) {
-                Ok(reason) => self.reason = reason,
+                Ok(reason) => {
+                    self.reason = reason;
+                }
                 Err(_) => {
                     // Param not found — this record has no corresponding driver param.
                     // Silently disable this device support (no-op reads/writes).
@@ -514,29 +553,39 @@ impl DeviceSupport for AsynDeviceSupport {
         // where the interrupt callback directly provides the new value.
         if self.scan == ScanType::IoIntr {
             let cached = self.interrupt_cache.lock().unwrap().take();
-            if let Some(pv) = cached {
-                if let Some(val) = param_value_to_epics_value(&pv) {
+            if let Some(ci) = cached {
+                if let Some(val) = param_value_to_epics_value(&ci.value) {
                     let _ = record.set_val(val);
                 }
-                return Ok(DeviceReadOutcome::ok());
+                self.last_ts = Some(ci.timestamp);
             }
-            return Ok(DeviceReadOutcome::ok());
+            // Return computed() so the record skips its built-in
+            // RVAL→VAL conversion and uses the value we just set.
+            return Ok(DeviceReadOutcome::computed());
         }
 
         if let Some(op) = self.read_op() {
             let user = AsynUser::new(self.reason)
                 .with_addr(self.addr)
                 .with_timeout(self.timeout);
-            if let Ok(result) = self.handle.submit_blocking(op, user) {
-                if let Some(val) = self.result_to_value(&result) {
-                    let _ = record.set_val(val);
+            match self.handle.submit_blocking(op, user) {
+                Ok(result) => {
+                    if let Some(val) = self.result_to_value(&result) {
+                        let _ = record.set_val(val);
+                    }
+                    self.last_alarm_status = result.alarm_status;
+                    self.last_alarm_severity = result.alarm_severity;
+                    self.last_ts = result.timestamp;
                 }
-                self.last_alarm_status = result.alarm_status;
-                self.last_alarm_severity = result.alarm_severity;
-                self.last_ts = result.timestamp;
+                Err(e) => {
+                    // Convert asyn error to EPICS alarm (C parity: asynStatusToEpicsAlarm)
+                    let (alarm_status, alarm_severity) = asyn_error_to_alarm(&e);
+                    self.last_alarm_status = alarm_status;
+                    self.last_alarm_severity = alarm_severity;
+                }
             }
         }
-        Ok(DeviceReadOutcome::ok())
+        Ok(DeviceReadOutcome::computed())
     }
 
     fn write(&mut self, record: &mut dyn Record) -> CaResult<()> {
@@ -619,6 +668,7 @@ impl DeviceSupport for AsynDeviceSupport {
         let filter = InterruptFilter {
             reason: Some(self.reason),
             addr: Some(self.addr),
+            uint32_mask: None,
         };
 
         let (sub, intr_rx) = self.handle.interrupts().register_interrupt_user(filter);
@@ -629,10 +679,10 @@ impl DeviceSupport for AsynDeviceSupport {
         let cache = self.interrupt_cache.clone();
         tokio::spawn(async move {
             while let Some(iv) = intr_rx.recv().await {
-                // Cache the interrupt value so read() can use it without
-                // a blocking port request. This matches C EPICS where the
-                // interrupt callback directly provides the new value.
-                *cache.lock().unwrap() = Some(iv.value);
+                *cache.lock().unwrap() = Some(CachedInterrupt {
+                    value: iv.value,
+                    timestamp: iv.timestamp,
+                });
                 if tx.send(()).await.is_err() {
                     break;
                 }

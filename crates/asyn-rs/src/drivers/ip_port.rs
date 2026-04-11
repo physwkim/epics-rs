@@ -37,6 +37,8 @@ pub enum IpProtocol {
     UdpMulticast,
     /// Unix domain socket (unix://path).
     Unix,
+    /// HTTP: TCP with connect-per-transaction (C parity: FLAG_CONNECT_PER_TRANSACTION).
+    Http,
 }
 
 /// Configuration for an IP port connection.
@@ -111,6 +113,7 @@ fn parse_protocol_suffix(spec: &str) -> (&str, IpProtocol) {
         (" TCP&", IpProtocol::TcpNonBlocking),
         (" UDP&", IpProtocol::UdpBroadcast),
         (" UDP*", IpProtocol::UdpMulticast),
+        (" HTTP", IpProtocol::Http),
         (" TCP", IpProtocol::Tcp),
         (" UDP", IpProtocol::Udp),
     ] {
@@ -197,6 +200,40 @@ enum IpIoInner {
     Udp(UdpSocket),
     #[cfg(unix)]
     Unix(std::os::unix::net::UnixStream),
+}
+
+/// Write all data with retry on WouldBlock/Interrupted, enforcing a deadline.
+fn write_with_retry(
+    stream: &mut impl Write,
+    data: &[u8],
+    deadline: std::time::Instant,
+) -> AsynResult<()> {
+    let mut offset = 0;
+    while offset < data.len() {
+        if std::time::Instant::now() > deadline {
+            return Err(AsynError::Status {
+                status: AsynStatus::Timeout,
+                message: "write timeout".into(),
+            });
+        }
+        match stream.write(&data[offset..]) {
+            Ok(0) => {
+                return Err(AsynError::Status {
+                    status: AsynStatus::Timeout,
+                    message: "write returned 0 bytes".into(),
+                });
+            }
+            Ok(n) => offset += n,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(AsynError::Io(e)),
+        }
+    }
+    Ok(())
 }
 
 struct IpIoState {
@@ -288,10 +325,11 @@ impl OctetNext for IpIoState {
             status: AsynStatus::Disconnected,
             message: "not connected".into(),
         })?;
+        let deadline = std::time::Instant::now() + user.timeout;
         match inner {
             IpIoInner::Tcp(stream) => {
                 stream.set_write_timeout(Some(user.timeout))?;
-                stream.write_all(data)?;
+                write_with_retry(stream, data, deadline)?;
             }
             IpIoInner::Udp(socket) => {
                 socket.set_write_timeout(Some(user.timeout))?;
@@ -300,7 +338,7 @@ impl OctetNext for IpIoState {
             #[cfg(unix)]
             IpIoInner::Unix(stream) => {
                 stream.set_write_timeout(Some(user.timeout))?;
-                stream.write_all(data)?;
+                write_with_retry(stream, data, deadline)?;
             }
         }
         Ok(data.len())
@@ -527,6 +565,14 @@ impl PortDriver for DrvAsynIPPort {
                     message: "Unix domain sockets not supported on this platform".into(),
                 });
             }
+            IpProtocol::Http => {
+                // C parity: HTTP uses TCP with connect-per-transaction semantics.
+                // Connection is established here, but io_write_octet disconnects after
+                // each write/read cycle.
+                let stream = self.connect_tcp()?;
+                stream.set_nodelay(true)?;
+                self.io.inner = Some(IpIoInner::Tcp(stream));
+            }
         }
         self.base.connected = true;
         self.base.announce_exception(AsynException::Connect, -1);
@@ -556,6 +602,10 @@ impl PortDriver for DrvAsynIPPort {
     }
 
     fn read_octet(&mut self, user: &AsynUser, buf: &mut [u8]) -> AsynResult<usize> {
+        // HTTP connect-per-transaction: reconnect if disconnected
+        if self.config.protocol == IpProtocol::Http && !self.base.connected {
+            let _ = self.connect(&AsynUser::default());
+        }
         self.base.check_ready()?;
         let result = self
             .base
@@ -570,19 +620,41 @@ impl PortDriver for DrvAsynIPPort {
                     &buf[..r.nbytes_transferred],
                     "read"
                 );
+                // HTTP: disconnect after each read (connect-per-transaction)
+                if self.config.protocol == IpProtocol::Http {
+                    self.io.inner = None;
+                    self.base.connected = false;
+                    self.base.announce_exception(AsynException::Connect, -1);
+                }
                 Ok(r.nbytes_transferred)
             }
-            Err(ref e) if self.disconnect_on_read_timeout => {
-                if let AsynError::Status {
-                    status: AsynStatus::Timeout,
-                    ..
-                } = e
-                {
+            Err(ref e) => {
+                let is_timeout = matches!(
+                    e,
+                    AsynError::Status {
+                        status: AsynStatus::Timeout,
+                        ..
+                    }
+                );
+                let is_disconnect = matches!(
+                    e,
+                    AsynError::Status {
+                        status: AsynStatus::Disconnected,
+                        ..
+                    }
+                );
+                // C parity: auto-disconnect on:
+                // 1. disconnectOnReadTimeout AND timeout error
+                // 2. Any real error that isn't timeout/WouldBlock (e.g. connection reset, EOF)
+                let should_disconnect = (self.disconnect_on_read_timeout && is_timeout)
+                    || is_disconnect
+                    || (!is_timeout && matches!(e, AsynError::Io(_)));
+                if should_disconnect && self.base.connected {
                     asyn_trace!(
                         Some(self.base.trace),
                         &self.base.port_name,
                         TraceMask::FLOW,
-                        "disconnectOnReadTimeout triggered"
+                        "read error, disconnecting: {e}"
                     );
                     self.io.inner = None;
                     self.base.connected = false;
@@ -590,11 +662,14 @@ impl PortDriver for DrvAsynIPPort {
                 }
                 result.map(|r| r.nbytes_transferred)
             }
-            Err(_) => result.map(|r| r.nbytes_transferred),
         }
     }
 
     fn write_octet(&mut self, user: &mut AsynUser, data: &[u8]) -> AsynResult<()> {
+        // HTTP connect-per-transaction: reconnect if disconnected
+        if self.config.protocol == IpProtocol::Http && !self.base.connected {
+            let _ = self.connect(&AsynUser::default());
+        }
         self.base.check_ready()?;
         asyn_trace_io!(
             Some(self.base.trace),
