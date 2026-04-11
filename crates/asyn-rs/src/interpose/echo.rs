@@ -1,11 +1,23 @@
 //! Echo interpose — for half-duplex devices that echo each transmitted character.
 //!
 //! After sending each byte, waits for the echo to come back before sending the next.
-//! Reports an error if the echo doesn't match.
+//! Reports an error if the echo doesn't match. Matches C asyn's `asynInterposeEcho.c`.
 
 use crate::error::{AsynError, AsynResult, AsynStatus};
 use crate::interpose::{OctetInterpose, OctetNext, OctetReadResult};
 use crate::user::AsynUser;
+
+/// Format a byte as an escaped string for error messages.
+fn escape_byte(b: u8) -> String {
+    match b {
+        b'\n' => "\\n".to_string(),
+        b'\r' => "\\r".to_string(),
+        b'\t' => "\\t".to_string(),
+        b'\0' => "\\0".to_string(),
+        0x20..=0x7e => String::from(b as char),
+        _ => format!("\\x{:02x}", b),
+    }
+}
 
 /// Interpose layer for echo-mode serial communication.
 pub struct EchoInterpose;
@@ -40,29 +52,63 @@ impl OctetInterpose for EchoInterpose {
     ) -> AsynResult<usize> {
         let mut total = 0;
         for byte in data {
+            // Write one byte
             let n = next.write(user, std::slice::from_ref(byte))?;
+            if n != 1 {
+                return Err(AsynError::Status {
+                    status: AsynStatus::Error,
+                    message: format!(
+                        "echo: write (0x{:02X}) returned {} bytes, expected 1",
+                        byte, n
+                    ),
+                });
+            }
             total += n;
 
             // Read back echo
             let mut echo_buf = [0u8; 1];
-            let echo_result = next.read(
-                &AsynUser::new(user.reason)
-                    .with_addr(user.addr)
-                    .with_timeout(user.timeout),
-                &mut echo_buf,
-            )?;
+            let echo_user = AsynUser::new(user.reason)
+                .with_addr(user.addr)
+                .with_timeout(user.timeout);
+            let echo_result = match next.read(&echo_user, &mut echo_buf) {
+                Ok(r) => r,
+                Err(AsynError::Status {
+                    status: AsynStatus::Timeout,
+                    ..
+                }) => {
+                    // C parity: timeout gets specific "Loss of communication?" message
+                    return Err(AsynError::Status {
+                        status: AsynStatus::Error,
+                        message: format!(
+                            "echo: write/read (0x{:02X}) -- no echo - Loss of communication?",
+                            byte
+                        ),
+                    });
+                }
+                Err(e) => {
+                    return Err(AsynError::Status {
+                        status: AsynStatus::Error,
+                        message: format!("echo: write/read (0x{:02X}) -- read failed: {}", byte, e),
+                    });
+                }
+            };
+
             if echo_result.nbytes_transferred != 1 {
                 return Err(AsynError::Status {
                     status: AsynStatus::Error,
-                    message: "echo: no echo received".into(),
+                    message: format!(
+                        "echo: write/read (0x{:02X}) -- read count {}",
+                        byte, echo_result.nbytes_transferred
+                    ),
                 });
             }
             if echo_buf[0] != *byte {
                 return Err(AsynError::Status {
                     status: AsynStatus::Error,
                     message: format!(
-                        "echo mismatch: sent 0x{:02X}, received 0x{:02X}",
-                        byte, echo_buf[0]
+                        "echo: expected '{}' got '{}'",
+                        escape_byte(*byte),
+                        escape_byte(echo_buf[0])
                     ),
                 });
             }
@@ -169,7 +215,8 @@ mod tests {
             .unwrap_err();
         match err {
             AsynError::Status { message, .. } => {
-                assert!(message.contains("echo mismatch"));
+                assert!(message.contains("expected"));
+                assert!(message.contains("got"));
             }
             other => panic!("expected echo mismatch error, got {other:?}"),
         }
@@ -202,12 +249,23 @@ mod tests {
         let err = stack
             .dispatch_write(&mut user, b"A", &mut base)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            AsynError::Status {
-                status: AsynStatus::Timeout,
-                ..
+        // C parity: timeout is converted to Error with "Loss of communication?" message
+        match err {
+            AsynError::Status { status, message } => {
+                assert_eq!(status, AsynStatus::Error);
+                assert!(message.contains("no echo"));
+                assert!(message.contains("Loss of communication"));
             }
-        ));
+            other => panic!("expected loss-of-comm error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_escape_byte_formatting() {
+        assert_eq!(escape_byte(b'A'), "A");
+        assert_eq!(escape_byte(b'\n'), "\\n");
+        assert_eq!(escape_byte(b'\r'), "\\r");
+        assert_eq!(escape_byte(0x01), "\\x01");
+        assert_eq!(escape_byte(0xFF), "\\xff");
     }
 }
