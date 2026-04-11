@@ -604,6 +604,10 @@ impl PortDriver for DrvAsynIPPort {
     }
 
     fn read_octet(&mut self, user: &AsynUser, buf: &mut [u8]) -> AsynResult<usize> {
+        // HTTP connect-per-transaction: reconnect if disconnected
+        if self.config.protocol == IpProtocol::Http && !self.base.connected {
+            let _ = self.connect(&AsynUser::default());
+        }
         self.base.check_ready()?;
         let result = self
             .base
@@ -618,6 +622,12 @@ impl PortDriver for DrvAsynIPPort {
                     &buf[..r.nbytes_transferred],
                     "read"
                 );
+                // HTTP: disconnect after each read (connect-per-transaction)
+                if self.config.protocol == IpProtocol::Http {
+                    self.io.inner = None;
+                    self.base.connected = false;
+                    self.base.announce_exception(AsynException::Connect, -1);
+                }
                 Ok(r.nbytes_transferred)
             }
             Err(ref e) => {

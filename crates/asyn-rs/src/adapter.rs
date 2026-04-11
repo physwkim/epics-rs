@@ -302,7 +302,7 @@ fn asyn_error_to_alarm(e: &AsynError) -> (u16, u16) {
         | AsynError::Status {
             status: crate::error::AsynStatus::Disabled,
             ..
-        } => (13, 3), // COMM_ALARM=13, INVALID_ALARM=3
+        } => (9, 3), // COMM_ALARM=9, INVALID_ALARM=3
         _ => (7, 2), // Default: READ_ALARM, MAJOR
     }
 }

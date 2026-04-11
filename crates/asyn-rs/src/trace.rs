@@ -161,29 +161,6 @@ impl TraceManager {
         }
     }
 
-    /// Resolve the effective TraceConfig: device → port → global.
-    fn resolve_config<'a>(
-        &'a self,
-        port: &str,
-        device_cfgs: &'a Option<std::sync::MutexGuard<'a, HashMap<(String, i32), TraceConfig>>>,
-        port_cfgs: &'a Option<std::sync::MutexGuard<'a, HashMap<String, TraceConfig>>>,
-        global_cfg: &'a Option<std::sync::MutexGuard<'a, TraceConfig>>,
-        addr: Option<i32>,
-    ) -> Option<&'a TraceConfig> {
-        if let Some(a) = addr {
-            if let Some(cfgs) = device_cfgs {
-                if let Some(cfg) = cfgs.get(&(port.to_string(), a)) {
-                    return Some(cfg);
-                }
-            }
-        }
-        if let Some(cfgs) = port_cfgs {
-            if let Some(cfg) = cfgs.get(port) {
-                return Some(cfg);
-            }
-        }
-        global_cfg.as_deref()
-    }
 
     /// Output a trace message.
     pub fn output(&self, port: &str, mask: TraceMask, msg: &str) {
