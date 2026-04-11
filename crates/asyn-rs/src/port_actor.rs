@@ -209,7 +209,15 @@ impl PortActor {
             return;
         }
 
-        let is_connect_op = matches!(op, RequestOp::Connect | RequestOp::Disconnect);
+        let is_connect_op = matches!(
+            op,
+            RequestOp::Connect
+                | RequestOp::Disconnect
+                | RequestOp::ConnectAddr
+                | RequestOp::DisconnectAddr
+                | RequestOp::EnableAddr
+                | RequestOp::DisableAddr
+        );
         let is_connect_priority = user.priority == QueuePriority::Connect;
 
         // Connect ops and Connect-priority requests bypass enabled/connected checks
@@ -320,6 +328,30 @@ impl PortActor {
             RequestOp::Disconnect => {
                 self.driver.disconnect(user)?;
                 Ok(RequestResult::write_ok())
+            }
+            RequestOp::ConnectAddr => {
+                self.driver.connect_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::DisconnectAddr => {
+                self.driver.disconnect_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::EnableAddr => {
+                self.driver.enable_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::DisableAddr => {
+                self.driver.disable_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::GetBoundsInt32 => {
+                let (low, high) = self.driver.get_bounds_int32(user)?;
+                Ok(RequestResult::bounds_read(low as i64, high as i64))
+            }
+            RequestOp::GetBoundsInt64 => {
+                let (low, high) = self.driver.get_bounds_int64(user)?;
+                Ok(RequestResult::bounds_read(low, high))
             }
             RequestOp::BlockProcess => {
                 let token = user.block_token.unwrap_or(user.reason as u64);

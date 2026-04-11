@@ -379,6 +379,43 @@ impl PortDriverBase {
         self.params.get_param_status(index, addr)
     }
 
+    /// Detailed parameter report matching C asynPortDriver::reportParams.
+    pub fn report_params(&self, level: i32) {
+        eprintln!(
+            "  Number of parameters is {}",
+            self.params.len()
+        );
+        if level < 1 {
+            return;
+        }
+        for i in 0..self.params.len() {
+            let name = self.params.param_name(i).unwrap_or("?");
+            let ptype = self
+                .params
+                .param_type(i)
+                .map(|t| format!("{t:?}"))
+                .unwrap_or("?".into());
+            if level >= 2 {
+                for addr in 0..self.max_addr.max(1) {
+                    let val = self
+                        .params
+                        .get_value(i, addr as i32)
+                        .map(|v| format!("{v:?}"))
+                        .unwrap_or("undefined".into());
+                    let (status, alarm_st, alarm_sev) = self
+                        .params
+                        .get_param_status(i, addr as i32)
+                        .unwrap_or((AsynStatus::Success, 0, 0));
+                    eprintln!(
+                        "  param[{i}] name={name} type={ptype} addr={addr} val={val} status={status:?} alarm=({alarm_st},{alarm_sev})"
+                    );
+                }
+            } else {
+                eprintln!("  param[{i}] name={name} type={ptype}");
+            }
+        }
+    }
+
     /// Push an interpose layer onto the octet I/O stack.
     ///
     /// **Concurrency**: requires `&mut self`, which means the caller must hold
