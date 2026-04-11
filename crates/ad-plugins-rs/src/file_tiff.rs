@@ -15,6 +15,7 @@ use tiff::ColorType;
 use tiff::decoder::Decoder;
 use tiff::encoder::TiffEncoder;
 use tiff::encoder::colortype;
+use tiff::tags::Tag;
 
 /// TIFF file writer using the `tiff` crate for proper encoding/decoding.
 pub struct TiffWriter {
@@ -109,12 +110,74 @@ impl NDFileWriter for TiffWriter {
         let mut encoder = TiffEncoder::new(file)
             .map_err(|e| ADError::UnsupportedConversion(format!("TIFF encoder error: {}", e)))?;
 
+        // Collect attribute tag data before borrowing encoder mutably.
+        // C++ writes NDArray attributes as custom TIFF tags starting at tag 65010.
+        // Each attribute is written as a string tag: "name=value".
+        let attr_tags: Vec<(u16, String)> = array
+            .attributes
+            .iter()
+            .enumerate()
+            .map(|(i, attr)| {
+                let tag_num = 65010u16.saturating_add(i as u16);
+                let tag_val = format!("{}={}", attr.name, attr.value.as_string());
+                (tag_num, tag_val)
+            })
+            .collect();
+
+        // Macro to reduce repetition: create image encoder, write custom tags, write data.
+        macro_rules! write_with_tags {
+            ($ct:ty, $data:expr) => {{
+                let mut image = encoder
+                    .new_image::<$ct>(width, height)
+                    .map_err(|e| {
+                        ADError::UnsupportedConversion(format!("TIFF encoder error: {}", e))
+                    })?;
+
+                // Write uniqueId and timestamp as the first custom tags
+                image
+                    .encoder()
+                    .write_tag(
+                        Tag::Unknown(65000),
+                        &*format!("uniqueId={}", array.unique_id),
+                    )
+                    .map_err(|e| {
+                        ADError::UnsupportedConversion(format!("TIFF tag write error: {}", e))
+                    })?;
+                image
+                    .encoder()
+                    .write_tag(
+                        Tag::Unknown(65001),
+                        &*format!("timestamp={}", array.timestamp.as_f64()),
+                    )
+                    .map_err(|e| {
+                        ADError::UnsupportedConversion(format!("TIFF tag write error: {}", e))
+                    })?;
+
+                // Write NDArray attributes as custom tags starting at 65010
+                for (tag_num, tag_val) in &attr_tags {
+                    image
+                        .encoder()
+                        .write_tag(Tag::Unknown(*tag_num), &**tag_val)
+                        .map_err(|e| {
+                            ADError::UnsupportedConversion(format!(
+                                "TIFF attribute tag write error: {}",
+                                e
+                            ))
+                        })?;
+                }
+
+                image.write_data($data).map_err(|e| {
+                    ADError::UnsupportedConversion(format!("TIFF write error: {}", e))
+                })
+            }};
+        }
+
         match &array.data {
             NDDataBuffer::U8(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB8>(width, height, v)
+                    write_with_tags!(colortype::RGB8, v)
                 } else {
-                    encoder.write_image::<colortype::Gray8>(width, height, v)
+                    write_with_tags!(colortype::Gray8, v)
                 }
             }
             NDDataBuffer::I8(v) => {
@@ -123,13 +186,13 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB8".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI8>(width, height, v)
+                write_with_tags!(colortype::GrayI8, v)
             }
             NDDataBuffer::U16(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB16>(width, height, v)
+                    write_with_tags!(colortype::RGB16, v)
                 } else {
-                    encoder.write_image::<colortype::Gray16>(width, height, v)
+                    write_with_tags!(colortype::Gray16, v)
                 }
             }
             NDDataBuffer::I16(v) => {
@@ -138,13 +201,13 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB16".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI16>(width, height, v)
+                write_with_tags!(colortype::GrayI16, v)
             }
             NDDataBuffer::U32(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB32>(width, height, v)
+                    write_with_tags!(colortype::RGB32, v)
                 } else {
-                    encoder.write_image::<colortype::Gray32>(width, height, v)
+                    write_with_tags!(colortype::Gray32, v)
                 }
             }
             NDDataBuffer::I32(v) => {
@@ -153,7 +216,7 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB32".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI32>(width, height, v)
+                write_with_tags!(colortype::GrayI32, v)
             }
             NDDataBuffer::I64(v) => {
                 if is_rgb {
@@ -161,31 +224,30 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB64".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI64>(width, height, v)
+                write_with_tags!(colortype::GrayI64, v)
             }
             NDDataBuffer::U64(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB64>(width, height, v)
+                    write_with_tags!(colortype::RGB64, v)
                 } else {
-                    encoder.write_image::<colortype::Gray64>(width, height, v)
+                    write_with_tags!(colortype::Gray64, v)
                 }
             }
             NDDataBuffer::F32(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB32Float>(width, height, v)
+                    write_with_tags!(colortype::RGB32Float, v)
                 } else {
-                    encoder.write_image::<colortype::Gray32Float>(width, height, v)
+                    write_with_tags!(colortype::Gray32Float, v)
                 }
             }
             NDDataBuffer::F64(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB64Float>(width, height, v)
+                    write_with_tags!(colortype::RGB64Float, v)
                 } else {
-                    encoder.write_image::<colortype::Gray64Float>(width, height, v)
+                    write_with_tags!(colortype::Gray64Float, v)
                 }
             }
-        }
-        .map_err(|e| ADError::UnsupportedConversion(format!("TIFF write error: {}", e)))?;
+        }?;
 
         Ok(())
     }

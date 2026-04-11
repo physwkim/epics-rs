@@ -231,6 +231,7 @@ pub struct TimeSeriesPortDriver {
     params: TSParams,
     shared: Arc<Mutex<SharedTsState>>,
     num_channels: usize,
+    time_per_point: f64,
 }
 
 impl TimeSeriesPortDriver {
@@ -288,8 +289,9 @@ impl TimeSeriesPortDriver {
             .create_param("TS_TIME_AXIS", ParamType::Float64Array)
             .unwrap();
 
-        // Initialize time axis
-        let time_axis: Vec<f64> = (0..num_points).map(|i| i as f64).collect();
+        // Initialize time axis (scaled by time_per_point, default 1.0)
+        let time_per_point = 1.0;
+        let time_axis: Vec<f64> = (0..num_points).map(|i| i as f64 * time_per_point).collect();
         let _ = base.params.set_float64_array(ts_time_axis, 0, time_axis);
 
         // Channel waveform params — one Float64Array per channel
@@ -323,6 +325,7 @@ impl TimeSeriesPortDriver {
             params,
             shared,
             num_channels,
+            time_per_point,
         }
     }
 
@@ -415,7 +418,7 @@ impl PortDriver for TimeSeriesPortDriver {
             drop(state);
 
             // Update time axis
-            let time_axis: Vec<f64> = (0..new_size).map(|i| i as f64).collect();
+            let time_axis: Vec<f64> = (0..new_size).map(|i| i as f64 * self.time_per_point).collect();
             let _ = self
                 .base
                 .params
@@ -458,6 +461,26 @@ impl PortDriver for TimeSeriesPortDriver {
             self.base.call_param_callbacks(user.addr)?;
         }
 
+        Ok(())
+    }
+
+    fn write_float64(&mut self, user: &mut AsynUser, value: f64) -> asyn_rs::error::AsynResult<()> {
+        let reason = user.reason;
+        if reason == self.params.ts_time_per_point {
+            self.time_per_point = value;
+            self.base.set_float64_param(reason, user.addr, value)?;
+            // Rebuild time axis with new scaling
+            let num_points = self.shared.lock().num_points;
+            let time_axis: Vec<f64> = (0..num_points).map(|i| i as f64 * self.time_per_point).collect();
+            let _ = self
+                .base
+                .params
+                .set_float64_array(self.params.ts_time_axis, 0, time_axis);
+            self.base.call_param_callbacks(user.addr)?;
+        } else {
+            self.base.set_float64_param(reason, user.addr, value)?;
+            self.base.call_param_callbacks(user.addr)?;
+        }
         Ok(())
     }
 

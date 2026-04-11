@@ -54,6 +54,9 @@ pub struct NDStatsParams {
     pub compute_profiles: usize,
     pub cursor_x: usize,
     pub cursor_y: usize,
+    pub cursor_val: usize,
+    pub profile_size_x: usize,
+    pub profile_size_y: usize,
 }
 
 /// Statistics computed from an NDArray.
@@ -82,6 +85,7 @@ pub struct StatsResult {
     pub profile_centroid_y: Vec<f64>,
     pub profile_cursor_x: Vec<f64>,
     pub profile_cursor_y: Vec<f64>,
+    pub cursor_value: f64,
 }
 
 /// Centroid and higher-order moment results.
@@ -932,6 +936,18 @@ impl NDPluginProcess for StatsProcessor {
             result.profile_cursor_y = profiles.cursor_y;
         }
 
+        // Compute cursor value: pixel at (cursor_x, cursor_y)
+        if info.color_size == 1 && array.dims.len() >= 2 {
+            let cx = self.cursor_x;
+            let cy = self.cursor_y;
+            if cx < info.x_size && cy < info.y_size {
+                result.cursor_value = array
+                    .data
+                    .get_as_f64(cy * info.x_size + cx)
+                    .unwrap_or(0.0);
+            }
+        }
+
         let updates = vec![
             ParamUpdate::float64(p.min_value, result.min),
             ParamUpdate::float64(p.max_value, result.max),
@@ -958,6 +974,9 @@ impl NDPluginProcess for StatsProcessor {
             ParamUpdate::float64(p.hist_below, result.hist_below),
             ParamUpdate::float64(p.hist_above, result.hist_above),
             ParamUpdate::float64(p.hist_entropy, result.hist_entropy),
+            ParamUpdate::float64(p.cursor_val, result.cursor_value),
+            ParamUpdate::int32(p.profile_size_x, info.x_size as i32),
+            ParamUpdate::int32(p.profile_size_y, info.y_size as i32),
         ];
 
         // Send time series data to TS port driver (if configured)
@@ -1058,6 +1077,10 @@ impl NDPluginProcess for StatsProcessor {
         base.set_int32_param(self.params.cursor_x, 0, 0)?;
         self.params.cursor_y = base.create_param("CURSOR_Y", ParamType::Int32)?;
         base.set_int32_param(self.params.cursor_y, 0, 0)?;
+
+        self.params.cursor_val = base.create_param("CURSOR_VAL", ParamType::Float64)?;
+        self.params.profile_size_x = base.create_param("PROFILE_SIZE_X", ParamType::Int32)?;
+        self.params.profile_size_y = base.create_param("PROFILE_SIZE_Y", ParamType::Int32)?;
 
         // Export params so create_stats_runtime can retrieve them after the move
         *self.params_out.lock() = self.params;

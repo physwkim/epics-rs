@@ -222,6 +222,22 @@ impl NDFileWriter for NexusWriter {
             })?;
         }
 
+        // Write per-frame uniqueId and timeStamp as attributes on the dataset
+        if let Some(ref ds) = self.dataset {
+            let uid_name = format!("uniqueId_{}", self.frame_count);
+            let _ = ds
+                .new_attr::<i32>()
+                .shape(())
+                .create(&uid_name)
+                .and_then(|a| a.write_numeric(&array.unique_id));
+            let ts_name = format!("timeStamp_{}", self.frame_count);
+            let _ = ds
+                .new_attr::<f64>()
+                .shape(())
+                .create(&ts_name)
+                .and_then(|a| a.write_numeric(&array.time_stamp));
+        }
+
         self.frame_count += 1;
         Ok(())
     }

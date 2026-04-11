@@ -48,7 +48,6 @@ pub struct ADDriverParams {
     pub shutter_control: usize,
     pub shutter_control_epics: usize,
     pub shutter_status: usize,
-    pub shutter_status_epics: usize,
     pub shutter_mode: usize,
     pub shutter_open_delay: usize,
     pub shutter_close_delay: usize,
@@ -106,8 +105,6 @@ impl ADDriverParams {
             shutter_control_epics: port_base
                 .create_param("SHUTTER_CONTROL_EPICS", ParamType::Int32)?,
             shutter_status: port_base.create_param("SHUTTER_STATUS", ParamType::Int32)?,
-            shutter_status_epics: port_base
-                .create_param("SHUTTER_STATUS_EPICS", ParamType::Int32)?,
             shutter_mode: port_base.create_param("SHUTTER_MODE", ParamType::Int32)?,
             shutter_open_delay: port_base.create_param("SHUTTER_OPEN_DELAY", ParamType::Float64)?,
             shutter_close_delay: port_base

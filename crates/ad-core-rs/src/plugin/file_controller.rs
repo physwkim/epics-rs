@@ -332,10 +332,14 @@ impl<W: NDFileWriter> FilePluginController<W> {
                     }
                     NDFileMode::Capture => {
                         self.file_base.clear_capture();
+                        self.file_base.lazy_open = self.lazy_open;
+                        self.file_base.delete_driver_file = self.delete_driver_file;
                         self.capture_active = true;
                         self.push_num_captured_update(&mut updates);
                     }
                     NDFileMode::Stream => {
+                        self.file_base.lazy_open = self.lazy_open;
+                        self.file_base.delete_driver_file = self.delete_driver_file;
                         self.capture_active = true;
                         self.stream_dims = None;
                         self.stream_data_type = None;

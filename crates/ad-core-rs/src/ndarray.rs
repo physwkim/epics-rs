@@ -303,6 +303,8 @@ pub struct NDArrayInfo {
 pub struct NDArray {
     pub unique_id: i32,
     pub timestamp: EpicsTimestamp,
+    /// Separate double-precision timestamp (C++ `double timeStamp`), independent of `epicsTS`.
+    pub time_stamp: f64,
     pub dims: Vec<NDDimension>,
     pub data: NDDataBuffer,
     pub attributes: NDAttributeList,
@@ -316,6 +318,7 @@ impl NDArray {
         Self {
             unique_id: 0,
             timestamp: EpicsTimestamp::default(),
+            time_stamp: 0.0,
             dims,
             data: NDDataBuffer::zeros(data_type, num_elements),
             attributes: NDAttributeList::new(),
@@ -576,6 +579,9 @@ mod tests {
         arr.codec = Some(Codec {
             name: crate::codec::CodecName::JPEG,
             compressed_size: 42,
+            level: 0,
+            shuffle: 0,
+            compressor: 0,
         });
         let cloned = arr.clone();
         assert_eq!(cloned.codec.as_ref().unwrap().compressed_size, 42);

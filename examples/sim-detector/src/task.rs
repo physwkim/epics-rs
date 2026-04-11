@@ -128,7 +128,11 @@ impl TaskState {
         let size_x = config.size_x.min(config.max_size_x - min_x).max(1);
         let size_y = config.size_y.min(config.max_size_y - min_y).max(1);
 
-        crop_roi(&self.raw_buf, &layout, min_x, min_y, size_x, size_y)
+        // Build a temporary NDArray wrapper for crop_roi (which now takes &NDArray)
+        let mut temp_arr = NDArray::new(layout.make_dims(), self.raw_buf.data_type());
+        temp_arr.data = self.raw_buf.clone();
+        crop_roi(&temp_arr, &layout, min_x, min_y, size_x, size_y)
+            .expect("crop_roi failed on uncompressed data")
     }
 }
 

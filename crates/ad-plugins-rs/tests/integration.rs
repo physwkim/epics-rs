@@ -94,6 +94,7 @@ fn test_pool_reuse_in_pipeline() {
     let pool = Arc::new(ad_core_rs::ndarray_pool::NDArrayPool::new(10_000_000));
 
     // Allocate, use, release, reallocate
+    // Use sizes within THRESHOLD_SIZE_RATIO (1.5) to ensure reuse
     let arr1 = pool
         .alloc(vec![NDDimension::new(1000)], NDDataType::UInt8)
         .unwrap();
@@ -101,8 +102,9 @@ fn test_pool_reuse_in_pipeline() {
     pool.release(arr1);
     assert_eq!(pool.num_free_buffers(), 1);
 
+    // 1000/800 = 1.25 < 1.5 threshold, so buffer is reused
     let _arr2 = pool
-        .alloc(vec![NDDimension::new(500)], NDDataType::UInt8)
+        .alloc(vec![NDDimension::new(800)], NDDataType::UInt8)
         .unwrap();
     assert_eq!(pool.num_free_buffers(), 0);
     // Should have reused buffer, allocated_bytes unchanged

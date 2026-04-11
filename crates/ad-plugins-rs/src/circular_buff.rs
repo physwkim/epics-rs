@@ -4,322 +4,44 @@ use std::sync::Arc;
 use ad_core_rs::ndarray::NDArray;
 use ad_core_rs::ndarray_pool::NDArrayPool;
 use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
+use epics_base_rs::calc;
 
-/// Operations supported by CalcExpression.
-#[derive(Debug, Clone, Copy)]
-enum CalcOp {
-    Gt,
-    Lt,
-    Ge,
-    Le,
-    Eq,
-    Ne,
-    And,
-    Or,
-    Not,
-}
-
-/// Token in a parsed CalcExpression (RPN).
-#[derive(Debug, Clone)]
-enum CalcToken {
-    Num(f64),
-    VarA,
-    VarB,
-    Op(CalcOp),
-}
-
-/// Raw token used during parsing (before conversion to RPN).
-#[derive(Debug, Clone)]
-enum RawToken {
-    Num(f64),
-    VarA,
-    VarB,
-    Op(CalcOp),
-    LParen,
-    RParen,
-}
-
-/// A simple expression evaluator supporting variables A and B,
-/// numeric literals, comparison and logical operators.
+/// Compiled EPICS calc expression wrapper.
 ///
-/// Parsed into reverse-polish notation (RPN) using shunting-yard.
+/// Uses the full epics-base-rs calc engine which supports variables A-L (indices 0-11)
+/// plus arithmetic, math functions (ABS, SQRT, LOG, LN, EXP, SIN, COS, MIN, MAX, etc.),
+/// comparison, logical, and bitwise operators -- matching the C++ EPICS calc engine.
+///
+/// For trigger calculations the C++ passes:
+///   A=attrValueA, B=attrValueB, C=preTrigger, D=postTrigger, E=currentImage, F=triggered
 #[derive(Debug, Clone)]
 pub struct CalcExpression {
-    tokens: Vec<CalcToken>,
+    compiled: calc::CompiledExpr,
 }
 
 impl CalcExpression {
-    /// Parse an infix expression into RPN.
+    /// Compile an infix expression string.
     ///
-    /// Supports: A, B (variables), numeric literals (including decimals and negatives
-    /// at start or after open paren), >, <, >=, <=, ==, !=, &&, ||, !, parentheses.
+    /// Returns `None` if the expression is invalid.
     pub fn parse(expr: &str) -> Option<CalcExpression> {
-        let raw_tokens = Self::tokenize(expr)?;
-        let rpn = Self::shunting_yard(raw_tokens)?;
-        Some(CalcExpression { tokens: rpn })
+        calc::compile(expr).ok().map(|compiled| CalcExpression { compiled })
     }
 
-    /// Evaluate the expression with the given variable values.
+    /// Evaluate with variables A and B only (legacy 2-variable interface).
     /// Returns the numeric result; nonzero means true for trigger purposes.
     pub fn evaluate(&self, a: f64, b: f64) -> f64 {
-        let mut stack: Vec<f64> = Vec::new();
-        for tok in &self.tokens {
-            match tok {
-                CalcToken::Num(n) => stack.push(*n),
-                CalcToken::VarA => stack.push(a),
-                CalcToken::VarB => stack.push(b),
-                CalcToken::Op(op) => match op {
-                    CalcOp::Not => {
-                        let v = stack.pop().unwrap_or(0.0);
-                        stack.push(if v == 0.0 { 1.0 } else { 0.0 });
-                    }
-                    _ => {
-                        let rhs = stack.pop().unwrap_or(0.0);
-                        let lhs = stack.pop().unwrap_or(0.0);
-                        let result = match op {
-                            CalcOp::Gt => {
-                                if lhs > rhs {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::Lt => {
-                                if lhs < rhs {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::Ge => {
-                                if lhs >= rhs {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::Le => {
-                                if lhs <= rhs {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::Eq => {
-                                if (lhs - rhs).abs() < f64::EPSILON {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::Ne => {
-                                if (lhs - rhs).abs() >= f64::EPSILON {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::And => {
-                                if lhs != 0.0 && rhs != 0.0 {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::Or => {
-                                if lhs != 0.0 || rhs != 0.0 {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            }
-                            CalcOp::Not => unreachable!(),
-                        };
-                        stack.push(result);
-                    }
-                },
-            }
-        }
-        stack.pop().unwrap_or(0.0)
+        let mut inputs = calc::NumericInputs::new();
+        inputs.vars[0] = a; // A
+        inputs.vars[1] = b; // B
+        calc::eval(&self.compiled, &mut inputs).unwrap_or(0.0)
     }
 
-    fn precedence(op: &CalcOp) -> u8 {
-        match op {
-            CalcOp::Or => 1,
-            CalcOp::And => 2,
-            CalcOp::Eq | CalcOp::Ne => 3,
-            CalcOp::Gt | CalcOp::Lt | CalcOp::Ge | CalcOp::Le => 4,
-            CalcOp::Not => 5,
-        }
-    }
-
-    fn is_right_assoc(op: &CalcOp) -> bool {
-        matches!(op, CalcOp::Not)
-    }
-
-    fn tokenize(expr: &str) -> Option<Vec<RawToken>> {
-        use RawToken as RT;
-        let chars: Vec<char> = expr.chars().collect();
-        let mut tokens = Vec::new();
-        let mut i = 0;
-
-        while i < chars.len() {
-            match chars[i] {
-                ' ' | '\t' => {
-                    i += 1;
-                }
-                '(' => {
-                    tokens.push(RT::LParen);
-                    i += 1;
-                }
-                ')' => {
-                    tokens.push(RT::RParen);
-                    i += 1;
-                }
-                'A' | 'a' => {
-                    tokens.push(RT::VarA);
-                    i += 1;
-                }
-                'B' | 'b' => {
-                    tokens.push(RT::VarB);
-                    i += 1;
-                }
-                '>' => {
-                    if i + 1 < chars.len() && chars[i + 1] == '=' {
-                        tokens.push(RT::Op(CalcOp::Ge));
-                        i += 2;
-                    } else {
-                        tokens.push(RT::Op(CalcOp::Gt));
-                        i += 1;
-                    }
-                }
-                '<' => {
-                    if i + 1 < chars.len() && chars[i + 1] == '=' {
-                        tokens.push(RT::Op(CalcOp::Le));
-                        i += 2;
-                    } else {
-                        tokens.push(RT::Op(CalcOp::Lt));
-                        i += 1;
-                    }
-                }
-                '=' => {
-                    if i + 1 < chars.len() && chars[i + 1] == '=' {
-                        tokens.push(RT::Op(CalcOp::Eq));
-                        i += 2;
-                    } else {
-                        return None; // Single '=' not supported
-                    }
-                }
-                '!' => {
-                    if i + 1 < chars.len() && chars[i + 1] == '=' {
-                        tokens.push(RT::Op(CalcOp::Ne));
-                        i += 2;
-                    } else {
-                        tokens.push(RT::Op(CalcOp::Not));
-                        i += 1;
-                    }
-                }
-                '&' => {
-                    if i + 1 < chars.len() && chars[i + 1] == '&' {
-                        tokens.push(RT::Op(CalcOp::And));
-                        i += 2;
-                    } else {
-                        return None;
-                    }
-                }
-                '|' => {
-                    if i + 1 < chars.len() && chars[i + 1] == '|' {
-                        tokens.push(RT::Op(CalcOp::Or));
-                        i += 2;
-                    } else {
-                        return None;
-                    }
-                }
-                c if c.is_ascii_digit() || c == '.' => {
-                    let start = i;
-                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                        i += 1;
-                    }
-                    let num_str: String = chars[start..i].iter().collect();
-                    let num: f64 = num_str.parse().ok()?;
-                    tokens.push(RT::Num(num));
-                }
-                '-' => {
-                    // Negative number: at start, or after '(' or after an operator
-                    let is_unary_minus = tokens.is_empty()
-                        || matches!(tokens.last(), Some(RT::LParen) | Some(RT::Op(_)));
-                    if is_unary_minus
-                        && i + 1 < chars.len()
-                        && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '.')
-                    {
-                        i += 1; // skip '-'
-                        let start = i;
-                        while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                            i += 1;
-                        }
-                        let num_str: String = chars[start..i].iter().collect();
-                        let num: f64 = num_str.parse().ok()?;
-                        tokens.push(RT::Num(-num));
-                    } else {
-                        return None; // Subtraction not supported
-                    }
-                }
-                _ => return None,
-            }
-        }
-
-        Some(tokens)
-    }
-
-    fn shunting_yard(raw: Vec<RawToken>) -> Option<Vec<CalcToken>> {
-        use RawToken as RT;
-        let mut output: Vec<CalcToken> = Vec::new();
-        let mut op_stack: Vec<RawToken> = Vec::new();
-
-        for tok in raw {
-            match tok {
-                RT::Num(n) => output.push(CalcToken::Num(n)),
-                RT::VarA => output.push(CalcToken::VarA),
-                RT::VarB => output.push(CalcToken::VarB),
-                RT::Op(ref op) => {
-                    while let Some(RT::Op(top_op)) = op_stack.last() {
-                        let top_prec = Self::precedence(top_op);
-                        let cur_prec = Self::precedence(op);
-                        if (!Self::is_right_assoc(op) && cur_prec <= top_prec)
-                            || (Self::is_right_assoc(op) && cur_prec < top_prec)
-                        {
-                            if let Some(RT::Op(o)) = op_stack.pop() {
-                                output.push(CalcToken::Op(o));
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    op_stack.push(tok);
-                }
-                RT::LParen => op_stack.push(tok),
-                RT::RParen => {
-                    loop {
-                        match op_stack.pop() {
-                            Some(RT::LParen) => break,
-                            Some(RT::Op(o)) => output.push(CalcToken::Op(o)),
-                            _ => return None, // Mismatched parens
-                        }
-                    }
-                }
-            }
-        }
-
-        // Pop remaining operators
-        while let Some(tok) = op_stack.pop() {
-            match tok {
-                RT::Op(o) => output.push(CalcToken::Op(o)),
-                RT::LParen => return None, // Mismatched parens
-                _ => return None,
-            }
-        }
-
-        Some(output)
+    /// Evaluate with the full variable set (A through L and beyond).
+    ///
+    /// `vars` is indexed 0=A, 1=B, 2=C, ... 11=L, up to 15=P.
+    pub fn evaluate_vars(&self, vars: &[f64; 16]) -> f64 {
+        let mut inputs = calc::NumericInputs::with_vars(*vars);
+        calc::eval(&self.compiled, &mut inputs).unwrap_or(0.0)
     }
 }
 
@@ -330,7 +52,10 @@ pub enum TriggerCondition {
     AttributeThreshold { name: String, threshold: f64 },
     /// External trigger (manual).
     External,
-    /// Calculated trigger based on two attribute values and an expression.
+    /// Calculated trigger based on attribute values and an expression.
+    ///
+    /// The C++ calc engine passes: A=attrValueA, B=attrValueB, C=preTrigger,
+    /// D=postTrigger, E=currentImage, F=triggered.
     Calc {
         attr_a: String,
         attr_b: String,
@@ -434,7 +159,8 @@ impl CircularBuffer {
             return false;
         }
 
-        // Check trigger condition
+        // Check trigger condition BEFORE adding to pre-buffer,
+        // so the triggering frame becomes the first post-trigger frame.
         let trigger = match &self.trigger_condition {
             TriggerCondition::AttributeThreshold { name, threshold } => array
                 .attributes
@@ -452,24 +178,49 @@ impl CircularBuffer {
                     .attributes
                     .get(attr_a)
                     .and_then(|a| a.value.as_f64())
-                    .unwrap_or(0.0);
+                    .unwrap_or(f64::NAN);
                 let b = array
                     .attributes
                     .get(attr_b)
                     .and_then(|a| a.value.as_f64())
-                    .unwrap_or(0.0);
-                expression.evaluate(a, b) != 0.0
+                    .unwrap_or(f64::NAN);
+                // C++ passes: A=attrValueA, B=attrValueB, C=preTrigger,
+                // D=postTrigger, E=currentImage, F=triggered
+                let mut vars = [0.0f64; 16];
+                vars[0] = a;                                // A
+                vars[1] = b;                                // B
+                vars[2] = self.pre_count as f64;            // C
+                vars[3] = self.post_count as f64;           // D
+                vars[4] = self.buffer.len() as f64;         // E (currentImage)
+                vars[5] = if self.triggered { 1.0 } else { 0.0 }; // F
+                expression.evaluate_vars(&vars) != 0.0
             }
         };
+
+        if trigger {
+            // Trigger fires before adding this frame to the pre-buffer,
+            // so the triggering frame will be the first post-trigger frame.
+            self.trigger();
+            // The triggering frame is the first post-trigger capture.
+            self.captured.push(array);
+            self.post_remaining -= 1;
+            if self.post_remaining == 0 {
+                self.triggered = false;
+                if self.preset_trigger_count > 0 && self.trigger_count >= self.preset_trigger_count
+                {
+                    self.status = BufferStatus::AcquisitionCompleted;
+                } else {
+                    self.status = BufferStatus::BufferFilling;
+                }
+                return true;
+            }
+            return false;
+        }
 
         // Maintain pre-trigger ring buffer
         self.buffer.push_back(array);
         if self.buffer.len() > self.pre_count {
             self.buffer.pop_front();
-        }
-
-        if trigger {
-            self.trigger();
         }
 
         false
@@ -807,7 +558,7 @@ mod tests {
     fn test_attribute_trigger() {
         let mut cb = CircularBuffer::new(
             1,
-            1,
+            2,
             TriggerCondition::AttributeThreshold {
                 name: "trigger".into(),
                 threshold: 5.0,
@@ -818,7 +569,7 @@ mod tests {
         cb.push(make_array_with_attr(2, 2.0));
         assert!(!cb.is_triggered());
 
-        // This should trigger (attr >= 5.0)
+        // This should trigger (attr >= 5.0); triggering frame is first post-trigger
         cb.push(make_array_with_attr(3, 5.0));
         assert!(cb.is_triggered());
 
@@ -826,7 +577,11 @@ mod tests {
         assert!(done);
 
         let captured = cb.take_captured();
-        assert_eq!(captured.len(), 2); // 1 pre + 1 post
+        // 1 pre (id=2) + 2 post (id=3 triggering frame + id=4)
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0].unique_id, 2);
+        assert_eq!(captured[1].unique_id, 3);
+        assert_eq!(captured[2].unique_id, 4);
     }
 
     // --- New tests ---
@@ -837,7 +592,7 @@ mod tests {
         let expr = CalcExpression::parse("A>5").unwrap();
         let mut cb = CircularBuffer::new(
             1,
-            1,
+            2,
             TriggerCondition::Calc {
                 attr_a: "attr_a".into(),
                 attr_b: "attr_b".into(),
@@ -849,7 +604,7 @@ mod tests {
         cb.push(make_array_with_attrs(1, 3.0, 0.0));
         assert!(!cb.is_triggered());
 
-        // A=6, should trigger
+        // A=6, should trigger; triggering frame is first post-trigger
         cb.push(make_array_with_attrs(2, 6.0, 0.0));
         assert!(cb.is_triggered());
 
@@ -857,7 +612,11 @@ mod tests {
         assert!(done);
 
         let captured = cb.take_captured();
-        assert_eq!(captured.len(), 2); // 1 pre + 1 post
+        // 1 pre (id=1) + 2 post (id=2 triggering frame + id=3)
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0].unique_id, 1);
+        assert_eq!(captured[1].unique_id, 2);
+        assert_eq!(captured[2].unique_id, 3);
     }
 
     #[test]
@@ -900,9 +659,46 @@ mod tests {
         assert_eq!(expr.evaluate(0.0, 0.0), 1.0);
         assert_eq!(expr.evaluate(1.0, 0.0), 0.0);
 
+        // The full EPICS calc engine treats single '=' as equality (like '==')
+        // and single '&' as bitwise AND, so both are valid expressions.
+        let expr = CalcExpression::parse("A=5").unwrap();
+        assert_eq!(expr.evaluate(5.0, 0.0), 1.0);
+        assert_eq!(expr.evaluate(4.0, 0.0), 0.0);
+
+        let expr = CalcExpression::parse("A&B").unwrap();
+        // 3 & 1 = 1 (bitwise AND)
+        assert_eq!(expr.evaluate(3.0, 1.0), 1.0);
+
+        // Test math functions supported by the full calc engine
+        let expr = CalcExpression::parse("ABS(A)").unwrap();
+        assert_eq!(expr.evaluate(-5.0, 0.0), 5.0);
+
+        let expr = CalcExpression::parse("SQRT(A)").unwrap();
+        assert!((expr.evaluate(9.0, 0.0) - 3.0).abs() < 1e-10);
+
+        let expr = CalcExpression::parse("A+B").unwrap();
+        assert_eq!(expr.evaluate(3.0, 4.0), 7.0);
+
+        let expr = CalcExpression::parse("A-B").unwrap();
+        assert_eq!(expr.evaluate(10.0, 3.0), 7.0);
+
+        let expr = CalcExpression::parse("A*B").unwrap();
+        assert_eq!(expr.evaluate(3.0, 4.0), 12.0);
+
+        let expr = CalcExpression::parse("A/B").unwrap();
+        assert_eq!(expr.evaluate(12.0, 4.0), 3.0);
+
+        // Test variables C through F using evaluate_vars
+        let expr = CalcExpression::parse("A>5&&C>0").unwrap();
+        let mut vars = [0.0f64; 16];
+        vars[0] = 6.0; // A
+        vars[2] = 1.0; // C
+        assert_eq!(expr.evaluate_vars(&vars), 1.0);
+        vars[2] = 0.0; // C=0 should fail the condition
+        assert_eq!(expr.evaluate_vars(&vars), 0.0);
+
         // Invalid expression returns None
-        assert!(CalcExpression::parse("A=5").is_none()); // single = not supported
-        assert!(CalcExpression::parse("A&B").is_none()); // single & not supported
+        assert!(CalcExpression::parse("@@@").is_none());
     }
 
     #[test]

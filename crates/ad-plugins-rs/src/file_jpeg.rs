@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use ad_core_rs::color::{NDColorMode, convert_rgb_layout};
 use ad_core_rs::error::{ADError, ADResult};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
@@ -32,9 +33,10 @@ impl JpegWriter {
 
 impl NDFileWriter for JpegWriter {
     fn open_file(&mut self, path: &Path, _mode: NDFileMode, array: &NDArray) -> ADResult<()> {
-        if array.data.data_type() != NDDataType::UInt8 {
+        let dt = array.data.data_type();
+        if dt != NDDataType::UInt8 && dt != NDDataType::Int8 {
             return Err(ADError::UnsupportedConversion(
-                "JPEG only supports UInt8 data".into(),
+                "JPEG only supports UInt8/Int8 data".into(),
             ));
         }
         self.current_path = Some(path.to_path_buf());
@@ -47,15 +49,43 @@ impl NDFileWriter for JpegWriter {
             .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
-        let info = array.info();
+        // Detect color mode and convert RGB2/RGB3 to RGB1 if needed
+        let color_mode = array
+            .attributes
+            .get("ColorMode")
+            .and_then(|attr| attr.value.as_i64())
+            .map(|v| NDColorMode::from_i32(v as i32))
+            .unwrap_or_else(|| {
+                if array.dims.len() == 3 {
+                    let d0 = array.dims[0].size;
+                    let d1 = array.dims[1].size;
+                    let d2 = array.dims[2].size;
+                    if d0 == 3 { NDColorMode::RGB1 }
+                    else if d1 == 3 { NDColorMode::RGB2 }
+                    else if d2 == 3 { NDColorMode::RGB3 }
+                    else { NDColorMode::Mono }
+                } else {
+                    NDColorMode::Mono
+                }
+            });
+
+        let is_rgb = matches!(color_mode, NDColorMode::RGB1 | NDColorMode::RGB2 | NDColorMode::RGB3);
+        let src = if is_rgb && color_mode != NDColorMode::RGB1 {
+            &convert_rgb_layout(array, color_mode, NDColorMode::RGB1)?
+        } else {
+            array
+        };
+
+        let info = src.info();
         let width = info.x_size;
         let height = info.y_size;
 
-        let data = match &array.data {
-            NDDataBuffer::U8(v) => v.as_slice(),
+        let data: Vec<u8> = match &src.data {
+            NDDataBuffer::U8(v) => v.clone(),
+            NDDataBuffer::I8(v) => v.iter().map(|&b| b as u8).collect(),
             _ => {
                 return Err(ADError::UnsupportedConversion(
-                    "JPEG only supports UInt8".into(),
+                    "JPEG only supports UInt8/Int8".into(),
                 ));
             }
         };
@@ -69,7 +99,7 @@ impl NDFileWriter for JpegWriter {
         let mut buf = Vec::new();
         let encoder = JpegEncoder::new(&mut buf, self.quality);
         encoder
-            .encode(data, width as u16, height as u16, color_type)
+            .encode(&data, width as u16, height as u16, color_type)
             .map_err(|e| ADError::UnsupportedConversion(format!("JPEG encode error: {}", e)))?;
 
         std::fs::write(path, &buf)?;

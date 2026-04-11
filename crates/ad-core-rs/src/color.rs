@@ -51,30 +51,29 @@ pub fn mono_to_rgb1(src: &NDArray) -> ADResult<NDArray> {
     let y = src.dims[1].size;
     let n = x * y;
 
+    macro_rules! mono_to_rgb1_typed {
+        ($v:expr, $T:ty, $variant:ident) => {{
+            let mut out = vec![<$T>::default(); n * 3];
+            for i in 0..n {
+                out[i * 3] = $v[i];
+                out[i * 3 + 1] = $v[i];
+                out[i * 3 + 2] = $v[i];
+            }
+            NDDataBuffer::$variant(out)
+        }};
+    }
+
     let out_data = match &src.data {
-        NDDataBuffer::U8(v) => {
-            let mut out = vec![0u8; n * 3];
-            for i in 0..n {
-                out[i * 3] = v[i];
-                out[i * 3 + 1] = v[i];
-                out[i * 3 + 2] = v[i];
-            }
-            NDDataBuffer::U8(out)
-        }
-        NDDataBuffer::U16(v) => {
-            let mut out = vec![0u16; n * 3];
-            for i in 0..n {
-                out[i * 3] = v[i];
-                out[i * 3 + 1] = v[i];
-                out[i * 3 + 2] = v[i];
-            }
-            NDDataBuffer::U16(out)
-        }
-        _ => {
-            return Err(ADError::UnsupportedConversion(
-                "mono_to_rgb1 only supports UInt8 and UInt16".into(),
-            ));
-        }
+        NDDataBuffer::I8(v) => mono_to_rgb1_typed!(v, i8, I8),
+        NDDataBuffer::U8(v) => mono_to_rgb1_typed!(v, u8, U8),
+        NDDataBuffer::I16(v) => mono_to_rgb1_typed!(v, i16, I16),
+        NDDataBuffer::U16(v) => mono_to_rgb1_typed!(v, u16, U16),
+        NDDataBuffer::I32(v) => mono_to_rgb1_typed!(v, i32, I32),
+        NDDataBuffer::U32(v) => mono_to_rgb1_typed!(v, u32, U32),
+        NDDataBuffer::I64(v) => mono_to_rgb1_typed!(v, i64, I64),
+        NDDataBuffer::U64(v) => mono_to_rgb1_typed!(v, u64, U64),
+        NDDataBuffer::F32(v) => mono_to_rgb1_typed!(v, f32, F32),
+        NDDataBuffer::F64(v) => mono_to_rgb1_typed!(v, f64, F64),
     };
 
     let dims = vec![
@@ -86,6 +85,7 @@ pub fn mono_to_rgb1(src: &NDArray) -> ADResult<NDArray> {
     arr.data = out_data;
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -103,32 +103,31 @@ pub fn rgb1_to_mono(src: &NDArray) -> ADResult<NDArray> {
     let y = src.dims[2].size;
     let n = x * y;
 
+    macro_rules! rgb1_to_mono_typed {
+        ($v:expr, $T:ty, $variant:ident) => {{
+            let mut out = vec![<$T>::default(); n];
+            for i in 0..n {
+                let r = $v[i * 3] as f64;
+                let g = $v[i * 3 + 1] as f64;
+                let b = $v[i * 3 + 2] as f64;
+                let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+                out[i] = lum.round() as $T;
+            }
+            NDDataBuffer::$variant(out)
+        }};
+    }
+
     let out_data = match &src.data {
-        NDDataBuffer::U8(v) => {
-            let mut out = vec![0u8; n];
-            for i in 0..n {
-                let r = v[i * 3] as f64;
-                let g = v[i * 3 + 1] as f64;
-                let b = v[i * 3 + 2] as f64;
-                out[i] = (0.299 * r + 0.587 * g + 0.114 * b).round() as u8;
-            }
-            NDDataBuffer::U8(out)
-        }
-        NDDataBuffer::U16(v) => {
-            let mut out = vec![0u16; n];
-            for i in 0..n {
-                let r = v[i * 3] as f64;
-                let g = v[i * 3 + 1] as f64;
-                let b = v[i * 3 + 2] as f64;
-                out[i] = (0.299 * r + 0.587 * g + 0.114 * b).round() as u16;
-            }
-            NDDataBuffer::U16(out)
-        }
-        _ => {
-            return Err(ADError::UnsupportedConversion(
-                "rgb1_to_mono only supports UInt8 and UInt16".into(),
-            ));
-        }
+        NDDataBuffer::I8(v) => rgb1_to_mono_typed!(v, i8, I8),
+        NDDataBuffer::U8(v) => rgb1_to_mono_typed!(v, u8, U8),
+        NDDataBuffer::I16(v) => rgb1_to_mono_typed!(v, i16, I16),
+        NDDataBuffer::U16(v) => rgb1_to_mono_typed!(v, u16, U16),
+        NDDataBuffer::I32(v) => rgb1_to_mono_typed!(v, i32, I32),
+        NDDataBuffer::U32(v) => rgb1_to_mono_typed!(v, u32, U32),
+        NDDataBuffer::I64(v) => rgb1_to_mono_typed!(v, i64, I64),
+        NDDataBuffer::U64(v) => rgb1_to_mono_typed!(v, u64, U64),
+        NDDataBuffer::F32(v) => rgb1_to_mono_typed!(v, f32, F32),
+        NDDataBuffer::F64(v) => rgb1_to_mono_typed!(v, f64, F64),
     };
 
     let dims = vec![NDDimension::new(x), NDDimension::new(y)];
@@ -136,6 +135,7 @@ pub fn rgb1_to_mono(src: &NDArray) -> ADResult<NDArray> {
     arr.data = out_data;
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -246,6 +246,7 @@ pub fn convert_rgb_layout(
     arr.data = out_data;
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -343,6 +344,7 @@ pub fn convert_data_type(src: &NDArray, target_type: NDDataType) -> ADResult<NDA
     arr.data = out_data;
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -407,6 +409,7 @@ pub fn rgb1_to_yuv444(src: &NDArray) -> ADResult<NDArray> {
     arr.data = out_data;
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -471,6 +474,7 @@ pub fn yuv444_to_rgb1(src: &NDArray) -> ADResult<NDArray> {
     arr.data = out_data;
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -542,6 +546,7 @@ pub fn rgb1_to_yuv422(src: &NDArray) -> ADResult<NDArray> {
     arr.data = NDDataBuffer::U8(out);
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -607,6 +612,7 @@ pub fn yuv422_to_rgb1(src: &NDArray) -> ADResult<NDArray> {
     arr.data = NDDataBuffer::U8(out);
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -682,6 +688,7 @@ pub fn rgb1_to_yuv411(src: &NDArray) -> ADResult<NDArray> {
     arr.data = NDDataBuffer::U8(out);
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)
@@ -745,6 +752,7 @@ pub fn yuv411_to_rgb1(src: &NDArray) -> ADResult<NDArray> {
     arr.data = NDDataBuffer::U8(out);
     arr.unique_id = src.unique_id;
     arr.timestamp = src.timestamp;
+    arr.time_stamp = src.time_stamp;
     arr.attributes = src.attributes.clone();
     arr.codec = src.codec.clone();
     Ok(arr)

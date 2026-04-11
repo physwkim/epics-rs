@@ -363,38 +363,35 @@ impl NDPluginProcess for ROIStatProcessor {
             self.results[i] = Self::compute_roi_stats(&array.data, x_size, y_size, roi);
         }
 
-        // Accumulate time series
+        // Accumulate time series (fixed-length: stop when full)
         if self.ts_mode == TSMode::Acquiring {
-            // Ensure ts_buffers match roi count
-            while self.ts_buffers.len() < self.rois.len() {
-                self.ts_buffers.push(vec![Vec::new(); NUM_STATS]);
-            }
-
-            for (i, result) in self.results.iter().enumerate() {
-                if i >= self.ts_buffers.len() {
-                    break;
+            if self.ts_num_points > 0 && self.ts_current >= self.ts_num_points {
+                // Buffer full — stop acquiring
+                self.ts_mode = TSMode::Idle;
+            } else {
+                // Ensure ts_buffers match roi count
+                while self.ts_buffers.len() < self.rois.len() {
+                    self.ts_buffers.push(vec![Vec::new(); NUM_STATS]);
                 }
-                let stats = [
-                    result.min,
-                    result.max,
-                    result.mean,
-                    result.total,
-                    result.net,
-                ];
-                for (s, &val) in stats.iter().enumerate() {
-                    let buf = &mut self.ts_buffers[i][s];
-                    if buf.len() >= self.ts_num_points && self.ts_num_points > 0 {
-                        // Circular: overwrite oldest
-                        let idx = self.ts_current % self.ts_num_points;
-                        if idx < buf.len() {
-                            buf[idx] = val;
-                        }
-                    } else {
+
+                for (i, result) in self.results.iter().enumerate() {
+                    if i >= self.ts_buffers.len() {
+                        break;
+                    }
+                    let stats = [
+                        result.min,
+                        result.max,
+                        result.mean,
+                        result.total,
+                        result.net,
+                    ];
+                    for (s, &val) in stats.iter().enumerate() {
+                        let buf = &mut self.ts_buffers[i][s];
                         buf.push(val);
                     }
                 }
+                self.ts_current += 1;
             }
-            self.ts_current += 1;
         }
 
         // Send flattened stats to TimeSeriesPortDriver if connected
@@ -529,12 +526,40 @@ impl NDPluginProcess for ROIStatProcessor {
                 *r = ROIStatResult::default();
             }
         } else if reason == p.ts_control {
-            let mode = if snapshot.value.as_i32() != 0 {
-                TSMode::Acquiring
-            } else {
-                TSMode::Idle
-            };
-            self.set_ts_mode(mode);
+            // 0=EraseStart (clear+start), 1=Start (resume), 2=Stop, 3=Read, 4=Erase
+            match snapshot.value.as_i32() {
+                0 => {
+                    // EraseStart: clear buffers then start
+                    for roi_bufs in &mut self.ts_buffers {
+                        for stat_buf in roi_bufs.iter_mut() {
+                            stat_buf.clear();
+                        }
+                    }
+                    self.ts_current = 0;
+                    self.ts_mode = TSMode::Acquiring;
+                }
+                1 => {
+                    // Start: resume without clearing
+                    self.ts_mode = TSMode::Acquiring;
+                }
+                2 => {
+                    // Stop
+                    self.ts_mode = TSMode::Idle;
+                }
+                3 => {
+                    // Read: callback without stopping (no-op here, param update triggers read)
+                }
+                4 => {
+                    // Erase: clear buffers
+                    for roi_bufs in &mut self.ts_buffers {
+                        for stat_buf in roi_bufs.iter_mut() {
+                            stat_buf.clear();
+                        }
+                    }
+                    self.ts_current = 0;
+                }
+                _ => {}
+            }
         } else if reason == p.ts_num_points {
             self.ts_num_points = snapshot.value.as_i32().max(0) as usize;
         }

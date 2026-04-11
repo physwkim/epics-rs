@@ -49,8 +49,9 @@ impl ADDriverBase {
         port_base.set_string_param(params.base.driver_version, 0, "0.0.0".into())?;
         port_base.set_string_param(params.base.codec, 0, String::new())?;
 
-        port_base.set_int32_param(params.max_size_x, 0, max_size_x)?;
-        port_base.set_int32_param(params.max_size_y, 0, max_size_y)?;
+        // C++ inits ADMaxSizeX/Y to 1, not the constructor arg
+        port_base.set_int32_param(params.max_size_x, 0, 1)?;
+        port_base.set_int32_param(params.max_size_y, 0, 1)?;
         port_base.set_int32_param(params.size_x, 0, max_size_x)?;
         port_base.set_int32_param(params.size_y, 0, max_size_y)?;
         port_base.set_int32_param(params.bin_x, 0, 1)?;
@@ -70,12 +71,11 @@ impl ADDriverBase {
             0,
             max_memory as f64 / 1_048_576.0,
         )?;
-        // Initial array size based on detector dimensions and data type (UInt8)
-        port_base.set_int32_param(params.base.array_size_x, 0, max_size_x)?;
-        port_base.set_int32_param(params.base.array_size_y, 0, max_size_y)?;
+        // C++ inits NDArraySizeX/Y/Size to 0
+        port_base.set_int32_param(params.base.array_size_x, 0, 0)?;
+        port_base.set_int32_param(params.base.array_size_y, 0, 0)?;
         port_base.set_int32_param(params.base.array_size_z, 0, 0)?;
-        let initial_array_bytes = max_size_x as i64 * max_size_y as i64; // UInt8 = 1 byte/element
-        port_base.set_int32_param(params.base.array_size, 0, initial_array_bytes as i32)?;
+        port_base.set_int32_param(params.base.array_size, 0, 0)?;
 
         port_base.set_float64_param(params.gain, 0, 1.0)?;
         port_base.set_int32_param(params.shutter_mode, 0, ShutterMode::None as i32)?;
@@ -117,11 +117,24 @@ impl ADDriverBase {
             .set_int32_param(self.params.base.array_size_z, 0, info.color_size as i32)?;
         self.port_base
             .set_int32_param(self.params.base.array_size, 0, info.total_bytes as i32)?;
+        self.port_base
+            .set_int32_param(self.params.base.unique_id, 0, array.unique_id)?;
 
+        // Update pool stats
         self.port_base.set_float64_param(
             self.params.base.pool_used_memory,
             0,
             self.pool.allocated_bytes() as f64 / 1_048_576.0,
+        )?;
+        self.port_base.set_int32_param(
+            self.params.base.pool_free_buffers,
+            0,
+            self.pool.num_free_buffers() as i32,
+        )?;
+        self.port_base.set_int32_param(
+            self.params.base.pool_alloc_buffers,
+            0,
+            self.pool.num_alloc_buffers() as i32,
         )?;
 
         let callbacks_enabled = self
@@ -152,15 +165,15 @@ impl ADDriverBase {
         );
 
         match mode {
-            ShutterMode::None => {}
-            ShutterMode::DetectorOnly | ShutterMode::EpicsAndDetector => {
+            Some(ShutterMode::None) | None => {}
+            Some(ShutterMode::DetectorOnly) => {
                 self.port_base.set_int32_param(
                     self.params.shutter_control,
                     0,
                     if open { 1 } else { 0 },
                 )?;
             }
-            ShutterMode::EpicsOnly => {
+            Some(ShutterMode::EpicsOnly) => {
                 self.port_base.set_int32_param(
                     self.params.shutter_control_epics,
                     0,
@@ -189,17 +202,18 @@ mod tests {
     #[test]
     fn test_new_sets_initial_params() {
         let ad = ADDriverBase::new("TEST", 1024, 768, 50_000_000).unwrap();
+        // C++ inits ADMaxSizeX/Y to 1
         assert_eq!(
             ad.port_base
                 .get_int32_param(ad.params.max_size_x, 0)
                 .unwrap(),
-            1024
+            1
         );
         assert_eq!(
             ad.port_base
                 .get_int32_param(ad.params.max_size_y, 0)
                 .unwrap(),
-            768
+            1
         );
         assert_eq!(
             ad.port_base.get_int32_param(ad.params.size_x, 0).unwrap(),

@@ -89,7 +89,18 @@ impl BadPixelProcessor {
     }
 
     /// Apply corrections to a mutable data buffer.
-    fn apply_corrections(&self, data: &mut NDDataBuffer, width: usize, height: usize) {
+    /// `offset_x`/`offset_y` and `binning_x`/`binning_y` are used to adjust bad pixel
+    /// coordinates from the original sensor space to the current array space.
+    fn apply_corrections(
+        &self,
+        data: &mut NDDataBuffer,
+        width: usize,
+        height: usize,
+        offset_x: i64,
+        offset_y: i64,
+        binning_x: i64,
+        binning_y: i64,
+    ) {
         // We need to read original values for Replace/Median, so take a snapshot first.
         // For Set mode, we could do it in-place, but for consistency we read from the
         // original and write to a separate buffer when needed.
@@ -98,7 +109,15 @@ impl BadPixelProcessor {
         let mut corrections: Vec<(usize, f64)> = Vec::with_capacity(self.pixels.len());
 
         for bp in &self.pixels {
-            if bp.x >= width || bp.y >= height {
+            // Adjust pixel coordinates for dimension offset and binning
+            let adj_x = (bp.x as i64 - offset_x) / binning_x;
+            let adj_y = (bp.y as i64 - offset_y) / binning_y;
+            if adj_x < 0 || adj_y < 0 {
+                continue;
+            }
+            let adj_x = adj_x as usize;
+            let adj_y = adj_y as usize;
+            if adj_x >= width || adj_y >= height {
                 continue;
             }
 
@@ -106,8 +125,8 @@ impl BadPixelProcessor {
                 BadPixelMode::Set { value } => *value,
 
                 BadPixelMode::Replace { dx, dy } => {
-                    let nx = bp.x as i64 + *dx as i64;
-                    let ny = bp.y as i64 + *dy as i64;
+                    let nx = adj_x as i64 + *dx as i64;
+                    let ny = adj_y as i64 + *dy as i64;
 
                     if nx < 0 || nx >= width as i64 || ny < 0 || ny >= height as i64 {
                         continue; // replacement out of bounds, skip
@@ -131,8 +150,8 @@ impl BadPixelProcessor {
                 BadPixelMode::Median { kernel_x, kernel_y } => {
                     let half_x = (*kernel_x / 2) as i64;
                     let half_y = (*kernel_y / 2) as i64;
-                    let cx = bp.x as i64;
-                    let cy = bp.y as i64;
+                    let cx = adj_x as i64;
+                    let cy = adj_y as i64;
 
                     let mut neighbors = Vec::new();
                     for ky in (cy - half_y)..=(cy + half_y) {
@@ -143,7 +162,7 @@ impl BadPixelProcessor {
                             let kxu = kx as usize;
                             let kyu = ky as usize;
                             // Skip the bad pixel itself and other bad pixels
-                            if kxu == bp.x && kyu == bp.y {
+                            if kxu == adj_x && kyu == adj_y {
                                 continue;
                             }
                             if self.is_bad(kxu, kyu) {
@@ -170,7 +189,7 @@ impl BadPixelProcessor {
                 }
             };
 
-            let idx = bp.y * width + bp.x;
+            let idx = adj_y * width + adj_x;
             corrections.push((idx, value));
         }
 
@@ -192,8 +211,21 @@ impl NDPluginProcess for BadPixelProcessor {
             return ProcessResult::arrays(vec![Arc::new(array.clone())]);
         }
 
+        let offset_x = array.dims.first().map_or(0, |d| d.offset as i64);
+        let offset_y = array.dims.get(1).map_or(0, |d| d.offset as i64);
+        let binning_x = array.dims.first().map_or(1, |d| d.binning.max(1) as i64);
+        let binning_y = array.dims.get(1).map_or(1, |d| d.binning.max(1) as i64);
+
         let mut out = array.clone();
-        self.apply_corrections(&mut out.data, self.width, height);
+        self.apply_corrections(
+            &mut out.data,
+            self.width,
+            height,
+            offset_x,
+            offset_y,
+            binning_x,
+            binning_y,
+        );
         ProcessResult::arrays(vec![Arc::new(out)])
     }
 

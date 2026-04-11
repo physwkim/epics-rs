@@ -148,6 +148,9 @@ pub fn compress_lz4(src: &NDArray) -> NDArray {
     arr.codec = Some(Codec {
         name: CodecName::LZ4,
         compressed_size,
+        level: 0,
+        shuffle: 0,
+        compressor: 0,
     });
 
     // Store original data type so decompression can reconstruct the buffer.
@@ -248,6 +251,9 @@ pub fn compress_jpeg(src: &NDArray, quality: u8) -> Option<NDArray> {
     arr.codec = Some(Codec {
         name: CodecName::JPEG,
         compressed_size,
+        level: 0,
+        shuffle: 0,
+        compressor: 0,
     });
 
     tracing::debug!(
@@ -363,6 +369,9 @@ pub fn compress_blosc(src: &NDArray, config: &BloscConfig) -> NDArray {
     arr.codec = Some(Codec {
         name: CodecName::Blosc,
         compressed_size,
+        level: 0,
+        shuffle: 0,
+        compressor: 0,
     });
     arr
 }
@@ -463,6 +472,10 @@ impl NDPluginProcess for CodecProcessor {
         let original_bytes = array.data.as_u8_slice().len();
 
         let result = match self.mode {
+            CodecMode::Compress { .. } if array.codec.is_some() => {
+                // Already compressed — pass through unchanged
+                Some(array.clone())
+            }
             CodecMode::Compress {
                 codec: CodecName::LZ4,
                 ..

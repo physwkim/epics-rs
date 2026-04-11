@@ -20,6 +20,7 @@ impl ScatterMethod {
 pub struct ScatterProcessor {
     method: ScatterMethod,
     current_index: usize,
+    num_outputs: usize,
     method_idx: Option<usize>,
 }
 
@@ -28,6 +29,7 @@ impl ScatterProcessor {
         Self {
             method: ScatterMethod::RoundRobin,
             current_index: 0,
+            num_outputs: 1,
             method_idx: None,
         }
     }
@@ -41,8 +43,12 @@ impl Default for ScatterProcessor {
 
 impl NDPluginProcess for ScatterProcessor {
     fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
-        let idx = self.current_index;
-        self.current_index += 1;
+        let idx = if self.num_outputs > 0 {
+            self.current_index % self.num_outputs
+        } else {
+            self.current_index
+        };
+        self.current_index = self.current_index.wrapping_add(1);
         ProcessResult::scatter(vec![Arc::new(array.clone())], idx)
     }
 
@@ -80,6 +86,7 @@ mod tests {
     #[test]
     fn test_scatter_processor_round_robin() {
         let mut proc = ScatterProcessor::new();
+        proc.num_outputs = 3;
         let pool = NDArrayPool::new(1_000_000);
 
         let mut arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
@@ -94,5 +101,9 @@ mod tests {
 
         let r2 = proc.process_array(&arr, &pool);
         assert_eq!(r2.scatter_index, Some(2));
+
+        // Should wrap around
+        let r3 = proc.process_array(&arr, &pool);
+        assert_eq!(r3.scatter_index, Some(0));
     }
 }
