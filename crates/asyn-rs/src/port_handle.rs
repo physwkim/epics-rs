@@ -443,8 +443,35 @@ impl PortHandle {
         );
     }
 
-    /// Set params directly and fire callbacks — no writeInt32/on_param_change re-entrancy.
-    /// Mirrors C ADCore's setIntegerParam + setDoubleParam + callParamCallbacks pattern.
+    /// Set parameters directly and fire callbacks atomically.
+    ///
+    /// This is the correct way for **background/acquisition threads** to update
+    /// parameters. It mirrors the C ADCore pattern of:
+    /// ```c
+    /// setIntegerParam(reason, value);
+    /// setDoubleParam(reason, value);
+    /// callParamCallbacks();
+    /// ```
+    ///
+    /// # Why not `write_int32_no_wait` + `call_param_callbacks_no_wait`?
+    ///
+    /// `write_int32_no_wait` routes through the driver's `writeInt32()` method,
+    /// which is the **external write** path (designed for CA client puts). This
+    /// can trigger unwanted side effects (e.g., starting acquisition again) and
+    /// sends two separate messages to the actor queue — the callback may fire
+    /// before all writes are processed, or may miss changed flags.
+    ///
+    /// `set_params_and_notify` sets parameters directly in the param cache and
+    /// fires callbacks in a **single atomic actor message**, ensuring all I/O Intr
+    /// records see the updated values.
+    ///
+    /// # Example
+    /// ```ignore
+    /// port_handle.set_params_and_notify(0, vec![
+    ///     ParamSetValue::Int32 { reason: acquire_busy, addr: 0, value: 0 },
+    ///     ParamSetValue::Int32 { reason: status, addr: 0, value: ADStatus::Idle as i32 },
+    /// ]);
+    /// ```
     pub fn set_params_and_notify(&self, addr: i32, updates: Vec<crate::request::ParamSetValue>) {
         let user = AsynUser::new(0).with_addr(addr);
         self.submit_no_wait(RequestOp::CallParamCallbacks { addr, updates }, user);
@@ -459,6 +486,10 @@ impl PortHandle {
         let _ = self.tx.try_send(msg);
     }
 
+    /// Send a write request without waiting. Routes through the driver's `writeInt32()`.
+    ///
+    /// **Note:** For background thread parameter updates, prefer [`set_params_and_notify`]
+    /// which sets params directly without going through the driver's write method.
     pub fn write_int32_no_wait(&self, reason: usize, addr: i32, value: i32) {
         let user = AsynUser::new(reason).with_addr(addr);
         self.submit_no_wait(RequestOp::Int32Write { value }, user);
