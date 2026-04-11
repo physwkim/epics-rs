@@ -175,6 +175,8 @@ impl MotorDeviceSupport {
             let _ = self
                 .poll_cmd_tx
                 .try_send(PollCommand::ScheduleDelay(delay.id, delay.duration));
+            // Poll loop goes idle during delay — sync our tracking flag
+            self.polling_active = false;
         }
     }
 }

@@ -706,8 +706,12 @@ impl MotorRecord {
                 self.check_completion()
             }
             Some(MotorEvent::DelayExpired) => {
+                // C: after DLY, request fresh poll then evaluate for retry
                 let mut effects = ProcessEffects::default();
-                self.finalize_motion(&mut effects);
+                self.stat.mip.remove(MipFlags::DELAY_REQ);
+                self.stat.mip.insert(MipFlags::DELAY_ACK);
+                effects.status_refresh = true;
+                effects.suppress_forward_link = true;
                 effects
             }
             None => ProcessEffects::default(),

@@ -5,6 +5,13 @@ impl MotorRecord {
     pub fn check_completion(&mut self) -> ProcessEffects {
         let mut effects = ProcessEffects::default();
 
+        // C: after DLY expires and fresh readback arrives, evaluate for retry
+        if self.stat.mip.contains(MipFlags::DELAY_ACK) {
+            self.stat.mip.remove(MipFlags::DELAY_ACK);
+            self.evaluate_position_error_after_delay(&mut effects);
+            return effects;
+        }
+
         let driver_done =
             self.stat.msta.contains(MstaFlags::DONE) && !self.stat.msta.contains(MstaFlags::MOVING);
 
@@ -81,11 +88,12 @@ impl MotorRecord {
                 self.evaluate_position_error(&mut effects);
             }
             MotionPhase::Jog | MotionPhase::JogStopping => {
+                // C: postProcess syncs VAL<-RBV, DVAL<-DRBV before jog backlash
+                // This ensures start_jog_backlash uses the jog-end position as base
+                self.sync_positions();
                 if self.needs_jog_backlash() {
                     self.start_jog_backlash(&mut effects);
                 } else {
-                    // C: postProcess syncs VAL<-RBV after jog stop
-                    self.sync_positions();
                     self.finalize_or_delay(&mut effects);
                 }
             }
@@ -153,6 +161,58 @@ impl MotorRecord {
     pub(crate) fn set_phase(&mut self, new_phase: MotionPhase) {
         tracing::debug!("phase transition: {:?} -> {:?}", self.stat.phase, new_phase);
         self.stat.phase = new_phase;
+    }
+
+    /// Evaluate position error after DLY expires (C: maybeRetry after delay).
+    /// Same as evaluate_position_error but finalizes directly (no re-delay).
+    fn evaluate_position_error_after_delay(&mut self, effects: &mut ProcessEffects) {
+        let diff = (self.pos.dval - self.pos.drbv).abs();
+
+        // Check limit switch blocks retry direction
+        let retry_dir_positive = (self.pos.dval - self.pos.drbv) >= 0.0;
+        let ls_blocks_retry = (self.limits.hls && retry_dir_positive)
+            || (self.limits.lls && !retry_dir_positive);
+
+        if diff > self.retry.rdbd
+            && self.retry.rcnt < self.retry.rtry
+            && self.retry.rdbd > 0.0
+            && !ls_blocks_retry
+        {
+            if self.retry.rmod == RetryMode::InPosition {
+                self.finalize_motion(effects);
+                return;
+            }
+
+            self.retry.rcnt += 1;
+            self.retry.miss = false;
+            self.set_phase(MotionPhase::Retry);
+            self.stat.mip = MipFlags::RETRY;
+
+            let retry_target = self.compute_retry_target();
+            let frac = self.retry.frac;
+            if self.use_relative_moves() {
+                let rel_distance = (retry_target - self.pos.drbv) * frac;
+                effects.commands.push(MotorCommand::MoveRelative {
+                    distance: rel_distance,
+                    velocity: self.vel.velo,
+                    acceleration: self.vel.accl,
+                });
+            } else {
+                let position = self.pos.dval + frac * (retry_target - self.pos.dval);
+                effects.commands.push(MotorCommand::MoveAbsolute {
+                    position,
+                    velocity: self.vel.velo,
+                    acceleration: self.vel.accl,
+                });
+            }
+            effects.request_poll = true;
+            effects.suppress_forward_link = true;
+        } else {
+            if diff > self.retry.rdbd && self.retry.rdbd > 0.0 {
+                self.retry.miss = true;
+            }
+            self.finalize_motion(effects);
+        }
     }
 
     /// Evaluate position error after motion completes.
@@ -274,18 +334,22 @@ impl MotorRecord {
         self.internal.backlash_pending = false;
         self.set_phase(MotionPhase::BacklashFinal);
         self.stat.mip = MipFlags::MOVE_BL;
-        // C: FRAC applied to backlash final move
         let frac = self.retry.frac;
-        let position_error = self.pos.dval - self.pos.drbv;
         if self.use_relative_moves() {
+            // C relative: relpos = (dval - drbv) * frac / mres
+            let rel_distance = (self.pos.dval - self.pos.drbv) * frac;
             effects.commands.push(MotorCommand::MoveRelative {
-                distance: position_error * frac,
+                distance: rel_distance,
                 velocity: self.vel.bvel,
                 acceleration: self.vel.bacc,
             });
         } else {
+            // C absolute: position = pretarget + frac * (dval - pretarget)
+            // = (dval - bdst) + frac * bdst = dval - bdst*(1-frac)
+            let pretarget = Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
+            let position = pretarget + frac * (self.pos.dval - pretarget);
             effects.commands.push(MotorCommand::MoveAbsolute {
-                position: self.pos.drbv + position_error * frac,
+                position,
                 velocity: self.vel.bvel,
                 acceleration: self.vel.bacc,
             });
@@ -314,13 +378,14 @@ impl MotorRecord {
 
     /// Start jog backlash phase 2 (final approach at backlash velocity).
     fn start_jog_backlash_final(&mut self, effects: &mut ProcessEffects) {
-        // Phase 2 (BL2): move from pretarget to dval at backlash velocity
         let frac = self.retry.frac;
-        let position_error = self.pos.dval - self.pos.drbv;
         self.stat.mip = MipFlags::JOG_BL2;
         self.internal.backlash_pending = false;
+        // C: pretarget + frac * (dval - pretarget)
+        let pretarget = Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
+        let position = pretarget + frac * (self.pos.dval - pretarget);
         effects.commands.push(MotorCommand::MoveAbsolute {
-            position: self.pos.drbv + position_error * frac,
+            position,
             velocity: self.vel.bvel,
             acceleration: self.vel.bacc,
         });

@@ -313,9 +313,15 @@ fn dly_delays_final_dmov_assertion() {
     assert!(effects.schedule_delay.is_some());
     assert!(!rec.stat.dmov);
 
-    // Delay expires
+    // Delay expires — C: sets DELAY_ACK, requests fresh poll
     rec.set_event(MotorEvent::DelayExpired);
-    let _effects = rec.do_process();
+    let effects = rec.do_process();
+    assert!(effects.status_refresh);
+    assert!(!rec.stat.dmov); // not yet finalized
+
+    // Fresh poll arrives — evaluate position error, finalize
+    complete_move(&mut rec, 10.0);
+    let _effects = rec.check_completion();
     assert!(rec.stat.dmov);
     assert_eq!(rec.stat.phase, MotionPhase::Idle);
 }
