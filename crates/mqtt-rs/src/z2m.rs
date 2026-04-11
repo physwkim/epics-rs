@@ -11,7 +11,7 @@
 //! mqttZ2mSwitch("MQTT1", "TEST:MQTT:", "MBath:Light", "zigbee2mqtt/bathroom light")
 //! mqttZ2mMotion("MQTT1", "TEST:MQTT:", "ENT:Motion", "zigbee2mqtt/entrance motion")
 //! mqttZ2mRemote2("MQTT1", "TEST:MQTT:", "LBath:Sw", "zigbee2mqtt/bathroom switch")
-//! mqttDriverConfigure("MQTT1", "mqtt://192.168.50.167:1883", "epics-mqtt-ioc", 1)
+//! mqttDriverConfigure("MQTT1", "mqtt://localhost:1883", "epics-mqtt-ioc", 1)
 //! iocInit()
 //! ```
 
