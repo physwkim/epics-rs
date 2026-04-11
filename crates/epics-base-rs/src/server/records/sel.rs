@@ -244,12 +244,14 @@ impl Record for SelRecord {
                 if v.is_finite() { v } else { self.val }
             }
             1 => {
-                // High Signal: max of non-NaN values
-                valid.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                // High Signal: max of non-NaN values (keep val if all NaN)
+                if valid.is_empty() { self.val }
+                else { valid.iter().copied().fold(f64::NEG_INFINITY, f64::max) }
             }
             2 => {
-                // Low Signal: min of non-NaN values
-                valid.iter().copied().fold(f64::INFINITY, f64::min)
+                // Low Signal: min of non-NaN values (keep val if all NaN)
+                if valid.is_empty() { self.val }
+                else { valid.iter().copied().fold(f64::INFINITY, f64::min) }
             }
             3 => {
                 // Median: C uses order[count/2] (no averaging)

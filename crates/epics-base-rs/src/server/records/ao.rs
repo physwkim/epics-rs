@@ -359,8 +359,10 @@ impl Record for AoRecord {
             self.val = self.val.clamp(self.drvl, self.drvh);
         }
 
-        // C: value = prec->val, then OROC modifies value (not VAL)
+        // C: value = prec->val; prec->pval = value; then OROC modifies value
         let mut value = self.val;
+        self.pval = value; // pval = drive-limited value BEFORE OROC (like C line 468)
+
         // OROC: rate of change limiting (C applies unconditionally when oroc != 0)
         if self.oroc != 0.0 {
             let diff = value - self.oval;
@@ -373,7 +375,6 @@ impl Record for AoRecord {
             }
         }
 
-        self.pval = value; // pval = rate-limited value (like C)
         self.oval = value; // oval = rate-limited output value
 
         // convert(): engineering units to raw value

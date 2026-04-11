@@ -539,7 +539,7 @@ impl Record for MbbiRecord {
     fn process(&mut self) -> CaResult<ProcessOutcome> {
         let mut rval = self.rval;
         if self.shft > 0 {
-            rval = ((rval as u32) >> (self.shft as u32)) as i32;
+            rval = ((rval as u32) >> ((self.shft as u32) & 31)) as i32;
         }
         self.val = self.raw_to_val(rval);
         self.oraw = self.rval;
@@ -605,7 +605,7 @@ impl Record for MbbiRecord {
         };
         self.rval = raw;
         let shifted = if self.shft > 0 {
-            ((raw as u32) >> (self.shft as u32)) as i32
+            ((raw as u32) >> ((self.shft as u32) & 31)) as i32
         } else {
             raw
         };

@@ -194,7 +194,7 @@ impl MbboRecord {
             self.rval = self.val as i32;
         }
         if self.shft > 0 {
-            self.rval = ((self.rval as u32) << (self.shft as u32)) as i32;
+            self.rval = ((self.rval as u32) << ((self.shft as u32) & 31)) as i32;
         }
     }
 }
