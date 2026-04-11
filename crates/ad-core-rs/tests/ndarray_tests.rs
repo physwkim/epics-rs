@@ -116,7 +116,15 @@ fn dimension_3d_rgb() {
         NDDimension::new(320),
         NDDimension::new(240),
     ];
-    let arr = NDArray::new(dims, NDDataType::UInt8);
+    let mut arr = NDArray::new(dims, NDDataType::UInt8);
+    // info() reads ColorMode attribute for 3D arrays
+    use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+    arr.attributes.add(NDAttribute {
+        name: "ColorMode".into(),
+        description: "Color Mode".into(),
+        source: NDAttrSource::Driver,
+        value: NDAttrValue::Int32(2), // RGB1
+    });
     let info = arr.info();
     assert_eq!(info.color_size, 3);
     assert_eq!(info.x_size, 320);
@@ -185,13 +193,13 @@ fn pool_free_list_reuse() {
     pool.release(arr);
     assert_eq!(pool.num_free_buffers(), 1);
 
-    // Allocate again — should reuse freed buffer, no new allocation
+    // Allocate again — use size within THRESHOLD_SIZE_RATIO (1.5x) for reuse
     let arr2 = pool
-        .alloc(vec![NDDimension::new(50)], NDDataType::UInt8)
+        .alloc(vec![NDDimension::new(80)], NDDataType::UInt8)
         .unwrap();
     assert_eq!(pool.num_free_buffers(), 0);
     assert_eq!(pool.allocated_bytes(), alloc_after_first);
-    assert_eq!(arr2.data.len(), 50);
+    assert_eq!(arr2.data.len(), 80);
     // unique_id keeps incrementing even on reuse
     assert_eq!(arr2.unique_id, 2);
 }
@@ -215,9 +223,9 @@ fn pool_free_list_prefers_smallest_sufficient_buffer() {
     pool.release(small);
     assert_eq!(pool.num_free_buffers(), 3);
 
-    // Request 500 bytes — should pick medium (1000 capacity), not large
+    // Request 800 bytes — within 1.5x of medium (1000), should pick medium, not large
     let reused = pool
-        .alloc(vec![NDDimension::new(500)], NDDataType::UInt8)
+        .alloc(vec![NDDimension::new(800)], NDDataType::UInt8)
         .unwrap();
     assert_eq!(pool.num_free_buffers(), 2);
     assert!(reused.data.capacity_bytes() >= 1000);
