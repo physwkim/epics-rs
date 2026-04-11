@@ -813,7 +813,12 @@ impl PortDriver for DrvAsynSerialPort {
             "clocal" => {
                 if self.io.fd.is_some() {
                     let t = self.get_current_termios()?;
-                    Ok(if t.c_cflag & libc::CLOCAL != 0 { "Y" } else { "N" }.to_string())
+                    Ok(if t.c_cflag & libc::CLOCAL != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
                 } else {
                     Ok("N".to_string())
                 }
@@ -821,18 +826,29 @@ impl PortDriver for DrvAsynSerialPort {
             "crtscts" => {
                 if self.io.fd.is_some() {
                     let t = self.get_current_termios()?;
-                    Ok(if t.c_cflag & libc::CRTSCTS != 0 { "Y" } else { "N" }.to_string())
+                    Ok(if t.c_cflag & libc::CRTSCTS != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
                 } else {
                     Ok(match self.config.flow_control {
                         FlowControl::Hardware => "Y",
                         _ => "N",
-                    }.to_string())
+                    }
+                    .to_string())
                 }
             }
             "ixon" => {
                 if self.io.fd.is_some() {
                     let t = self.get_current_termios()?;
-                    Ok(if t.c_iflag & libc::IXON != 0 { "Y" } else { "N" }.to_string())
+                    Ok(if t.c_iflag & libc::IXON != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
                 } else {
                     Ok("N".to_string())
                 }
@@ -840,7 +856,12 @@ impl PortDriver for DrvAsynSerialPort {
             "ixoff" => {
                 if self.io.fd.is_some() {
                     let t = self.get_current_termios()?;
-                    Ok(if t.c_iflag & libc::IXOFF != 0 { "Y" } else { "N" }.to_string())
+                    Ok(if t.c_iflag & libc::IXOFF != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
                 } else {
                     Ok("N".to_string())
                 }
@@ -848,7 +869,12 @@ impl PortDriver for DrvAsynSerialPort {
             "ixany" => {
                 if self.io.fd.is_some() {
                     let t = self.get_current_termios()?;
-                    Ok(if t.c_iflag & libc::IXANY != 0 { "Y" } else { "N" }.to_string())
+                    Ok(if t.c_iflag & libc::IXANY != 0 {
+                        "Y"
+                    } else {
+                        "N"
+                    }
+                    .to_string())
                 } else {
                     Ok("N".to_string())
                 }
@@ -887,13 +913,25 @@ impl PortDriver for DrvAsynSerialPort {
         let enabled = parse_bool_option(value).unwrap_or(false);
         match key {
             "rs485_enable" => {
-                if enabled { rs485 |= 1; } else { rs485 &= !1; } // SER_RS485_ENABLED
+                if enabled {
+                    rs485 |= 1;
+                } else {
+                    rs485 &= !1;
+                } // SER_RS485_ENABLED
             }
             "rs485_rts_on_send" => {
-                if enabled { rs485 |= 2; } else { rs485 &= !2; } // SER_RS485_RTS_ON_SEND
+                if enabled {
+                    rs485 |= 2;
+                } else {
+                    rs485 &= !2;
+                } // SER_RS485_RTS_ON_SEND
             }
             "rs485_rts_after_send" => {
-                if enabled { rs485 |= 4; } else { rs485 &= !4; } // SER_RS485_RTS_AFTER_SEND
+                if enabled {
+                    rs485 |= 4;
+                } else {
+                    rs485 &= !4;
+                } // SER_RS485_RTS_AFTER_SEND
             }
             _ => {}
         }

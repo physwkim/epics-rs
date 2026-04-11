@@ -377,20 +377,13 @@ impl PortDriverBase {
             .set_param_status(index, addr, status, alarm_status, alarm_severity)
     }
 
-    pub fn get_param_status(
-        &self,
-        index: usize,
-        addr: i32,
-    ) -> AsynResult<(AsynStatus, u16, u16)> {
+    pub fn get_param_status(&self, index: usize, addr: i32) -> AsynResult<(AsynStatus, u16, u16)> {
         self.params.get_param_status(index, addr)
     }
 
     /// Detailed parameter report matching C asynPortDriver::reportParams.
     pub fn report_params(&self, level: i32) {
-        eprintln!(
-            "  Number of parameters is {}",
-            self.params.len()
-        );
+        eprintln!("  Number of parameters is {}", self.params.len());
         if level < 1 {
             return;
         }

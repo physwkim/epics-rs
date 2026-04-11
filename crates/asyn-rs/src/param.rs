@@ -314,7 +314,7 @@ impl ParamList {
             if *old != value {
                 entry.value = ParamValue::Float64(value);
                 entry.value_changed = true;
-                    entry.defined = true;
+                entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -341,7 +341,7 @@ impl ParamList {
             if *old != value {
                 entry.value = ParamValue::Int64(value);
                 entry.value_changed = true;
-                    entry.defined = true;
+                entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -368,7 +368,7 @@ impl ParamList {
             if *old != value {
                 entry.value = ParamValue::Octet(value);
                 entry.value_changed = true;
-                    entry.defined = true;
+                entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -431,7 +431,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Float64Array(_)) {
             entry.value = ParamValue::Float64Array(Arc::from(data));
             entry.value_changed = true;
-                    entry.defined = true;
+            entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -456,7 +456,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int32Array(_)) {
             entry.value = ParamValue::Int32Array(Arc::from(data));
             entry.value_changed = true;
-                    entry.defined = true;
+            entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -481,7 +481,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int8Array(_)) {
             entry.value = ParamValue::Int8Array(Arc::from(data));
             entry.value_changed = true;
-                    entry.defined = true;
+            entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -506,7 +506,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int16Array(_)) {
             entry.value = ParamValue::Int16Array(Arc::from(data));
             entry.value_changed = true;
-                    entry.defined = true;
+            entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -531,7 +531,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int64Array(_)) {
             entry.value = ParamValue::Int64Array(Arc::from(data));
             entry.value_changed = true;
-                    entry.defined = true;
+            entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -556,7 +556,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Float32Array(_)) {
             entry.value = ParamValue::Float32Array(Arc::from(data));
             entry.value_changed = true;
-                    entry.defined = true;
+            entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -597,7 +597,7 @@ impl ParamList {
             if *idx != value {
                 *idx = value;
                 entry.value_changed = true;
-                    entry.defined = true;
+                entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -626,7 +626,7 @@ impl ParamList {
                 *idx = 0;
             }
             entry.value_changed = true;
-                    entry.defined = true;
+            entry.defined = true;
         } else {
             return Err(AsynError::TypeMismatch {
                 expected: "Enum",
@@ -662,7 +662,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::GenericPointer(_)) {
             entry.value = ParamValue::GenericPointer(value);
             entry.value_changed = true;
-                    entry.defined = true; // Any is not comparable
+            entry.defined = true; // Any is not comparable
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {

@@ -161,7 +161,6 @@ impl TraceManager {
         }
     }
 
-
     /// Output a trace message.
     pub fn output(&self, port: &str, mask: TraceMask, msg: &str) {
         let configs = self.port_configs.lock().ok();
