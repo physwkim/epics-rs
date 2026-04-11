@@ -85,20 +85,10 @@ pub fn crop_roi(
         _ => (0, 1),
     };
     if x_dim < result.dims.len() {
-        result.dims[x_dim].offset = source
-            .dims
-            .get(x_dim)
-            .map(|d| d.offset)
-            .unwrap_or(0)
-            + min_x;
+        result.dims[x_dim].offset = source.dims.get(x_dim).map(|d| d.offset).unwrap_or(0) + min_x;
     }
     if y_dim < result.dims.len() {
-        result.dims[y_dim].offset = source
-            .dims
-            .get(y_dim)
-            .map(|d| d.offset)
-            .unwrap_or(0)
-            + min_y;
+        result.dims[y_dim].offset = source.dims.get(y_dim).map(|d| d.offset).unwrap_or(0) + min_y;
     }
 
     Ok(result)
@@ -108,7 +98,7 @@ pub fn crop_roi(
 mod tests {
     use super::*;
     use crate::driver::ColorMode;
-    use crate::ndarray::{NDDataType, NDDimension};
+    use crate::ndarray::NDDimension;
 
     fn make_mono_array(size_x: usize, size_y: usize, data: NDDataBuffer) -> NDArray {
         let dims = vec![NDDimension::new(size_x), NDDimension::new(size_y)];

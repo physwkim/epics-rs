@@ -114,7 +114,11 @@ impl MotorRecord {
         // URIP path: use external readback link value with RRES conversion
         if !self.conv.ueip && self.conv.urip && self.initialized {
             if let Some(rdbl_value) = self.conv.rdbl_value {
-                let rres = if self.conv.rres != 0.0 { self.conv.rres } else { 1.0 };
+                let rres = if self.conv.rres != 0.0 {
+                    self.conv.rres
+                } else {
+                    1.0
+                };
                 self.pos.rrbv = ((rdbl_value * rres) / self.conv.mres).round() as i32;
             }
         }
@@ -153,13 +157,8 @@ impl MotorRecord {
 
         // MOVN: C checks ls_active (limit in direction of motion), DONE, and PROBLEM
         // ls_active = (hls && cdir) || (lls && !cdir)
-        let ls_active =
-            (self.limits.hls && self.stat.cdir) || (self.limits.lls && !self.stat.cdir);
-        if ls_active || status.done || status.problem {
-            self.stat.movn = false;
-        } else {
-            self.stat.movn = true;
-        }
+        let ls_active = (self.limits.hls && self.stat.cdir) || (self.limits.lls && !self.stat.cdir);
+        self.stat.movn = !(ls_active || status.done || status.problem);
 
         // Build MSTA from driver status
         let mut msta = MstaFlags::empty();

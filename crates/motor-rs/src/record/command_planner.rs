@@ -141,13 +141,16 @@ impl MotorRecord {
             // C: DLLM > DHLM means limits are inverted => always violation
             if self.limits.dllm > self.limits.dhlm {
                 self.limits.lvio = true;
-                tracing::warn!("limit violation: inverted limits dllm={:.4} > dhlm={:.4}",
-                    self.limits.dllm, self.limits.dhlm);
+                tracing::warn!(
+                    "limit violation: inverted limits dllm={:.4} > dhlm={:.4}",
+                    self.limits.dllm,
+                    self.limits.dhlm
+                );
                 return;
             }
 
-            let target_outside = self.pos.dval > self.limits.dhlm
-                || self.pos.dval < self.limits.dllm;
+            let target_outside =
+                self.pos.dval > self.limits.dhlm || self.pos.dval < self.limits.dllm;
 
             if target_outside {
                 // C: allow move if heading toward the valid range
@@ -174,7 +177,8 @@ impl MotorRecord {
             if self.retry.bdst != 0.0 {
                 let backlash_needed = self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
                 if backlash_needed {
-                    let pretarget = Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
+                    let pretarget =
+                        Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
                     if pretarget > self.limits.dhlm || pretarget < self.limits.dllm {
                         self.limits.lvio = true;
                         tracing::warn!(
@@ -249,32 +253,52 @@ impl MotorRecord {
         // Case 3: Non-preferred (backlash): pretarget, no FRAC
         let same_vel = (self.vel.bvel - self.vel.velo).abs() < 1e-12
             && (self.vel.bacc - self.vel.accl).abs() < 1e-12;
-        let within_backlash_range = preferred
-            && self.retry.bdst != 0.0
-            && position_error.abs() <= self.retry.bdst.abs();
+        let within_backlash_range =
+            preferred && self.retry.bdst != 0.0 && position_error.abs() <= self.retry.bdst.abs();
 
         if backlash && !preferred {
             // Case 3: Non-preferred direction: move to pretarget, no FRAC
-            self.emit_move(effects, use_rel, move_target - self.pos.drbv, move_target,
-                self.vel.velo, self.vel.accl);
+            self.emit_move(
+                effects,
+                use_rel,
+                move_target - self.pos.drbv,
+                move_target,
+                self.vel.velo,
+                self.vel.accl,
+            );
         } else if !backlash || (preferred && same_vel) {
             // Case 1: No backlash or preferred with matching vel/accel
             // Apply FRAC scaling
-            self.emit_move(effects, use_rel, position_error * frac,
+            self.emit_move(
+                effects,
+                use_rel,
+                position_error * frac,
                 self.pos.drbv + position_error * frac,
-                self.vel.velo, self.vel.accl);
+                self.vel.velo,
+                self.vel.accl,
+            );
         } else if within_backlash_range {
             // Case 2: Preferred direction, within backlash range
             // Use backlash velocity, apply FRAC
-            self.emit_move(effects, use_rel, position_error * frac,
+            self.emit_move(
+                effects,
+                use_rel,
+                position_error * frac,
                 self.pos.drbv + position_error * frac,
-                self.vel.bvel, self.vel.bacc);
+                self.vel.bvel,
+                self.vel.bacc,
+            );
         } else {
             // Preferred direction, outside backlash range, vel differs
             // Use slew velocity, apply FRAC
-            self.emit_move(effects, use_rel, position_error * frac,
+            self.emit_move(
+                effects,
+                use_rel,
+                position_error * frac,
                 self.pos.drbv + position_error * frac,
-                self.vel.velo, self.vel.accl);
+                self.vel.velo,
+                self.vel.accl,
+            );
         }
         effects.request_poll = true;
         effects.suppress_forward_link = true;
@@ -393,10 +417,18 @@ impl MotorRecord {
 
         // C: home direction is inverted when MRES is negative
         // if ((MIP_HOMF && mres>0) || (MIP_HOMR && mres<0)) => HOME_FOR else HOME_REV
-        let hw_forward = if self.conv.mres >= 0.0 { forward } else { !forward };
+        let hw_forward = if self.conv.mres >= 0.0 {
+            forward
+        } else {
+            !forward
+        };
 
         // CDIR for homing: C accounts for MRES sign
-        self.stat.cdir = if self.conv.mres >= 0.0 { forward } else { !forward };
+        self.stat.cdir = if self.conv.mres >= 0.0 {
+            forward
+        } else {
+            !forward
+        };
 
         effects.commands.push(MotorCommand::Home {
             forward: hw_forward,
@@ -572,7 +604,7 @@ impl MotorRecord {
         let deadband = self.timing.ntmf * (self.retry.bdst.abs() + self.retry.rdbd);
 
         // C: retarget only if direction changed AND error exceeds deadband
-        let sign_diff = if diff >= 0.0 { true } else { false };
+        let sign_diff = diff >= 0.0;
         let direction_changed = sign_diff != self.stat.cdir;
 
         if direction_changed && diff.abs() > deadband {

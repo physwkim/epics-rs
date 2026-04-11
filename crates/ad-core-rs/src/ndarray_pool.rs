@@ -259,7 +259,9 @@ impl NDArrayPool {
             return self.alloc_copy(src);
         }
         let mut out = crate::color::convert_data_type(src, target_type)?;
-        out.unique_id = self.next_unique_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        out.unique_id = self
+            .next_unique_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(out)
     }
 
@@ -418,7 +420,9 @@ impl NDArrayPool {
 
         // Build intermediate array in source type with binned data
         let mut arr = NDArray {
-            unique_id: self.next_unique_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            unique_id: self
+                .next_unique_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             timestamp: src.timestamp,
             time_stamp: src.time_stamp,
             dims: out_dims,
@@ -527,7 +531,7 @@ mod tests {
         let arr = pool
             .alloc(vec![NDDimension::new(100)], NDDataType::UInt8)
             .unwrap();
-        let alloc_bytes_after_first = pool.allocated_bytes();
+        let _alloc_bytes_after_first = pool.allocated_bytes();
         assert_eq!(pool.num_alloc_buffers(), 1);
 
         // Release back to free list
@@ -720,8 +724,18 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
         let src = make_4x4_u8();
         let dims_out = vec![
-            NDDimension { size: 4, offset: 0, binning: 1, reverse: false },
-            NDDimension { size: 4, offset: 0, binning: 1, reverse: false },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt8).unwrap();
@@ -742,8 +756,18 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
         let src = make_4x4_u8();
         let dims_out = vec![
-            NDDimension { size: 2, offset: 1, binning: 1, reverse: false },
-            NDDimension { size: 2, offset: 1, binning: 1, reverse: false },
+            NDDimension {
+                size: 2,
+                offset: 1,
+                binning: 1,
+                reverse: false,
+            },
+            NDDimension {
+                size: 2,
+                offset: 1,
+                binning: 1,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt8).unwrap();
@@ -772,8 +796,18 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
         let src = make_4x4_u8();
         let dims_out = vec![
-            NDDimension { size: 4, offset: 0, binning: 2, reverse: false },
-            NDDimension { size: 4, offset: 0, binning: 2, reverse: false },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 2,
+                reverse: false,
+            },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 2,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt8).unwrap();
@@ -813,8 +847,18 @@ mod tests {
         }
 
         let dims_out = vec![
-            NDDimension { size: 4, offset: 0, binning: 1, reverse: true },
-            NDDimension { size: 1, offset: 0, binning: 1, reverse: false },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 1,
+                reverse: true,
+            },
+            NDDimension {
+                size: 1,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt8).unwrap();
@@ -845,8 +889,18 @@ mod tests {
         }
 
         let dims_out = vec![
-            NDDimension { size: 2, offset: 0, binning: 1, reverse: false },
-            NDDimension { size: 2, offset: 0, binning: 1, reverse: true },
+            NDDimension {
+                size: 2,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
+            NDDimension {
+                size: 2,
+                offset: 0,
+                binning: 1,
+                reverse: true,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt16).unwrap();
@@ -867,8 +921,18 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
         let src = make_4x4_u8();
         let dims_out = vec![
-            NDDimension { size: 4, offset: 0, binning: 2, reverse: false },
-            NDDimension { size: 4, offset: 0, binning: 2, reverse: false },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 2,
+                reverse: false,
+            },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 2,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::Float32).unwrap();
@@ -902,8 +966,18 @@ mod tests {
         }
 
         let dims_out = vec![
-            NDDimension { size: 2, offset: 1, binning: 2, reverse: false },
-            NDDimension { size: 2, offset: 1, binning: 2, reverse: false },
+            NDDimension {
+                size: 2,
+                offset: 1,
+                binning: 2,
+                reverse: false,
+            },
+            NDDimension {
+                size: 2,
+                offset: 1,
+                binning: 2,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt8).unwrap();
@@ -919,10 +993,7 @@ mod tests {
     fn test_convert_1d() {
         // 1D: 8 elements, offset=2, size=4, binning=2 -> 2 output elements
         let pool = NDArrayPool::new(1_000_000);
-        let mut src = NDArray::new(
-            vec![NDDimension::new(8)],
-            NDDataType::UInt16,
-        );
+        let mut src = NDArray::new(vec![NDDimension::new(8)], NDDataType::UInt16);
         if let NDDataBuffer::U16(ref mut v) = src.data {
             for i in 0..8 {
                 v[i] = (i * 10) as u16;
@@ -930,9 +1001,12 @@ mod tests {
             // [0, 10, 20, 30, 40, 50, 60, 70]
         }
 
-        let dims_out = vec![
-            NDDimension { size: 4, offset: 2, binning: 2, reverse: false },
-        ];
+        let dims_out = vec![NDDimension {
+            size: 4,
+            offset: 2,
+            binning: 2,
+            reverse: false,
+        }];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt16).unwrap();
         assert_eq!(out.dims.len(), 1);
@@ -952,7 +1026,11 @@ mod tests {
         // 3D: 2x2x2 with identity dims -> should copy exactly
         let pool = NDArrayPool::new(1_000_000);
         let mut src = NDArray::new(
-            vec![NDDimension::new(2), NDDimension::new(2), NDDimension::new(2)],
+            vec![
+                NDDimension::new(2),
+                NDDimension::new(2),
+                NDDimension::new(2),
+            ],
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(ref mut v) = src.data {
@@ -962,9 +1040,24 @@ mod tests {
         }
 
         let dims_out = vec![
-            NDDimension { size: 2, offset: 0, binning: 1, reverse: false },
-            NDDimension { size: 2, offset: 0, binning: 1, reverse: false },
-            NDDimension { size: 2, offset: 0, binning: 1, reverse: false },
+            NDDimension {
+                size: 2,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
+            NDDimension {
+                size: 2,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
+            NDDimension {
+                size: 2,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt8).unwrap();
@@ -982,9 +1075,12 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
         let src = make_4x4_u8();
         // Wrong number of dims_out
-        let dims_out = vec![
-            NDDimension { size: 4, offset: 0, binning: 1, reverse: false },
-        ];
+        let dims_out = vec![NDDimension {
+            size: 4,
+            offset: 0,
+            binning: 1,
+            reverse: false,
+        }];
 
         let result = pool.convert(&src, &dims_out, NDDataType::UInt8);
         assert!(result.is_err());
@@ -995,8 +1091,18 @@ mod tests {
         let pool = NDArrayPool::new(1_000_000);
         let src = make_4x4_u8();
         let dims_out = vec![
-            NDDimension { size: 4, offset: 2, binning: 1, reverse: false }, // 2+4 > 4
-            NDDimension { size: 4, offset: 0, binning: 1, reverse: false },
+            NDDimension {
+                size: 4,
+                offset: 2,
+                binning: 1,
+                reverse: false,
+            }, // 2+4 > 4
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
         ];
 
         let result = pool.convert(&src, &dims_out, NDDataType::UInt8);
@@ -1010,8 +1116,18 @@ mod tests {
         src.time_stamp = 12345.678;
 
         let dims_out = vec![
-            NDDimension { size: 4, offset: 0, binning: 1, reverse: false },
-            NDDimension { size: 4, offset: 0, binning: 1, reverse: false },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
+            NDDimension {
+                size: 4,
+                offset: 0,
+                binning: 1,
+                reverse: false,
+            },
         ];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt8).unwrap();
@@ -1022,10 +1138,7 @@ mod tests {
     fn test_convert_binning_and_reverse_combined() {
         // 4x1, binning=2, reverse=true
         let pool = NDArrayPool::new(1_000_000);
-        let mut src = NDArray::new(
-            vec![NDDimension::new(4)],
-            NDDataType::UInt16,
-        );
+        let mut src = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt16);
         if let NDDataBuffer::U16(ref mut v) = src.data {
             v[0] = 1;
             v[1] = 2;
@@ -1033,9 +1146,12 @@ mod tests {
             v[3] = 4;
         }
 
-        let dims_out = vec![
-            NDDimension { size: 4, offset: 0, binning: 2, reverse: true },
-        ];
+        let dims_out = vec![NDDimension {
+            size: 4,
+            offset: 0,
+            binning: 2,
+            reverse: true,
+        }];
 
         let out = pool.convert(&src, &dims_out, NDDataType::UInt16).unwrap();
         assert_eq!(out.dims[0].size, 2);
