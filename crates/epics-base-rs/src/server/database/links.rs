@@ -167,7 +167,11 @@ impl PvDatabase {
                         .get_field("SELN")
                         .and_then(|v| v.to_f64())
                         .unwrap_or(0.0) as i16;
-                    let links: Vec<String> = ["LNK1", "LNK2", "LNK3", "LNK4", "LNK5", "LNK6"]
+                    let links: Vec<String> = [
+                        "LNK1", "LNK2", "LNK3", "LNK4", "LNK5", "LNK6",
+                        "LNK7", "LNK8", "LNK9", "LNKA", "LNKB", "LNKC",
+                        "LNKD", "LNKE", "LNKF",
+                    ]
                         .iter()
                         .map(|f| {
                             instance
@@ -202,6 +206,7 @@ impl PvDatabase {
                     let val = instance.record.val();
                     let links: Vec<String> = [
                         "OUTA", "OUTB", "OUTC", "OUTD", "OUTE", "OUTF", "OUTG", "OUTH",
+                        "OUTI", "OUTJ", "OUTK", "OUTL", "OUTM", "OUTN", "OUTO", "OUTP",
                     ]
                     .iter()
                     .map(|f| {

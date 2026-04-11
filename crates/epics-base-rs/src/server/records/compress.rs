@@ -69,6 +69,9 @@ impl CompressRecord {
                     let idx = self.off as usize % self.nsam as usize;
                     self.val[idx] = compressed;
                     self.off += 1;
+                    if (self.nuse as usize) < self.nsam as usize {
+                        self.nuse += 1;
+                    }
                     self.accum.clear();
                 }
             }
