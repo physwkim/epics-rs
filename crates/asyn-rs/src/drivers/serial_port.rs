@@ -780,7 +780,7 @@ impl PortDriver for DrvAsynSerialPort {
             }
             #[cfg(target_os = "linux")]
             "rs485_enable" | "rs485_rts_on_send" | "rs485_rts_after_send" => {
-                self.set_rs485_option(key, value)?;
+                self.set_rs485_option(&key, value)?;
             }
             _ => {
                 self.base.options.insert(key.to_string(), value.to_string());
