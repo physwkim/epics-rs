@@ -177,12 +177,18 @@ pub struct AsynDeviceSupport {
     write_only: bool,
     /// RAII interrupt subscription — dropping unsubscribes.
     interrupt_sub: Option<InterruptSubscription>,
-    /// Shared cache for the latest interrupt value. Written by the I/O Intr
-    /// forwarding task, read by read(). When an I/O Intr record is processed
-    /// due to an interrupt, read() uses this cached value instead of sending
-    /// a blocking read to the port driver. This matches C EPICS behavior
+    /// Shared cache for the latest interrupt value and its timestamp. Written by
+    /// the I/O Intr forwarding task, read by read(). When an I/O Intr record is
+    /// processed due to an interrupt, read() uses this cached value instead of
+    /// sending a blocking read to the port driver. This matches C EPICS behavior
     /// where the interrupt callback directly provides the value.
-    interrupt_cache: Arc<std::sync::Mutex<Option<crate::param::ParamValue>>>,
+    interrupt_cache: Arc<std::sync::Mutex<Option<CachedInterrupt>>>,
+}
+
+/// Cached interrupt value with metadata for alarm/timestamp propagation.
+struct CachedInterrupt {
+    value: crate::param::ParamValue,
+    timestamp: SystemTime,
 }
 
 impl AsynDeviceSupport {
@@ -275,6 +281,30 @@ impl AsynDeviceSupport {
 
 fn asyn_to_ca_error(e: AsynError) -> CaError {
     CaError::Protocol(e.to_string())
+}
+
+/// Convert an asyn error to EPICS alarm status/severity pair.
+/// Matches C asyn's `asynStatusToEpicsAlarm()` conversion:
+/// - Success → no alarm (0, 0)
+/// - Timeout → READ alarm, MAJOR severity
+/// - Error/Overflow → READ alarm, MAJOR severity
+/// - Disconnected/Disabled → COMM alarm, INVALID severity
+fn asyn_error_to_alarm(e: &AsynError) -> (u16, u16) {
+    match e {
+        AsynError::Status {
+            status: crate::error::AsynStatus::Timeout,
+            ..
+        } => (7, 2), // READ_ALARM=7, MAJOR_ALARM=2
+        AsynError::Status {
+            status: crate::error::AsynStatus::Disconnected,
+            ..
+        }
+        | AsynError::Status {
+            status: crate::error::AsynStatus::Disabled,
+            ..
+        } => (13, 3), // COMM_ALARM=13, INVALID_ALARM=3
+        _ => (7, 2), // Default: READ_ALARM, MAJOR
+    }
 }
 
 /// Convert an asyn ParamValue to an EpicsValue.
@@ -514,10 +544,11 @@ impl DeviceSupport for AsynDeviceSupport {
         // where the interrupt callback directly provides the new value.
         if self.scan == ScanType::IoIntr {
             let cached = self.interrupt_cache.lock().unwrap().take();
-            if let Some(pv) = cached {
-                if let Some(val) = param_value_to_epics_value(&pv) {
+            if let Some(ci) = cached {
+                if let Some(val) = param_value_to_epics_value(&ci.value) {
                     let _ = record.set_val(val);
                 }
+                self.last_ts = Some(ci.timestamp);
                 return Ok(DeviceReadOutcome::ok());
             }
             return Ok(DeviceReadOutcome::ok());
@@ -527,13 +558,21 @@ impl DeviceSupport for AsynDeviceSupport {
             let user = AsynUser::new(self.reason)
                 .with_addr(self.addr)
                 .with_timeout(self.timeout);
-            if let Ok(result) = self.handle.submit_blocking(op, user) {
-                if let Some(val) = self.result_to_value(&result) {
-                    let _ = record.set_val(val);
+            match self.handle.submit_blocking(op, user) {
+                Ok(result) => {
+                    if let Some(val) = self.result_to_value(&result) {
+                        let _ = record.set_val(val);
+                    }
+                    self.last_alarm_status = result.alarm_status;
+                    self.last_alarm_severity = result.alarm_severity;
+                    self.last_ts = result.timestamp;
                 }
-                self.last_alarm_status = result.alarm_status;
-                self.last_alarm_severity = result.alarm_severity;
-                self.last_ts = result.timestamp;
+                Err(e) => {
+                    // Convert asyn error to EPICS alarm (C parity: asynStatusToEpicsAlarm)
+                    let (alarm_status, alarm_severity) = asyn_error_to_alarm(&e);
+                    self.last_alarm_status = alarm_status;
+                    self.last_alarm_severity = alarm_severity;
+                }
             }
         }
         Ok(DeviceReadOutcome::ok())
@@ -629,10 +668,13 @@ impl DeviceSupport for AsynDeviceSupport {
         let cache = self.interrupt_cache.clone();
         tokio::spawn(async move {
             while let Some(iv) = intr_rx.recv().await {
-                // Cache the interrupt value so read() can use it without
-                // a blocking port request. This matches C EPICS where the
-                // interrupt callback directly provides the new value.
-                *cache.lock().unwrap() = Some(iv.value);
+                // Cache the interrupt value and timestamp so read() can use
+                // them without a blocking port request. This matches C EPICS
+                // where the interrupt callback provides value + timestamp.
+                *cache.lock().unwrap() = Some(CachedInterrupt {
+                    value: iv.value,
+                    timestamp: iv.timestamp,
+                });
                 if tx.send(()).await.is_err() {
                     break;
                 }
