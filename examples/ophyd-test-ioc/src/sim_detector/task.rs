@@ -42,14 +42,26 @@ impl AcquisitionContext {
         if wait_for_plugins {
             self.queued_counter.wait_until_zero(Duration::from_secs(5));
         }
-        let _ = self
-            .port_handle
-            .write_int32_blocking(self.ad.acquire_busy, 0, 0);
-        let _ = self
-            .port_handle
-            .write_int32_blocking(self.ad.status, 0, ADStatus::Idle as i32);
-        let _ = self.port_handle.write_int32_blocking(self.ad.acquire, 0, 0);
-        let _ = self.port_handle.call_param_callbacks_blocking(0);
+        self.port_handle.set_params_and_notify(
+            0,
+            vec![
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.acquire_busy,
+                    addr: 0,
+                    value: 0,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.status,
+                    addr: 0,
+                    value: ADStatus::Idle as i32,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.acquire,
+                    addr: 0,
+                    value: 0,
+                },
+            ],
+        );
     }
 }
 
@@ -100,15 +112,26 @@ fn acquisition_loop(ctx: AcquisitionContext) {
         }
 
         // Initialize counters
-        let _ = ctx
-            .port_handle
-            .write_int32_blocking(ctx.ad.num_images_counter, 0, 0);
-        let _ = ctx
-            .port_handle
-            .write_int32_blocking(ctx.ad.status, 0, ADStatus::Acquire as i32);
-        let _ = ctx
-            .port_handle
-            .write_int32_blocking(ctx.ad.acquire_busy, 0, 1);
+        ctx.port_handle.set_params_and_notify(
+            0,
+            vec![
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.num_images_counter,
+                    addr: 0,
+                    value: 0,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.status,
+                    addr: 0,
+                    value: ADStatus::Acquire as i32,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.acquire_busy,
+                    addr: 0,
+                    value: 1,
+                },
+            ],
+        );
 
         let mut num_counter = 0;
         let mut array_counter = ctx
@@ -183,26 +206,36 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             frame.unique_id = array_counter;
             frame.timestamp = ad_core_rs::timestamp::EpicsTimestamp::now();
 
-            ctx.port_handle
-                .write_int32_no_wait(ctx.ad.base.array_counter, 0, array_counter);
-            ctx.port_handle
-                .write_int32_no_wait(ctx.ad.num_images_counter, 0, num_counter);
-            ctx.port_handle.write_float64_no_wait(
-                ctx.ad.base.timestamp_rbv,
+            ctx.port_handle.set_params_and_notify(
                 0,
-                frame.timestamp.as_f64(),
+                vec![
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.array_counter,
+                        addr: 0,
+                        value: array_counter,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.num_images_counter,
+                        addr: 0,
+                        value: num_counter,
+                    },
+                    asyn_rs::request::ParamSetValue::Float64 {
+                        reason: ctx.ad.base.timestamp_rbv,
+                        addr: 0,
+                        value: frame.timestamp.as_f64(),
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.epics_ts_sec,
+                        addr: 0,
+                        value: frame.timestamp.sec as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.epics_ts_nsec,
+                        addr: 0,
+                        value: frame.timestamp.nsec as i32,
+                    },
+                ],
             );
-            ctx.port_handle.write_int32_no_wait(
-                ctx.ad.base.epics_ts_sec,
-                0,
-                frame.timestamp.sec as i32,
-            );
-            ctx.port_handle.write_int32_no_wait(
-                ctx.ad.base.epics_ts_nsec,
-                0,
-                frame.timestamp.nsec as i32,
-            );
-            let _ = ctx.port_handle.call_param_callbacks_blocking(0);
 
             if config.array_callbacks {
                 ctx.array_output.lock().publish(Arc::new(frame));
