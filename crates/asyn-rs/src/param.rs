@@ -261,7 +261,6 @@ impl ParamList {
                     entry.value = ParamValue::Int32(value);
                     entry.value_changed = true;
                     entry.defined = true;
-                    entry.defined = true;
                 }
             }
             // C EPICS asyn: asynInt32 interface writes enum index transparently

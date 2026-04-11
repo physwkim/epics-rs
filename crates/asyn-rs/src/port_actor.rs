@@ -217,6 +217,8 @@ impl PortActor {
                 | RequestOp::DisconnectAddr
                 | RequestOp::EnableAddr
                 | RequestOp::DisableAddr
+                | RequestOp::BlockProcess
+                | RequestOp::UnblockProcess
         );
         let is_connect_priority = user.priority == QueuePriority::Connect;
 
