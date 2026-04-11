@@ -26,13 +26,44 @@ impl MotorRecord {
                 }
                 self.plan_absolute_move(&mut effects);
                 return effects;
-            } else {
-                // Plain stop -- sync target to readback then finalize
-                // C: postProcess syncs VAL<-RBV, DVAL<-DRBV after stop
-                self.sync_positions();
-                self.finalize_or_delay(&mut effects);
+            }
+            // Check for queued home command (stop-then-home pattern)
+            if self.stat.mip.intersects(MipFlags::HOMF | MipFlags::HOMR) {
+                let forward = self.stat.mip.contains(MipFlags::HOMF);
+                self.stat.mip.remove(MipFlags::STOP);
+                // Resume homing
+                self.set_phase(MotionPhase::Homing);
+                let hw_forward = if self.conv.mres >= 0.0 { forward } else { !forward };
+                self.stat.cdir = if self.conv.mres >= 0.0 { forward } else { !forward };
+                effects.commands.push(MotorCommand::Home {
+                    forward: hw_forward,
+                    velocity: self.vel.hvel,
+                    acceleration: self.vel.accl,
+                });
+                effects.request_poll = true;
+                effects.suppress_forward_link = true;
                 return effects;
             }
+            // Check for queued jog command (stop-then-jog pattern)
+            if self.stat.mip.intersects(MipFlags::JOGF | MipFlags::JOGR) {
+                let forward = self.stat.mip.contains(MipFlags::JOGF);
+                self.stat.mip.remove(MipFlags::STOP);
+                self.set_phase(MotionPhase::Jog);
+                self.internal.jog_was_forward = forward;
+                effects.commands.push(MotorCommand::MoveVelocity {
+                    direction: forward,
+                    velocity: self.vel.jvel,
+                    acceleration: self.vel.jar,
+                });
+                effects.request_poll = true;
+                effects.suppress_forward_link = true;
+                return effects;
+            }
+            // Plain stop -- sync target to readback then finalize
+            // C: postProcess syncs VAL<-RBV, DVAL<-DRBV after stop
+            self.sync_positions();
+            self.finalize_or_delay(&mut effects);
+            return effects;
         }
 
         match self.stat.phase {

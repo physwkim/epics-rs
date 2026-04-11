@@ -143,8 +143,13 @@ impl MotorRecord {
             0
         };
 
+        // MOVN: C uses RAW limit switches (rhls/rlls) with RAW cdir
+        // Must compute ls_active BEFORE mapping limits to user coordinates
+        let ls_active =
+            (status.high_limit && self.stat.cdir) || (status.low_limit && !self.stat.cdir);
+        self.stat.movn = !(ls_active || status.done || status.problem);
+
         // Limit switches: map raw -> user based on DIR and MRES sign
-        // Must be done before MOVN check which uses HLS/LLS
         // C: hls = ((dir == Pos) == (mres >= 0)) ? rhls : rlls
         let same_polarity = (self.conv.dir == MotorDir::Pos) == (self.conv.mres >= 0.0);
         if same_polarity {
@@ -154,11 +159,6 @@ impl MotorRecord {
             self.limits.hls = status.low_limit;
             self.limits.lls = status.high_limit;
         }
-
-        // MOVN: C checks ls_active (limit in direction of motion), DONE, and PROBLEM
-        // ls_active = (hls && cdir) || (lls && !cdir)
-        let ls_active = (self.limits.hls && self.stat.cdir) || (self.limits.lls && !self.stat.cdir);
-        self.stat.movn = !(ls_active || status.done || status.problem);
 
         // Build MSTA from driver status
         let mut msta = MstaFlags::empty();

@@ -118,6 +118,10 @@ impl MotorRecord {
                 } else {
                     0
                 };
+                // C: load_pos updates ldvl/lval/lrvl
+                self.internal.ldvl = self.pos.dval;
+                self.internal.lval = self.pos.val;
+                self.internal.lrvl = self.pos.rval;
                 // Convert dial to raw steps for the driver (C: dval / mres)
                 if self.conv.mres != 0.0 {
                     effects.commands.push(MotorCommand::SetPosition {
@@ -329,6 +333,19 @@ impl MotorRecord {
 
     /// Start jogging.
     fn start_jog(&mut self, forward: bool, effects: &mut ProcessEffects) {
+        // C: if motor is moving, stop first then queue jog for after stop
+        if self.stat.phase != MotionPhase::Idle && self.stat.movn {
+            self.stat.mip =
+                if forward { MipFlags::JOGF } else { MipFlags::JOGR } | MipFlags::STOP;
+            self.internal.backlash_pending = false;
+            effects.commands.push(MotorCommand::Stop {
+                acceleration: self.vel.accl,
+            });
+            effects.request_poll = true;
+            effects.suppress_forward_link = true;
+            return;
+        }
+
         let dir = if forward {
             MotionDirection::Positive
         } else {
@@ -387,6 +404,20 @@ impl MotorRecord {
 
     /// Start homing.
     fn start_home(&mut self, forward: bool, effects: &mut ProcessEffects) {
+        // C: if motor is moving, stop first then queue home for after stop
+        if self.stat.phase != MotionPhase::Idle && self.stat.movn {
+            self.stat.mip =
+                if forward { MipFlags::HOMF } else { MipFlags::HOMR } | MipFlags::STOP;
+            self.internal.backlash_pending = false;
+            self.internal.pending_retarget = None;
+            effects.commands.push(MotorCommand::Stop {
+                acceleration: self.vel.accl,
+            });
+            effects.request_poll = true;
+            effects.suppress_forward_link = true;
+            return;
+        }
+
         // C: check limit switch in direction of home before starting
         // HOMF blocked by HLS (when DIR=Pos) or LLS (when DIR=Neg)
         let blocked = if forward {
