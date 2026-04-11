@@ -572,17 +572,33 @@ impl PortDriver for DrvAsynIPPort {
                 );
                 Ok(r.nbytes_transferred)
             }
-            Err(ref e) if self.disconnect_on_read_timeout => {
-                if let AsynError::Status {
-                    status: AsynStatus::Timeout,
-                    ..
-                } = e
-                {
+            Err(ref e) => {
+                let is_timeout = matches!(
+                    e,
+                    AsynError::Status {
+                        status: AsynStatus::Timeout,
+                        ..
+                    }
+                );
+                let is_disconnect = matches!(
+                    e,
+                    AsynError::Status {
+                        status: AsynStatus::Disconnected,
+                        ..
+                    }
+                );
+                // C parity: auto-disconnect on:
+                // 1. disconnectOnReadTimeout AND timeout error
+                // 2. Any real error that isn't timeout/WouldBlock (e.g. connection reset, EOF)
+                let should_disconnect = (self.disconnect_on_read_timeout && is_timeout)
+                    || is_disconnect
+                    || (!is_timeout && matches!(e, AsynError::Io(_)));
+                if should_disconnect && self.base.connected {
                     asyn_trace!(
                         Some(self.base.trace),
                         &self.base.port_name,
                         TraceMask::FLOW,
-                        "disconnectOnReadTimeout triggered"
+                        "read error, disconnecting: {e}"
                     );
                     self.io.inner = None;
                     self.base.connected = false;
@@ -590,7 +606,6 @@ impl PortDriver for DrvAsynIPPort {
                 }
                 result.map(|r| r.nbytes_transferred)
             }
-            Err(_) => result.map(|r| r.nbytes_transferred),
         }
     }
 

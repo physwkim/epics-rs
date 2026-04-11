@@ -102,6 +102,8 @@ struct ParamEntry {
     name: String,
     param_type: ParamType,
     value: ParamValue,
+    /// Whether the value has been explicitly set (C parity: valueDefined).
+    defined: bool,
     status: AsynStatus,
     alarm_status: u16,
     alarm_severity: u16,
@@ -111,6 +113,10 @@ struct ParamEntry {
 
 impl ParamEntry {
     fn new(name: String, param_type: ParamType) -> Self {
+        // C parity: parameters start with default values but are marked as
+        // "not yet defined" (valueDefined=false in C). In C, getters still
+        // return the default value but also return asynParamUndefined status.
+        // In Rust, we keep the values accessible but track the defined flag.
         let value = match param_type {
             ParamType::Int32 => ParamValue::Int32(0),
             ParamType::Int64 => ParamValue::Int64(0),
@@ -137,6 +143,7 @@ impl ParamEntry {
             name,
             param_type,
             value,
+            defined: false,
             status: AsynStatus::Success,
             alarm_status: 0,
             alarm_severity: 0,
@@ -253,6 +260,8 @@ impl ParamList {
                 if *old != value {
                     entry.value = ParamValue::Int32(value);
                     entry.value_changed = true;
+                    entry.defined = true;
+                    entry.defined = true;
                 }
             }
             // C EPICS asyn: asynInt32 interface writes enum index transparently
@@ -273,6 +282,7 @@ impl ParamList {
                 if *index != new_idx {
                     *index = new_idx;
                     entry.value_changed = true;
+                    entry.defined = true;
                 }
             }
             _ => {
@@ -301,6 +311,7 @@ impl ParamList {
             if *old != value {
                 entry.value = ParamValue::Float64(value);
                 entry.value_changed = true;
+                    entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -327,6 +338,7 @@ impl ParamList {
             if *old != value {
                 entry.value = ParamValue::Int64(value);
                 entry.value_changed = true;
+                    entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -353,6 +365,7 @@ impl ParamList {
             if *old != value {
                 entry.value = ParamValue::Octet(value);
                 entry.value_changed = true;
+                    entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -380,6 +393,7 @@ impl ParamList {
             if *old != new_val {
                 entry.value = ParamValue::UInt32Digital(new_val);
                 entry.value_changed = true;
+                    entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -407,6 +421,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Float64Array(_)) {
             entry.value = ParamValue::Float64Array(Arc::from(data));
             entry.value_changed = true;
+                    entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -431,6 +446,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int32Array(_)) {
             entry.value = ParamValue::Int32Array(Arc::from(data));
             entry.value_changed = true;
+                    entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -455,6 +471,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int8Array(_)) {
             entry.value = ParamValue::Int8Array(Arc::from(data));
             entry.value_changed = true;
+                    entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -479,6 +496,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int16Array(_)) {
             entry.value = ParamValue::Int16Array(Arc::from(data));
             entry.value_changed = true;
+                    entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -503,6 +521,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Int64Array(_)) {
             entry.value = ParamValue::Int64Array(Arc::from(data));
             entry.value_changed = true;
+                    entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -527,6 +546,7 @@ impl ParamList {
         if matches!(entry.value, ParamValue::Float32Array(_)) {
             entry.value = ParamValue::Float32Array(Arc::from(data));
             entry.value_changed = true;
+                    entry.defined = true;
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -567,6 +587,7 @@ impl ParamList {
             if *idx != value {
                 *idx = value;
                 entry.value_changed = true;
+                    entry.defined = true;
             }
         } else {
             return Err(AsynError::TypeMismatch {
@@ -595,6 +616,7 @@ impl ParamList {
                 *idx = 0;
             }
             entry.value_changed = true;
+                    entry.defined = true;
         } else {
             return Err(AsynError::TypeMismatch {
                 expected: "Enum",
@@ -629,7 +651,8 @@ impl ParamList {
         let entry = self.get_entry_mut(index, addr)?;
         if matches!(entry.value, ParamValue::GenericPointer(_)) {
             entry.value = ParamValue::GenericPointer(value);
-            entry.value_changed = true; // Any is not comparable
+            entry.value_changed = true;
+                    entry.defined = true; // Any is not comparable
             Ok(())
         } else {
             Err(AsynError::TypeMismatch {
@@ -637,6 +660,11 @@ impl ParamList {
                 actual: entry.value.type_name(),
             })
         }
+    }
+
+    /// Check if a parameter has been explicitly set (C parity: valueDefined).
+    pub fn is_param_defined(&self, index: usize, addr: i32) -> AsynResult<bool> {
+        Ok(self.get_entry(index, addr)?.defined)
     }
 
     // --- Status ---
