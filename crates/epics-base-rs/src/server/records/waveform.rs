@@ -8,8 +8,8 @@ pub struct WaveformRecord {
     pub nelm: i32,
     pub nord: i32,
     pub ftvl: i16,
-    pub mpst: i16, // Monitor Post Mode: 0=Always, 1=OnChange
-    pub apst: i16, // Archive Post Mode: 0=Always, 1=OnChange
+    pub mpst: i16,  // Monitor Post Mode: 0=Always, 1=OnChange
+    pub apst: i16,  // Archive Post Mode: 0=Always, 1=OnChange
     pub hash: u32,  // Hash of array for OnChange detection
     pub busy: bool, // Record is busy (async operation pending)
     pub egu: String,

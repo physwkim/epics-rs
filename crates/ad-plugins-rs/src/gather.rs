@@ -136,11 +136,7 @@ impl NDPluginProcess for GatherProcessor {
                 if let Some(new_port) = params.value.as_string() {
                     self.source_ports[i] = new_port.to_string();
                     // Recount active ports
-                    self.num_ports = self
-                        .source_ports
-                        .iter()
-                        .filter(|s| !s.is_empty())
-                        .count();
+                    self.num_ports = self.source_ports.iter().filter(|s| !s.is_empty()).count();
                     if let Some(idx) = self.num_ports_idx {
                         return ParamChangeResult::updates(vec![ParamUpdate::int32(
                             idx,

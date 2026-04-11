@@ -130,9 +130,7 @@ impl MagickWriter {
                 let u16_data: Vec<u16> = v.iter().map(|&b| b as u16).collect();
                 if is_rgb {
                     image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(
-                        width,
-                        height,
-                        u16_data,
+                        width, height, u16_data,
                     )
                     .map(DynamicImage::ImageRgb16)
                     .ok_or_else(|| {
@@ -140,9 +138,7 @@ impl MagickWriter {
                     })
                 } else {
                     image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(
-                        width,
-                        height,
-                        u16_data,
+                        width, height, u16_data,
                     )
                     .map(DynamicImage::ImageLuma16)
                     .ok_or_else(|| {
@@ -157,9 +153,7 @@ impl MagickWriter {
                     .collect();
                 if is_rgb {
                     image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(
-                        width,
-                        height,
-                        u16_data,
+                        width, height, u16_data,
                     )
                     .map(DynamicImage::ImageRgb16)
                     .ok_or_else(|| {
@@ -167,9 +161,7 @@ impl MagickWriter {
                     })
                 } else {
                     image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(
-                        width,
-                        height,
-                        u16_data,
+                        width, height, u16_data,
                     )
                     .map(DynamicImage::ImageLuma16)
                     .ok_or_else(|| {

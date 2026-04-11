@@ -367,7 +367,10 @@ async fn write_loop(
                 // Saturating: read_loop also sends frames (echo, flow
                 // control) that bypass send_frame's increment.
                 let prev = pending_frames.load(std::sync::atomic::Ordering::Relaxed);
-                pending_frames.store(prev.saturating_sub(drained), std::sync::atomic::Ordering::Relaxed);
+                pending_frames.store(
+                    prev.saturating_sub(drained),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             Ok(Err(_)) | Err(_) => {
                 let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });

@@ -24,7 +24,9 @@ impl CalcExpression {
     ///
     /// Returns `None` if the expression is invalid.
     pub fn parse(expr: &str) -> Option<CalcExpression> {
-        calc::compile(expr).ok().map(|compiled| CalcExpression { compiled })
+        calc::compile(expr)
+            .ok()
+            .map(|compiled| CalcExpression { compiled })
     }
 
     /// Evaluate with variables A and B only (legacy 2-variable interface).
@@ -187,11 +189,11 @@ impl CircularBuffer {
                 // C++ passes: A=attrValueA, B=attrValueB, C=preTrigger,
                 // D=postTrigger, E=currentImage, F=triggered
                 let mut vars = [0.0f64; 16];
-                vars[0] = a;                                // A
-                vars[1] = b;                                // B
-                vars[2] = self.pre_count as f64;            // C
-                vars[3] = self.post_count as f64;           // D
-                vars[4] = self.buffer.len() as f64;         // E (currentImage)
+                vars[0] = a; // A
+                vars[1] = b; // B
+                vars[2] = self.pre_count as f64; // C
+                vars[3] = self.post_count as f64; // D
+                vars[4] = self.buffer.len() as f64; // E (currentImage)
                 vars[5] = if self.triggered { 1.0 } else { 0.0 }; // F
                 expression.evaluate_vars(&vars) != 0.0
             }

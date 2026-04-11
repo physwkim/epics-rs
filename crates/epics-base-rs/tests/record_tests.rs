@@ -533,27 +533,27 @@ fn test_deadband_mdel() {
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(3.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(6.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(10.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(12.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
 
@@ -565,12 +565,12 @@ fn test_deadband_mdel_zero() {
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(0.001)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
 
@@ -582,7 +582,7 @@ fn test_deadband_mdel_negative() {
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
 
@@ -655,7 +655,7 @@ fn test_deadband_alarm_always_included() {
 
     instance.record.set_val(EpicsValue::Double(1.0)).unwrap();
     instance.record.set_device_did_compute(true);
-        let snap = instance.process_local().unwrap();
+    let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "SEVR"));
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "STAT"));

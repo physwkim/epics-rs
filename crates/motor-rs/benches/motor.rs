@@ -81,8 +81,12 @@ fn bench_motor_move_to_done(c: &mut Criterion) {
     c.bench_function("motor_move_to_done", |b| {
         b.iter(|| {
             rt.block_on(async {
-                let (runtime, handle) =
-                    create_axis_runtime(Box::new(BenchMotor::new()), Duration::from_millis(10), Duration::from_millis(10), 0);
+                let (runtime, handle) = create_axis_runtime(
+                    Box::new(BenchMotor::new()),
+                    Duration::from_millis(10),
+                    Duration::from_millis(10),
+                    0,
+                );
                 let rt_handle = tokio::spawn(runtime.run());
 
                 // Wait for initial poll

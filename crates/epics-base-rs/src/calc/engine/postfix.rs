@@ -47,7 +47,12 @@ impl StackEntry {
 fn binary_op(token: &Token) -> Option<(u8, u8)> {
     match token {
         Token::OrOr | Token::BitOr | Token::OrKeyword | Token::BitXor => Some((2, 2)),
-        Token::AndAnd | Token::BitAnd | Token::AndKeyword | Token::Shr | Token::ShrLogical | Token::Shl => Some((3, 3)),
+        Token::AndAnd
+        | Token::BitAnd
+        | Token::AndKeyword
+        | Token::Shr
+        | Token::ShrLogical
+        | Token::Shl => Some((3, 3)),
         Token::MaxOp | Token::MinOp => Some((4, 4)),
         Token::Eq | Token::Ne | Token::Lt | Token::Le | Token::Gt | Token::Ge => Some((5, 5)),
         Token::Plus | Token::Minus => Some((6, 6)),

@@ -959,7 +959,7 @@ mod tests {
                 num_filter: 10,
                 fc: [0.5, 0.0, 0.5, 0.0], // F1=0.5, F2=0.5
                 oc: [1.0, 0.0, 0.0, 0.0], // O1=1, O2=0
-                rc: [0.0, 1.0], // reset: filter = data
+                rc: [0.0, 1.0],           // reset: filter = data
                 ..Default::default()
             },
             ..Default::default()

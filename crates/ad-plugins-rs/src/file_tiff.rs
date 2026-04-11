@@ -127,11 +127,9 @@ impl NDFileWriter for TiffWriter {
         // Macro to reduce repetition: create image encoder, write custom tags, write data.
         macro_rules! write_with_tags {
             ($ct:ty, $data:expr) => {{
-                let mut image = encoder
-                    .new_image::<$ct>(width, height)
-                    .map_err(|e| {
-                        ADError::UnsupportedConversion(format!("TIFF encoder error: {}", e))
-                    })?;
+                let mut image = encoder.new_image::<$ct>(width, height).map_err(|e| {
+                    ADError::UnsupportedConversion(format!("TIFF encoder error: {}", e))
+                })?;
 
                 // Write uniqueId and timestamp as the first custom tags
                 image
@@ -166,9 +164,9 @@ impl NDFileWriter for TiffWriter {
                         })?;
                 }
 
-                image.write_data($data).map_err(|e| {
-                    ADError::UnsupportedConversion(format!("TIFF write error: {}", e))
-                })
+                image
+                    .write_data($data)
+                    .map_err(|e| ADError::UnsupportedConversion(format!("TIFF write error: {}", e)))
             }};
         }
 

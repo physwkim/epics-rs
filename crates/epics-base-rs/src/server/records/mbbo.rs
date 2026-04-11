@@ -79,11 +79,18 @@ impl Default for MbboRecord {
     fn default() -> Self {
         Self {
             val: 0,
-            rval: 0, oraw: 0, rbv: 0, orbv: 0,
-            mask: 0, shft: 0, sdef: false,
+            rval: 0,
+            oraw: 0,
+            rbv: 0,
+            orbv: 0,
+            mask: 0,
+            shft: 0,
+            sdef: false,
             nobt: 0,
-            mlst: 0, lalm: 0,
-            ivoa: 0, ivov: 0,
+            mlst: 0,
+            lalm: 0,
+            ivoa: 0,
+            ivov: 0,
             zrsv: 0,
             onsv: 0,
             twsv: 0,
@@ -136,7 +143,10 @@ impl Default for MbboRecord {
             ttst: String::new(),
             ftst: String::new(),
             ffst: String::new(),
-            simm: 0, siml: String::new(), siol: String::new(), sims: 0,
+            simm: 0,
+            siml: String::new(),
+            siol: String::new(),
+            sims: 0,
         }
     }
 }
@@ -159,10 +169,9 @@ impl MbboRecord {
     fn compute_sdef(&mut self) {
         let rvs = self.raw_values();
         let sts: [&String; 16] = [
-            &self.zrst, &self.onst, &self.twst, &self.thst,
-            &self.frst, &self.fvst, &self.sxst, &self.svst,
-            &self.eist, &self.nist, &self.test, &self.elst,
-            &self.tvst, &self.ttst, &self.ftst, &self.ffst,
+            &self.zrst, &self.onst, &self.twst, &self.thst, &self.frst, &self.fvst, &self.sxst,
+            &self.svst, &self.eist, &self.nist, &self.test, &self.elst, &self.tvst, &self.ttst,
+            &self.ftst, &self.ffst,
         ];
         self.sdef = false;
         for i in 0..16 {
@@ -176,7 +185,9 @@ impl MbboRecord {
     /// C convert(): VAL -> RVAL with SDEF check and SHFT
     fn convert(&mut self) {
         if self.sdef {
-            if self.val > 15 { return; }
+            if self.val > 15 {
+                return;
+            }
             let rvs = self.raw_values();
             self.rval = rvs[self.val as usize];
         } else {
@@ -189,17 +200,61 @@ impl MbboRecord {
 }
 
 static MBBO_FIELDS: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Enum, read_only: false },
-    FieldDesc { name: "RVAL", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "ORAW", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "RBV", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "ORBV", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "MASK", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "SHFT", dbf_type: DbFieldType::Short, read_only: false },
-    FieldDesc { name: "MLST", dbf_type: DbFieldType::Enum, read_only: true },
-    FieldDesc { name: "LALM", dbf_type: DbFieldType::Enum, read_only: true },
-    FieldDesc { name: "IVOA", dbf_type: DbFieldType::Short, read_only: false },
-    FieldDesc { name: "IVOV", dbf_type: DbFieldType::Enum, read_only: false },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Enum,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "RVAL",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ORAW",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "RBV",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "ORBV",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "MASK",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "SHFT",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "MLST",
+        dbf_type: DbFieldType::Enum,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LALM",
+        dbf_type: DbFieldType::Enum,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "IVOA",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "IVOV",
+        dbf_type: DbFieldType::Enum,
+        read_only: false,
+    },
     FieldDesc {
         name: "NOBT",
         dbf_type: DbFieldType::Short,
@@ -585,5 +640,4 @@ impl Record for MbboRecord {
     fn can_device_write(&self) -> bool {
         true
     }
-
 }

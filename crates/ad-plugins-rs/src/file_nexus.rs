@@ -58,17 +58,16 @@ impl NexusWriter {
             .new_dataset::<u8>()
             .shape([1usize])
             .create("NX_class")
-            .map_err(|e| ADError::UnsupportedConversion(format!("NX_class dataset error: {}", e)))?;
-        ds.write_raw(&[0u8]).map_err(|e| {
-            ADError::UnsupportedConversion(format!("NX_class write error: {}", e))
-        })?;
+            .map_err(|e| {
+                ADError::UnsupportedConversion(format!("NX_class dataset error: {}", e))
+            })?;
+        ds.write_raw(&[0u8])
+            .map_err(|e| ADError::UnsupportedConversion(format!("NX_class write error: {}", e)))?;
         let attr = ds
             .new_attr::<rust_hdf5::types::VarLenUnicode>()
             .shape(())
             .create("value")
-            .map_err(|e| {
-                ADError::UnsupportedConversion(format!("NX_class attr error: {}", e))
-            })?;
+            .map_err(|e| ADError::UnsupportedConversion(format!("NX_class attr error: {}", e)))?;
         attr.write_string(class_name).map_err(|e| {
             ADError::UnsupportedConversion(format!("NX_class attr write error: {}", e))
         })?;
@@ -217,9 +216,8 @@ impl NDFileWriter for NexusWriter {
             })?;
 
             let raw = array.data.as_u8_slice();
-            ds.write_chunk(self.frame_count, raw).map_err(|e| {
-                ADError::UnsupportedConversion(format!("NeXus write error: {}", e))
-            })?;
+            ds.write_chunk(self.frame_count, raw)
+                .map_err(|e| ADError::UnsupportedConversion(format!("NeXus write error: {}", e)))?;
         }
 
         // Write per-frame uniqueId and timeStamp as attributes on the dataset

@@ -60,16 +60,24 @@ impl NDFileWriter for JpegWriter {
                     let d0 = array.dims[0].size;
                     let d1 = array.dims[1].size;
                     let d2 = array.dims[2].size;
-                    if d0 == 3 { NDColorMode::RGB1 }
-                    else if d1 == 3 { NDColorMode::RGB2 }
-                    else if d2 == 3 { NDColorMode::RGB3 }
-                    else { NDColorMode::Mono }
+                    if d0 == 3 {
+                        NDColorMode::RGB1
+                    } else if d1 == 3 {
+                        NDColorMode::RGB2
+                    } else if d2 == 3 {
+                        NDColorMode::RGB3
+                    } else {
+                        NDColorMode::Mono
+                    }
                 } else {
                     NDColorMode::Mono
                 }
             });
 
-        let is_rgb = matches!(color_mode, NDColorMode::RGB1 | NDColorMode::RGB2 | NDColorMode::RGB3);
+        let is_rgb = matches!(
+            color_mode,
+            NDColorMode::RGB1 | NDColorMode::RGB2 | NDColorMode::RGB3
+        );
         let src = if is_rgb && color_mode != NDColorMode::RGB1 {
             &convert_rgb_layout(array, color_mode, NDColorMode::RGB1)?
         } else {

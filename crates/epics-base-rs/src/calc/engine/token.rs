@@ -110,13 +110,13 @@ pub enum Token {
     Gt,
     Ge,
 
-    AndAnd, // &&
-    OrOr,   // ||
-    BitAnd, // &
-    BitOr,  // |
-    BitXor, // XOR
-    Tilde,  // ~
-    Shl,    // <<
+    AndAnd,     // &&
+    OrOr,       // ||
+    BitAnd,     // &
+    BitOr,      // |
+    BitXor,     // XOR
+    Tilde,      // ~
+    Shl,        // <<
     Shr,        // >>
     ShrLogical, // >>>
 

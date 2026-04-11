@@ -348,7 +348,13 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
             self.update_sort_params();
             // Still publish param updates immediately
             if !result.param_updates.is_empty() {
-                self.publish_result(vec![], result.param_updates, result.scatter_index, Some(array), elapsed_ms);
+                self.publish_result(
+                    vec![],
+                    result.param_updates,
+                    result.scatter_index,
+                    Some(array),
+                    elapsed_ms,
+                );
             }
         } else {
             self.publish_result(
@@ -373,11 +379,8 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
     /// Update sort-related param values (SortFree, DisorderedArrays, DroppedOutputArrays).
     fn update_sort_params(&self) {
         let sort_free = self.sort_size - self.sort_buffer.len();
-        self.port_handle.write_int32_no_wait(
-            self.plugin_params.sort_free,
-            0,
-            sort_free,
-        );
+        self.port_handle
+            .write_int32_no_wait(self.plugin_params.sort_free, 0, sort_free);
         self.port_handle.write_int32_no_wait(
             self.plugin_params.disordered_arrays,
             0,

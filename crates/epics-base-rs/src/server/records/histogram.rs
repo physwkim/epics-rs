@@ -142,7 +142,10 @@ impl Record for HistogramRecord {
                 }
                 _ => Err(CaError::TypeMismatch("LLIM".into())),
             },
-            "SGNL" => { self.sgnl = value.to_f64().unwrap_or(0.0); Ok(()) }
+            "SGNL" => {
+                self.sgnl = value.to_f64().unwrap_or(0.0);
+                Ok(())
+            }
             "CMD" => match value {
                 EpicsValue::Short(v) => {
                     self.cmd = v;

@@ -447,9 +447,16 @@ impl Record for SseqRecord {
         use crate::server::record::ProcessAction;
 
         static DOL_DOV: [(&str, &str); NUM_STEPS] = [
-            ("DOL1", "DO1"), ("DOL2", "DO2"), ("DOL3", "DO3"), ("DOL4", "DO4"),
-            ("DOL5", "DO5"), ("DOL6", "DO6"), ("DOL7", "DO7"), ("DOL8", "DO8"),
-            ("DOL9", "DO9"), ("DOLA", "DOA"),
+            ("DOL1", "DO1"),
+            ("DOL2", "DO2"),
+            ("DOL3", "DO3"),
+            ("DOL4", "DO4"),
+            ("DOL5", "DO5"),
+            ("DOL6", "DO6"),
+            ("DOL7", "DO7"),
+            ("DOL8", "DO8"),
+            ("DOL9", "DO9"),
+            ("DOLA", "DOA"),
         ];
 
         let mut actions = Vec::new();
@@ -467,9 +474,16 @@ impl Record for SseqRecord {
     fn multi_output_links(&self) -> &[(&'static str, &'static str)] {
         // Return all possible output links; the framework writes non-empty ones.
         static LINKS: [(&str, &str); NUM_STEPS] = [
-            ("LNK1", "DO1"), ("LNK2", "DO2"), ("LNK3", "DO3"), ("LNK4", "DO4"),
-            ("LNK5", "DO5"), ("LNK6", "DO6"), ("LNK7", "DO7"), ("LNK8", "DO8"),
-            ("LNK9", "DO9"), ("LNKA", "DOA"),
+            ("LNK1", "DO1"),
+            ("LNK2", "DO2"),
+            ("LNK3", "DO3"),
+            ("LNK4", "DO4"),
+            ("LNK5", "DO5"),
+            ("LNK6", "DO6"),
+            ("LNK7", "DO7"),
+            ("LNK8", "DO8"),
+            ("LNK9", "DO9"),
+            ("LNKA", "DOA"),
         ];
         &LINKS
     }

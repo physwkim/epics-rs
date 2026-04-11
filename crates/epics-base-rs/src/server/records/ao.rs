@@ -15,17 +15,17 @@ pub struct AoRecord {
     pub drvl: f64,
     // Conversion
     pub rval: i32,
-    pub oraw: i32,  // old raw value for monitor
-    pub rbv: i32,    // readback value
-    pub orbv: i32,   // old readback value
+    pub oraw: i32, // old raw value for monitor
+    pub rbv: i32,  // readback value
+    pub orbv: i32, // old readback value
     pub oval: f64,
-    pub linr: i16,   // 0=NO_CONVERSION, 1=SLOPE, 2=LINEAR
+    pub linr: i16, // 0=NO_CONVERSION, 1=SLOPE, 2=LINEAR
     pub eguf: f64,
     pub egul: f64,
-    pub eslo: f64,   // default 1.0
-    pub eoff: f64,   // engineering offset (defaults to egul for LINEAR)
+    pub eslo: f64, // default 1.0
+    pub eoff: f64, // engineering offset (defaults to egul for LINEAR)
     pub roff: i32,
-    pub aslo: f64,   // default 1.0
+    pub aslo: f64, // default 1.0
     pub aoff: f64,
     // Output control
     pub omsl: i16,   // 0=supervisory, 1=closed_loop

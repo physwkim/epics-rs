@@ -56,9 +56,18 @@ impl Default for SelRecord {
             inpk: String::new(),
             inpl: String::new(),
             // C initializes inputs to epicsNAN; NaN values are skipped by algorithms
-            a: f64::NAN, b: f64::NAN, c: f64::NAN, d: f64::NAN,
-            e: f64::NAN, f: f64::NAN, g: f64::NAN, h: f64::NAN,
-            i: f64::NAN, j: f64::NAN, k: f64::NAN, l: f64::NAN,
+            a: f64::NAN,
+            b: f64::NAN,
+            c: f64::NAN,
+            d: f64::NAN,
+            e: f64::NAN,
+            f: f64::NAN,
+            g: f64::NAN,
+            h: f64::NAN,
+            i: f64::NAN,
+            j: f64::NAN,
+            k: f64::NAN,
+            l: f64::NAN,
         }
     }
 }

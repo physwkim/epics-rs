@@ -224,7 +224,8 @@ impl NDFileWriter for NetcdfWriter {
         for i in 0..ndims {
             let dim_idx = ndims - 1 - i;
             let name = format!("dim{}", i);
-            ds.add_fixed_dim(&name, first.dims[dim_idx]).map_err(map_def)?;
+            ds.add_fixed_dim(&name, first.dims[dim_idx])
+                .map_err(map_def)?;
             dim_names.push(name);
         }
 
@@ -283,7 +284,11 @@ impl NDFileWriter for NetcdfWriter {
         let dim_binning: Vec<i32> = first.dim_meta.iter().map(|d| d.binning as i32).collect();
         ds.add_global_attr_i32("dimBinning", dim_binning)
             .map_err(map_def)?;
-        let dim_reverse: Vec<i32> = first.dim_meta.iter().map(|d| if d.reverse { 1 } else { 0 }).collect();
+        let dim_reverse: Vec<i32> = first
+            .dim_meta
+            .iter()
+            .map(|d| if d.reverse { 1 } else { 0 })
+            .collect();
         ds.add_global_attr_i32("dimReverse", dim_reverse)
             .map_err(map_def)?;
 

@@ -587,8 +587,7 @@ pub fn compute_centroid(
     };
 
     // Orientation: 0.5 * atan2(2*mu11, mu20 - mu02) in degrees
-    let orientation =
-        0.5 * (2.0 * mu11).atan2(mu20 - mu02) * 180.0 / std::f64::consts::PI;
+    let orientation = 0.5 * (2.0 * mu11).atan2(mu20 - mu02) * 180.0 / std::f64::consts::PI;
 
     CentroidResult {
         centroid_x: cx,
@@ -941,10 +940,7 @@ impl NDPluginProcess for StatsProcessor {
             let cx = self.cursor_x;
             let cy = self.cursor_y;
             if cx < info.x_size && cy < info.y_size {
-                result.cursor_value = array
-                    .data
-                    .get_as_f64(cy * info.x_size + cx)
-                    .unwrap_or(0.0);
+                result.cursor_value = array.data.get_as_f64(cy * info.x_size + cx).unwrap_or(0.0);
             }
         }
 

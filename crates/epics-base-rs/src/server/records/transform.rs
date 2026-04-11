@@ -594,10 +594,22 @@ impl Record for TransformRecord {
 
     fn multi_output_links(&self) -> &[(&'static str, &'static str)] {
         static ALL: [(&str, &str); 16] = [
-            ("OUTA", "A"), ("OUTB", "B"), ("OUTC", "C"), ("OUTD", "D"),
-            ("OUTE", "E"), ("OUTF", "F"), ("OUTG", "G"), ("OUTH", "H"),
-            ("OUTI", "I"), ("OUTJ", "J"), ("OUTK", "K"), ("OUTL", "L"),
-            ("OUTM", "M"), ("OUTN", "N"), ("OUTO", "O"), ("OUTP", "P"),
+            ("OUTA", "A"),
+            ("OUTB", "B"),
+            ("OUTC", "C"),
+            ("OUTD", "D"),
+            ("OUTE", "E"),
+            ("OUTF", "F"),
+            ("OUTG", "G"),
+            ("OUTH", "H"),
+            ("OUTI", "I"),
+            ("OUTJ", "J"),
+            ("OUTK", "K"),
+            ("OUTL", "L"),
+            ("OUTM", "M"),
+            ("OUTN", "N"),
+            ("OUTO", "O"),
+            ("OUTP", "P"),
         ];
         if self.copt == 1 {
             // COPT=Always: write all output links

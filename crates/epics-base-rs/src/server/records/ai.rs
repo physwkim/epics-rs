@@ -17,12 +17,12 @@ pub struct AiRecord {
     pub linr: i16, // 0=NO_CONVERSION, 1=SLOPE, 2=LINEAR
     pub eguf: f64,
     pub egul: f64,
-    pub eslo: f64,  // default 1.0
-    pub eoff: f64,  // engineering offset (defaults to egul for LINEAR)
+    pub eslo: f64, // default 1.0
+    pub eoff: f64, // engineering offset (defaults to egul for LINEAR)
     pub roff: i32,
-    pub aslo: f64,  // default 1.0
+    pub aslo: f64, // default 1.0
     pub aoff: f64,
-    pub smoo: f64,  // smoothing 0~1
+    pub smoo: f64, // smoothing 0~1
     // Deadband
     pub adel: f64,
     pub mdel: f64,
@@ -249,30 +249,30 @@ impl Record for AiRecord {
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
         if !self.skip_convert {
-        // convert() - raw to engineering units conversion
-        // Step 1: Apply ROFF, then ASLO/AOFF (always, regardless of LINR)
-        let mut v = (self.rval as f64) + (self.roff as f64);
-        if self.aslo != 0.0 {
-            v *= self.aslo;
-        }
-        v += self.aoff;
-
-        // Step 2: Apply linearization based on LINR
-        match self.linr {
-            0 => {} // NO_CONVERSION: skip linearization
-            1 | 2 => {
-                // SLOPE (1) and LINEAR (2): apply eslo/eoff
-                v = v * self.eslo + self.eoff;
+            // convert() - raw to engineering units conversion
+            // Step 1: Apply ROFF, then ASLO/AOFF (always, regardless of LINR)
+            let mut v = (self.rval as f64) + (self.roff as f64);
+            if self.aslo != 0.0 {
+                v *= self.aslo;
             }
-            _ => {} // breakpoint tables not yet supported
-        }
+            v += self.aoff;
 
-        // Step 3: Smoothing filter
-        if self.smoo != 0.0 && self.init && self.val.is_finite() {
-            self.val = v * (1.0 - self.smoo) + self.val * self.smoo;
-        } else {
-            self.val = v;
-        }
+            // Step 2: Apply linearization based on LINR
+            match self.linr {
+                0 => {} // NO_CONVERSION: skip linearization
+                1 | 2 => {
+                    // SLOPE (1) and LINEAR (2): apply eslo/eoff
+                    v = v * self.eslo + self.eoff;
+                }
+                _ => {} // breakpoint tables not yet supported
+            }
+
+            // Step 3: Smoothing filter
+            if self.smoo != 0.0 && self.init && self.val.is_finite() {
+                self.val = v * (1.0 - self.smoo) + self.val * self.smoo;
+            } else {
+                self.val = v;
+            }
         } // end skip_convert
         self.skip_convert = false;
 

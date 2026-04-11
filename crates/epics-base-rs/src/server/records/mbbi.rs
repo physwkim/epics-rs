@@ -73,9 +73,14 @@ impl Default for MbbiRecord {
     fn default() -> Self {
         Self {
             val: 0,
-            rval: 0, oraw: 0, mask: 0, shft: 0, sdef: false,
+            rval: 0,
+            oraw: 0,
+            mask: 0,
+            shft: 0,
+            sdef: false,
             nobt: 0,
-            mlst: 0, lalm: 0,
+            mlst: 0,
+            lalm: 0,
             zrsv: 0,
             onsv: 0,
             twsv: 0,
@@ -126,7 +131,10 @@ impl Default for MbbiRecord {
             ttst: String::new(),
             ftst: String::new(),
             ffst: String::new(),
-            simm: 0, siml: String::new(), siol: String::new(), sims: 0,
+            simm: 0,
+            siml: String::new(),
+            siol: String::new(),
+            sims: 0,
         }
     }
 }
@@ -149,10 +157,9 @@ impl MbbiRecord {
     fn compute_sdef(&mut self) {
         let rvs = self.raw_values();
         let sts: [&String; 16] = [
-            &self.zrst, &self.onst, &self.twst, &self.thst,
-            &self.frst, &self.fvst, &self.sxst, &self.svst,
-            &self.eist, &self.nist, &self.test, &self.elst,
-            &self.tvst, &self.ttst, &self.ftst, &self.ffst,
+            &self.zrst, &self.onst, &self.twst, &self.thst, &self.frst, &self.fvst, &self.sxst,
+            &self.svst, &self.eist, &self.nist, &self.test, &self.elst, &self.tvst, &self.ttst,
+            &self.ftst, &self.ffst,
         ];
         self.sdef = false;
         for i in 0..16 {
@@ -164,23 +171,55 @@ impl MbbiRecord {
     }
 
     fn raw_to_val(&self, raw: i32) -> u16 {
-        if !self.sdef { return raw as u16; }
+        if !self.sdef {
+            return raw as u16;
+        }
         let rvs = self.raw_values();
         for (i, &rv) in rvs.iter().enumerate() {
-            if rv == raw { return i as u16; }
+            if rv == raw {
+                return i as u16;
+            }
         }
         65535
     }
 }
 
 static MBBI_FIELDS: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Enum, read_only: false },
-    FieldDesc { name: "RVAL", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "ORAW", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "MASK", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "SHFT", dbf_type: DbFieldType::Short, read_only: false },
-    FieldDesc { name: "MLST", dbf_type: DbFieldType::Enum, read_only: true },
-    FieldDesc { name: "LALM", dbf_type: DbFieldType::Enum, read_only: true },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Enum,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "RVAL",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ORAW",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "MASK",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "SHFT",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "MLST",
+        dbf_type: DbFieldType::Enum,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LALM",
+        dbf_type: DbFieldType::Enum,
+        read_only: true,
+    },
     FieldDesc {
         name: "NOBT",
         dbf_type: DbFieldType::Short,
@@ -495,7 +534,9 @@ impl Record for MbbiRecord {
 
     fn process(&mut self) -> CaResult<ProcessOutcome> {
         let mut rval = self.rval;
-        if self.shft > 0 { rval = ((rval as u32) >> (self.shft as u32)) as i32; }
+        if self.shft > 0 {
+            rval = ((rval as u32) >> (self.shft as u32)) as i32;
+        }
         self.val = self.raw_to_val(rval);
         self.oraw = self.rval;
         Ok(ProcessOutcome::complete())
@@ -557,7 +598,11 @@ impl Record for MbbiRecord {
             _ => return Err(CaError::TypeMismatch("VAL".into())),
         };
         self.rval = raw;
-        let shifted = if self.shft > 0 { ((raw as u32) >> (self.shft as u32)) as i32 } else { raw };
+        let shifted = if self.shft > 0 {
+            ((raw as u32) >> (self.shft as u32)) as i32
+        } else {
+            raw
+        };
         self.val = self.raw_to_val(shifted);
         Ok(())
     }

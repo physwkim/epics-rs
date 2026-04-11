@@ -5,12 +5,12 @@ use crate::types::{DbFieldType, EpicsValue};
 /// Compress record — circular buffer with compression algorithms.
 pub struct CompressRecord {
     pub val: Vec<f64>,
-    pub nsam: i32, // Number of samples (buffer size)
-    pub inp: String,  // input link
-    pub alg: i16,  // 0=N to 1 Low, 1=N to 1 High, 2=N to 1 Mean, 3=Circular Buffer
-    pub n: i32,    // Number of values to compress
+    pub nsam: i32,   // Number of samples (buffer size)
+    pub inp: String, // input link
+    pub alg: i16,    // 0=N to 1 Low, 1=N to 1 High, 2=N to 1 Mean, 3=Circular Buffer
+    pub n: i32,      // Number of values to compress
     pub nuse: i32,   // Number of elements used
-    pub off: i32,  // Current write offset
+    pub off: i32,    // Current write offset
     pub res: i16,    // Reset flag
     pub balg: i16,   // 0=FIFO, 1=LIFO
     // Internal accumulator for N-to-1 algorithms
@@ -52,7 +52,9 @@ impl CompressRecord {
                 let idx = self.off as usize % self.nsam as usize;
                 self.val[idx] = input;
                 self.off += 1;
-                if (self.nuse as usize) < self.nsam as usize { self.nuse += 1; }
+                if (self.nuse as usize) < self.nsam as usize {
+                    self.nuse += 1;
+                }
             }
             _ => {
                 // N-to-1 algorithms
@@ -111,7 +113,9 @@ impl Record for CompressRecord {
         if self.res != 0 {
             self.off = 0;
             self.nuse = 0;
-            for v in &mut self.val { *v = 0.0; }
+            for v in &mut self.val {
+                *v = 0.0;
+            }
             self.res = 0;
         }
         Ok(ProcessOutcome::complete())

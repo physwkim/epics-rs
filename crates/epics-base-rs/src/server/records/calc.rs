@@ -555,39 +555,66 @@ impl Record for CalcRecord {
                 _ => Err(CaError::TypeMismatch("CALC".into())),
             },
             "EGU" => match value {
-                EpicsValue::String(s) => { self.egu = s; Ok(()) }
+                EpicsValue::String(s) => {
+                    self.egu = s;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "PREC" => match value {
-                EpicsValue::Short(v) => { self.prec = v; Ok(()) }
+                EpicsValue::Short(v) => {
+                    self.prec = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "HOPR" => match value {
-                EpicsValue::Double(v) => { self.hopr = v; Ok(()) }
+                EpicsValue::Double(v) => {
+                    self.hopr = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "LOPR" => match value {
-                EpicsValue::Double(v) => { self.lopr = v; Ok(()) }
+                EpicsValue::Double(v) => {
+                    self.lopr = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "ADEL" => match value {
-                EpicsValue::Double(v) => { self.adel = v; Ok(()) }
+                EpicsValue::Double(v) => {
+                    self.adel = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "MDEL" => match value {
-                EpicsValue::Double(v) => { self.mdel = v; Ok(()) }
+                EpicsValue::Double(v) => {
+                    self.mdel = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "LALM" => match value {
-                EpicsValue::Double(v) => { self.lalm = v; Ok(()) }
+                EpicsValue::Double(v) => {
+                    self.lalm = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "ALST" => match value {
-                EpicsValue::Double(v) => { self.alst = v; Ok(()) }
+                EpicsValue::Double(v) => {
+                    self.alst = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "MLST" => match value {
-                EpicsValue::Double(v) => { self.mlst = v; Ok(()) }
+                EpicsValue::Double(v) => {
+                    self.mlst = v;
+                    Ok(())
+                }
                 _ => Err(CaError::TypeMismatch(name.into())),
             },
             "INPA" => match value {

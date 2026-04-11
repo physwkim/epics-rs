@@ -7,10 +7,10 @@ use crate::types::{DbFieldType, EpicsValue};
 pub struct BoRecord {
     pub val: u16,
     pub rval: i32,
-    pub oraw: i32,  // old raw value for monitor
-    pub rbv: i32,    // readback value
-    pub orbv: i32,   // old readback value
-    pub mask: i32,   // hardware mask from device support
+    pub oraw: i32, // old raw value for monitor
+    pub rbv: i32,  // readback value
+    pub orbv: i32, // old readback value
+    pub mask: i32, // hardware mask from device support
     // Strings
     pub znam: String,
     pub onam: String,
@@ -18,16 +18,16 @@ pub struct BoRecord {
     pub zsv: i16,
     pub osv: i16,
     pub cosv: i16,
-    pub lalm: u16,   // last alarm value (for COS alarm)
+    pub lalm: u16, // last alarm value (for COS alarm)
     // Monitor
-    pub mlst: u16,   // last monitored value
+    pub mlst: u16, // last monitored value
     // Output control
     pub omsl: i16,   // 0=supervisory, 1=closed_loop
-    pub dol: String,  // desired output location link
-    pub high: f64,    // seconds to hold output high (toggle delay)
+    pub dol: String, // desired output location link
+    pub high: f64,   // seconds to hold output high (toggle delay)
     // Invalid output
-    pub ivoa: i16,    // 0=Continue, 1=Don't drive, 2=Set to IVOV
-    pub ivov: u16,    // invalid output value
+    pub ivoa: i16, // 0=Continue, 1=Don't drive, 2=Set to IVOV
+    pub ivov: u16, // invalid output value
     // Simulation
     pub simm: i16,
     pub siml: String,

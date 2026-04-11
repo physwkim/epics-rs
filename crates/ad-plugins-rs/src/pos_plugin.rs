@@ -211,11 +211,9 @@ fn parse_positions_xml(xml: &str) -> Result<Vec<HashMap<String, f64>>, String> {
             let quote_char = after_eq.chars().next().unwrap_or('"');
             if quote_char == '"' || quote_char == '\'' {
                 let inner = &after_eq[1..];
-                let end = inner
-                    .find(quote_char)
-                    .ok_or_else(|| {
-                        "Malformed XML: unclosed quote in index attribute".to_string()
-                    })?;
+                let end = inner.find(quote_char).ok_or_else(|| {
+                    "Malformed XML: unclosed quote in index attribute".to_string()
+                })?;
                 inner[..end]
                     .parse::<usize>()
                     .map_err(|e| format!("Invalid index value: {}", e))?

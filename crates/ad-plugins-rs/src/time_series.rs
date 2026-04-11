@@ -418,7 +418,9 @@ impl PortDriver for TimeSeriesPortDriver {
             drop(state);
 
             // Update time axis
-            let time_axis: Vec<f64> = (0..new_size).map(|i| i as f64 * self.time_per_point).collect();
+            let time_axis: Vec<f64> = (0..new_size)
+                .map(|i| i as f64 * self.time_per_point)
+                .collect();
             let _ = self
                 .base
                 .params
@@ -471,7 +473,9 @@ impl PortDriver for TimeSeriesPortDriver {
             self.base.set_float64_param(reason, user.addr, value)?;
             // Rebuild time axis with new scaling
             let num_points = self.shared.lock().num_points;
-            let time_axis: Vec<f64> = (0..num_points).map(|i| i as f64 * self.time_per_point).collect();
+            let time_axis: Vec<f64> = (0..num_points)
+                .map(|i| i as f64 * self.time_per_point)
+                .collect();
             let _ = self
                 .base
                 .params

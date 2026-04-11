@@ -975,11 +975,7 @@ impl RecordInstance {
                     let state_sev = if val == 0 { zsv } else { osv };
                     let sev = AlarmSeverity::from_u16(state_sev as u16);
                     if sev != AlarmSeverity::NoAlarm {
-                        recgbl::rec_gbl_set_sevr(
-                            &mut self.common,
-                            alarm_status::STATE_ALARM,
-                            sev,
-                        );
+                        recgbl::rec_gbl_set_sevr(&mut self.common, alarm_status::STATE_ALARM, sev);
                     }
 
                     // COS alarm: only fires when val changed from LALM
@@ -1058,11 +1054,7 @@ impl RecordInstance {
 
                 let sev = AlarmSeverity::from_u16(state_sev as u16);
                 if sev != AlarmSeverity::NoAlarm {
-                    recgbl::rec_gbl_set_sevr(
-                        &mut self.common,
-                        alarm_status::STATE_ALARM,
-                        sev,
-                    );
+                    recgbl::rec_gbl_set_sevr(&mut self.common, alarm_status::STATE_ALARM, sev);
                 }
 
                 // COS alarm: only when val changed from LALM (like bi/bo)
@@ -1087,9 +1079,7 @@ impl RecordInstance {
                             cos_sev,
                         );
                     }
-                    let _ = self
-                        .record
-                        .put_field("LALM", EpicsValue::Enum(val as u16));
+                    let _ = self.record.put_field("LALM", EpicsValue::Enum(val as u16));
                 }
             }
             _ => {} // no-op for other types
@@ -1109,26 +1099,25 @@ impl RecordInstance {
         // C-style per-level hysteresis: alarm fires if val passes the level,
         // OR if we were already at that alarm level (lalm == alev) and val
         // hasn't retreated past the hysteresis margin.
-        let (new_sevr, new_stat, alev) =
-            if cfg.hhsv != AlarmSeverity::NoAlarm
-                && (val >= cfg.hihi || (lalm == cfg.hihi && val >= cfg.hihi - hyst))
-            {
-                (cfg.hhsv, alarm_status::HIHI_ALARM, cfg.hihi)
-            } else if cfg.llsv != AlarmSeverity::NoAlarm
-                && (val <= cfg.lolo || (lalm == cfg.lolo && val <= cfg.lolo + hyst))
-            {
-                (cfg.llsv, alarm_status::LOLO_ALARM, cfg.lolo)
-            } else if cfg.hsv != AlarmSeverity::NoAlarm
-                && (val >= cfg.high || (lalm == cfg.high && val >= cfg.high - hyst))
-            {
-                (cfg.hsv, alarm_status::HIGH_ALARM, cfg.high)
-            } else if cfg.lsv != AlarmSeverity::NoAlarm
-                && (val <= cfg.low || (lalm == cfg.low && val <= cfg.low + hyst))
-            {
-                (cfg.lsv, alarm_status::LOW_ALARM, cfg.low)
-            } else {
-                (AlarmSeverity::NoAlarm, alarm_status::NO_ALARM, 0.0)
-            };
+        let (new_sevr, new_stat, alev) = if cfg.hhsv != AlarmSeverity::NoAlarm
+            && (val >= cfg.hihi || (lalm == cfg.hihi && val >= cfg.hihi - hyst))
+        {
+            (cfg.hhsv, alarm_status::HIHI_ALARM, cfg.hihi)
+        } else if cfg.llsv != AlarmSeverity::NoAlarm
+            && (val <= cfg.lolo || (lalm == cfg.lolo && val <= cfg.lolo + hyst))
+        {
+            (cfg.llsv, alarm_status::LOLO_ALARM, cfg.lolo)
+        } else if cfg.hsv != AlarmSeverity::NoAlarm
+            && (val >= cfg.high || (lalm == cfg.high && val >= cfg.high - hyst))
+        {
+            (cfg.hsv, alarm_status::HIGH_ALARM, cfg.high)
+        } else if cfg.lsv != AlarmSeverity::NoAlarm
+            && (val <= cfg.low || (lalm == cfg.low && val <= cfg.low + hyst))
+        {
+            (cfg.lsv, alarm_status::LOW_ALARM, cfg.low)
+        } else {
+            (AlarmSeverity::NoAlarm, alarm_status::NO_ALARM, 0.0)
+        };
 
         if new_sevr != AlarmSeverity::NoAlarm {
             recgbl::rec_gbl_set_sevr(&mut self.common, new_stat, new_sevr);
