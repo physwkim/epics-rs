@@ -887,7 +887,6 @@ impl PortDriver for DrvAsynSerialPort {
                 .ok_or_else(|| AsynError::OptionNotFound(key.to_string())),
         }
     }
-
 }
 
 // --- RS485 support (Linux only) ---
