@@ -566,6 +566,10 @@ impl Record for MbboRecord {
         MBBO_FIELDS
     }
 
+    fn uses_monitor_deadband(&self) -> bool {
+        false
+    }
+
     fn init_record(&mut self, pass: u8) -> CaResult<()> {
         if pass == 0 {
             if self.mask == 0 && self.nobt > 0 && self.nobt <= 32 {

@@ -501,6 +501,10 @@ impl Record for BusyRecord {
     fn field_list(&self) -> &'static [FieldDesc] {
         FIELDS
     }
+
+    fn uses_monitor_deadband(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

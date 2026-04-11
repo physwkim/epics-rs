@@ -261,6 +261,14 @@ pub trait Record: Send + Sync + 'static {
         true
     }
 
+    /// Whether this record uses MDEL/ADEL deadband for monitor posting.
+    /// Binary records (bi, bo, busy, mbbi, mbbo) return false because
+    /// C EPICS always posts monitors for these record types regardless
+    /// of whether the value changed.
+    fn uses_monitor_deadband(&self) -> bool {
+        true
+    }
+
     /// Initialize record (pass 0: field defaults; pass 1: dependent init).
     fn init_record(&mut self, _pass: u8) -> CaResult<()> {
         Ok(())

@@ -656,7 +656,12 @@ impl PvDatabase {
             use crate::server::recgbl::EventMask;
             let mut event_mask = EventMask::NONE;
 
-            let (include_val, include_archive) = instance.check_deadband_ext();
+            let (include_val, include_archive) = if instance.record.uses_monitor_deadband() {
+                instance.check_deadband_ext()
+            } else {
+                // Binary records (bi/bo/busy/mbbi/mbbo): always post monitors
+                (true, true)
+            };
             if include_val {
                 event_mask |= EventMask::VALUE;
             }
@@ -1078,7 +1083,12 @@ impl PvDatabase {
 
             use crate::server::recgbl::EventMask;
             let mut event_mask = EventMask::NONE;
-            let (include_val, include_archive) = instance.check_deadband_ext();
+            let (include_val, include_archive) = if instance.record.uses_monitor_deadband() {
+                instance.check_deadband_ext()
+            } else {
+                // Binary records (bi/bo/busy/mbbi/mbbo): always post monitors
+                (true, true)
+            };
             if include_val {
                 event_mask |= EventMask::VALUE;
             }
