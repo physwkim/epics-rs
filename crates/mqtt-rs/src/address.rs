@@ -33,6 +33,9 @@ pub struct TopicAddress {
     pub value_type: ValueType,
     pub topic: String,
     pub json_field: Option<String>,
+    /// When true, string values "1"/"on"/"true" → "ON", "0"/"off"/"false" → "OFF".
+    /// Set by Z2M builders for state control topics. Generic MQTT leaves this false.
+    pub normalize_on_off: bool,
 }
 
 impl TopicAddress {
@@ -90,6 +93,7 @@ impl TopicAddress {
             value_type,
             topic,
             json_field,
+            normalize_on_off: false,
         })
     }
 

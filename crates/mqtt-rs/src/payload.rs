@@ -26,12 +26,20 @@ pub fn decode_payload(raw: &str, addr: &TopicAddress) -> MqttResult<DecodedValue
 }
 
 /// Encode a value for publishing according to the topic address format.
+///
+/// If `addr.normalize_on_off` is true, string values are normalized
+/// ("1"/"on"/"true" → "ON", "0"/"off"/"false" → "OFF") before encoding.
 pub fn encode_payload(value: &DecodedValue, addr: &TopicAddress) -> String {
+    let value = if addr.normalize_on_off {
+        normalize_value(value)
+    } else {
+        value.clone()
+    };
     match addr.format {
-        PayloadFormat::Flat => encode_flat(value),
+        PayloadFormat::Flat => encode_flat(&value),
         PayloadFormat::Json => {
             let field = addr.json_field.as_deref().unwrap_or("value");
-            encode_json(value, field)
+            encode_json(&value, field)
         }
     }
 }
@@ -54,11 +62,9 @@ pub fn encode_flat(value: &DecodedValue) -> String {
     }
 }
 
-/// Normalize string values for Z2M compatibility.
-/// "1", "on", "On", "ON", "true" → "ON"
-/// "0", "off", "Off", "OFF", "false" → "OFF"
+/// Normalize a string: "1"/"on"/"true" → "ON", "0"/"off"/"false" → "OFF".
 /// Other values pass through unchanged.
-fn normalize_on_off(s: &str) -> String {
+pub fn normalize_on_off(s: &str) -> String {
     match s.trim().to_ascii_lowercase().as_str() {
         "1" | "on" | "true" => "ON".to_string(),
         "0" | "off" | "false" => "OFF".to_string(),
@@ -66,19 +72,21 @@ fn normalize_on_off(s: &str) -> String {
     }
 }
 
+/// Apply ON/OFF normalization to a DecodedValue (strings only).
+fn normalize_value(value: &DecodedValue) -> DecodedValue {
+    match value {
+        DecodedValue::String(s) => DecodedValue::String(normalize_on_off(s)),
+        other => other.clone(),
+    }
+}
+
 /// Encode a value as JSON with a dot-separated field path.
-///
-/// String values are normalized for Z2M: "1"/"on"/"true" → "ON", "0"/"off"/"false" → "OFF".
-/// Integer values pass through as numbers (no normalization — would break brightness etc.).
 fn encode_json(value: &DecodedValue, field_path: &str) -> String {
     let json_value = match value {
         DecodedValue::Int32(v) => serde_json::Value::from(*v),
         DecodedValue::Float64(v) => serde_json::Value::from(*v),
         DecodedValue::UInt32(v) => serde_json::Value::from(*v),
-        DecodedValue::String(v) => {
-            let normalized = normalize_on_off(v);
-            serde_json::Value::from(normalized)
-        }
+        DecodedValue::String(v) => serde_json::Value::from(v.as_str()),
         DecodedValue::Int32Array(v) => serde_json::Value::from(v.as_slice()),
         DecodedValue::Float64Array(v) => serde_json::Value::from(v.as_slice()),
     };
@@ -397,11 +405,17 @@ mod tests {
         assert_eq!(encode_payload(&DecodedValue::Int32(42), &addr), "42");
     }
 
-    // --- JSON on/off normalization ---
+    // --- ON/OFF normalization (opt-in via normalize_on_off flag) ---
+
+    fn addr_with_normalize(drv_info: &str) -> TopicAddress {
+        let mut addr = TopicAddress::parse(drv_info).unwrap();
+        addr.normalize_on_off = true;
+        addr
+    }
 
     #[test]
-    fn encode_json_normalize_on_variants() {
-        let addr = TopicAddress::parse("JSON:STRING device/set state").unwrap();
+    fn normalize_on_variants() {
+        let addr = addr_with_normalize("JSON:STRING device/set state");
         for input in &["1", "on", "On", "ON", "true", "TRUE", "True"] {
             let result = encode_payload(&DecodedValue::String(input.to_string()), &addr);
             let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -410,8 +424,8 @@ mod tests {
     }
 
     #[test]
-    fn encode_json_normalize_off_variants() {
-        let addr = TopicAddress::parse("JSON:STRING device/set state").unwrap();
+    fn normalize_off_variants() {
+        let addr = addr_with_normalize("JSON:STRING device/set state");
         for input in &["0", "off", "Off", "OFF", "false", "FALSE", "False"] {
             let result = encode_payload(&DecodedValue::String(input.to_string()), &addr);
             let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -420,17 +434,25 @@ mod tests {
     }
 
     #[test]
-    fn encode_json_no_normalize_other_strings() {
-        let addr = TopicAddress::parse("JSON:STRING device/set mode").unwrap();
+    fn no_normalize_without_flag() {
+        // Default: normalize_on_off = false — values pass through as-is
+        let addr = TopicAddress::parse("JSON:STRING device/set state").unwrap();
+        let result = encode_payload(&DecodedValue::String("1".into()), &addr);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["state"], "1"); // NOT "ON"
+    }
+
+    #[test]
+    fn no_normalize_other_strings() {
+        let addr = addr_with_normalize("JSON:STRING device/set mode");
         let result = encode_payload(&DecodedValue::String("auto".into()), &addr);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["mode"], "auto");
     }
 
     #[test]
-    fn encode_json_int_not_normalized() {
-        // brightness 0 and 1 should stay as integers, not become "OFF"/"ON"
-        let addr = TopicAddress::parse("JSON:INT device/set brightness").unwrap();
+    fn no_normalize_integers() {
+        let addr = addr_with_normalize("JSON:INT device/set brightness");
         let result = encode_payload(&DecodedValue::Int32(0), &addr);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["brightness"], 0);

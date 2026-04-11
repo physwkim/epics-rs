@@ -99,7 +99,17 @@ fn load_records(
 
 /// Register a topic and return the drvInfo string.
 fn add_topic(port: &str, drv_info: &str) -> String {
-    if let Ok(addr) = TopicAddress::parse(drv_info) {
+    add_topic_opts(port, drv_info, false)
+}
+
+/// Register a topic with ON/OFF normalization enabled.
+fn add_topic_normalized(port: &str, drv_info: &str) -> String {
+    add_topic_opts(port, drv_info, true)
+}
+
+fn add_topic_opts(port: &str, drv_info: &str, normalize: bool) -> String {
+    if let Ok(mut addr) = TopicAddress::parse(drv_info) {
+        addr.normalize_on_off = normalize;
         register_pending_topic(port, addr);
     }
     drv_info.to_string()
@@ -210,7 +220,7 @@ pub fn cmd_z2m_plug() -> CommandDef {
                     suffix: "SetState",
                     dtyp: "asynOctetWrite",
                     link_field: "OUT",
-                    drv_info: add_topic(&port, &format!("JSON:STRING {topic}/set state")),
+                    drv_info: add_topic_normalized(&port, &format!("JSON:STRING {topic}/set state")),
                     egu: "",
                     prec: None,
                     scan_io_intr: false,
@@ -316,7 +326,7 @@ pub fn cmd_z2m_light() -> CommandDef {
                     suffix: "SetState",
                     dtyp: "asynOctetWrite",
                     link_field: "OUT",
-                    drv_info: add_topic(&port, &format!("JSON:STRING {topic}/set state")),
+                    drv_info: add_topic_normalized(&port, &format!("JSON:STRING {topic}/set state")),
                     egu: "",
                     prec: None,
                     scan_io_intr: false,
@@ -364,7 +374,7 @@ pub fn cmd_z2m_switch() -> CommandDef {
                     suffix: "SetState",
                     dtyp: "asynOctetWrite",
                     link_field: "OUT",
-                    drv_info: add_topic(&port, &format!("JSON:STRING {topic}/set state")),
+                    drv_info: add_topic_normalized(&port, &format!("JSON:STRING {topic}/set state")),
                     egu: "",
                     prec: None,
                     scan_io_intr: false,
