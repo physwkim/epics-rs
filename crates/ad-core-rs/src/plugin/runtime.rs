@@ -1115,10 +1115,11 @@ fn plugin_data_loop<P: NDPluginProcess>(
 
                             // Update queue metrics (C parity: DroppedArrays + QueueFree)
                             let guard = shared.lock();
-                            let queue_free = queue_tx.capacity() as i32;
+                            // queue_use = total - free (C++: QueueUse reports occupied slots)
+                            let queue_use = (queue_tx.max_capacity() - queue_tx.capacity()) as i32;
                             let dropped = dropped_count.load(Ordering::Relaxed) as i32;
                             guard.port_handle.write_int32_no_wait(
-                                guard.plugin_params.queue_use, 0, queue_free,
+                                guard.plugin_params.queue_use, 0, queue_use,
                             );
                             guard.port_handle.write_int32_no_wait(
                                 guard.plugin_params.dropped_arrays, 0, dropped,

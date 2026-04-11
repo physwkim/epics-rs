@@ -146,7 +146,7 @@ impl CircularBuffer {
         if self.triggered {
             // Post-trigger capture (Flushing state)
             self.captured.push(array);
-            self.post_remaining -= 1;
+            self.post_remaining = self.post_remaining.saturating_sub(1);
             if self.post_remaining == 0 {
                 self.triggered = false;
                 // Check if we've reached the preset trigger count

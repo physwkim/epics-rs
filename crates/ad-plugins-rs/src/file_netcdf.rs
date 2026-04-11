@@ -349,6 +349,8 @@ impl NDFileWriter for NetcdfWriter {
                 }
                 dims.push(NDDimension::new(d.size()));
             }
+            // Reverse dims on read (they were reversed on write to match C++)
+            dims.reverse();
 
             let original_type_ordinal = ds
                 .get_global_attr_i32("dataType")

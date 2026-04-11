@@ -41,7 +41,11 @@ impl NDArrayPool {
 
     /// Allocate an NDArray. Tries to reuse a free-list entry with sufficient capacity.
     pub fn alloc(&self, dims: Vec<NDDimension>, data_type: NDDataType) -> ADResult<NDArray> {
-        let num_elements: usize = dims.iter().map(|d| d.size).product();
+        let num_elements: usize = if dims.is_empty() {
+            0
+        } else {
+            dims.iter().map(|d| d.size).product()
+        };
         let needed_bytes = num_elements * data_type.element_size();
 
         // Try to find a reusable buffer in the free list

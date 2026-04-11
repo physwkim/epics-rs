@@ -314,7 +314,11 @@ pub struct NDArray {
 impl NDArray {
     /// Create a new NDArray with zeroed buffer matching dimensions.
     pub fn new(dims: Vec<NDDimension>, data_type: NDDataType) -> Self {
-        let num_elements: usize = dims.iter().map(|d| d.size).product();
+        let num_elements: usize = if dims.is_empty() {
+            0
+        } else {
+            dims.iter().map(|d| d.size).product()
+        };
         Self {
             unique_id: 0,
             timestamp: EpicsTimestamp::default(),
