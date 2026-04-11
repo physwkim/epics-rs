@@ -101,6 +101,23 @@ impl<W: NDFileWriter> FilePluginController<W> {
         Ok(())
     }
 
+    /// Validate that a frame matches the recorded initial dimensions and data type.
+    /// Records initial values on the first call. Returns false if mismatched.
+    fn is_frame_valid(&mut self, array: &NDArray) -> bool {
+        let frame_dims: Vec<usize> = array.dims.iter().map(|d| d.size).collect();
+        let frame_dtype = array.data.data_type();
+        if let (Some(expected_dims), Some(expected_dtype)) =
+            (&self.stream_dims, self.stream_data_type)
+        {
+            frame_dims == *expected_dims && frame_dtype == expected_dtype
+        } else {
+            // First frame: record dimensions and data type
+            self.stream_dims = Some(frame_dims);
+            self.stream_data_type = Some(frame_dtype);
+            true
+        }
+    }
+
     /// Process an incoming array: auto_save, capture buffering, stream write.
     pub fn process_array(&mut self, array: &NDArray) -> ProcessResult {
         let mut proc_result = ProcessResult::empty();
@@ -117,6 +134,10 @@ impl<W: NDFileWriter> FilePluginController<W> {
             }
             NDFileMode::Capture => {
                 if self.capture_active {
+                    // Validate frame matches initial dims/type (same as stream mode)
+                    if !self.is_frame_valid(&array) {
+                        return proc_result; // skip mismatched frame
+                    }
                     self.file_base.capture_array(array);
                     self.push_num_captured_update(&mut proc_result.param_updates);
                     if self.file_base.num_captured() >= self.file_base.num_capture_target() {
@@ -142,20 +163,9 @@ impl<W: NDFileWriter> FilePluginController<W> {
             }
             NDFileMode::Stream => {
                 if self.capture_active {
-                    // Validate frame dimensions and data type against the first frame.
-                    let frame_dims: Vec<usize> = array.dims.iter().map(|d| d.size).collect();
-                    let frame_dtype = array.data.data_type();
-                    if let (Some(expected_dims), Some(expected_dtype)) =
-                        (&self.stream_dims, self.stream_data_type)
-                    {
-                        if &frame_dims != expected_dims || frame_dtype != expected_dtype {
-                            // Mismatched frame: skip silently (C parity behavior).
-                            return proc_result;
-                        }
-                    } else {
-                        // First frame in stream: record dimensions and data type.
-                        self.stream_dims = Some(frame_dims);
-                        self.stream_data_type = Some(frame_dtype);
+                    // Validate frame matches initial dims/type
+                    if !self.is_frame_valid(&array) {
+                        return proc_result; // skip mismatched frame
                     }
                     let r = self.file_base.process_array(array, &mut self.writer);
                     let target = self.file_base.num_capture_target();

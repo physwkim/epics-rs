@@ -90,9 +90,10 @@ fn format_int_spec(spec: &str, value: i32) -> String {
     }
 
     if zero_pad || precision > 0 {
-        format!("{:0>width$}", value, width = min_digits)
+        // Use Rust's native zero-fill which handles sign correctly: -005 not 0-5
+        format!("{:0width$}", value, width = min_digits)
     } else {
-        format!("{:>width$}", value, width = min_digits)
+        format!("{:width$}", value, width = min_digits)
     }
 }
 

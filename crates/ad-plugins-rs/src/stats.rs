@@ -754,16 +754,14 @@ pub fn compute_profiles(
         avg_y[iy] /= x_size as f64;
     }
 
-    // Threshold profiles: divide by count of pixels above threshold
+    // C++: threshold profiles divided by dimension size (same as average profiles)
     let threshold_x: Vec<f64> = thresh_x_sum
         .iter()
-        .zip(thresh_x_cnt.iter())
-        .map(|(&s, &c)| if c > 0 { s / c as f64 } else { 0.0 })
+        .map(|&s| s / y_size as f64)
         .collect();
     let threshold_y: Vec<f64> = thresh_y_sum
         .iter()
-        .zip(thresh_y_cnt.iter())
-        .map(|(&s, &c)| if c > 0 { s / c as f64 } else { 0.0 })
+        .map(|&s| s / x_size as f64)
         .collect();
 
     // Centroid profiles: extract single row/column at centroid position
@@ -1426,17 +1424,18 @@ mod tests {
             2.0, 1.0, 0, 0,
         );
 
-        // Threshold X profile: only column 2 has a pixel >= 5.0 (at row 1)
+        // Threshold X profile: C++ divides by y_size (4), not count
+        // Column 2 has one pixel >= 5.0 (value 10.0), so sum=10, /4 = 2.5
         assert_eq!(profiles.threshold_x.len(), 4);
-        assert!((profiles.threshold_x[2] - 10.0).abs() < 1e-10);
-        // Other columns: no pixels above threshold
+        assert!((profiles.threshold_x[2] - 2.5).abs() < 1e-10);
+        // Other columns: no pixels above threshold, sum=0, /4 = 0
         assert!((profiles.threshold_x[0] - 0.0).abs() < 1e-10);
         assert!((profiles.threshold_x[1] - 0.0).abs() < 1e-10);
         assert!((profiles.threshold_x[3] - 0.0).abs() < 1e-10);
 
-        // Threshold Y profile: only row 1 has a pixel >= 5.0
+        // Threshold Y profile: row 1 has one pixel >= 5.0 (value 10.0), /4 = 2.5
         assert_eq!(profiles.threshold_y.len(), 4);
-        assert!((profiles.threshold_y[1] - 10.0).abs() < 1e-10);
+        assert!((profiles.threshold_y[1] - 2.5).abs() < 1e-10);
         assert!((profiles.threshold_y[0] - 0.0).abs() < 1e-10);
     }
 

@@ -121,7 +121,9 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
     let (eff_x_min, eff_x_size) = if !config.dims[0].enable {
         (0, src_x)
     } else if config.dims[0].auto_size {
-        (config.dims[0].min.min(src_x), src_x)
+        // C++: size = src_dim, then clamp: size = MIN(size, src_dim - offset)
+        let min = config.dims[0].min.min(src_x);
+        (min, src_x.saturating_sub(min))
     } else {
         let min = config.dims[0].min.min(src_x);
         let size = config.dims[0].size.min(src_x.saturating_sub(min));
@@ -132,7 +134,8 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
     let (eff_y_min, eff_y_size) = if !config.dims[1].enable {
         (0, src_y)
     } else if config.dims[1].auto_size {
-        (config.dims[1].min.min(src_y), src_y)
+        let min = config.dims[1].min.min(src_y);
+        (min, src_y.saturating_sub(min))
     } else {
         let min = config.dims[1].min.min(src_y);
         let size = config.dims[1].size.min(src_y.saturating_sub(min));
@@ -781,9 +784,9 @@ mod tests {
         };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
-        // C++: autoSize uses full dimension size, not src_dim - min
-        assert_eq!(roi.dims[0].size, 4); // full dim size
-        assert_eq!(roi.dims[1].size, 4); // full dim size
+        // C++: autoSize sets size=src_dim then clamps to src_dim-offset
+        assert_eq!(roi.dims[0].size, 3); // 4 - 1 = 3
+        assert_eq!(roi.dims[1].size, 4); // 4 - 0 = 4
     }
 
     #[test]

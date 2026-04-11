@@ -177,6 +177,7 @@ impl NDArrayPool {
         let mut copy = self.alloc(dims, data_type)?;
         copy.data = source.data.clone();
         copy.time_stamp = source.time_stamp;
+        copy.timestamp = source.timestamp;
         copy.attributes = source.attributes.clone();
         copy.codec = source.codec.clone();
         Ok(copy)
@@ -327,7 +328,8 @@ impl NDArrayPool {
                 size: out_sizes[i],
                 offset: src.dims[i].offset + dims_out[i].offset,
                 binning: src.dims[i].binning * bin,
-                reverse: dims_out[i].reverse,
+                // C++: if source is already reversed, XOR with output reverse
+                reverse: src.dims[i].reverse ^ dims_out[i].reverse,
             });
         }
 
@@ -430,6 +432,20 @@ impl NDArrayPool {
             attributes: src.attributes.clone(),
             codec: src.codec.clone(),
         };
+
+        // C++: if color dimension was collapsed (size != 3), downgrade to Mono
+        if ndims == 3 {
+            let color_dim = src.info().color_dim;
+            if color_dim < ndims && arr.dims[color_dim].size != 3 {
+                use crate::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+                arr.attributes.add(NDAttribute {
+                    name: "ColorMode".into(),
+                    description: "Color Mode".into(),
+                    source: NDAttrSource::Driver,
+                    value: NDAttrValue::Int32(0), // Mono
+                });
+            }
+        }
 
         // Convert data type if needed
         if target_type != src_type {

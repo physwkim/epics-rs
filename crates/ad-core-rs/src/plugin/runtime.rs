@@ -465,7 +465,7 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
             }
 
             let info = report_arr.info();
-            let color_mode = if report_arr.dims.len() <= 2 { 0 } else { 2 };
+            let color_mode = info.color_mode as i32;
             self.port_handle.write_int32_no_wait(
                 self.ndarray_params.array_counter,
                 0,
