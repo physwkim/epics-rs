@@ -197,6 +197,11 @@ impl MotorRecord {
             let npos = (self.pos.dval / self.conv.mres).round() as i64;
             let rpos = (self.pos.drbv / self.conv.mres).round() as i64;
             if (npos - rpos).abs() < 1 {
+                // Sub-step move: still pulse DMOV 1→0→1 so clients
+                // (ophyd/bluesky) detect the move completed immediately.
+                self.stat.dmov = false;
+                self.suppress_flnk = true;
+                self.finalize_motion(effects);
                 return;
             }
         }
