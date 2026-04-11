@@ -179,7 +179,11 @@ impl MotorRecord {
             && !ls_blocks_retry
         {
             if self.retry.rmod == RetryMode::InPosition {
-                self.finalize_motion(effects);
+                // C: InPosition mode re-delays to let servo settle
+                self.retry.rcnt += 1;
+                self.retry.miss = false;
+                self.stat.mip = MipFlags::RETRY;
+                self.finalize_or_delay(effects);
                 return;
             }
 
@@ -219,7 +223,13 @@ impl MotorRecord {
     fn evaluate_position_error(&mut self, effects: &mut ProcessEffects) {
         let diff = (self.pos.dval - self.pos.drbv).abs();
 
-        if diff > self.retry.rdbd && self.retry.rcnt < self.retry.rtry && self.retry.rdbd > 0.0 {
+        // C: check if limit switch blocks retry direction
+        let retry_dir_positive = (self.pos.dval - self.pos.drbv) >= 0.0;
+        let ls_blocks_retry = (self.limits.hls && retry_dir_positive)
+            || (self.limits.lls && !retry_dir_positive);
+
+        if diff > self.retry.rdbd && self.retry.rcnt < self.retry.rtry && self.retry.rdbd > 0.0
+            && !ls_blocks_retry {
             // InPosition mode: don't reissue, just finalize
             if self.retry.rmod == RetryMode::InPosition {
                 self.finalize_or_delay(effects);
@@ -366,12 +376,20 @@ impl MotorRecord {
         let pretarget = self.pos.dval - self.retry.bdst;
         self.set_phase(MotionPhase::JogBacklash);
         self.stat.mip = MipFlags::JOG_BL1;
-        self.internal.backlash_pending = true; // signal BL2 needed after BL1
-        effects.commands.push(MotorCommand::MoveAbsolute {
-            position: pretarget,
-            velocity: self.vel.velo,
-            acceleration: self.vel.accl,
-        });
+        self.internal.backlash_pending = true;
+        if self.use_relative_moves() {
+            effects.commands.push(MotorCommand::MoveRelative {
+                distance: pretarget - self.pos.drbv,
+                velocity: self.vel.velo,
+                acceleration: self.vel.accl,
+            });
+        } else {
+            effects.commands.push(MotorCommand::MoveAbsolute {
+                position: pretarget,
+                velocity: self.vel.velo,
+                acceleration: self.vel.accl,
+            });
+        }
         effects.request_poll = true;
         effects.suppress_forward_link = true;
     }
@@ -381,14 +399,22 @@ impl MotorRecord {
         let frac = self.retry.frac;
         self.stat.mip = MipFlags::JOG_BL2;
         self.internal.backlash_pending = false;
-        // C: pretarget + frac * (dval - pretarget)
         let pretarget = Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
-        let position = pretarget + frac * (self.pos.dval - pretarget);
-        effects.commands.push(MotorCommand::MoveAbsolute {
-            position,
-            velocity: self.vel.bvel,
-            acceleration: self.vel.bacc,
-        });
+        if self.use_relative_moves() {
+            let rel_distance = (self.pos.dval - self.pos.drbv) * frac;
+            effects.commands.push(MotorCommand::MoveRelative {
+                distance: rel_distance,
+                velocity: self.vel.bvel,
+                acceleration: self.vel.bacc,
+            });
+        } else {
+            let position = pretarget + frac * (self.pos.dval - pretarget);
+            effects.commands.push(MotorCommand::MoveAbsolute {
+                position,
+                velocity: self.vel.bvel,
+                acceleration: self.vel.bacc,
+            });
+        }
         effects.request_poll = true;
         effects.suppress_forward_link = true;
     }
