@@ -257,9 +257,11 @@ macro_rules! draw_on_typed_buffer {
                         }
                         for i in 0..steps {
                             let angle = 2.0 * std::f64::consts::PI * i as f64 / steps as f64;
-                            let px = (cx + rx_cur * angle.cos()).round() as usize;
-                            let py = (cy + ry_cur * angle.sin()).round() as usize;
-                            set_pixel(px, py);
+                            let fpx = (cx + rx_cur * angle.cos()).round();
+                            let fpy = (cy + ry_cur * angle.sin()).round();
+                            if fpx >= 0.0 && fpy >= 0.0 {
+                                set_pixel(fpx as usize, fpy as usize);
+                            }
                         }
                     }
                 }

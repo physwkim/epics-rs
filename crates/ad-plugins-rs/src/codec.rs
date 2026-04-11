@@ -217,6 +217,11 @@ pub fn compress_jpeg(src: &NDArray, quality: u8) -> Option<NDArray> {
     let raw = src.data.as_u8_slice();
     let info = src.info();
 
+    // JPEG dimensions must fit in u16
+    if info.x_size > u16::MAX as usize || info.y_size > u16::MAX as usize {
+        return None;
+    }
+
     let (width, height, color_type) = match src.dims.len() {
         2 => {
             // Mono: dims = [x, y]

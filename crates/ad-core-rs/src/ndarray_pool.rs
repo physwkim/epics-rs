@@ -63,12 +63,13 @@ impl NDArrayPool {
             }
             if let Some(idx) = best_idx {
                 if best_cap as f64 > needed_bytes as f64 * THRESHOLD_SIZE_RATIO {
+                    // Oversized buffer (> 1.5x needed): discard and allocate fresh
                     let dropped = free.swap_remove(idx);
                     let dropped_cap = dropped.data.capacity_bytes();
                     self.num_free_buffers.fetch_sub(1, Ordering::Relaxed);
+                    self.num_alloc_buffers.fetch_sub(1, Ordering::Relaxed);
                     self.allocated_bytes
                         .fetch_sub(dropped_cap as u64, Ordering::Relaxed);
-                    self.num_alloc_buffers.fetch_sub(1, Ordering::Relaxed);
                     None
                 } else {
                     let arr = free.swap_remove(idx);
@@ -263,10 +264,14 @@ impl NDArrayPool {
         if src.data.data_type() == target_type {
             return self.alloc_copy(src);
         }
-        let mut out = crate::color::convert_data_type(src, target_type)?;
-        out.unique_id = self
-            .next_unique_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Allocate via pool (tracks memory), then overwrite with converted data
+        let mut out = self.alloc(src.dims.clone(), target_type)?;
+        let converted = crate::color::convert_data_type(src, target_type)?;
+        out.data = converted.data;
+        out.time_stamp = src.time_stamp;
+        out.timestamp = src.timestamp;
+        out.attributes = src.attributes.clone();
+        out.codec = src.codec.clone();
         Ok(out)
     }
 
@@ -287,6 +292,9 @@ impl NDArrayPool {
         target_type: NDDataType,
     ) -> ADResult<NDArray> {
         let ndims = src.dims.len();
+        if ndims == 0 {
+            return self.convert_type(src, target_type);
+        }
         if dims_out.len() != ndims {
             return Err(ADError::InvalidDimensions(format!(
                 "convert: dims_out length {} != source ndims {}",

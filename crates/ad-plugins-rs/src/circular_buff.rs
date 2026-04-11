@@ -205,7 +205,7 @@ impl CircularBuffer {
             self.trigger();
             // The triggering frame is the first post-trigger capture.
             self.captured.push(array);
-            self.post_remaining -= 1;
+            self.post_remaining = self.post_remaining.saturating_sub(1);
             if self.post_remaining == 0 {
                 self.triggered = false;
                 if self.preset_trigger_count > 0 && self.trigger_count >= self.preset_trigger_count
