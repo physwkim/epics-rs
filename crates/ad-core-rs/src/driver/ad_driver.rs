@@ -49,9 +49,9 @@ impl ADDriverBase {
         port_base.set_string_param(params.base.driver_version, 0, "0.0.0".into())?;
         port_base.set_string_param(params.base.codec, 0, String::new())?;
 
-        // C++ inits ADMaxSizeX/Y to 1, not the constructor arg
-        port_base.set_int32_param(params.max_size_x, 0, 1)?;
-        port_base.set_int32_param(params.max_size_y, 0, 1)?;
+        // C++ ADBase constructor: setIntegerParam(ADMaxSizeX, maxSizeX)
+        port_base.set_int32_param(params.max_size_x, 0, max_size_x)?;
+        port_base.set_int32_param(params.max_size_y, 0, max_size_y)?;
         port_base.set_int32_param(params.size_x, 0, max_size_x)?;
         port_base.set_int32_param(params.size_y, 0, max_size_y)?;
         port_base.set_int32_param(params.bin_x, 0, 1)?;
@@ -202,18 +202,18 @@ mod tests {
     #[test]
     fn test_new_sets_initial_params() {
         let ad = ADDriverBase::new("TEST", 1024, 768, 50_000_000).unwrap();
-        // C++ inits ADMaxSizeX/Y to 1
+        // C++ ADBase: setIntegerParam(ADMaxSizeX, maxSizeX)
         assert_eq!(
             ad.port_base
                 .get_int32_param(ad.params.max_size_x, 0)
                 .unwrap(),
-            1
+            1024
         );
         assert_eq!(
             ad.port_base
                 .get_int32_param(ad.params.max_size_y, 0)
                 .unwrap(),
-            1
+            768
         );
         assert_eq!(
             ad.port_base.get_int32_param(ad.params.size_x, 0).unwrap(),

@@ -611,8 +611,7 @@ pub(crate) fn motor_put_field(
                     // SET+FOFF=Frozen: DVAL changes directly, SetPosition
                     if let Ok(rval) = coordinate::dial_to_raw(v, rec.conv.mres) {
                         rec.pos.dval = v;
-                        rec.pos.val =
-                            coordinate::dial_to_user(v, rec.conv.dir, rec.pos.off);
+                        rec.pos.val = coordinate::dial_to_user(v, rec.conv.dir, rec.pos.off);
                         rec.pos.rval = rval;
                     }
                 }
@@ -663,8 +662,7 @@ pub(crate) fn motor_put_field(
                     let dval = coordinate::raw_to_dial(v, rec.conv.mres);
                     rec.pos.rval = v;
                     rec.pos.dval = dval;
-                    rec.pos.val =
-                        coordinate::dial_to_user(dval, rec.conv.dir, rec.pos.off);
+                    rec.pos.val = coordinate::dial_to_user(dval, rec.conv.dir, rec.pos.off);
                 }
                 rec.last_write = Some(CommandSource::Set);
             } else {
@@ -736,8 +734,7 @@ pub(crate) fn motor_put_field(
                                 coordinate::calc_offset(rec.pos.val, rec.pos.dval, rec.conv.dir);
                         }
                     }
-                    rec.pos.rbv =
-                        coordinate::dial_to_user(rec.pos.drbv, rec.conv.dir, rec.pos.off);
+                    rec.pos.rbv = coordinate::dial_to_user(rec.pos.drbv, rec.conv.dir, rec.pos.off);
                     let (hlm, llm) = coordinate::dial_limits_to_user(
                         rec.limits.dhlm,
                         rec.limits.dllm,

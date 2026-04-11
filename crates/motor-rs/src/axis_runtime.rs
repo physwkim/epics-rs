@@ -345,18 +345,14 @@ impl AxisRuntime {
                 MotorCommand::SetClosedLoop { enable } => {
                     self.motor.set_closed_loop(&user, *enable)
                 }
-                MotorCommand::DeferMoves { defer } => {
-                    self.motor.set_deferred_moves(&user, *defer)
-                }
+                MotorCommand::DeferMoves { defer } => self.motor.set_deferred_moves(&user, *defer),
                 MotorCommand::ProfileInitialize { max_points } => {
                     self.motor.initialize_profile(&user, *max_points)
                 }
                 MotorCommand::ProfileBuild => self.motor.build_profile(&user),
                 MotorCommand::ProfileExecute => self.motor.execute_profile(&user),
                 MotorCommand::ProfileAbort => self.motor.abort_profile(&user),
-                MotorCommand::ProfileReadback => {
-                    self.motor.readback_profile(&user).map(|_| ())
-                }
+                MotorCommand::ProfileReadback => self.motor.readback_profile(&user).map(|_| ()),
                 MotorCommand::Poll => Ok(()),
             };
             if let Err(e) = result {

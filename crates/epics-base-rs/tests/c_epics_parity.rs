@@ -1161,8 +1161,13 @@ fn mbbo_state_strings_and_values() {
 fn mbbi_all_16_states() {
     let mut rec = MbbiRecord::default();
     // C defaults all *VL to 0. Set them explicitly for this test.
-    let vl_fields = ["ZRVL","ONVL","TWVL","THVL","FRVL","FVVL","SXVL","SVVL","EIVL","NIVL","TEVL","ELVL","TVVL","TTVL","FTVL","FFVL"];
-    for (i, f) in vl_fields.iter().enumerate() { rec.put_field(f, EpicsValue::Long(i as i32)).unwrap(); }
+    let vl_fields = [
+        "ZRVL", "ONVL", "TWVL", "THVL", "FRVL", "FVVL", "SXVL", "SVVL", "EIVL", "NIVL", "TEVL",
+        "ELVL", "TVVL", "TTVL", "FTVL", "FFVL",
+    ];
+    for (i, f) in vl_fields.iter().enumerate() {
+        rec.put_field(f, EpicsValue::Long(i as i32)).unwrap();
+    }
     for i in 0..16u16 {
         let field = match i {
             0 => "ZRVL",
