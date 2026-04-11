@@ -764,7 +764,9 @@ impl PortDriver for DrvAsynSerialPort {
                     // no-op
                 } else if let Some(fd) = self.io.fd {
                     // Drain output first (C parity: tcdrain before tcsendbreak)
-                    unsafe { libc::tcdrain(fd) };
+                    if unsafe { libc::tcdrain(fd) } < 0 {
+                        return Err(AsynError::Io(std::io::Error::last_os_error()));
+                    }
                     let duration = if value.is_empty() || value == "on" {
                         0 // standard break duration
                     } else {

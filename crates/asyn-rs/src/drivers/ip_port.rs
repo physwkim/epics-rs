@@ -202,6 +202,40 @@ enum IpIoInner {
     Unix(std::os::unix::net::UnixStream),
 }
 
+/// Write all data with retry on WouldBlock/Interrupted, enforcing a deadline.
+fn write_with_retry(
+    stream: &mut impl Write,
+    data: &[u8],
+    deadline: std::time::Instant,
+) -> AsynResult<()> {
+    let mut offset = 0;
+    while offset < data.len() {
+        if std::time::Instant::now() > deadline {
+            return Err(AsynError::Status {
+                status: AsynStatus::Timeout,
+                message: "write timeout".into(),
+            });
+        }
+        match stream.write(&data[offset..]) {
+            Ok(0) => {
+                return Err(AsynError::Status {
+                    status: AsynStatus::Timeout,
+                    message: "write returned 0 bytes".into(),
+                });
+            }
+            Ok(n) => offset += n,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(AsynError::Io(e)),
+        }
+    }
+    Ok(())
+}
+
 struct IpIoState {
     inner: Option<IpIoInner>,
 }
@@ -291,29 +325,11 @@ impl OctetNext for IpIoState {
             status: AsynStatus::Disconnected,
             message: "not connected".into(),
         })?;
+        let deadline = std::time::Instant::now() + user.timeout;
         match inner {
             IpIoInner::Tcp(stream) => {
                 stream.set_write_timeout(Some(user.timeout))?;
-                // C parity: retry loop for partial writes with SEND_RETRY_DELAY
-                let mut offset = 0;
-                while offset < data.len() {
-                    match stream.write(&data[offset..]) {
-                        Ok(0) => {
-                            return Err(AsynError::Status {
-                                status: AsynStatus::Timeout,
-                                message: "write returned 0 bytes".into(),
-                            });
-                        }
-                        Ok(n) => offset += n,
-                        Err(ref e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::Interrupted =>
-                        {
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                        Err(e) => return Err(AsynError::Io(e)),
-                    }
-                }
+                write_with_retry(stream, data, deadline)?;
             }
             IpIoInner::Udp(socket) => {
                 socket.set_write_timeout(Some(user.timeout))?;
@@ -322,25 +338,7 @@ impl OctetNext for IpIoState {
             #[cfg(unix)]
             IpIoInner::Unix(stream) => {
                 stream.set_write_timeout(Some(user.timeout))?;
-                let mut offset = 0;
-                while offset < data.len() {
-                    match stream.write(&data[offset..]) {
-                        Ok(0) => {
-                            return Err(AsynError::Status {
-                                status: AsynStatus::Timeout,
-                                message: "write returned 0 bytes".into(),
-                            });
-                        }
-                        Ok(n) => offset += n,
-                        Err(ref e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::Interrupted =>
-                        {
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                        Err(e) => return Err(AsynError::Io(e)),
-                    }
-                }
+                write_with_retry(stream, data, deadline)?;
             }
         }
         Ok(data.len())
@@ -668,6 +666,10 @@ impl PortDriver for DrvAsynIPPort {
     }
 
     fn write_octet(&mut self, user: &mut AsynUser, data: &[u8]) -> AsynResult<()> {
+        // HTTP connect-per-transaction: reconnect if disconnected
+        if self.config.protocol == IpProtocol::Http && !self.base.connected {
+            let _ = self.connect(&AsynUser::default());
+        }
         self.base.check_ready()?;
         asyn_trace_io!(
             Some(self.base.trace),

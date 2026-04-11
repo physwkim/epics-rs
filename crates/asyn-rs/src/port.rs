@@ -109,6 +109,10 @@ pub struct PortDriverBase {
     /// Exception sink injected by [`crate::manager::PortManager`] on registration.
     pub exception_sink: Option<Arc<ExceptionManager>>,
     pub options: HashMap<String, String>,
+    /// Input EOS sequence (max 2 bytes). Used by EOS interpose and drivers.
+    pub input_eos: Vec<u8>,
+    /// Output EOS sequence (max 2 bytes). Used by EOS interpose and drivers.
+    pub output_eos: Vec<u8>,
     pub interpose_octet: OctetInterposeStack,
     pub trace: Option<Arc<TraceManager>>,
     /// Per-address device state for multi-device ports.
@@ -130,6 +134,8 @@ impl PortDriverBase {
             auto_connect: true,
             exception_sink: None,
             options: HashMap::new(),
+            input_eos: Vec::new(),
+            output_eos: Vec::new(),
             interpose_octet: OctetInterposeStack::new(),
             trace: None,
             device_states: HashMap::new(),
@@ -570,22 +576,7 @@ pub trait PortDriver: Send + Sync + 'static {
             base.options.len()
         );
         if level >= 1 {
-            for i in 0..base.params.len() {
-                if let (Some(name), Some(ptype)) =
-                    (base.params.param_name(i), base.params.param_type(i))
-                {
-                    if level >= 3 {
-                        let val = base
-                            .params
-                            .get_value(i, 0)
-                            .map(|v| format!("{v:?}"))
-                            .unwrap_or("?".into());
-                        eprintln!("  param[{i}]: {name} ({ptype:?}) = {val}");
-                    } else {
-                        eprintln!("  param[{i}]: {name} ({ptype:?})");
-                    }
-                }
-            }
+            base.report_params(level.saturating_sub(1));
         }
         if level >= 2 {
             for (k, v) in &base.options {
@@ -847,16 +838,12 @@ pub trait PortDriver: Send + Sync + 'static {
                 message: format!("illegal eoslen {}", eos.len()),
             });
         }
-        // Walk the interpose stack looking for an EOS layer
-        // Default: store on the base for drivers to access
-        self.base_mut()
-            .options
-            .insert("inputEos".to_string(), format!("{:?}", eos));
+        self.base_mut().input_eos = eos.to_vec();
         Ok(())
     }
 
     fn get_input_eos(&self) -> Vec<u8> {
-        Vec::new()
+        self.base().input_eos.clone()
     }
 
     fn set_output_eos(&mut self, eos: &[u8]) -> AsynResult<()> {
@@ -866,14 +853,12 @@ pub trait PortDriver: Send + Sync + 'static {
                 message: format!("illegal eoslen {}", eos.len()),
             });
         }
-        self.base_mut()
-            .options
-            .insert("outputEos".to_string(), format!("{:?}", eos));
+        self.base_mut().output_eos = eos.to_vec();
         Ok(())
     }
 
     fn get_output_eos(&self) -> Vec<u8> {
-        Vec::new()
+        self.base().output_eos.clone()
     }
 
     // --- Lifecycle ---
