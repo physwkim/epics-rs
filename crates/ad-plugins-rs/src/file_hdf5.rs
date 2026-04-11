@@ -21,6 +21,7 @@ const COMPRESS_NBIT: i32 = 1;
 const COMPRESS_SZIP: i32 = 2;
 const COMPRESS_ZLIB: i32 = 3;
 const COMPRESS_BLOSC: i32 = 4;
+#[allow(dead_code)] // Reserved for future bitshuffle support
 const COMPRESS_BSHUF: i32 = 5;
 const COMPRESS_LZ4: i32 = 6;
 const COMPRESS_JPEG: i32 = 7;

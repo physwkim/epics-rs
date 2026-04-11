@@ -222,7 +222,7 @@ impl NDArrayDriverBase {
             format!("{}{}{:04}", path, name, number)
         } else {
             // Parse C printf-style template: two %s args (path, name) and one %d-like arg (number)
-            sprintf_template(&template, path, name, number)
+            sprintf_template(template, path, name, number)
         };
 
         self.port_base

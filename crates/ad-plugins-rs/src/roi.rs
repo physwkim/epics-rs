@@ -187,14 +187,12 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
             for oy in 0..out_y {
                 for ox in 0..out_x {
                     let mut sum = 0.0f64;
-                    let mut count = 0usize;
                     for by in 0..bin_y {
                         for bx in 0..bin_x {
                             let sx = roi_x_min + ox * bin_x + bx;
                             let sy = roi_y_min + oy * bin_y + by;
                             if sx < src_x && sy < src_y {
                                 sum += $vec[sy * src_x + sx] as f64;
-                                count += 1;
                             }
                         }
                     }
