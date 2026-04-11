@@ -344,6 +344,26 @@ impl PortDriverBase {
         self.params.set_timestamp(index, addr, ts)
     }
 
+    pub fn set_param_status(
+        &mut self,
+        index: usize,
+        addr: i32,
+        status: AsynStatus,
+        alarm_status: u16,
+        alarm_severity: u16,
+    ) -> AsynResult<()> {
+        self.params
+            .set_param_status(index, addr, status, alarm_status, alarm_severity)
+    }
+
+    pub fn get_param_status(
+        &self,
+        index: usize,
+        addr: i32,
+    ) -> AsynResult<(AsynStatus, u16, u16)> {
+        self.params.get_param_status(index, addr)
+    }
+
     /// Push an interpose layer onto the octet I/O stack.
     ///
     /// **Concurrency**: requires `&mut self`, which means the caller must hold
@@ -514,13 +534,15 @@ pub trait PortDriver: Send + Sync + 'static {
 
     // --- Scalar I/O (cache-based defaults, timeout not applicable) ---
 
+    // Cache-based defaults do NOT check connection state (C parity).
+    // The port actor checks check_ready_addr() before dispatching, matching
+    // C asyn where asynManager checks connection before calling the driver.
+
     fn read_int32(&mut self, user: &AsynUser) -> AsynResult<i32> {
-        self.base().check_ready()?;
         self.base().params.get_int32(user.reason, user.addr)
     }
 
     fn write_int32(&mut self, user: &mut AsynUser, value: i32) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_int32(user.reason, user.addr, value)?;
@@ -528,16 +550,18 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_int64(&mut self, user: &AsynUser) -> AsynResult<i64> {
-        self.base().check_ready()?;
         self.base().params.get_int64(user.reason, user.addr)
     }
 
     fn write_int64(&mut self, user: &mut AsynUser, value: i64) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_int64(user.reason, user.addr, value)?;
         self.base_mut().call_param_callbacks(user.addr)
+    }
+
+    fn get_bounds_int32(&self, _user: &AsynUser) -> AsynResult<(i32, i32)> {
+        Ok((i32::MIN, i32::MAX))
     }
 
     fn get_bounds_int64(&self, _user: &AsynUser) -> AsynResult<(i64, i64)> {
@@ -545,12 +569,10 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_float64(&mut self, user: &AsynUser) -> AsynResult<f64> {
-        self.base().check_ready()?;
         self.base().params.get_float64(user.reason, user.addr)
     }
 
     fn write_float64(&mut self, user: &mut AsynUser, value: f64) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_float64(user.reason, user.addr, value)?;
@@ -558,7 +580,6 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_octet(&mut self, user: &AsynUser, buf: &mut [u8]) -> AsynResult<usize> {
-        self.base().check_ready()?;
         let s = self.base().params.get_string(user.reason, user.addr)?;
         let bytes = s.as_bytes();
         let n = bytes.len().min(buf.len());
@@ -567,7 +588,6 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn write_octet(&mut self, user: &mut AsynUser, data: &[u8]) -> AsynResult<()> {
-        self.base().check_ready()?;
         let s = String::from_utf8_lossy(data).into_owned();
         self.base_mut()
             .params
@@ -576,7 +596,6 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_uint32_digital(&mut self, user: &AsynUser, mask: u32) -> AsynResult<u32> {
-        self.base().check_ready()?;
         let val = self.base().params.get_uint32(user.reason, user.addr)?;
         Ok(val & mask)
     }
@@ -587,7 +606,6 @@ pub trait PortDriver: Send + Sync + 'static {
         value: u32,
         mask: u32,
     ) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_uint32(user.reason, user.addr, value, mask)?;
@@ -597,12 +615,10 @@ pub trait PortDriver: Send + Sync + 'static {
     // --- Enum I/O (cache-based defaults) ---
 
     fn read_enum(&mut self, user: &AsynUser) -> AsynResult<(usize, Arc<[EnumEntry]>)> {
-        self.base().check_ready()?;
         self.base().params.get_enum(user.reason, user.addr)
     }
 
     fn write_enum(&mut self, user: &mut AsynUser, index: usize) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_enum_index(user.reason, user.addr, index)?;
@@ -614,7 +630,6 @@ pub trait PortDriver: Send + Sync + 'static {
         user: &mut AsynUser,
         choices: Arc<[EnumEntry]>,
     ) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_enum_choices(user.reason, user.addr, choices)?;
@@ -624,7 +639,6 @@ pub trait PortDriver: Send + Sync + 'static {
     // --- GenericPointer I/O (cache-based defaults) ---
 
     fn read_generic_pointer(&mut self, user: &AsynUser) -> AsynResult<Arc<dyn Any + Send + Sync>> {
-        self.base().check_ready()?;
         self.base()
             .params
             .get_generic_pointer(user.reason, user.addr)
@@ -635,7 +649,6 @@ pub trait PortDriver: Send + Sync + 'static {
         user: &mut AsynUser,
         value: Arc<dyn Any + Send + Sync>,
     ) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_generic_pointer(user.reason, user.addr, value)?;
@@ -763,6 +776,52 @@ pub trait PortDriver: Send + Sync + 'static {
         Ok(())
     }
 
+    // --- Octet EOS (delegates to interpose stack by default) ---
+
+    fn set_input_eos(&mut self, eos: &[u8]) -> AsynResult<()> {
+        if eos.len() > 2 {
+            return Err(AsynError::Status {
+                status: AsynStatus::Error,
+                message: format!("illegal eoslen {}", eos.len()),
+            });
+        }
+        // Walk the interpose stack looking for an EOS layer
+        // Default: store on the base for drivers to access
+        self.base_mut()
+            .options
+            .insert("inputEos".to_string(), format!("{:?}", eos));
+        Ok(())
+    }
+
+    fn get_input_eos(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn set_output_eos(&mut self, eos: &[u8]) -> AsynResult<()> {
+        if eos.len() > 2 {
+            return Err(AsynError::Status {
+                status: AsynStatus::Error,
+                message: format!("illegal eoslen {}", eos.len()),
+            });
+        }
+        self.base_mut()
+            .options
+            .insert("outputEos".to_string(), format!("{:?}", eos));
+        Ok(())
+    }
+
+    fn get_output_eos(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    // --- Lifecycle ---
+
+    /// Called when the port is being shut down. Drivers override this
+    /// to release hardware resources. Matches C asynPortDriver::shutdownPortDriver().
+    fn shutdown(&mut self) -> AsynResult<()> {
+        Ok(())
+    }
+
     // --- drvUser ---
 
     /// Resolve a driver info string to a parameter index.
@@ -786,8 +845,6 @@ pub trait PortDriver: Send + Sync + 'static {
     fn supports(&self, cap: crate::interfaces::Capability) -> bool {
         self.capabilities().contains(&cap)
     }
-
-    // --- Lifecycle ---
 
     fn init(&mut self) -> AsynResult<()> {
         Ok(())
