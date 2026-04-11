@@ -229,15 +229,9 @@ impl MotorRecord {
     }
 
     /// Check if jog backlash is needed.
+    /// C: jog backlash is performed unconditionally when |BDST| >= |MRES|.
     fn needs_jog_backlash(&self) -> bool {
-        if self.retry.bdst == 0.0 {
-            return false;
-        }
-        // Use saved jog direction (MIP flags are cleared by stop_jog)
-        let jog_was_forward = self.internal.jog_was_forward;
-        let bdst_positive = self.retry.bdst > 0.0;
-        // Backlash needed when jog direction opposes BDST sign
-        (jog_was_forward && !bdst_positive) || (!jog_was_forward && bdst_positive)
+        self.retry.bdst != 0.0 && self.retry.bdst.abs() >= self.conv.mres.abs()
     }
 
     /// Start backlash final approach (move from pretarget to dval).

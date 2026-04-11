@@ -150,46 +150,42 @@ impl MotorRecord {
                 return;
             }
 
-            let target_outside =
-                self.pos.dval > self.limits.dhlm || self.pos.dval < self.limits.dllm;
+            let preferred = self.is_preferred_direction(self.pos.dval, self.pos.drbv);
 
-            if target_outside {
-                // C: allow move if heading toward the valid range
-                // Compares dval against ldvl (previous target), but we use drbv
-                // as an approximation since we don't track ldvl separately
-                let currently_above = self.pos.drbv > self.limits.dhlm;
-                let currently_below = self.pos.drbv < self.limits.dllm;
-                let moving_toward_valid = (currently_above && self.pos.dval < self.pos.drbv)
-                    || (currently_below && self.pos.dval > self.pos.drbv);
-
-                if !moving_toward_valid {
-                    self.limits.lvio = true;
-                    tracing::warn!(
-                        "limit violation: dval={:.4}, limits=[{:.4}, {:.4}]",
-                        self.pos.dval,
-                        self.limits.dllm,
-                        self.limits.dhlm
-                    );
-                    return;
-                }
-            }
-
-            // C: for non-preferred direction (backlash), also check pretarget
-            if self.retry.bdst != 0.0 {
-                let backlash_needed = self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
-                if backlash_needed {
-                    let pretarget =
-                        Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
-                    if pretarget > self.limits.dhlm || pretarget < self.limits.dllm {
+            if preferred {
+                // C preferred_dir: check dval against limits
+                let target_outside =
+                    self.pos.dval > self.limits.dhlm || self.pos.dval < self.limits.dllm;
+                if target_outside {
+                    // C: allow if dval is closer to valid range than ldvl
+                    let ldvl_above = self.internal.ldvl > self.limits.dhlm;
+                    let ldvl_below = self.internal.ldvl < self.limits.dllm;
+                    let moving_toward_valid = (ldvl_above && self.pos.dval < self.internal.ldvl)
+                        || (ldvl_below && self.pos.dval > self.internal.ldvl);
+                    if !moving_toward_valid {
                         self.limits.lvio = true;
                         tracing::warn!(
-                            "limit violation: backlash pretarget={:.4}, limits=[{:.4}, {:.4}]",
-                            pretarget,
+                            "limit violation: dval={:.4}, limits=[{:.4}, {:.4}]",
+                            self.pos.dval,
                             self.limits.dllm,
                             self.limits.dhlm
                         );
                         return;
                     }
+                }
+            } else {
+                // C non-preferred: check backlash pretarget against limits
+                let pretarget =
+                    Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
+                if pretarget > self.limits.dhlm || pretarget < self.limits.dllm {
+                    self.limits.lvio = true;
+                    tracing::warn!(
+                        "limit violation: backlash pretarget={:.4}, limits=[{:.4}, {:.4}]",
+                        pretarget,
+                        self.limits.dllm,
+                        self.limits.dhlm
+                    );
+                    return;
                 }
             }
         }

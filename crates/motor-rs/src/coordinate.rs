@@ -78,19 +78,11 @@ pub fn cascade_from_val(
         let rval = dial_to_raw(current_dval, mres)?;
         Ok((current_dval, rval, new_off))
     } else {
-        match foff {
-            FreezeOffset::Variable => {
-                let dval = user_to_dial(val, dir, off);
-                let rval = dial_to_raw(dval, mres)?;
-                Ok((dval, rval, off))
-            }
-            FreezeOffset::Frozen => {
-                // FOFF=Frozen: DVAL stays the same, OFF adjusts
-                let new_off = calc_offset(val, current_dval, dir);
-                let rval = dial_to_raw(current_dval, mres)?;
-                Ok((current_dval, rval, new_off))
-            }
-        }
+        // C: non-SET mode always cascades VAL -> DVAL normally.
+        // FOFF has no effect outside SET mode.
+        let dval = user_to_dial(val, dir, off);
+        let rval = dial_to_raw(dval, mres)?;
+        Ok((dval, rval, off))
     }
 }
 

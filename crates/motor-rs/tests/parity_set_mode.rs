@@ -133,19 +133,19 @@ fn off_change_recalculates_user_coords() {
 }
 
 #[test]
-fn foff_frozen_val_write_preserves_dval() {
+fn foff_frozen_val_write_cascades_normally() {
     let mut rec = make_record();
     rec.conv.foff = FreezeOffset::Frozen;
     rec.pos.val = 10.0;
     rec.pos.dval = 10.0;
     rec.pos.off = 0.0;
 
-    // Write VAL=20: FOFF=Frozen → DVAL stays 10, OFF adjusts
+    // C: FOFF has no effect in non-SET mode -- VAL cascades to DVAL normally
     rec.put_field("VAL", EpicsValue::Double(20.0)).unwrap();
 
-    assert_eq!(rec.pos.dval, 10.0); // preserved
+    assert_eq!(rec.pos.dval, 20.0); // cascaded normally
     assert_eq!(rec.pos.val, 20.0);
-    assert_eq!(rec.pos.off, 10.0); // 20 - 1*10
+    assert_eq!(rec.pos.off, 0.0); // unchanged
 }
 
 #[test]

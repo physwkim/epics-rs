@@ -251,10 +251,23 @@ fn jog_start_stop_backlash_sequence() {
     assert!(rec.stat.mip.contains(MipFlags::JOG_STOP));
     assert!(matches!(effects.commands[0], MotorCommand::Stop { .. }));
 
-    // Motor stops at position 20.0 (jog was forward, bdst > 0 → no jog backlash)
+    // Motor stops at position 20.0
+    complete_move(&mut rec, 20.0);
+    let effects = rec.check_completion();
+    // C: jog backlash is unconditional when |BDST| >= |MRES|
+    // Phase 1 (BL1): move to pretarget at slew velocity
+    assert_eq!(rec.stat.phase, MotionPhase::JogBacklash);
+    assert!(!effects.commands.is_empty());
+
+    // BL1 completes at pretarget
+    complete_move(&mut rec, 20.0 - 1.0); // pretarget = dval - bdst
+    let effects = rec.check_completion();
+    // Phase 2 (BL2): move to final at backlash velocity
+    assert!(!effects.commands.is_empty());
+
+    // BL2 completes
     complete_move(&mut rec, 20.0);
     let _effects = rec.check_completion();
-    // Jog forward with positive BDST → no backlash needed
     assert!(rec.stat.dmov);
 }
 
