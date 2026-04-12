@@ -37,7 +37,7 @@ scaler-rs = { path = "crates/scaler-rs", version = "0.7.12" }
 optics-rs = { path = "crates/optics-rs", version = "0.7.12" }
 
 [patch.crates-io]
-spvirit-client = { path = "../spvirit/spvirit-client" }
-spvirit-codec = { path = "../spvirit/spvirit-codec" }
-spvirit-server = { path = "../spvirit/spvirit-server" }
-spvirit-types = { path = "../spvirit/spvirit-types" }
+spvirit-client = "0.1.6"
+spvirit-codec = "0.1.6"
+spvirit-server = "0.1.6"
+spvirit-types = "0.1.6"
