@@ -224,6 +224,9 @@ enum CoordRequest {
     Unsubscribe {
         subid: u32,
     },
+    MonitorConsumed {
+        subid: u32,
+    },
     DropChannel {
         cid: u32,
     },
@@ -786,7 +789,13 @@ pub struct MonitorHandle {
 
 impl MonitorHandle {
     pub async fn recv(&mut self) -> Option<CaResult<Snapshot>> {
-        self.callback_rx.recv().await
+        let result = self.callback_rx.recv().await;
+        if result.is_some() {
+            let _ = self
+                .coord_tx
+                .send(CoordRequest::MonitorConsumed { subid: self.subid });
+        }
+        result
     }
 }
 
@@ -799,6 +808,50 @@ impl Drop for MonitorHandle {
 }
 
 // --- Coordinator ---
+
+const FLOW_CONTROL_OFF_THRESHOLD: usize = 10;
+const FLOW_CONTROL_ON_THRESHOLD: usize = 5;
+
+#[derive(Default)]
+struct FlowControlState {
+    outstanding: usize,
+    active: bool,
+}
+
+fn flow_control_note_queued(
+    flow_control: &mut HashMap<SocketAddr, FlowControlState>,
+    server_addr: SocketAddr,
+    transport_tx: &mpsc::UnboundedSender<TransportCommand>,
+) {
+    let state = flow_control.entry(server_addr).or_default();
+    state.outstanding = state.outstanding.saturating_add(1);
+    if !state.active && state.outstanding >= FLOW_CONTROL_OFF_THRESHOLD {
+        let _ = transport_tx.send(TransportCommand::EventsOff { server_addr });
+        state.active = true;
+    }
+}
+
+fn flow_control_note_consumed(
+    flow_control: &mut HashMap<SocketAddr, FlowControlState>,
+    server_addr: SocketAddr,
+    count: usize,
+    transport_tx: &mpsc::UnboundedSender<TransportCommand>,
+) {
+    if count == 0 {
+        return;
+    }
+    let Some(state) = flow_control.get_mut(&server_addr) else {
+        return;
+    };
+    state.outstanding = state.outstanding.saturating_sub(count);
+    if state.active && state.outstanding <= FLOW_CONTROL_ON_THRESHOLD {
+        let _ = transport_tx.send(TransportCommand::EventsOn { server_addr });
+        state.active = false;
+    }
+    if !state.active && state.outstanding == 0 {
+        flow_control.remove(&server_addr);
+    }
+}
 
 async fn run_coordinator(
     mut coord_rx: mpsc::UnboundedReceiver<CoordRequest>,
@@ -819,6 +872,7 @@ async fn run_coordinator(
     // Keep disconnected channels indexed so beacon anomalies can trigger
     // immediate re-search for the affected IOC.
     let mut server_channels: HashMap<SocketAddr, HashSet<u32>> = HashMap::new();
+    let mut flow_control: HashMap<SocketAddr, FlowControlState> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -899,8 +953,10 @@ async fn run_coordinator(
 
                                 subscriptions.add(subscription::SubscriptionRecord {
                                     subid, cid, data_type: time_type, count, mask,
+                                    server_addr,
                                     deadband, callback_tx, needs_restore: false,
                                     last_value: None,
+                                    pending_deliveries: 0,
                                 });
 
                                 let _ = transport_tx.send(TransportCommand::Subscribe {
@@ -933,7 +989,24 @@ async fn run_coordinator(
                                 }
                             }
                         }
-                        subscriptions.remove(subid);
+                        if let Some(rec) = subscriptions.remove(subid) {
+                            flow_control_note_consumed(
+                                &mut flow_control,
+                                rec.server_addr,
+                                rec.pending_deliveries,
+                                &transport_tx,
+                            );
+                        }
+                    }
+                    CoordRequest::MonitorConsumed { subid } => {
+                        if let Some(server_addr) = subscriptions.mark_consumed(subid) {
+                            flow_control_note_consumed(
+                                &mut flow_control,
+                                server_addr,
+                                1,
+                                &transport_tx,
+                            );
+                        }
                     }
                     CoordRequest::DropChannel { cid } => {
                         // Cancel all subscriptions for this channel
@@ -951,7 +1024,14 @@ async fn run_coordinator(
                                     }
                                 }
                             }
-                            subscriptions.remove(subid);
+                            if let Some(rec) = subscriptions.remove(subid) {
+                                flow_control_note_consumed(
+                                    &mut flow_control,
+                                    rec.server_addr,
+                                    rec.pending_deliveries,
+                                    &transport_tx,
+                                );
+                            }
                         }
 
                         // Clear channel on server + clean reverse index
@@ -1130,7 +1210,15 @@ async fn run_coordinator(
                         }
                     }
                     TransportEvent::MonitorData { subid, data_type, count, data } => {
-                        subscriptions.on_monitor_data(subid, data_type, count, &data);
+                        if let Some(server_addr) =
+                            subscriptions.on_monitor_data(subid, data_type, count, &data)
+                        {
+                            flow_control_note_queued(
+                                &mut flow_control,
+                                server_addr,
+                                &transport_tx,
+                            );
+                        }
                     }
                     TransportEvent::AccessRightsChanged { cid, access } => {
                         if let Some(ch) = channels.get_mut(&cid) {
@@ -1170,6 +1258,7 @@ async fn run_coordinator(
                         // Logged in transport layer; no further action needed
                     }
                     TransportEvent::TcpClosed { server_addr } => {
+                        flow_control.remove(&server_addr);
                         handle_disconnect(&mut channels, &mut subscriptions, &mut server_channels, &search_tx, server_addr, &diag, &mut read_waiters, &mut write_waiters);
                     }
                     TransportEvent::ServerDisconnect { cid, server_addr } => {
@@ -1180,7 +1269,15 @@ async fn run_coordinator(
                                 let _ = ch.conn_tx.send(ConnectionEvent::Disconnected);
 
                                 let cids = vec![cid];
-                                subscriptions.mark_disconnected(&cids);
+                                let cleared = subscriptions.mark_disconnected(&cids);
+                                for (addr, count) in cleared {
+                                    flow_control_note_consumed(
+                                        &mut flow_control,
+                                        addr,
+                                        count,
+                                        &transport_tx,
+                                    );
+                                }
 
                                 // Re-search
                                 let _ = search_tx.send(SearchRequest::Schedule {
@@ -1278,7 +1375,7 @@ fn handle_disconnect(
     // Clean up stale server_channels entries so beacon anomaly
     // lookups don't reference disconnected channels.
     server_channels.remove(&server_addr);
-    subscriptions.mark_disconnected(&affected_cids);
+    let _ = subscriptions.mark_disconnected(&affected_cids);
 
     // Fail pending read/write waiters for affected channels so callers
     // don't hang forever waiting for a response that will never arrive.

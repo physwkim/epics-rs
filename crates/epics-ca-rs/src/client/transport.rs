@@ -231,6 +231,24 @@ pub(crate) async fn run_transport_manager(
                     conn.echo_probe.notify_one();
                 }
             }
+            TransportCommand::EventsOff { server_addr } => {
+                let hdr = CaHeader::new(CA_PROTO_EVENTS_OFF);
+                send_frame(
+                    &mut connections,
+                    server_addr,
+                    hdr.to_bytes().to_vec(),
+                    &event_tx,
+                );
+            }
+            TransportCommand::EventsOn { server_addr } => {
+                let hdr = CaHeader::new(CA_PROTO_EVENTS_ON);
+                send_frame(
+                    &mut connections,
+                    server_addr,
+                    hdr.to_bytes().to_vec(),
+                    &event_tx,
+                );
+            }
         }
     }
 }
@@ -395,11 +413,6 @@ async fn read_loop(
     let mut unresponsive_notified = false;
     let mut server_minor_version: u16 = 0;
 
-    // Monitor flow control (C EPICS contiguousMsgCountWhichTriggersFlowControl)
-    let mut contiguous_read_count: u32 = 0;
-    let mut flow_control_active = false;
-    const FLOW_CONTROL_THRESHOLD: u32 = 10;
-
     loop {
         let timeout = if echo_pending {
             echo_timeout
@@ -433,14 +446,6 @@ async fn read_loop(
             }
             Ok(Ok(n)) => n,
             Err(_) => {
-                // Timeout expired — we caught up (no contiguous data)
-                contiguous_read_count = 0;
-                if flow_control_active {
-                    let hdr = CaHeader::new(CA_PROTO_EVENTS_ON);
-                    let _ = write_tx.send(hdr.to_bytes().to_vec());
-                    flow_control_active = false;
-                }
-
                 if echo_pending {
                     if !unresponsive_notified {
                         // First echo timeout: mark unresponsive, try one more echo
@@ -486,13 +491,11 @@ async fn read_loop(
             let _ = event_tx.send(TransportEvent::CircuitResponsive { server_addr });
         }
 
-        // Flow control: count contiguous reads without a gap
-        contiguous_read_count += 1;
-        if !flow_control_active && contiguous_read_count >= FLOW_CONTROL_THRESHOLD {
-            let hdr = CaHeader::new(CA_PROTO_EVENTS_OFF);
-            let _ = write_tx.send(hdr.to_bytes().to_vec());
-            flow_control_active = true;
-        }
+        // Automatic CA flow control is intentionally disabled here. The
+        // previous implementation counted TCP reads, which can overshoot badly
+        // on fragmented links and stall remote C IOCs with EVENTS_OFF. A
+        // correct implementation must count parsed monitor messages and resume
+        // based on downstream consumption, not socket read timing.
         accumulated.extend_from_slice(&buf[..n]);
 
         // Guard against unbounded buffer growth from malformed servers.

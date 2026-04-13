@@ -18,7 +18,7 @@ pub enum ServerConnectionEvent {
 }
 
 use crate::protocol::*;
-use crate::server::monitor::spawn_monitor_sender;
+use crate::server::monitor::{FlowControlGate, spawn_monitor_sender};
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::access_security::{AccessLevel, AccessSecurityConfig};
 use epics_base_rs::server::database::{PvDatabase, PvEntry, parse_pv_name};
@@ -57,6 +57,7 @@ struct ClientState {
     acf: Arc<Option<AccessSecurityConfig>>,
     tcp_port: u16,
     client_minor_version: u16,
+    flow_control: Arc<FlowControlGate>,
 }
 
 impl ClientState {
@@ -71,6 +72,7 @@ impl ClientState {
             acf,
             tcp_port,
             client_minor_version: 0,
+            flow_control: Arc::new(FlowControlGate::default()),
         }
     }
 
@@ -654,6 +656,7 @@ async fn dispatch_message(
                             sub_id,
                             requested_type,
                             writer.clone(),
+                            state.flow_control.clone(),
                             rx,
                         );
 
@@ -677,9 +680,18 @@ async fn dispatch_message(
                         }
 
                         let writer_clone = writer.clone();
+                        let flow_control = state.flow_control.clone();
                         let task = epics_base_rs::runtime::task::spawn(async move {
                             let mut rx = rx;
-                            while let Some(event) = rx.recv().await {
+                            while let Some(mut event) = rx.recv().await {
+                                if flow_control.is_paused() {
+                                    let Some(coalesced) =
+                                        flow_control.coalesce_while_paused(&mut rx, event).await
+                                    else {
+                                        break;
+                                    };
+                                    event = coalesced;
+                                }
                                 let payload_bytes =
                                     match encode_dbr(requested_type, &event.snapshot) {
                                         Ok(bytes) => bytes,
@@ -751,8 +763,11 @@ async fn dispatch_message(
         }
 
         CA_PROTO_EVENTS_OFF | CA_PROTO_EVENTS_ON => {
-            // Flow control from client — acknowledge silently (no-op).
-            // Sending CA_PROTO_ERROR would confuse C libca clients.
+            if hdr.cmmd == CA_PROTO_EVENTS_OFF {
+                state.flow_control.pause();
+            } else {
+                state.flow_control.resume();
+            }
         }
 
         CA_PROTO_READ_SYNC => {
