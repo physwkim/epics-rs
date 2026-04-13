@@ -3,6 +3,12 @@ use super::*;
 impl MotorRecord {
     /// Plan and start a motion from a user write.
     pub fn plan_motion(&mut self, src: CommandSource) -> ProcessEffects {
+        // Reset DMOV notification flag so the upcoming DMOV 1→0 transition
+        // fires AsyncPendingNotify. Without this, back-to-back motions
+        // (previous done + new write in same process cycle) would skip
+        // the notification because dmov_notified was still true from the
+        // previous motion.
+        self.internal.dmov_notified = false;
         let mut effects = ProcessEffects::default();
 
         // SPMG, STOP, and SYNC always processed regardless of command gate
