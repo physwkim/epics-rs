@@ -1,22 +1,24 @@
 use clap::Parser;
 use epics_ca_rs::client::CaClient;
+use epics_ca_rs::CaError;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "rcaput", about = "Write a value to an EPICS PV")]
+#[command(name = "caput", about = "Write a value to an EPICS PV")]
 struct Args {
-    /// Wait for completion callback (like caput -c)
+    /// Wait for completion callback (ca_put_callback)
     #[arg(short = 'c', long = "callback")]
     callback: bool,
 
-    /// Callback timeout in seconds (default: 30)
-    #[arg(short = 'w', long = "timeout", default_value = "30")]
+    /// CA timeout in seconds (default: 1.0)
+    #[arg(short = 'w', long = "timeout", default_value = "1.0")]
     timeout: f64,
 
     /// PV name to write to
     pv_name: String,
 
     /// Value to write
+    #[arg(allow_hyphen_values = true)]
     value: String,
 }
 
@@ -24,16 +26,21 @@ struct Args {
 async fn main() {
     let args = Args::parse();
     let client = CaClient::new().await.expect("failed to create CA client");
+    let timeout = Duration::from_secs_f64(args.timeout);
 
     let ch = client.create_channel(&args.pv_name);
-    if let Err(e) = ch.wait_connected(Duration::from_secs(3)).await {
+    if let Err(e) = ch.wait_connected(timeout).await {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 
-    // Read old value and get native type in one call
-    let (native_type, old_value) = match ch.get().await {
+    // Read old value with timeout
+    let (native_type, old_value) = match ch.get_with_timeout(timeout).await {
         Ok((t, val)) => (t, val.to_string()),
+        Err(CaError::Timeout) => {
+            eprintln!("Read operation timed out: PV data was not read.");
+            std::process::exit(1);
+        }
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
@@ -48,20 +55,24 @@ async fn main() {
         }
     };
 
+    // Write value
     let result = if args.callback {
-        ch.put_with_timeout(&value, Duration::from_secs_f64(args.timeout)).await
+        ch.put_with_timeout(&value, timeout).await
     } else {
         ch.put_nowait(&value).await
     };
 
-    match result {
-        Ok(()) => {
-            println!("Old : {} {}", args.pv_name, old_value);
-            println!("New : {} {}", args.pv_name, args.value);
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
+
+    // Re-read new value from server with timeout (C: caget after put)
+    let new_value = match ch.get_with_timeout(timeout).await {
+        Ok((_, val)) => val.to_string(),
+        _ => args.value.clone(),
+    };
+
+    println!("Old : {} {}", args.pv_name, old_value);
+    println!("New : {} {}", args.pv_name, new_value);
 }

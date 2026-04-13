@@ -3,7 +3,7 @@ name = "epics-pva-rs"
 version.workspace = true
 edition.workspace = true
 description = "EPICS pvAccess protocol client (experimental)"
-license.workspace = true
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 

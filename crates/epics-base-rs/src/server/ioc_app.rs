@@ -32,7 +32,7 @@ use crate::server::record::{self, Record, SubroutineFn};
 use crate::server::database::PvDatabase;
 use crate::server::device_support::DeviceSupport;
 use crate::server::iocsh::{self, registry::CommandDef};
-use crate::server::{autosave, access_security, DeviceSupportFactory};
+use crate::server::{DeviceSupportFactory, access_security, autosave};
 use autosave::startup::AutosaveStartupConfig;
 
 /// Context passed to dynamic device support factories during iocInit wiring.
@@ -57,6 +57,8 @@ pub struct IocRunConfig {
     pub autosave_config: Option<autosave::SaveSetConfig>,
     pub autosave_manager: Option<Arc<autosave::AutosaveManager>>,
     pub shell_commands: Vec<CommandDef>,
+    /// Callbacks to run after PINI processing (e.g., start pollers).
+    pub after_init_hooks: Vec<Box<dyn FnOnce() + Send>>,
 }
 
 /// IOC Application with st.cmd-style startup support.
@@ -74,6 +76,8 @@ pub struct IocApplication {
     startup_script: Option<String>,
     /// Records added via the declarative builder (Phase 7).
     inline_records: Vec<(String, Box<dyn Record>)>,
+    /// Callbacks invoked after iocInit completes (e.g., start pollers).
+    after_init_hooks: Vec<Box<dyn FnOnce() + Send>>,
 }
 
 impl IocApplication {
@@ -91,6 +95,7 @@ impl IocApplication {
             shell_commands: Vec::new(),
             startup_script: None,
             inline_records: Vec::new(),
+            after_init_hooks: Vec::new(),
         }
     }
 
@@ -106,7 +111,8 @@ impl IocApplication {
     where
         F: Fn() -> Box<dyn DeviceSupport> + Send + Sync + 'static,
     {
-        self.device_factories.insert(dtyp.to_string(), Box::new(factory));
+        self.device_factories
+            .insert(dtyp.to_string(), Box::new(factory));
         self
     }
 
@@ -145,6 +151,15 @@ impl IocApplication {
         self
     }
 
+    /// Register a callback to run after iocInit completes.
+    ///
+    /// Use this to start pollers and other periodic tasks that should
+    /// not run during st.cmd execution or autosave restore.
+    pub fn register_after_init(mut self, hook: impl FnOnce() + Send + 'static) -> Self {
+        self.after_init_hooks.push(Box::new(hook));
+        self
+    }
+
     /// Set the startup script path (executed before iocInit).
     pub fn startup_script(mut self, path: &str) -> Self {
         self.startup_script = Some(path.to_string());
@@ -157,7 +172,8 @@ impl IocApplication {
     where
         F: Fn() -> Box<dyn Record> + Send + Sync + 'static,
     {
-        self.record_factories.insert(type_name.to_string(), Box::new(factory));
+        self.record_factories
+            .insert(type_name.to_string(), Box::new(factory));
         self
     }
 
@@ -242,6 +258,7 @@ impl IocApplication {
             shell_commands,
             startup_script,
             inline_records,
+            after_init_hooks,
         } = self;
 
         // Register record type factories with global registry so dbLoadRecords
@@ -291,10 +308,14 @@ impl IocApplication {
         // Collect restore paths and builder from startup config (scoped mutex lock)
         let (pass0_files, pass1_files, builder_opt) = if let Some(ref config) = autosave_startup {
             let cfg = config.lock().unwrap();
-            let pass0: Vec<std::path::PathBuf> = cfg.pass0_restores.iter()
+            let pass0: Vec<std::path::PathBuf> = cfg
+                .pass0_restores
+                .iter()
                 .map(|r| cfg.resolve_save_file(&r.filename))
                 .collect();
-            let pass1: Vec<std::path::PathBuf> = cfg.pass1_restores.iter()
+            let pass1: Vec<std::path::PathBuf> = cfg
+                .pass1_restores
+                .iter()
                 .map(|r| cfg.resolve_save_file(&r.filename))
                 .collect();
             let builder = if !cfg.monitor_sets.is_empty() || !cfg.triggered_sets.is_empty() {
@@ -321,7 +342,8 @@ impl IocApplication {
         }
 
         // Phase 2b: iocInit — wire device support to all records with DTYP
-        let record_count = wire_device_support(&db, &device_factories, &dynamic_device_factory).await?;
+        let record_count =
+            wire_device_support(&db, &device_factories, &dynamic_device_factory).await?;
         wire_subroutines(&db, &subroutine_registry).await;
         let io_intr_count = setup_io_intr(db.clone()).await;
         db.setup_cp_links().await;
@@ -364,7 +386,9 @@ impl IocApplication {
         };
 
         let total_records = db.all_record_names().await.len();
-        eprintln!("iocInit: {total_records} records, {record_count} with device support, {io_intr_count} I/O Intr");
+        eprintln!(
+            "iocInit: {total_records} records, {record_count} with device support, {io_intr_count} I/O Intr"
+        );
 
         // Phase 3: Hand off to protocol runner
         let config = IocRunConfig {
@@ -374,6 +398,7 @@ impl IocApplication {
             autosave_config,
             autosave_manager,
             shell_commands,
+            after_init_hooks,
         };
         protocol_runner(config).await
     }
@@ -414,7 +439,9 @@ pub(crate) async fn wire_device_support(
                     instance.device = Some(dev);
                     count += 1;
                 } else {
-                    eprintln!("warning: no device support registered for DTYP '{dtyp}' (record: {name})");
+                    eprintln!(
+                        "warning: no device support registered for DTYP '{dtyp}' (record: {name})"
+                    );
                 }
             }
         }
@@ -423,10 +450,7 @@ pub(crate) async fn wire_device_support(
 }
 
 /// Wire subroutine functions to sub records.
-async fn wire_subroutines(
-    db: &PvDatabase,
-    registry: &HashMap<String, Arc<SubroutineFn>>,
-) {
+async fn wire_subroutines(db: &PvDatabase, registry: &HashMap<String, Arc<SubroutineFn>>) {
     if registry.is_empty() {
         return;
     }
@@ -450,7 +474,10 @@ async fn wire_subroutines(
 /// Set up I/O Intr scanning for records with SCAN="I/O Intr".
 async fn setup_io_intr(db: Arc<PvDatabase>) -> usize {
     let all_names = db.all_record_names().await;
-    let io_intr_recs: Vec<(String, Arc<crate::runtime::sync::RwLock<record::RecordInstance>>)> = {
+    let io_intr_recs: Vec<(
+        String,
+        Arc<crate::runtime::sync::RwLock<record::RecordInstance>>,
+    )> = {
         let mut recs = Vec::new();
         for name in &all_names {
             if let Some(arc) = db.get_record(name).await {

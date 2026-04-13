@@ -22,7 +22,11 @@ pub struct MotorPollLoop {
     io_intr_tx: mpsc::Sender<()>,
     motor: Arc<Mutex<dyn AsynMotor>>,
     device_state: SharedDeviceState,
-    poll_interval: Duration,
+    moving_poll_interval: Duration,
+    idle_poll_interval: Duration,
+    forced_fast_polls_config: u32,
+    forced_fast_polls_remaining: u32,
+    last_moving: bool,
     status_seq: u64,
 }
 
@@ -32,14 +36,20 @@ impl MotorPollLoop {
         io_intr_tx: mpsc::Sender<()>,
         motor: Arc<Mutex<dyn AsynMotor>>,
         device_state: SharedDeviceState,
-        poll_interval: Duration,
+        moving_poll_interval: Duration,
+        idle_poll_interval: Duration,
+        forced_fast_polls: u32,
     ) -> Self {
         Self {
             cmd_rx,
             io_intr_tx,
             motor,
             device_state,
-            poll_interval,
+            moving_poll_interval,
+            idle_poll_interval,
+            forced_fast_polls_config: forced_fast_polls,
+            forced_fast_polls_remaining: 0,
+            last_moving: false,
             status_seq: 1, // starts at 1 (init already wrote seq=1)
         }
     }
@@ -57,11 +67,15 @@ impl MotorPollLoop {
                 Err(_) => return,
             }
         };
+        self.last_moving = status.moving;
         self.status_seq += 1;
         {
             match self.device_state.lock() {
                 Ok(mut ds) => {
-                    ds.latest_status = Some(StampedStatus { seq: self.status_seq, status });
+                    ds.latest_status = Some(StampedStatus {
+                        seq: self.status_seq,
+                        status,
+                    });
                 }
                 Err(e) => {
                     tracing::error!("device state lock poisoned in poll_and_notify: {e}");
@@ -72,20 +86,33 @@ impl MotorPollLoop {
         let _ = self.io_intr_tx.send(()).await;
     }
 
+    fn effective_poll_interval(&mut self) -> Duration {
+        if self.forced_fast_polls_remaining > 0 {
+            self.forced_fast_polls_remaining -= 1;
+            self.moving_poll_interval
+        } else if self.last_moving {
+            self.moving_poll_interval
+        } else {
+            self.idle_poll_interval
+        }
+    }
+
     /// Run the poll loop. Call from a spawned task.
     pub async fn run(mut self) {
-        // Start active: initial poll triggers I/O Intr so the record
-        // picks up the first motor status (clears LVIO, sets MSTA, etc.)
-        let mut active = true;
+        // Start idle: device support init() sends StartPolling after
+        // iocInit, matching C EPICS where the poller starts in init_record.
+        let mut active = false;
 
         loop {
             if active {
                 // Poll mode: check for commands or poll on interval
+                let interval = self.effective_poll_interval();
                 tokio::select! {
                     cmd = self.cmd_rx.recv() => {
                         match cmd {
                             Some(PollCommand::StartPolling) => {
                                 active = true;
+                                self.forced_fast_polls_remaining = self.forced_fast_polls_config;
                                 self.poll_and_notify().await;
                             }
                             Some(PollCommand::StopPolling) => {
@@ -111,7 +138,7 @@ impl MotorPollLoop {
                             }
                         }
                     }
-                    _ = tokio::time::sleep(self.poll_interval) => {
+                    _ = tokio::time::sleep(interval) => {
                         self.poll_and_notify().await;
                     }
                 }
@@ -120,6 +147,7 @@ impl MotorPollLoop {
                 match self.cmd_rx.recv().await {
                     Some(PollCommand::StartPolling) => {
                         active = true;
+                        self.forced_fast_polls_remaining = self.forced_fast_polls_config;
                         self.poll_and_notify().await;
                     }
                     Some(PollCommand::StopPolling) => {
@@ -128,7 +156,9 @@ impl MotorPollLoop {
                     Some(PollCommand::ScheduleDelay(delay_id, dur)) => {
                         tokio::time::sleep(dur).await;
                         match self.device_state.lock() {
-                            Ok(mut ds) => { ds.expired_delay_id = Some(delay_id); }
+                            Ok(mut ds) => {
+                                ds.expired_delay_id = Some(delay_id);
+                            }
                             Err(e) => {
                                 tracing::error!("device state lock poisoned in delay expiry: {e}");
                                 continue;

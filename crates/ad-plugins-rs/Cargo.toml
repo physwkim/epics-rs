@@ -3,7 +3,7 @@ name = "ad-plugins-rs"
 version.workspace = true
 edition.workspace = true
 description = "NDPlugin implementations for areaDetector-rs"
-license.workspace = true
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 
@@ -25,14 +25,9 @@ serde = { version = "1", features = ["derive"] }
 netcdf3 = "0.6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "tiff"] }
 rayon = { version = "1", optional = true }
-
-[dependencies.hdf5]
-git = "https://github.com/physwkim/hdf5-rs.git"
-features = ["threadsafe"]
-optional = true
+rust-hdf5 = { version = "0.2", features = ["threadsafe", "all_filters"] }
 
 [features]
 default = ["parallel"]
-hdf5 = ["dep:hdf5"]
 ioc = ["ad-core-rs/ioc"]
 parallel = ["rayon"]

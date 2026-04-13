@@ -8,6 +8,7 @@ pub mod tcp;
 pub mod udp;
 
 pub use ca_server::{CaServer, CaServerBuilder};
+pub use tcp::ServerConnectionEvent;
 
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::ioc_app::IocRunConfig;
@@ -27,13 +28,14 @@ use epics_base_rs::server::ioc_app::IocRunConfig;
 ///     .await
 /// ```
 pub async fn run_ca_ioc(config: IocRunConfig) -> CaResult<()> {
-    let server = CaServer::from_parts(
+    let mut server = CaServer::from_parts(
         config.db,
         config.port,
         config.acf,
         config.autosave_config,
         config.autosave_manager,
     );
+    server.set_after_init_hooks(config.after_init_hooks);
     server
         .run_with_shell(move |shell| {
             for cmd in config.shell_commands {

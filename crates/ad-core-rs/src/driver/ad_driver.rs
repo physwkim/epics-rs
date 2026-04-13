@@ -41,10 +41,15 @@ impl ADDriverBase {
         // Set initial values
         // Identity strings
         port_base.set_string_param(params.base.port_name_self, 0, port_name.into())?;
-        port_base.set_string_param(params.base.ad_core_version, 0, env!("CARGO_PKG_VERSION").into())?;
+        port_base.set_string_param(
+            params.base.ad_core_version,
+            0,
+            env!("CARGO_PKG_VERSION").into(),
+        )?;
         port_base.set_string_param(params.base.driver_version, 0, "0.0.0".into())?;
         port_base.set_string_param(params.base.codec, 0, String::new())?;
 
+        // C++ ADBase constructor: setIntegerParam(ADMaxSizeX, maxSizeX)
         port_base.set_int32_param(params.max_size_x, 0, max_size_x)?;
         port_base.set_int32_param(params.max_size_y, 0, max_size_y)?;
         port_base.set_int32_param(params.size_x, 0, max_size_x)?;
@@ -61,13 +66,16 @@ impl ADDriverBase {
         port_base.set_int32_param(params.base.data_type, 0, 1)?; // UInt8
         port_base.set_int32_param(params.base.color_mode, 0, NDColorMode::Mono as i32)?;
         port_base.set_int32_param(params.base.array_callbacks, 0, 1)?;
-        port_base.set_float64_param(params.base.pool_max_memory, 0, max_memory as f64 / 1_048_576.0)?;
-        // Initial array size based on detector dimensions and data type (UInt8)
-        port_base.set_int32_param(params.base.array_size_x, 0, max_size_x)?;
-        port_base.set_int32_param(params.base.array_size_y, 0, max_size_y)?;
+        port_base.set_float64_param(
+            params.base.pool_max_memory,
+            0,
+            max_memory as f64 / 1_048_576.0,
+        )?;
+        // C++ inits NDArraySizeX/Y/Size to 0
+        port_base.set_int32_param(params.base.array_size_x, 0, 0)?;
+        port_base.set_int32_param(params.base.array_size_y, 0, 0)?;
         port_base.set_int32_param(params.base.array_size_z, 0, 0)?;
-        let initial_array_bytes = max_size_x as i64 * max_size_y as i64; // UInt8 = 1 byte/element
-        port_base.set_int32_param(params.base.array_size, 0, initial_array_bytes as i32)?;
+        port_base.set_int32_param(params.base.array_size, 0, 0)?;
 
         port_base.set_float64_param(params.gain, 0, 1.0)?;
         port_base.set_int32_param(params.shutter_mode, 0, ShutterMode::None as i32)?;
@@ -75,6 +83,9 @@ impl ADDriverBase {
         port_base.set_float64_param(params.temperature_actual, 0, 25.0)?;
 
         let pool = Arc::new(NDArrayPool::new(max_memory));
+
+        // Push initial values to RBV records via I/O Intr callbacks
+        port_base.call_param_callbacks(0)?;
 
         Ok(Self {
             port_base,
@@ -93,7 +104,10 @@ impl ADDriverBase {
 
     /// Publish an array: update counters, push to plugins and channel outputs, fire callbacks.
     pub fn publish_array(&mut self, array: Arc<NDArray>) -> AsynResult<()> {
-        let counter = self.port_base.get_int32_param(self.params.base.array_counter, 0)? + 1;
+        let counter = self
+            .port_base
+            .get_int32_param(self.params.base.array_counter, 0)?
+            + 1;
         self.port_base
             .set_int32_param(self.params.base.array_counter, 0, counter)?;
 
@@ -106,17 +120,30 @@ impl ADDriverBase {
             .set_int32_param(self.params.base.array_size_z, 0, info.color_size as i32)?;
         self.port_base
             .set_int32_param(self.params.base.array_size, 0, info.total_bytes as i32)?;
+        self.port_base
+            .set_int32_param(self.params.base.unique_id, 0, array.unique_id)?;
 
+        // Update pool stats
         self.port_base.set_float64_param(
             self.params.base.pool_used_memory,
             0,
             self.pool.allocated_bytes() as f64 / 1_048_576.0,
         )?;
+        self.port_base.set_int32_param(
+            self.params.base.pool_free_buffers,
+            0,
+            self.pool.num_free_buffers() as i32,
+        )?;
+        self.port_base.set_int32_param(
+            self.params.base.pool_alloc_buffers,
+            0,
+            self.pool.num_alloc_buffers() as i32,
+        )?;
 
-        let callbacks_enabled =
-            self.port_base
-                .get_int32_param(self.params.base.array_callbacks, 0)?
-                != 0;
+        let callbacks_enabled = self
+            .port_base
+            .get_int32_param(self.params.base.array_callbacks, 0)?
+            != 0;
 
         if callbacks_enabled {
             self.port_base.set_generic_pointer_param(
@@ -136,19 +163,20 @@ impl ADDriverBase {
     /// Set shutter state (open/close). In C++ this dispatches based on shutter mode.
     pub fn set_shutter(&mut self, open: bool) -> AsynResult<()> {
         let mode = ShutterMode::from_i32(
-            self.port_base.get_int32_param(self.params.shutter_mode, 0)?,
+            self.port_base
+                .get_int32_param(self.params.shutter_mode, 0)?,
         );
 
         match mode {
-            ShutterMode::None => {}
-            ShutterMode::DetectorOnly | ShutterMode::EpicsAndDetector => {
+            Some(ShutterMode::None) | None => {}
+            Some(ShutterMode::DetectorOnly) => {
                 self.port_base.set_int32_param(
                     self.params.shutter_control,
                     0,
                     if open { 1 } else { 0 },
                 )?;
             }
-            ShutterMode::EpicsOnly => {
+            Some(ShutterMode::EpicsOnly) => {
                 self.port_base.set_int32_param(
                     self.params.shutter_control_epics,
                     0,
@@ -157,11 +185,8 @@ impl ADDriverBase {
             }
         }
 
-        self.port_base.set_int32_param(
-            self.params.shutter_status,
-            0,
-            if open { 1 } else { 0 },
-        )?;
+        self.port_base
+            .set_int32_param(self.params.shutter_status, 0, if open { 1 } else { 0 })?;
 
         Ok(())
     }
@@ -180,12 +205,17 @@ mod tests {
     #[test]
     fn test_new_sets_initial_params() {
         let ad = ADDriverBase::new("TEST", 1024, 768, 50_000_000).unwrap();
+        // C++ ADBase: setIntegerParam(ADMaxSizeX, maxSizeX)
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.max_size_x, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.max_size_x, 0)
+                .unwrap(),
             1024
         );
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.max_size_y, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.max_size_y, 0)
+                .unwrap(),
             768
         );
         assert_eq!(
@@ -217,7 +247,9 @@ mod tests {
             .unwrap();
         ad.publish_array(Arc::new(arr)).unwrap();
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.base.array_counter, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.base.array_counter, 0)
+                .unwrap(),
             1
         );
     }
@@ -248,11 +280,16 @@ mod tests {
 
         // Counter still increments, but generic pointer should NOT be updated to an NDArray
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.base.array_counter, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.base.array_counter, 0)
+                .unwrap(),
             1
         );
         // Generic pointer should still be the default (unit type), not an NDArray
-        let gp = ad.port_base.get_generic_pointer_param(ad.params.base.ndarray_data, 0).unwrap();
+        let gp = ad
+            .port_base
+            .get_generic_pointer_param(ad.params.base.ndarray_data, 0)
+            .unwrap();
         assert!(gp.downcast_ref::<NDArray>().is_none());
     }
 
@@ -289,21 +326,29 @@ mod tests {
 
         ad.set_shutter(true).unwrap();
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.shutter_control, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.shutter_control, 0)
+                .unwrap(),
             1
         );
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.shutter_status, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.shutter_status, 0)
+                .unwrap(),
             1
         );
 
         ad.set_shutter(false).unwrap();
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.shutter_control, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.shutter_control, 0)
+                .unwrap(),
             0
         );
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.shutter_status, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.shutter_status, 0)
+                .unwrap(),
             0
         );
     }
@@ -317,7 +362,9 @@ mod tests {
 
         ad.set_shutter(true).unwrap();
         assert_eq!(
-            ad.port_base.get_int32_param(ad.params.shutter_control_epics, 0).unwrap(),
+            ad.port_base
+                .get_int32_param(ad.params.shutter_control_epics, 0)
+                .unwrap(),
             1
         );
     }
@@ -330,7 +377,9 @@ mod tests {
             1.0
         );
         assert_eq!(
-            ad.port_base.get_float64_param(ad.params.temperature, 0).unwrap(),
+            ad.port_base
+                .get_float64_param(ad.params.temperature, 0)
+                .unwrap(),
             25.0
         );
     }

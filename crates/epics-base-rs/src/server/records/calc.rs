@@ -6,6 +6,17 @@ use crate::types::{DbFieldType, EpicsValue};
 pub struct CalcRecord {
     pub val: f64,
     pub calc: String,
+    // Display/engineering
+    pub egu: String,
+    pub prec: i16,
+    pub hopr: f64,
+    pub lopr: f64,
+    // Alarm/monitor
+    pub adel: f64,
+    pub mdel: f64,
+    pub lalm: f64,
+    pub alst: f64,
+    pub mlst: f64,
     // Input link strings (INPA..INPL)
     pub inpa: String,
     pub inpb: String,
@@ -45,20 +56,64 @@ pub struct CalcRecord {
     pub lj: f64,
     pub lk: f64,
     pub ll: f64,
+    // CALC_ALARM flag: set when calcPerform fails
+    pub calc_alarm: bool,
+    // Cached compiled expression (RPCL equivalent)
+    rpcl: Option<crate::calc::CompiledExpr>,
 }
 
 impl Default for CalcRecord {
     fn default() -> Self {
         Self {
-            val: 0.0, calc: String::new(),
-            inpa: String::new(), inpb: String::new(), inpc: String::new(),
-            inpd: String::new(), inpe: String::new(), inpf: String::new(),
-            inpg: String::new(), inph: String::new(), inpi: String::new(),
-            inpj: String::new(), inpk: String::new(), inpl: String::new(),
-            a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0,
-            g: 0.0, h: 0.0, i: 0.0, j: 0.0, k: 0.0, l: 0.0,
-            la: 0.0, lb: 0.0, lc: 0.0, ld: 0.0, le: 0.0, lf: 0.0,
-            lg: 0.0, lh: 0.0, li: 0.0, lj: 0.0, lk: 0.0, ll: 0.0,
+            val: 0.0,
+            calc: String::new(),
+            egu: String::new(),
+            prec: 0,
+            hopr: 0.0,
+            lopr: 0.0,
+            adel: 0.0,
+            mdel: 0.0,
+            lalm: 0.0,
+            alst: 0.0,
+            mlst: 0.0,
+            inpa: String::new(),
+            inpb: String::new(),
+            inpc: String::new(),
+            inpd: String::new(),
+            inpe: String::new(),
+            inpf: String::new(),
+            inpg: String::new(),
+            inph: String::new(),
+            inpi: String::new(),
+            inpj: String::new(),
+            inpk: String::new(),
+            inpl: String::new(),
+            a: 0.0,
+            b: 0.0,
+            c: 0.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.0,
+            g: 0.0,
+            h: 0.0,
+            i: 0.0,
+            j: 0.0,
+            k: 0.0,
+            l: 0.0,
+            la: 0.0,
+            lb: 0.0,
+            lc: 0.0,
+            ld: 0.0,
+            le: 0.0,
+            lf: 0.0,
+            lg: 0.0,
+            lh: 0.0,
+            li: 0.0,
+            lj: 0.0,
+            lk: 0.0,
+            ll: 0.0,
+            calc_alarm: false,
+            rpcl: None,
         }
     }
 }
@@ -72,77 +127,293 @@ impl CalcRecord {
     }
 
     fn get_vars(&self) -> [f64; 12] {
-        [self.a, self.b, self.c, self.d, self.e, self.f,
-         self.g, self.h, self.i, self.j, self.k, self.l]
+        [
+            self.a, self.b, self.c, self.d, self.e, self.f, self.g, self.h, self.i, self.j, self.k,
+            self.l,
+        ]
     }
 
     pub fn get_inp_link(&self, idx: usize) -> &str {
         match idx {
-            0 => &self.inpa, 1 => &self.inpb, 2 => &self.inpc,
-            3 => &self.inpd, 4 => &self.inpe, 5 => &self.inpf,
-            6 => &self.inpg, 7 => &self.inph, 8 => &self.inpi,
-            9 => &self.inpj, 10 => &self.inpk, 11 => &self.inpl,
+            0 => &self.inpa,
+            1 => &self.inpb,
+            2 => &self.inpc,
+            3 => &self.inpd,
+            4 => &self.inpe,
+            5 => &self.inpf,
+            6 => &self.inpg,
+            7 => &self.inph,
+            8 => &self.inpi,
+            9 => &self.inpj,
+            10 => &self.inpk,
+            11 => &self.inpl,
             _ => "",
         }
     }
 
     /// Get input link strings for external processing.
     pub fn input_links(&self) -> [&str; 12] {
-        [&self.inpa, &self.inpb, &self.inpc, &self.inpd,
-         &self.inpe, &self.inpf, &self.inpg, &self.inph,
-         &self.inpi, &self.inpj, &self.inpk, &self.inpl]
+        [
+            &self.inpa, &self.inpb, &self.inpc, &self.inpd, &self.inpe, &self.inpf, &self.inpg,
+            &self.inph, &self.inpi, &self.inpj, &self.inpk, &self.inpl,
+        ]
     }
 
     pub fn set_var(&mut self, idx: usize, val: f64) {
         match idx {
-            0 => self.a = val, 1 => self.b = val, 2 => self.c = val,
-            3 => self.d = val, 4 => self.e = val, 5 => self.f = val,
-            6 => self.g = val, 7 => self.h = val, 8 => self.i = val,
-            9 => self.j = val, 10 => self.k = val, 11 => self.l = val,
+            0 => self.a = val,
+            1 => self.b = val,
+            2 => self.c = val,
+            3 => self.d = val,
+            4 => self.e = val,
+            5 => self.f = val,
+            6 => self.g = val,
+            7 => self.h = val,
+            8 => self.i = val,
+            9 => self.j = val,
+            10 => self.k = val,
+            11 => self.l = val,
             _ => {}
         }
     }
 }
 
 static CALC_FIELDS: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "CALC", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPA", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPB", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPC", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPD", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPE", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPF", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPG", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPH", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPI", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPJ", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPK", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "INPL", dbf_type: DbFieldType::String, read_only: false },
-    FieldDesc { name: "A", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "B", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "C", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "D", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "E", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "F", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "G", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "H", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "I", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "J", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "K", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "L", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "LA", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LB", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LC", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LD", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LE", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LF", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LG", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LH", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LI", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LJ", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LK", dbf_type: DbFieldType::Double, read_only: true },
-    FieldDesc { name: "LL", dbf_type: DbFieldType::Double, read_only: true },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "CALC",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "EGU",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "PREC",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "HOPR",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LOPR",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "ADEL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "MDEL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LALM",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "ALST",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "MLST",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "INPA",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPB",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPC",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPD",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPE",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPF",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPG",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPH",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPI",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPJ",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPK",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "INPL",
+        dbf_type: DbFieldType::String,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "A",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "B",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "C",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "D",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "E",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "F",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "G",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "H",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "I",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "J",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "K",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "L",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "LA",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LB",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LC",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LD",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LE",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LF",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LG",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LH",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LI",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LJ",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LK",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "LL",
+        dbf_type: DbFieldType::Double,
+        read_only: true,
+    },
 ];
 
 impl Record for CalcRecord {
@@ -150,18 +421,64 @@ impl Record for CalcRecord {
         "calc"
     }
 
+    fn init_record(&mut self, pass: u8) -> CaResult<()> {
+        if pass == 0 && !self.calc.is_empty() {
+            // Compile CALC expression and cache it (like C's RPCL)
+            self.rpcl = crate::calc::compile(&self.calc).ok();
+            self.mlst = self.val;
+            self.alst = self.val;
+            self.lalm = self.val;
+        }
+        Ok(())
+    }
+
     fn process(&mut self) -> CaResult<ProcessOutcome> {
-        if !self.calc.is_empty() {
+        if let Some(ref compiled) = self.rpcl {
             let vars = self.get_vars();
             let mut inputs = crate::calc::NumericInputs::new();
             inputs.vars[..12].copy_from_slice(&vars);
-            self.val = crate::calc::calc(&self.calc, &mut inputs)
-                .map_err(|e| CaError::CalcError(e.to_string()))?;
+            // C sets CALC_ALARM on failure but continues processing
+            match crate::calc::eval(compiled, &mut inputs) {
+                Ok(v) => {
+                    self.val = v;
+                    self.calc_alarm = false;
+                }
+                Err(_) => {
+                    self.calc_alarm = true;
+                }
+            }
+        } else if !self.calc.is_empty() {
+            // Fallback: try to compile and eval (e.g., if CALC was set after init)
+            match crate::calc::calc(&self.calc, &mut {
+                let vars = self.get_vars();
+                let mut inputs = crate::calc::NumericInputs::new();
+                inputs.vars[..12].copy_from_slice(&vars);
+                inputs
+            }) {
+                Ok(v) => {
+                    self.val = v;
+                    self.calc_alarm = false;
+                    // Cache for next time
+                    self.rpcl = crate::calc::compile(&self.calc).ok();
+                }
+                Err(_) => {
+                    self.calc_alarm = true;
+                }
+            }
         }
         // Save current values to LA-LL for next cycle
-        self.la = self.a; self.lb = self.b; self.lc = self.c; self.ld = self.d;
-        self.le = self.e; self.lf = self.f; self.lg = self.g; self.lh = self.h;
-        self.li = self.i; self.lj = self.j; self.lk = self.k; self.ll = self.l;
+        self.la = self.a;
+        self.lb = self.b;
+        self.lc = self.c;
+        self.ld = self.d;
+        self.le = self.e;
+        self.lf = self.f;
+        self.lg = self.g;
+        self.lh = self.h;
+        self.li = self.i;
+        self.lj = self.j;
+        self.lk = self.k;
+        self.ll = self.l;
         Ok(ProcessOutcome::complete())
     }
 
@@ -169,6 +486,16 @@ impl Record for CalcRecord {
         match name {
             "VAL" => Some(EpicsValue::Double(self.val)),
             "CALC" => Some(EpicsValue::String(self.calc.clone())),
+            "EGU" => Some(EpicsValue::String(self.egu.clone())),
+            "PREC" => Some(EpicsValue::Short(self.prec)),
+            "HOPR" => Some(EpicsValue::Double(self.hopr)),
+            "LOPR" => Some(EpicsValue::Double(self.lopr)),
+            "ADEL" => Some(EpicsValue::Double(self.adel)),
+            "MDEL" => Some(EpicsValue::Double(self.mdel)),
+            "LALM" => Some(EpicsValue::Double(self.lalm)),
+            "ALST" => Some(EpicsValue::Double(self.alst)),
+            "MLST" => Some(EpicsValue::Double(self.mlst)),
+            "CALC_ALARM" => Some(EpicsValue::Char(if self.calc_alarm { 1 } else { 0 })),
             "INPA" => Some(EpicsValue::String(self.inpa.clone())),
             "INPB" => Some(EpicsValue::String(self.inpb.clone())),
             "INPC" => Some(EpicsValue::String(self.inpc.clone())),
@@ -211,32 +538,337 @@ impl Record for CalcRecord {
 
     fn put_field(&mut self, name: &str, value: EpicsValue) -> CaResult<()> {
         match name {
-            "VAL" => match value { EpicsValue::Double(v) => { self.val = v; Ok(()) } _ => Err(CaError::TypeMismatch("VAL".into())) },
-            "CALC" => match value { EpicsValue::String(s) => { self.calc = s; Ok(()) } _ => Err(CaError::TypeMismatch("CALC".into())) },
-            "INPA" => match value { EpicsValue::String(s) => { self.inpa = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPA".into())) },
-            "INPB" => match value { EpicsValue::String(s) => { self.inpb = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPB".into())) },
-            "INPC" => match value { EpicsValue::String(s) => { self.inpc = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPC".into())) },
-            "INPD" => match value { EpicsValue::String(s) => { self.inpd = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPD".into())) },
-            "INPE" => match value { EpicsValue::String(s) => { self.inpe = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPE".into())) },
-            "INPF" => match value { EpicsValue::String(s) => { self.inpf = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPF".into())) },
-            "INPG" => match value { EpicsValue::String(s) => { self.inpg = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPG".into())) },
-            "INPH" => match value { EpicsValue::String(s) => { self.inph = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPH".into())) },
-            "INPI" => match value { EpicsValue::String(s) => { self.inpi = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPI".into())) },
-            "INPJ" => match value { EpicsValue::String(s) => { self.inpj = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPJ".into())) },
-            "INPK" => match value { EpicsValue::String(s) => { self.inpk = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPK".into())) },
-            "INPL" => match value { EpicsValue::String(s) => { self.inpl = s; Ok(()) } _ => Err(CaError::TypeMismatch("INPL".into())) },
-            "A" => match value { EpicsValue::Double(v) => { self.a = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.a = f; Ok(()) } else { Err(CaError::TypeMismatch("A".into())) } } },
-            "B" => match value { EpicsValue::Double(v) => { self.b = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.b = f; Ok(()) } else { Err(CaError::TypeMismatch("B".into())) } } },
-            "C" => match value { EpicsValue::Double(v) => { self.c = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.c = f; Ok(()) } else { Err(CaError::TypeMismatch("C".into())) } } },
-            "D" => match value { EpicsValue::Double(v) => { self.d = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.d = f; Ok(()) } else { Err(CaError::TypeMismatch("D".into())) } } },
-            "E" => match value { EpicsValue::Double(v) => { self.e = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.e = f; Ok(()) } else { Err(CaError::TypeMismatch("E".into())) } } },
-            "F" => match value { EpicsValue::Double(v) => { self.f = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.f = f; Ok(()) } else { Err(CaError::TypeMismatch("F".into())) } } },
-            "G" => match value { EpicsValue::Double(v) => { self.g = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.g = f; Ok(()) } else { Err(CaError::TypeMismatch("G".into())) } } },
-            "H" => match value { EpicsValue::Double(v) => { self.h = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.h = f; Ok(()) } else { Err(CaError::TypeMismatch("H".into())) } } },
-            "I" => match value { EpicsValue::Double(v) => { self.i = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.i = f; Ok(()) } else { Err(CaError::TypeMismatch("I".into())) } } },
-            "J" => match value { EpicsValue::Double(v) => { self.j = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.j = f; Ok(()) } else { Err(CaError::TypeMismatch("J".into())) } } },
-            "K" => match value { EpicsValue::Double(v) => { self.k = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.k = f; Ok(()) } else { Err(CaError::TypeMismatch("K".into())) } } },
-            "L" => match value { EpicsValue::Double(v) => { self.l = v; Ok(()) } v => { if let Some(f) = v.to_f64() { self.l = f; Ok(()) } else { Err(CaError::TypeMismatch("L".into())) } } },
+            "VAL" => match value {
+                EpicsValue::Double(v) => {
+                    self.val = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("VAL".into())),
+            },
+            "CALC" => match value {
+                EpicsValue::String(s) => {
+                    // Recompile on CALC change (like C special SPC_CALC)
+                    self.rpcl = crate::calc::compile(&s).ok();
+                    self.calc = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("CALC".into())),
+            },
+            "EGU" => match value {
+                EpicsValue::String(s) => {
+                    self.egu = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "PREC" => match value {
+                EpicsValue::Short(v) => {
+                    self.prec = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "HOPR" => match value {
+                EpicsValue::Double(v) => {
+                    self.hopr = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "LOPR" => match value {
+                EpicsValue::Double(v) => {
+                    self.lopr = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ADEL" => match value {
+                EpicsValue::Double(v) => {
+                    self.adel = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MDEL" => match value {
+                EpicsValue::Double(v) => {
+                    self.mdel = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "LALM" => match value {
+                EpicsValue::Double(v) => {
+                    self.lalm = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "ALST" => match value {
+                EpicsValue::Double(v) => {
+                    self.alst = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "MLST" => match value {
+                EpicsValue::Double(v) => {
+                    self.mlst = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch(name.into())),
+            },
+            "INPA" => match value {
+                EpicsValue::String(s) => {
+                    self.inpa = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPA".into())),
+            },
+            "INPB" => match value {
+                EpicsValue::String(s) => {
+                    self.inpb = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPB".into())),
+            },
+            "INPC" => match value {
+                EpicsValue::String(s) => {
+                    self.inpc = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPC".into())),
+            },
+            "INPD" => match value {
+                EpicsValue::String(s) => {
+                    self.inpd = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPD".into())),
+            },
+            "INPE" => match value {
+                EpicsValue::String(s) => {
+                    self.inpe = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPE".into())),
+            },
+            "INPF" => match value {
+                EpicsValue::String(s) => {
+                    self.inpf = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPF".into())),
+            },
+            "INPG" => match value {
+                EpicsValue::String(s) => {
+                    self.inpg = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPG".into())),
+            },
+            "INPH" => match value {
+                EpicsValue::String(s) => {
+                    self.inph = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPH".into())),
+            },
+            "INPI" => match value {
+                EpicsValue::String(s) => {
+                    self.inpi = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPI".into())),
+            },
+            "INPJ" => match value {
+                EpicsValue::String(s) => {
+                    self.inpj = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPJ".into())),
+            },
+            "INPK" => match value {
+                EpicsValue::String(s) => {
+                    self.inpk = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPK".into())),
+            },
+            "INPL" => match value {
+                EpicsValue::String(s) => {
+                    self.inpl = s;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("INPL".into())),
+            },
+            "A" => match value {
+                EpicsValue::Double(v) => {
+                    self.a = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.a = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("A".into()))
+                    }
+                }
+            },
+            "B" => match value {
+                EpicsValue::Double(v) => {
+                    self.b = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.b = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("B".into()))
+                    }
+                }
+            },
+            "C" => match value {
+                EpicsValue::Double(v) => {
+                    self.c = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.c = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("C".into()))
+                    }
+                }
+            },
+            "D" => match value {
+                EpicsValue::Double(v) => {
+                    self.d = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.d = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("D".into()))
+                    }
+                }
+            },
+            "E" => match value {
+                EpicsValue::Double(v) => {
+                    self.e = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.e = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("E".into()))
+                    }
+                }
+            },
+            "F" => match value {
+                EpicsValue::Double(v) => {
+                    self.f = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.f = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("F".into()))
+                    }
+                }
+            },
+            "G" => match value {
+                EpicsValue::Double(v) => {
+                    self.g = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.g = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("G".into()))
+                    }
+                }
+            },
+            "H" => match value {
+                EpicsValue::Double(v) => {
+                    self.h = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.h = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("H".into()))
+                    }
+                }
+            },
+            "I" => match value {
+                EpicsValue::Double(v) => {
+                    self.i = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.i = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("I".into()))
+                    }
+                }
+            },
+            "J" => match value {
+                EpicsValue::Double(v) => {
+                    self.j = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.j = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("J".into()))
+                    }
+                }
+            },
+            "K" => match value {
+                EpicsValue::Double(v) => {
+                    self.k = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.k = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("K".into()))
+                    }
+                }
+            },
+            "L" => match value {
+                EpicsValue::Double(v) => {
+                    self.l = v;
+                    Ok(())
+                }
+                v => {
+                    if let Some(f) = v.to_f64() {
+                        self.l = f;
+                        Ok(())
+                    } else {
+                        Err(CaError::TypeMismatch("L".into()))
+                    }
+                }
+            },
             _ => Err(CaError::FieldNotFound(name.to_string())),
         }
     }
@@ -246,8 +878,19 @@ impl Record for CalcRecord {
     }
 
     fn multi_input_links(&self) -> &[(&'static str, &'static str)] {
-        &[("INPA","A"),("INPB","B"),("INPC","C"),("INPD","D"),
-          ("INPE","E"),("INPF","F"),("INPG","G"),("INPH","H"),
-          ("INPI","I"),("INPJ","J"),("INPK","K"),("INPL","L")]
+        &[
+            ("INPA", "A"),
+            ("INPB", "B"),
+            ("INPC", "C"),
+            ("INPD", "D"),
+            ("INPE", "E"),
+            ("INPF", "F"),
+            ("INPG", "G"),
+            ("INPH", "H"),
+            ("INPI", "I"),
+            ("INPJ", "J"),
+            ("INPK", "K"),
+            ("INPL", "L"),
+        ]
     }
 }

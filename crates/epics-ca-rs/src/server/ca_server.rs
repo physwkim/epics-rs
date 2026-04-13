@@ -11,10 +11,10 @@ use epics_base_rs::runtime::net::CA_SERVER_PORT;
 use epics_base_rs::server::record::Record;
 use epics_base_rs::types::EpicsValue;
 
+use super::{beacon, tcp, udp};
 use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::server::scan::ScanScheduler;
 use epics_base_rs::server::{access_security, autosave, device_support, ioc_builder, iocsh};
-use super::{tcp, udp, beacon};
 
 /// Builder for CaServer configuration.
 ///
@@ -46,8 +46,7 @@ impl CaServerBuilder {
 
     /// Load an access security configuration file.
     pub fn acf_file(mut self, path: &str) -> CaResult<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(CaError::Io)?;
+        let content = std::fs::read_to_string(path).map_err(CaError::Io)?;
         self.acf = Some(access_security::parse_acf(&content)?);
         Ok(self)
     }
@@ -135,7 +134,15 @@ impl CaServerBuilder {
     pub async fn build(self) -> CaResult<CaServer> {
         let (db, autosave_config) = self.ioc.build().await?;
         let acf = Arc::new(self.acf);
-        Ok(CaServer { db, port: self.port, acf, autosave_config, autosave_manager: None })
+        Ok(CaServer {
+            db,
+            port: self.port,
+            acf,
+            autosave_config,
+            autosave_manager: None,
+            conn_events: None,
+            after_init_hooks: std::sync::Mutex::new(Vec::new()),
+        })
     }
 }
 
@@ -146,6 +153,11 @@ pub struct CaServer {
     acf: Arc<Option<access_security::AccessSecurityConfig>>,
     autosave_config: Option<autosave::SaveSetConfig>,
     autosave_manager: Option<Arc<autosave::AutosaveManager>>,
+    /// Optional broadcast channel for connection lifecycle events.
+    /// Subscribers (e.g. ca-gateway) get one event per accept/disconnect.
+    conn_events: Option<tokio::sync::broadcast::Sender<crate::server::tcp::ServerConnectionEvent>>,
+    /// Callbacks to run after PINI processing (e.g., start pollers).
+    after_init_hooks: std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
 
 impl CaServer {
@@ -169,6 +181,31 @@ impl CaServer {
             acf: Arc::new(acf),
             autosave_config,
             autosave_manager,
+            conn_events: None,
+            after_init_hooks: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Set callbacks to run after PINI processing completes.
+    pub fn set_after_init_hooks(&mut self, hooks: Vec<Box<dyn FnOnce() + Send>>) {
+        *self.after_init_hooks.lock().unwrap() = hooks;
+    }
+
+    /// Subscribe to connection lifecycle events. Returns a broadcast
+    /// receiver that receives [`ServerConnectionEvent::Connected`] /
+    /// `Disconnected` for each accepted client.
+    ///
+    /// Idempotent: calling multiple times shares the same broadcast sender.
+    pub fn connection_events(
+        &mut self,
+    ) -> tokio::sync::broadcast::Receiver<crate::server::tcp::ServerConnectionEvent> {
+        match &self.conn_events {
+            Some(tx) => tx.subscribe(),
+            None => {
+                let (tx, rx) = tokio::sync::broadcast::channel(64);
+                self.conn_events = Some(tx);
+                rx
+            }
         }
     }
 
@@ -185,15 +222,16 @@ impl CaServer {
         let db = self.db.clone();
         let handle = tokio::runtime::Handle::current();
 
-        let autosave_cmds = self.autosave_manager.as_ref()
+        let autosave_cmds = self
+            .autosave_manager
+            .as_ref()
             .map(|mgr| autosave::iocsh::autosave_commands(mgr.clone()));
 
         let server = Arc::new(self);
 
         let server_clone = server.clone();
-        let server_handle = epics_base_rs::runtime::task::spawn(async move {
-            server_clone.run().await
-        });
+        let server_handle =
+            epics_base_rs::runtime::task::spawn(async move { server_clone.run().await });
 
         let (tx, rx) = epics_base_rs::runtime::sync::oneshot::channel();
         std::thread::spawn(move || {
@@ -233,9 +271,7 @@ impl CaServer {
 
     /// Add a record at runtime.
     pub async fn add_record(&self, name: &str, record: impl Record) {
-        self.db
-            .add_record(name, Box::new(record))
-            .await;
+        self.db.add_record(name, Box::new(record)).await;
     }
 
     /// Set a PV value (notifies subscribers).
@@ -285,13 +321,17 @@ impl CaServer {
         let beacon_reset = std::sync::Arc::new(tokio::sync::Notify::new());
         let beacon_reset_tcp = beacon_reset.clone();
 
+        let conn_events = self.conn_events.clone();
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
-            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp).await
+            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp, conn_events).await
         });
 
-        let tcp_port = tcp_rx.await.map_err(|_| CaError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, "TCP listener failed to start")
-        ))?;
+        let tcp_port = tcp_rx.await.map_err(|_| {
+            CaError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "TCP listener failed to start",
+            ))
+        })?;
 
         eprintln!("CA server: UDP search on port {port}, TCP on port {tcp_port}");
 
@@ -313,7 +353,7 @@ impl CaServer {
                 eprintln!("Beacon emitter exited: {r:?}");
                 r
             }
-            _ = scanner.run() => {
+            _ = scanner.run_with_hooks(self.after_init_hooks.lock().unwrap().drain(..).collect()) => {
                 eprintln!("Scan scheduler exited");
                 Ok(())
             }

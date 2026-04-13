@@ -48,7 +48,7 @@ fn motor_moving(rec: &mut MotorRecord, current_pos: f64) {
 }
 
 #[test]
-fn val_during_motion_triggers_retarget() {
+fn val_during_motion_same_direction_accepted() {
     let mut rec = make_record();
 
     // Start move to 50
@@ -62,16 +62,15 @@ fn val_during_motion_triggers_retarget() {
     motor_moving(&mut rec, 25.0);
 
     // New target: 80 (same direction, farther) → ExtendMove
+    // C: same-direction change is simply accepted without issuing new command;
+    // the new target will be picked up when the current move completes.
     rec.put_field("VAL", EpicsValue::Double(80.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // Should issue new MoveAbsolute to 80
-    assert_eq!(effects.commands.len(), 1);
-    if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((*position - 80.0).abs() < 1e-10);
-    } else {
-        panic!("expected MoveAbsolute");
-    }
+    // No new command issued (C behavior)
+    assert!(effects.commands.is_empty());
+    // ldvl stays at original target (not updated on ExtendMove)
+    assert_eq!(rec.internal.ldvl, 50.0);
     assert!(!rec.stat.dmov);
 }
 
@@ -135,22 +134,27 @@ fn retarget_during_backlash_cancels_pending() {
     let mut rec = make_record();
     rec.retry.bdst = 1.0;
 
-    // Start move with backlash
+    // Start move with backlash (moving negative with positive BDST)
     rec.put_field("VAL", EpicsValue::Double(-10.0)).unwrap();
     rec.plan_motion(CommandSource::Val);
     rec.internal.ldvl = -10.0;
     assert!(rec.internal.backlash_pending);
+    assert_eq!(rec.stat.phase, MotionPhase::MainMove);
 
     motor_moving(&mut rec, -5.0);
 
-    // Retarget while backlash is pending
+    // Explicitly set CDIR to match the negative move direction
+    // (CDIR may be overwritten by process_motor_info's TDIR update)
+    rec.stat.cdir = false; // moving negative
+
+    // Retarget to opposite direction (20.0 vs original -10.0)
     rec.put_field("VAL", EpicsValue::Double(20.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // Should clear backlash_pending
+    // Opposite direction retarget: stop-and-replan
+    assert!(rec.stat.mip.contains(MipFlags::STOP));
     assert!(!rec.internal.backlash_pending);
-    // Either stop-and-replan or extend
-    assert!(!effects.commands.is_empty());
+    assert!(matches!(effects.commands[0], MotorCommand::Stop { .. }));
 }
 
 #[test]
@@ -173,13 +177,13 @@ fn retarget_during_retry_resets_rcnt() {
     // Motor retrying
     motor_moving(&mut rec, 9.7);
 
-    // Retarget during retry
-    rec.put_field("VAL", EpicsValue::Double(20.0)).unwrap();
+    // Retarget to opposite direction during retry (requires stop-and-replan)
+    rec.put_field("VAL", EpicsValue::Double(-20.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // RCNT should be reset
+    // RCNT should be reset, stop issued
     assert_eq!(rec.retry.rcnt, 0);
-    assert!(!effects.commands.is_empty());
+    assert!(matches!(effects.commands[0], MotorCommand::Stop { .. }));
 }
 
 #[test]
@@ -218,7 +222,7 @@ fn stop_and_replan_with_backlash() {
 }
 
 #[test]
-fn spmg_go_resume_from_pause() {
+fn spmg_pause_stops_and_syncs_after_completion() {
     let mut rec = make_record();
 
     // Start move
@@ -226,18 +230,25 @@ fn spmg_go_resume_from_pause() {
     rec.plan_motion(CommandSource::Val);
     motor_moving(&mut rec, 25.0);
 
-    // Pause
+    // Pause: sends STOP, sets MIP_STOP, but motor is still moving
     rec.ctrl.spmg = SpmgMode::Pause;
-    rec.plan_motion(CommandSource::Spmg);
-    assert!(rec.stat.dmov);
-    assert_eq!(rec.pos.dval, 50.0); // target preserved
-
-    // Resume with Go
-    rec.ctrl.spmg = SpmgMode::Go;
     let effects = rec.plan_motion(CommandSource::Spmg);
+    assert!(!rec.stat.dmov); // motor still moving
+    assert!(rec.stat.mip.contains(MipFlags::STOP));
+    assert!(matches!(effects.commands[0], MotorCommand::Stop { .. }));
 
-    // Should replan to saved target
-    assert!(!rec.stat.dmov);
-    assert_eq!(rec.stat.phase, MotionPhase::MainMove);
-    assert!(!effects.commands.is_empty());
+    // Motor stops at position 25.0
+    complete_move(&mut rec, 25.0);
+    let _effects = rec.check_completion();
+
+    // C: postProcess syncs positions (VAL=RBV, DVAL=DRBV)
+    assert!(rec.stat.dmov);
+    assert_eq!(rec.pos.dval, 25.0); // synced to readback
+    assert_eq!(rec.pos.val, 25.0);
+
+    // Go: no resume since positions are synced
+    rec.ctrl.spmg = SpmgMode::Go;
+    rec.internal.lspg = SpmgMode::Pause;
+    let effects = rec.plan_motion(CommandSource::Spmg);
+    assert!(effects.commands.is_empty()); // no move, already at target
 }

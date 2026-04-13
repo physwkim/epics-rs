@@ -54,10 +54,44 @@ dbLoadRecords("NDROI.template", "P=$(PREFIX),R=ROI3:,PORT=ROI3,NDARRAY_PORT=$(PO
 NDROIConfigure("ROI4", $(QSIZE), 0, "$(PORT)", 0)
 dbLoadRecords("NDROI.template", "P=$(PREFIX),R=ROI4:,PORT=ROI4,NDARRAY_PORT=$(PORT)")
 
-# ===== ROI statistics (with 8 ROIs via substitute+include) =====
+# ===== ROI statistics (with 32 ROIs via substitute+include) =====
 
 NDROIStatConfigure("ROISTAT1", $(QSIZE), 0, "$(PORT)", 0)
-dbLoadRecords("NDROIStat8.template", "P=$(PREFIX),R=ROIStat1:,PORT=ROISTAT1,NCHANS=$(NCHANS),NDARRAY_PORT=$(PORT)")
+dbLoadRecords("NDROIStat.template", "P=$(PREFIX),R=ROIStat1:,PORT=ROISTAT1,NCHANS=$(NCHANS),NDARRAY_PORT=$(PORT)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:1:,PORT=ROISTAT1,ADDR=0,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:2:,PORT=ROISTAT1,ADDR=1,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:3:,PORT=ROISTAT1,ADDR=2,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:4:,PORT=ROISTAT1,ADDR=3,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:5:,PORT=ROISTAT1,ADDR=4,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:6:,PORT=ROISTAT1,ADDR=5,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:7:,PORT=ROISTAT1,ADDR=6,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:8:,PORT=ROISTAT1,ADDR=7,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:9:,PORT=ROISTAT1,ADDR=8,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:10:,PORT=ROISTAT1,ADDR=9,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:11:,PORT=ROISTAT1,ADDR=10,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:12:,PORT=ROISTAT1,ADDR=11,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:13:,PORT=ROISTAT1,ADDR=12,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:14:,PORT=ROISTAT1,ADDR=13,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:15:,PORT=ROISTAT1,ADDR=14,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:16:,PORT=ROISTAT1,ADDR=15,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:17:,PORT=ROISTAT1,ADDR=16,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:18:,PORT=ROISTAT1,ADDR=17,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:19:,PORT=ROISTAT1,ADDR=18,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:20:,PORT=ROISTAT1,ADDR=19,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:21:,PORT=ROISTAT1,ADDR=20,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:22:,PORT=ROISTAT1,ADDR=21,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:23:,PORT=ROISTAT1,ADDR=22,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:24:,PORT=ROISTAT1,ADDR=23,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:25:,PORT=ROISTAT1,ADDR=24,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:26:,PORT=ROISTAT1,ADDR=25,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:27:,PORT=ROISTAT1,ADDR=26,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:28:,PORT=ROISTAT1,ADDR=27,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:29:,PORT=ROISTAT1,ADDR=28,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:30:,PORT=ROISTAT1,ADDR=29,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:31:,PORT=ROISTAT1,ADDR=30,TIMEOUT=1,NCHANS=$(NCHANS)")
+dbLoadRecords("NDROIStatN.template", "P=$(PREFIX),R=ROIStat1:32:,PORT=ROISTAT1,ADDR=31,TIMEOUT=1,NCHANS=$(NCHANS)")
+NDTimeSeriesConfigure("ROISTAT1_TS", $(QSIZE), 0, "ROISTAT1", 0)
+dbLoadRecords("NDTimeSeries.template", "P=$(PREFIX),R=ROIStat1:TS:,PORT=ROISTAT1_TS,ADDR=0,TIMEOUT=1,NDARRAY_PORT=ROISTAT1,NDARRAY_ADDR=0,NCHANS=$(NCHANS),ENABLED=1")
 
 # ===== Processing plugin (with helper TIFF for dark/flat field loading) =====
 
@@ -87,22 +121,27 @@ dbLoadRecords("NDGatherN.template", "P=$(PREFIX),R=Gather1:,PORT=GATHER1,ADDR=7,
 
 NDStatsConfigure("STATS1", $(QSIZE), 0, "$(PORT)", 0)
 dbLoadRecords("NDStats.template", "P=$(PREFIX),R=Stats1:,PORT=STATS1,NCHANS=$(NCHANS),XSIZE=$(XSIZE),YSIZE=$(YSIZE),HIST_SIZE=256,NDARRAY_PORT=$(PORT)")
+NDTimeSeriesConfigure("STATS1_TS", $(QSIZE), 0, "STATS1", 0)
 dbLoadRecords("NDTimeSeries.template", "P=$(PREFIX),R=Stats1:TS:,PORT=STATS1_TS,ADDR=0,TIMEOUT=1,NDARRAY_PORT=STATS1,NDARRAY_ADDR=0,NCHANS=$(NCHANS),ENABLED=1")
 
 NDStatsConfigure("STATS2", $(QSIZE), 0, "$(PORT)", 0)
 dbLoadRecords("NDStats.template", "P=$(PREFIX),R=Stats2:,PORT=STATS2,NCHANS=$(NCHANS),XSIZE=$(XSIZE),YSIZE=$(YSIZE),HIST_SIZE=256,NDARRAY_PORT=$(PORT)")
+NDTimeSeriesConfigure("STATS2_TS", $(QSIZE), 0, "STATS2", 0)
 dbLoadRecords("NDTimeSeries.template", "P=$(PREFIX),R=Stats2:TS:,PORT=STATS2_TS,ADDR=0,TIMEOUT=1,NDARRAY_PORT=STATS2,NDARRAY_ADDR=0,NCHANS=$(NCHANS),ENABLED=1")
 
 NDStatsConfigure("STATS3", $(QSIZE), 0, "$(PORT)", 0)
 dbLoadRecords("NDStats.template", "P=$(PREFIX),R=Stats3:,PORT=STATS3,NCHANS=$(NCHANS),XSIZE=$(XSIZE),YSIZE=$(YSIZE),HIST_SIZE=256,NDARRAY_PORT=$(PORT)")
+NDTimeSeriesConfigure("STATS3_TS", $(QSIZE), 0, "STATS3", 0)
 dbLoadRecords("NDTimeSeries.template", "P=$(PREFIX),R=Stats3:TS:,PORT=STATS3_TS,ADDR=0,TIMEOUT=1,NDARRAY_PORT=STATS3,NDARRAY_ADDR=0,NCHANS=$(NCHANS),ENABLED=1")
 
 NDStatsConfigure("STATS4", $(QSIZE), 0, "$(PORT)", 0)
 dbLoadRecords("NDStats.template", "P=$(PREFIX),R=Stats4:,PORT=STATS4,NCHANS=$(NCHANS),XSIZE=$(XSIZE),YSIZE=$(YSIZE),HIST_SIZE=256,NDARRAY_PORT=$(PORT)")
+NDTimeSeriesConfigure("STATS4_TS", $(QSIZE), 0, "STATS4", 0)
 dbLoadRecords("NDTimeSeries.template", "P=$(PREFIX),R=Stats4:TS:,PORT=STATS4_TS,ADDR=0,TIMEOUT=1,NDARRAY_PORT=STATS4,NDARRAY_ADDR=0,NCHANS=$(NCHANS),ENABLED=1")
 
 NDStatsConfigure("STATS5", $(QSIZE), 0, "$(PORT)", 0)
 dbLoadRecords("NDStats.template", "P=$(PREFIX),R=Stats5:,PORT=STATS5,NCHANS=$(NCHANS),XSIZE=$(XSIZE),YSIZE=$(YSIZE),HIST_SIZE=256,NDARRAY_PORT=$(PORT)")
+NDTimeSeriesConfigure("STATS5_TS", $(QSIZE), 0, "STATS5", 0)
 dbLoadRecords("NDTimeSeries.template", "P=$(PREFIX),R=Stats5:TS:,PORT=STATS5_TS,ADDR=0,TIMEOUT=1,NDARRAY_PORT=STATS5,NDARRAY_ADDR=0,NCHANS=$(NCHANS),ENABLED=1")
 
 # ===== Transform plugin =====
@@ -148,6 +187,7 @@ dbLoadRecords("NDAttributeN.template", "P=$(PREFIX),R=Attr1:5:,PORT=ATTR1,ADDR=4
 dbLoadRecords("NDAttributeN.template", "P=$(PREFIX),R=Attr1:6:,PORT=ATTR1,ADDR=5,TIMEOUT=1,NCHANS=$(NCHANS)")
 dbLoadRecords("NDAttributeN.template", "P=$(PREFIX),R=Attr1:7:,PORT=ATTR1,ADDR=6,TIMEOUT=1,NCHANS=$(NCHANS)")
 dbLoadRecords("NDAttributeN.template", "P=$(PREFIX),R=Attr1:8:,PORT=ATTR1,ADDR=7,TIMEOUT=1,NCHANS=$(NCHANS)")
+NDTimeSeriesConfigure("ATTR1_TS", $(QSIZE), 0, "ATTR1", 0)
 dbLoadRecords("NDTimeSeries.template", "P=$(PREFIX),R=Attr1:TS:,PORT=ATTR1_TS,ADDR=0,TIMEOUT=1,NDARRAY_PORT=ATTR1,NDARRAY_ADDR=0,NCHANS=$(NCHANS),ENABLED=1")
 
 # ===== FFT =====

@@ -3,7 +3,7 @@ name = "optics-rs"
 version.workspace = true
 edition.workspace = true
 description = "Rust port of EPICS synApps optics module"
-license.workspace = true
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 

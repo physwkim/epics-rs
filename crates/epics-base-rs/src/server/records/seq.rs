@@ -9,6 +9,12 @@ pub struct SeqRecord {
     pub selm: i16,
     #[field(type = "Short")]
     pub seln: i16,
+    #[field(type = "String")]
+    pub sell: String,
+    #[field(type = "Short")]
+    pub offs: i16,
+    #[field(type = "Short")]
+    pub shft: i16,
     #[field(type = "Double")]
     pub dly1: f64,
     #[field(type = "Double")]
@@ -74,16 +80,41 @@ pub struct SeqRecord {
 impl Default for SeqRecord {
     fn default() -> Self {
         Self {
-            val: 0, selm: 0, seln: 0,
-            dly1: 0.0, dly2: 0.0, dly3: 0.0, dly4: 0.0, dly5: 0.0,
-            dly6: 0.0, dly7: 0.0, dly8: 0.0, dly9: 0.0, dlya: 0.0,
-            dol1: String::new(), dol2: String::new(), dol3: String::new(),
-            dol4: String::new(), dol5: String::new(), dol6: String::new(),
-            dol7: String::new(), dol8: String::new(), dol9: String::new(),
+            val: 0,
+            selm: 0,
+            seln: 0,
+            sell: String::new(),
+            offs: 0,
+            shft: 0,
+            dly1: 0.0,
+            dly2: 0.0,
+            dly3: 0.0,
+            dly4: 0.0,
+            dly5: 0.0,
+            dly6: 0.0,
+            dly7: 0.0,
+            dly8: 0.0,
+            dly9: 0.0,
+            dlya: 0.0,
+            dol1: String::new(),
+            dol2: String::new(),
+            dol3: String::new(),
+            dol4: String::new(),
+            dol5: String::new(),
+            dol6: String::new(),
+            dol7: String::new(),
+            dol8: String::new(),
+            dol9: String::new(),
             dola: String::new(),
-            lnk1: String::new(), lnk2: String::new(), lnk3: String::new(),
-            lnk4: String::new(), lnk5: String::new(), lnk6: String::new(),
-            lnk7: String::new(), lnk8: String::new(), lnk9: String::new(),
+            lnk1: String::new(),
+            lnk2: String::new(),
+            lnk3: String::new(),
+            lnk4: String::new(),
+            lnk5: String::new(),
+            lnk6: String::new(),
+            lnk7: String::new(),
+            lnk8: String::new(),
+            lnk9: String::new(),
             lnka: String::new(),
         }
     }

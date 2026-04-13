@@ -17,6 +17,7 @@ pub mod client;
 pub mod codec;
 pub mod error;
 pub mod pv_request;
+pub mod pvdata;
 pub mod server;
 
 pub use error::{PvaError, PvaResult};
@@ -26,5 +27,5 @@ pub use epics_base_rs::types::{DbFieldType, EpicsValue};
 
 // Re-export spvirit-codec types used in the public API
 pub use spvirit_codec::spvd_decode::{
-    DecodedValue, FieldDesc, FieldType, PvdDecoder, StructureDesc, TypeCode,
+    DecodedValue, FieldType, PvdDecoder, StructureDesc, TypeCode,
 };

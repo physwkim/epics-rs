@@ -1,7 +1,7 @@
 use epics_base_rs::server::record::Record;
 use epics_base_rs::types::EpicsValue;
-use motor_rs::flags::*;
 use motor_rs::MotorRecord;
+use motor_rs::flags::*;
 
 #[test]
 fn test_default_values() {
@@ -14,7 +14,7 @@ fn test_default_values() {
     assert_eq!(rec.ctrl.spmg, SpmgMode::Go);
     assert_eq!(rec.conv.mres, 1.0);
     assert_eq!(rec.vel.velo, 1.0);
-    assert_eq!(rec.vel.accl, 0.5);
+    assert_eq!(rec.vel.accl, 0.2);
     assert_eq!(rec.retry.rtry, 10);
     assert!(rec.limits.lvio); // default true (no limits set)
 }
@@ -42,7 +42,8 @@ fn test_field_roundtrip_short() {
 #[test]
 fn test_field_roundtrip_string() {
     let mut rec = MotorRecord::new();
-    rec.put_field("EGU", EpicsValue::String("mm".into())).unwrap();
+    rec.put_field("EGU", EpicsValue::String("mm".into()))
+        .unwrap();
     assert_eq!(rec.get_field("EGU"), Some(EpicsValue::String("mm".into())));
 }
 
@@ -144,11 +145,7 @@ fn test_process_motor_info() {
         encoder_position: 10.001,
         done: true,
         moving: false,
-        high_limit: false,
-        low_limit: false,
-        home: false,
-        powered: true,
-        problem: false,
+        ..Default::default()
     };
     rec.process_motor_info(&status);
     assert_eq!(rec.pos.rmp, 10000);
@@ -201,7 +198,10 @@ fn test_absolute_move_sets_dmov_false() {
     assert_eq!(rec.stat.phase, MotionPhase::MainMove);
     assert_eq!(effects.commands.len(), 1);
     assert!(effects.request_poll);
-    assert!(matches!(effects.commands[0], MotorCommand::MoveAbsolute { .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::MoveAbsolute { .. }
+    ));
 }
 
 #[test]
@@ -234,7 +234,13 @@ fn test_jog_start_stop() {
     assert!(!rec.stat.dmov);
     assert_eq!(rec.stat.phase, MotionPhase::Jog);
     assert!(rec.stat.mip.contains(MipFlags::JOGF));
-    assert!(matches!(effects.commands[0], MotorCommand::MoveVelocity { direction: true, .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::MoveVelocity {
+            direction: true,
+            ..
+        }
+    ));
 
     // Stop jog
     rec.ctrl.jogf = false;
@@ -254,7 +260,10 @@ fn test_home_forward() {
     assert_eq!(rec.stat.phase, MotionPhase::Homing);
     assert!(rec.stat.mip.contains(MipFlags::HOMF));
     assert!(!rec.ctrl.homf); // pulse cleared
-    assert!(matches!(effects.commands[0], MotorCommand::Home { forward: true, .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::Home { forward: true, .. }
+    ));
 }
 
 #[test]
@@ -346,11 +355,16 @@ fn test_ntm_retarget_direction_change() {
     rec.retry.rdbd = 0.0;
     rec.internal.ldvl = 10.0;
     rec.pos.drbv = 5.0;
+    // Set up active motion state (required for NTM)
+    rec.stat.mip = MipFlags::MOVE;
+    rec.stat.phase = MotionPhase::MainMove;
+    // CDIR: moving positive (dval > drbv)
+    rec.stat.cdir = true;
 
     // Same direction, farther -> ExtendMove
     assert_eq!(rec.handle_retarget(15.0), RetargetAction::ExtendMove);
 
-    // Opposite direction -> StopAndReplan
+    // Opposite direction (negative, deadband=0) -> StopAndReplan
     assert_eq!(rec.handle_retarget(-5.0), RetargetAction::StopAndReplan);
 }
 
@@ -409,7 +423,7 @@ fn test_ueip_false_uses_motor_position() {
     // UEIP=false: uses RMP path with MRES
     assert_eq!(rec.pos.rmp, 10000);
     assert_eq!(rec.pos.rrbv, 10000); // RMP, not REP
-    assert_eq!(rec.pos.drbv, 10.0);  // rrbv * mres
+    assert_eq!(rec.pos.drbv, 10.0); // rrbv * mres
 }
 
 #[test]

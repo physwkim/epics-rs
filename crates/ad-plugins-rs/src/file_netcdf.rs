@@ -14,12 +14,23 @@ use netcdf3::{DataSet, FileReader, FileWriter, Version};
 const VAR_NAME: &str = "array_data";
 const DIM_UNLIMITED: &str = "numArrays";
 
+/// Dimension metadata captured from NDArray dimensions.
+struct DimMeta {
+    size: usize,
+    offset: usize,
+    binning: usize,
+    reverse: bool,
+}
+
 /// A single buffered frame captured from an NDArray.
 struct FrameData {
     dims: Vec<usize>,
+    dim_meta: Vec<DimMeta>,
     data: NDDataBuffer,
     data_type: NDDataType,
     attrs: Vec<(String, String)>,
+    unique_id: i32,
+    time_stamp: f64,
 }
 
 /// NetCDF-3 file writer.
@@ -53,17 +64,12 @@ fn nc_data_type(dt: NDDataType) -> ADResult<netcdf3::DataType> {
         NDDataType::Int32 | NDDataType::UInt32 => Ok(netcdf3::DataType::I32),
         NDDataType::Float32 => Ok(netcdf3::DataType::F32),
         NDDataType::Float64 => Ok(netcdf3::DataType::F64),
-        NDDataType::Int64 | NDDataType::UInt64 => Err(ADError::UnsupportedConversion(
-            "NetCDF-3 does not support 64-bit integer types".into(),
-        )),
+        NDDataType::Int64 | NDDataType::UInt64 => Ok(netcdf3::DataType::F64),
     }
 }
 
 /// Write a single frame's data to a fixed-dimension variable.
-fn write_var_data(
-    writer: &mut FileWriter,
-    data: &NDDataBuffer,
-) -> ADResult<()> {
+fn write_var_data(writer: &mut FileWriter, data: &NDDataBuffer) -> ADResult<()> {
     let err = |e: netcdf3::error::WriteError| {
         ADError::UnsupportedConversion(format!("NetCDF write error: {:?}", e))
     };
@@ -82,9 +88,14 @@ fn write_var_data(
         }
         NDDataBuffer::F32(v) => writer.write_var_f32(VAR_NAME, v).map_err(err),
         NDDataBuffer::F64(v) => writer.write_var_f64(VAR_NAME, v).map_err(err),
-        _ => Err(ADError::UnsupportedConversion(
-            "NetCDF-3 does not support 64-bit integer types".into(),
-        )),
+        NDDataBuffer::I64(v) => {
+            let reinterp: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+            writer.write_var_f64(VAR_NAME, &reinterp).map_err(err)
+        }
+        NDDataBuffer::U64(v) => {
+            let reinterp: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+            writer.write_var_f64(VAR_NAME, &reinterp).map_err(err)
+        }
     }
 }
 
@@ -98,23 +109,48 @@ fn write_record_data(
         ADError::UnsupportedConversion(format!("NetCDF write error: {:?}", e))
     };
     match data {
-        NDDataBuffer::I8(v) => writer.write_record_i8(VAR_NAME, record_index, v).map_err(err),
-        NDDataBuffer::U8(v) => writer.write_record_u8(VAR_NAME, record_index, v).map_err(err),
-        NDDataBuffer::I16(v) => writer.write_record_i16(VAR_NAME, record_index, v).map_err(err),
+        NDDataBuffer::I8(v) => writer
+            .write_record_i8(VAR_NAME, record_index, v)
+            .map_err(err),
+        NDDataBuffer::U8(v) => writer
+            .write_record_u8(VAR_NAME, record_index, v)
+            .map_err(err),
+        NDDataBuffer::I16(v) => writer
+            .write_record_i16(VAR_NAME, record_index, v)
+            .map_err(err),
         NDDataBuffer::U16(v) => {
             let reinterp: Vec<i16> = v.iter().map(|&x| x as i16).collect();
-            writer.write_record_i16(VAR_NAME, record_index, &reinterp).map_err(err)
+            writer
+                .write_record_i16(VAR_NAME, record_index, &reinterp)
+                .map_err(err)
         }
-        NDDataBuffer::I32(v) => writer.write_record_i32(VAR_NAME, record_index, v).map_err(err),
+        NDDataBuffer::I32(v) => writer
+            .write_record_i32(VAR_NAME, record_index, v)
+            .map_err(err),
         NDDataBuffer::U32(v) => {
             let reinterp: Vec<i32> = v.iter().map(|&x| x as i32).collect();
-            writer.write_record_i32(VAR_NAME, record_index, &reinterp).map_err(err)
+            writer
+                .write_record_i32(VAR_NAME, record_index, &reinterp)
+                .map_err(err)
         }
-        NDDataBuffer::F32(v) => writer.write_record_f32(VAR_NAME, record_index, v).map_err(err),
-        NDDataBuffer::F64(v) => writer.write_record_f64(VAR_NAME, record_index, v).map_err(err),
-        _ => Err(ADError::UnsupportedConversion(
-            "NetCDF-3 does not support 64-bit integer types".into(),
-        )),
+        NDDataBuffer::F32(v) => writer
+            .write_record_f32(VAR_NAME, record_index, v)
+            .map_err(err),
+        NDDataBuffer::F64(v) => writer
+            .write_record_f64(VAR_NAME, record_index, v)
+            .map_err(err),
+        NDDataBuffer::I64(v) => {
+            let reinterp: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+            writer
+                .write_record_f64(VAR_NAME, record_index, &reinterp)
+                .map_err(err)
+        }
+        NDDataBuffer::U64(v) => {
+            let reinterp: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+            writer
+                .write_record_f64(VAR_NAME, record_index, &reinterp)
+                .map_err(err)
+        }
     }
 }
 
@@ -130,6 +166,16 @@ impl NDFileWriter for NetcdfWriter {
         nc_data_type(array.data.data_type())?;
 
         let dims: Vec<usize> = array.dims.iter().map(|d| d.size).collect();
+        let dim_meta: Vec<DimMeta> = array
+            .dims
+            .iter()
+            .map(|d| DimMeta {
+                size: d.size,
+                offset: d.offset,
+                binning: d.binning,
+                reverse: d.reverse,
+            })
+            .collect();
         let attrs: Vec<(String, String)> = array
             .attributes
             .iter()
@@ -138,9 +184,12 @@ impl NDFileWriter for NetcdfWriter {
 
         self.frames.push(FrameData {
             dims,
+            dim_meta,
             data: array.data.clone(),
             data_type: array.data.data_type(),
             attrs,
+            unique_id: array.unique_id,
+            time_stamp: array.time_stamp,
         });
         Ok(())
     }
@@ -169,18 +218,22 @@ impl NDFileWriter for NetcdfWriter {
         // Build DataSet definition
         let mut ds = DataSet::new();
 
-        // Fixed dimensions: dim0, dim1, ...
+        // Fixed dimensions in reversed order (matching C++ NDFileNetCDF)
+        let ndims = first.dims.len();
         let mut dim_names: Vec<String> = Vec::new();
-        for (i, &size) in first.dims.iter().enumerate() {
+        for i in 0..ndims {
+            let dim_idx = ndims - 1 - i;
             let name = format!("dim{}", i);
-            ds.add_fixed_dim(&name, size).map_err(map_def)?;
+            ds.add_fixed_dim(&name, first.dims[dim_idx])
+                .map_err(map_def)?;
             dim_names.push(name);
         }
 
         // Variable dimensions list
         let var_dims: Vec<String> = if multi {
             // Unlimited dimension first for record variables
-            ds.set_unlimited_dim(DIM_UNLIMITED, self.frames.len()).map_err(map_def)?;
+            ds.set_unlimited_dim(DIM_UNLIMITED, self.frames.len())
+                .map_err(map_def)?;
             let mut v = vec![DIM_UNLIMITED.to_string()];
             v.extend(dim_names.iter().cloned());
             v
@@ -189,7 +242,8 @@ impl NDFileWriter for NetcdfWriter {
         };
 
         let var_dim_refs: Vec<&str> = var_dims.iter().map(|s| s.as_str()).collect();
-        ds.add_var(VAR_NAME, &var_dim_refs, nc_dt).map_err(map_def)?;
+        ds.add_var(VAR_NAME, &var_dim_refs, nc_dt)
+            .map_err(map_def)?;
 
         // Store NDArray attributes as variable attributes on array_data
         // Merge attributes from all frames (first frame wins on duplicates)
@@ -202,18 +256,57 @@ impl NDFileWriter for NetcdfWriter {
             }
         }
 
+        // Per-frame uniqueId and timeStamp record variables for multi-frame files
+        if multi {
+            ds.add_var("uniqueId", &[DIM_UNLIMITED], netcdf3::DataType::I32)
+                .map_err(map_def)?;
+            ds.add_var("timeStamp", &[DIM_UNLIMITED], netcdf3::DataType::F64)
+                .map_err(map_def)?;
+        }
+
         // Global attributes
-        ds.add_global_attr_i32("uniqueId", vec![0]).map_err(map_def)?;
-        ds.add_global_attr_i32("dataType", vec![first.data_type as i32]).map_err(map_def)?;
-        ds.add_global_attr_i32("numArrays", vec![self.frames.len() as i32]).map_err(map_def)?;
+        ds.add_global_attr_i32("uniqueId", vec![first.unique_id])
+            .map_err(map_def)?;
+        ds.add_global_attr_i32("dataType", vec![first.data_type as i32])
+            .map_err(map_def)?;
+        ds.add_global_attr_i32("numArrays", vec![self.frames.len() as i32])
+            .map_err(map_def)?;
+
+        // Dimension metadata global attributes
+        ds.add_global_attr_i32("numArrayDims", vec![ndims as i32])
+            .map_err(map_def)?;
+        let dim_size: Vec<i32> = first.dim_meta.iter().map(|d| d.size as i32).collect();
+        ds.add_global_attr_i32("dimSize", dim_size)
+            .map_err(map_def)?;
+        let dim_offset: Vec<i32> = first.dim_meta.iter().map(|d| d.offset as i32).collect();
+        ds.add_global_attr_i32("dimOffset", dim_offset)
+            .map_err(map_def)?;
+        let dim_binning: Vec<i32> = first.dim_meta.iter().map(|d| d.binning as i32).collect();
+        ds.add_global_attr_i32("dimBinning", dim_binning)
+            .map_err(map_def)?;
+        let dim_reverse: Vec<i32> = first
+            .dim_meta
+            .iter()
+            .map(|d| if d.reverse { 1 } else { 0 })
+            .collect();
+        ds.add_global_attr_i32("dimReverse", dim_reverse)
+            .map_err(map_def)?;
 
         // Write
         let mut writer = FileWriter::open(&path).map_err(map_write)?;
-        writer.set_def(&ds, Version::Classic, 0).map_err(map_write)?;
+        writer
+            .set_def(&ds, Version::Classic, 0)
+            .map_err(map_write)?;
 
         if multi {
             for (i, frame) in self.frames.iter().enumerate() {
                 write_record_data(&mut writer, i, &frame.data)?;
+                writer
+                    .write_record_i32("uniqueId", i, &[frame.unique_id])
+                    .map_err(map_write)?;
+                writer
+                    .write_record_f64("timeStamp", i, &[frame.time_stamp])
+                    .map_err(map_write)?;
             }
         } else {
             write_var_data(&mut writer, &self.frames[0].data)?;
@@ -225,7 +318,9 @@ impl NDFileWriter for NetcdfWriter {
     }
 
     fn read_file(&mut self) -> ADResult<NDArray> {
-        let path = self.current_path.as_ref()
+        let path = self
+            .current_path
+            .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
         let map_read = |e: netcdf3::error::ReadError| {
@@ -237,10 +332,12 @@ impl NDFileWriter for NetcdfWriter {
         // Extract metadata from data_set() before any mutable read calls
         let (is_record, dims, original_type_ordinal) = {
             let ds = reader.data_set();
-            let var = ds.get_var(VAR_NAME)
-                .ok_or_else(|| ADError::UnsupportedConversion(
-                    format!("variable '{}' not found in NetCDF file", VAR_NAME),
-                ))?;
+            let var = ds.get_var(VAR_NAME).ok_or_else(|| {
+                ADError::UnsupportedConversion(format!(
+                    "variable '{}' not found in NetCDF file",
+                    VAR_NAME
+                ))
+            })?;
 
             let is_record = ds.is_record_var(VAR_NAME).unwrap_or(false);
 
@@ -330,11 +427,18 @@ impl NDPluginProcess for NetcdfFileProcessor {
         "NDFileNetCDF"
     }
 
-    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
         self.ctrl.register_params(base)
     }
 
-    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        params: &PluginParamSnapshot,
+    ) -> ParamChangeResult {
         self.ctrl.on_param_change(reason, params)
     }
 }
@@ -426,9 +530,7 @@ mod tests {
 
         writer.current_path = Some(path.clone());
         let read_back = writer.read_file().unwrap();
-        if let (NDDataBuffer::U8(orig), NDDataBuffer::U8(read)) =
-            (&arr.data, &read_back.data)
-        {
+        if let (NDDataBuffer::U8(orig), NDDataBuffer::U8(read)) = (&arr.data, &read_back.data) {
             assert_eq!(orig, read);
         } else {
             panic!("data type mismatch on roundtrip");
@@ -458,9 +560,7 @@ mod tests {
 
         writer.current_path = Some(path.clone());
         let read_back = writer.read_file().unwrap();
-        if let (NDDataBuffer::I16(orig), NDDataBuffer::I16(read)) =
-            (&arr.data, &read_back.data)
-        {
+        if let (NDDataBuffer::I16(orig), NDDataBuffer::I16(read)) = (&arr.data, &read_back.data) {
             assert_eq!(orig, read);
         } else {
             panic!("data type mismatch on roundtrip");
@@ -490,9 +590,7 @@ mod tests {
 
         writer.current_path = Some(path.clone());
         let read_back = writer.read_file().unwrap();
-        if let (NDDataBuffer::F32(orig), NDDataBuffer::F32(read)) =
-            (&arr.data, &read_back.data)
-        {
+        if let (NDDataBuffer::F32(orig), NDDataBuffer::F32(read)) = (&arr.data, &read_back.data) {
             assert_eq!(orig, read);
         } else {
             panic!("data type mismatch on roundtrip");
@@ -562,10 +660,7 @@ mod tests {
         let path = temp_path("nc_attrs");
         let mut writer = NetcdfWriter::new();
 
-        let mut arr = NDArray::new(
-            vec![NDDimension::new(4)],
-            NDDataType::UInt8,
-        );
+        let mut arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
         arr.attributes.add(NDAttribute {
             name: "exposure".into(),
             description: "".into(),

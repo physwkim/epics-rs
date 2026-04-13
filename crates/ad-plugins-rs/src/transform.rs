@@ -34,7 +34,10 @@ impl TransformType {
 
     /// Whether this transform swaps x and y dimensions.
     pub fn swaps_dims(&self) -> bool {
-        matches!(self, Self::Rot90CW | Self::Rot90CCW | Self::FlipDiag | Self::FlipAntiDiag)
+        matches!(
+            self,
+            Self::Rot90CW | Self::Rot90CCW | Self::FlipDiag | Self::FlipAntiDiag
+        )
     }
 }
 
@@ -112,11 +115,15 @@ pub fn apply_transform(src: &NDArray, transform: TransformType) -> NDArray {
 /// Pure transform processing logic.
 pub struct TransformProcessor {
     transform: TransformType,
+    transform_type_idx: Option<usize>,
 }
 
 impl TransformProcessor {
     pub fn new(transform: TransformType) -> Self {
-        Self { transform }
+        Self {
+            transform,
+            transform_type_idx: None,
+        }
     }
 }
 
@@ -130,10 +137,25 @@ impl NDPluginProcess for TransformProcessor {
         "NDPluginTransform"
     }
 
-    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
         use asyn_rs::param::ParamType;
         base.create_param("TRANSFORM_TYPE", ParamType::Int32)?;
+        self.transform_type_idx = base.find_param("TRANSFORM_TYPE");
         Ok(())
+    }
+
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        params: &ad_core_rs::plugin::runtime::PluginParamSnapshot,
+    ) -> ad_core_rs::plugin::runtime::ParamChangeResult {
+        if Some(reason) == self.transform_type_idx {
+            self.transform = TransformType::from_u8(params.value.as_i32() as u8);
+        }
+        ad_core_rs::plugin::runtime::ParamChangeResult::updates(vec![])
     }
 }
 

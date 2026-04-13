@@ -28,11 +28,28 @@ impl ScanScheduler {
     /// Run all scan tasks. Also processes PINI records at startup.
     /// This function runs indefinitely.
     pub async fn run(&self) {
+        self.run_with_hooks(Vec::new()).await;
+    }
+
+    /// Run all scan tasks with post-PINI hooks.
+    ///
+    /// After PINI records are processed, the hooks are invoked before
+    /// periodic scan tasks begin. This ensures pollers start only after
+    /// the initial record processing burst is complete.
+    pub async fn run_with_hooks(&self, hooks: Vec<Box<dyn FnOnce() + Send>>) {
         // Process PINI records at startup (with full link chain)
         let pini_records = self.db.pini_records().await;
         for name in &pini_records {
             let mut visited = HashSet::new();
-            let _ = self.db.process_record_with_links(name, &mut visited, 0).await;
+            let _ = self
+                .db
+                .process_record_with_links(name, &mut visited, 0)
+                .await;
+        }
+
+        // Run after-init hooks (start pollers, etc.)
+        for hook in hooks {
+            hook();
         }
 
         // Spawn a task for each periodic scan rate

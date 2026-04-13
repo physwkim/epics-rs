@@ -133,23 +133,17 @@ fn rbv_with_dir_neg() {
 }
 
 #[test]
-fn movn_reflects_phase_and_driver() {
+fn movn_reflects_c_logic() {
     let mut rec = make_record();
     rec.conv.mres = 0.001;
 
-    // Idle + not moving → MOVN=false
-    rec.stat.phase = MotionPhase::Idle;
-    let status = make_status(0.0, 0.0);
+    // C: MOVN is false if ls_active || DONE || PROBLEM
+    // Idle + done=true → MOVN=false
+    let status = make_status(0.0, 0.0); // done=true by default
     rec.process_motor_info(&status);
     assert!(!rec.stat.movn);
 
-    // Active phase + not moving → MOVN=true
-    rec.stat.phase = MotionPhase::MainMove;
-    rec.process_motor_info(&status);
-    assert!(rec.stat.movn);
-
-    // Idle + driver moving → MOVN=true
-    rec.stat.phase = MotionPhase::Idle;
+    // Moving + done=false + no limits → MOVN=true
     let moving = MotorStatus {
         moving: true,
         done: false,
@@ -157,4 +151,25 @@ fn movn_reflects_phase_and_driver() {
     };
     rec.process_motor_info(&moving);
     assert!(rec.stat.movn);
+
+    // Moving but limit switch active in direction of motion → MOVN=false
+    rec.stat.cdir = true; // moving positive
+    let limit_hit = MotorStatus {
+        moving: true,
+        done: false,
+        high_limit: true, // positive limit active
+        ..Default::default()
+    };
+    rec.process_motor_info(&limit_hit);
+    assert!(!rec.stat.movn);
+
+    // PROBLEM → MOVN=false even if moving
+    let problem = MotorStatus {
+        moving: true,
+        done: false,
+        problem: true,
+        ..Default::default()
+    };
+    rec.process_motor_info(&problem);
+    assert!(!rec.stat.movn);
 }

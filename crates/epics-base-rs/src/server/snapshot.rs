@@ -20,6 +20,11 @@ pub struct DisplayInfo {
     pub upper_warning_limit: f64,
     pub lower_warning_limit: f64,
     pub lower_alarm_limit: f64,
+    /// Display format hint (0=Default, 1=String, 2=Binary, 3=Decimal,
+    /// 4=Hex, 5=Exponential, 6=Engineering). From record's Q:form info tag.
+    pub form: i16,
+    /// Record description (DESC field).
+    pub description: String,
 }
 
 /// Control limits (DRVH/DRVL for output records, or HOPR/LOPR).
@@ -44,6 +49,8 @@ pub struct Snapshot {
     pub display: Option<DisplayInfo>,
     pub control: Option<ControlInfo>,
     pub enums: Option<EnumInfo>,
+    /// Timestamp user tag (from Q:time:tag info, nsec LSB splitting).
+    pub user_tag: i32,
 }
 
 impl Snapshot {
@@ -56,6 +63,7 @@ impl Snapshot {
             display: None,
             control: None,
             enums: None,
+            user_tag: 0,
         }
     }
 }
@@ -90,12 +98,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_construction() {
-        let snap = Snapshot::new(
-            EpicsValue::Double(42.0),
-            0,
-            0,
-            SystemTime::UNIX_EPOCH,
-        );
+        let snap = Snapshot::new(EpicsValue::Double(42.0), 0, 0, SystemTime::UNIX_EPOCH);
         assert_eq!(snap.alarm.status, 0);
         assert_eq!(snap.alarm.severity, 0);
         assert!(snap.display.is_none());
@@ -105,12 +108,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_with_metadata() {
-        let mut snap = Snapshot::new(
-            EpicsValue::Double(3.14),
-            1,
-            2,
-            SystemTime::UNIX_EPOCH,
-        );
+        let mut snap = Snapshot::new(EpicsValue::Double(3.14), 1, 2, SystemTime::UNIX_EPOCH);
         snap.display = Some(DisplayInfo {
             units: "degC".to_string(),
             precision: 3,
@@ -120,6 +118,7 @@ mod tests {
             upper_warning_limit: 80.0,
             lower_warning_limit: -20.0,
             lower_alarm_limit: -40.0,
+            ..Default::default()
         });
         snap.control = Some(ControlInfo {
             upper_ctrl_limit: 100.0,

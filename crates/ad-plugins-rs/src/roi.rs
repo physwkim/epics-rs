@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
-use ad_core_rs::plugin::runtime::{NDPluginProcess, ParamUpdate, PluginParamSnapshot, ProcessResult};
+use ad_core_rs::plugin::runtime::{
+    NDPluginProcess, ParamUpdate, PluginParamSnapshot, ProcessResult,
+};
 use asyn_rs::param::ParamType;
 use asyn_rs::port::PortDriverBase;
 
@@ -20,7 +22,14 @@ pub struct ROIDimConfig {
 
 impl Default for ROIDimConfig {
     fn default() -> Self {
-        Self { min: 0, size: 0, bin: 1, reverse: false, enable: true, auto_size: false }
+        Self {
+            min: 0,
+            size: 0,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        }
     }
 }
 
@@ -46,7 +55,11 @@ pub struct ROIConfig {
 impl Default for ROIConfig {
     fn default() -> Self {
         Self {
-            dims: [ROIDimConfig::default(), ROIDimConfig::default(), ROIDimConfig::default()],
+            dims: [
+                ROIDimConfig::default(),
+                ROIDimConfig::default(),
+                ROIDimConfig::default(),
+            ],
             data_type: None,
             enable_scale: false,
             scale: 1.0,
@@ -104,14 +117,14 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
     let src_y = src.dims[1].size;
 
     // Resolve effective min/size for X dimension
+    // C++: when autoSize, size = full dimension size (src_dim), offset is clamped later
     let (eff_x_min, eff_x_size) = if !config.dims[0].enable {
         (0, src_x)
     } else if config.dims[0].auto_size {
-        let min = config.dims[0].min.min(src_x);
-        (min, src_x.saturating_sub(min))
+        (config.dims[0].min.min(src_x), src_x)
     } else {
         let min = config.dims[0].min.min(src_x);
-        let size = config.dims[0].size.min(src_x - min);
+        let size = config.dims[0].size.min(src_x.saturating_sub(min));
         (min, size)
     };
 
@@ -119,11 +132,10 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
     let (eff_y_min, eff_y_size) = if !config.dims[1].enable {
         (0, src_y)
     } else if config.dims[1].auto_size {
-        let min = config.dims[1].min.min(src_y);
-        (min, src_y.saturating_sub(min))
+        (config.dims[1].min.min(src_y), src_y)
     } else {
         let min = config.dims[1].min.min(src_y);
-        let size = config.dims[1].size.min(src_y - min);
+        let size = config.dims[1].size.min(src_y.saturating_sub(min));
         (min, size)
     };
 
@@ -133,14 +145,22 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
         AutoCenter::None => (eff_x_min, eff_y_min),
         AutoCenter::CenterOfMass => {
             let (cx, cy) = find_centroid_2d(&src.data, src_x, src_y);
-            let mx = cx.saturating_sub(eff_x_size / 2).min(src_x.saturating_sub(eff_x_size));
-            let my = cy.saturating_sub(eff_y_size / 2).min(src_y.saturating_sub(eff_y_size));
+            let mx = cx
+                .saturating_sub(eff_x_size / 2)
+                .min(src_x.saturating_sub(eff_x_size));
+            let my = cy
+                .saturating_sub(eff_y_size / 2)
+                .min(src_y.saturating_sub(eff_y_size));
             (mx, my)
         }
         AutoCenter::PeakPosition => {
             let (px, py) = find_peak_2d(&src.data, src_x, src_y);
-            let mx = px.saturating_sub(eff_x_size / 2).min(src_x.saturating_sub(eff_x_size));
-            let my = py.saturating_sub(eff_y_size / 2).min(src_y.saturating_sub(eff_y_size));
+            let mx = px
+                .saturating_sub(eff_x_size / 2)
+                .min(src_x.saturating_sub(eff_x_size));
+            let my = py
+                .saturating_sub(eff_y_size / 2)
+                .min(src_y.saturating_sub(eff_y_size));
             (mx, my)
         }
     };
@@ -167,21 +187,33 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
             for oy in 0..out_y {
                 for ox in 0..out_x {
                     let mut sum = 0.0f64;
-                    let mut count = 0usize;
+                    let mut _count = 0usize;
                     for by in 0..bin_y {
                         for bx in 0..bin_x {
                             let sx = roi_x_min + ox * bin_x + bx;
                             let sy = roi_y_min + oy * bin_y + by;
                             if sx < src_x && sy < src_y {
                                 sum += $vec[sy * src_x + sx] as f64;
-                                count += 1;
+                                _count += 1;
                             }
                         }
                     }
-                    let val = if count > 0 { sum / count as f64 } else { 0.0 };
-                    let idx = if config.dims[0].reverse { out_x - 1 - ox } else { ox }
-                        + if config.dims[1].reverse { out_y - 1 - oy } else { oy } * out_x;
-                    let scaled = if config.enable_scale { val * config.scale } else { val };
+                    // C++ sums binned pixels (no averaging); scale is a divisor
+                    let val = sum;
+                    let idx = if config.dims[0].reverse {
+                        out_x - 1 - ox
+                    } else {
+                        ox
+                    } + if config.dims[1].reverse {
+                        out_y - 1 - oy
+                    } else {
+                        oy
+                    } * out_x;
+                    let scaled = if config.enable_scale && config.scale != 0.0 {
+                        val / config.scale
+                    } else {
+                        val
+                    };
                     out[idx] = scaled as $T;
                 }
             }
@@ -202,8 +234,14 @@ pub fn extract_roi_2d(src: &NDArray, config: &ROIConfig) -> Option<NDArray> {
         NDDataBuffer::F64(v) => NDDataBuffer::F64(extract!(v, f64, 0.0)),
     };
 
-    let out_dims = if config.collapse_dims && out_y == 1 {
-        vec![NDDimension::new(out_x)]
+    let out_dims = if config.collapse_dims {
+        let all_dims = vec![NDDimension::new(out_x), NDDimension::new(out_y)];
+        let filtered: Vec<NDDimension> = all_dims.into_iter().filter(|d| d.size > 1).collect();
+        if filtered.is_empty() {
+            vec![NDDimension::new(out_x)]
+        } else {
+            filtered
+        }
     } else {
         vec![NDDimension::new(out_x), NDDimension::new(out_y)]
     };
@@ -266,7 +304,10 @@ pub struct ROIProcessor {
 
 impl ROIProcessor {
     pub fn new(config: ROIConfig) -> Self {
-        Self { config, params: ROIParams::default() }
+        Self {
+            config,
+            params: ROIParams::default(),
+        }
     }
 
     /// Access the registered ROI param reasons.
@@ -288,6 +329,7 @@ impl NDPluginProcess for ROIProcessor {
             Some(roi_arr) => ProcessResult {
                 output_arrays: vec![Arc::new(roi_arr)],
                 param_updates: updates,
+                scatter_index: None,
             },
             None => ProcessResult::sink(updates),
         }
@@ -297,24 +339,46 @@ impl NDPluginProcess for ROIProcessor {
         "NDPluginROI"
     }
 
-    fn register_params(&mut self, base: &mut PortDriverBase) -> Result<(), asyn_rs::error::AsynError> {
+    fn register_params(
+        &mut self,
+        base: &mut PortDriverBase,
+    ) -> Result<(), asyn_rs::error::AsynError> {
         let dim_names = ["DIM0", "DIM1", "DIM2"];
         for (i, prefix) in dim_names.iter().enumerate() {
-            self.params.dims[i].min = base.create_param(&format!("{prefix}_MIN"), ParamType::Int32)?;
-            self.params.dims[i].size = base.create_param(&format!("{prefix}_SIZE"), ParamType::Int32)?;
-            self.params.dims[i].bin = base.create_param(&format!("{prefix}_BIN"), ParamType::Int32)?;
-            self.params.dims[i].reverse = base.create_param(&format!("{prefix}_REVERSE"), ParamType::Int32)?;
-            self.params.dims[i].enable = base.create_param(&format!("{prefix}_ENABLE"), ParamType::Int32)?;
-            self.params.dims[i].auto_size = base.create_param(&format!("{prefix}_AUTO_SIZE"), ParamType::Int32)?;
-            self.params.dims[i].max_size = base.create_param(&format!("{prefix}_MAX_SIZE"), ParamType::Int32)?;
+            self.params.dims[i].min =
+                base.create_param(&format!("{prefix}_MIN"), ParamType::Int32)?;
+            self.params.dims[i].size =
+                base.create_param(&format!("{prefix}_SIZE"), ParamType::Int32)?;
+            self.params.dims[i].bin =
+                base.create_param(&format!("{prefix}_BIN"), ParamType::Int32)?;
+            self.params.dims[i].reverse =
+                base.create_param(&format!("{prefix}_REVERSE"), ParamType::Int32)?;
+            self.params.dims[i].enable =
+                base.create_param(&format!("{prefix}_ENABLE"), ParamType::Int32)?;
+            self.params.dims[i].auto_size =
+                base.create_param(&format!("{prefix}_AUTO_SIZE"), ParamType::Int32)?;
+            self.params.dims[i].max_size =
+                base.create_param(&format!("{prefix}_MAX_SIZE"), ParamType::Int32)?;
 
             // Set initial values from config
             base.set_int32_param(self.params.dims[i].min, 0, self.config.dims[i].min as i32)?;
             base.set_int32_param(self.params.dims[i].size, 0, self.config.dims[i].size as i32)?;
             base.set_int32_param(self.params.dims[i].bin, 0, self.config.dims[i].bin as i32)?;
-            base.set_int32_param(self.params.dims[i].reverse, 0, self.config.dims[i].reverse as i32)?;
-            base.set_int32_param(self.params.dims[i].enable, 0, self.config.dims[i].enable as i32)?;
-            base.set_int32_param(self.params.dims[i].auto_size, 0, self.config.dims[i].auto_size as i32)?;
+            base.set_int32_param(
+                self.params.dims[i].reverse,
+                0,
+                self.config.dims[i].reverse as i32,
+            )?;
+            base.set_int32_param(
+                self.params.dims[i].enable,
+                0,
+                self.config.dims[i].enable as i32,
+            )?;
+            base.set_int32_param(
+                self.params.dims[i].auto_size,
+                0,
+                self.config.dims[i].auto_size as i32,
+            )?;
         }
         self.params.enable_scale = base.create_param("ENABLE_SCALE", ParamType::Int32)?;
         self.params.scale = base.create_param("SCALE_VALUE", ParamType::Float64)?;
@@ -325,12 +389,20 @@ impl NDPluginProcess for ROIProcessor {
         base.set_int32_param(self.params.enable_scale, 0, self.config.enable_scale as i32)?;
         base.set_float64_param(self.params.scale, 0, self.config.scale)?;
         base.set_int32_param(self.params.data_type, 0, -1)?; // -1 = Automatic
-        base.set_int32_param(self.params.collapse_dims, 0, self.config.collapse_dims as i32)?;
+        base.set_int32_param(
+            self.params.collapse_dims,
+            0,
+            self.config.collapse_dims as i32,
+        )?;
 
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) -> ad_core_rs::plugin::runtime::ParamChangeResult {
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        snapshot: &PluginParamSnapshot,
+    ) -> ad_core_rs::plugin::runtime::ParamChangeResult {
         let p = &self.params;
         for i in 0..3 {
             if reason == p.dims[i].min {
@@ -364,11 +436,15 @@ impl NDPluginProcess for ROIProcessor {
             self.config.scale = snapshot.value.as_f64();
         } else if reason == p.data_type {
             let v = snapshot.value.as_i32();
-            self.config.data_type = if v < 0 { None } else { NDDataType::from_ordinal(v as u8) };
+            self.config.data_type = if v < 0 {
+                None
+            } else {
+                NDDataType::from_ordinal(v as u8)
+            };
         } else if reason == p.collapse_dims {
             self.config.collapse_dims = snapshot.value.as_i32() != 0;
         }
-            ad_core_rs::plugin::runtime::ParamChangeResult::empty()
+        ad_core_rs::plugin::runtime::ParamChangeResult::empty()
     }
 }
 
@@ -395,25 +471,62 @@ pub fn create_roi_runtime(
     );
     // Recreate param layout on a scratch PortDriverBase to get matching reasons.
     let params = {
-        let mut base = asyn_rs::port::PortDriverBase::new("_scratch_", 1, asyn_rs::port::PortFlags::default());
+        let mut base =
+            asyn_rs::port::PortDriverBase::new("_scratch_", 1, asyn_rs::port::PortFlags::default());
         let _ = ad_core_rs::params::ndarray_driver::NDArrayDriverParams::create(&mut base);
         let _ = ad_core_rs::plugin::params::PluginBaseParams::create(&mut base);
         let mut p = ROIParams::default();
         let dim_names = ["DIM0", "DIM1", "DIM2"];
         for (i, prefix) in dim_names.iter().enumerate() {
-            p.dims[i].min = base.create_param(&format!("{prefix}_MIN"), asyn_rs::param::ParamType::Int32).unwrap();
-            p.dims[i].size = base.create_param(&format!("{prefix}_SIZE"), asyn_rs::param::ParamType::Int32).unwrap();
-            p.dims[i].bin = base.create_param(&format!("{prefix}_BIN"), asyn_rs::param::ParamType::Int32).unwrap();
-            p.dims[i].reverse = base.create_param(&format!("{prefix}_REVERSE"), asyn_rs::param::ParamType::Int32).unwrap();
-            p.dims[i].enable = base.create_param(&format!("{prefix}_ENABLE"), asyn_rs::param::ParamType::Int32).unwrap();
-            p.dims[i].auto_size = base.create_param(&format!("{prefix}_AUTO_SIZE"), asyn_rs::param::ParamType::Int32).unwrap();
-            p.dims[i].max_size = base.create_param(&format!("{prefix}_MAX_SIZE"), asyn_rs::param::ParamType::Int32).unwrap();
+            p.dims[i].min = base
+                .create_param(&format!("{prefix}_MIN"), asyn_rs::param::ParamType::Int32)
+                .unwrap();
+            p.dims[i].size = base
+                .create_param(&format!("{prefix}_SIZE"), asyn_rs::param::ParamType::Int32)
+                .unwrap();
+            p.dims[i].bin = base
+                .create_param(&format!("{prefix}_BIN"), asyn_rs::param::ParamType::Int32)
+                .unwrap();
+            p.dims[i].reverse = base
+                .create_param(
+                    &format!("{prefix}_REVERSE"),
+                    asyn_rs::param::ParamType::Int32,
+                )
+                .unwrap();
+            p.dims[i].enable = base
+                .create_param(
+                    &format!("{prefix}_ENABLE"),
+                    asyn_rs::param::ParamType::Int32,
+                )
+                .unwrap();
+            p.dims[i].auto_size = base
+                .create_param(
+                    &format!("{prefix}_AUTO_SIZE"),
+                    asyn_rs::param::ParamType::Int32,
+                )
+                .unwrap();
+            p.dims[i].max_size = base
+                .create_param(
+                    &format!("{prefix}_MAX_SIZE"),
+                    asyn_rs::param::ParamType::Int32,
+                )
+                .unwrap();
         }
-        p.enable_scale = base.create_param("ENABLE_SCALE", asyn_rs::param::ParamType::Int32).unwrap();
-        p.scale = base.create_param("SCALE_VALUE", asyn_rs::param::ParamType::Float64).unwrap();
-        p.data_type = base.create_param("ROI_DATA_TYPE", asyn_rs::param::ParamType::Int32).unwrap();
-        p.collapse_dims = base.create_param("COLLAPSE_DIMS", asyn_rs::param::ParamType::Int32).unwrap();
-        p.name = base.create_param("NAME", asyn_rs::param::ParamType::Octet).unwrap();
+        p.enable_scale = base
+            .create_param("ENABLE_SCALE", asyn_rs::param::ParamType::Int32)
+            .unwrap();
+        p.scale = base
+            .create_param("SCALE_VALUE", asyn_rs::param::ParamType::Float64)
+            .unwrap();
+        p.data_type = base
+            .create_param("ROI_DATA_TYPE", asyn_rs::param::ParamType::Int32)
+            .unwrap();
+        p.collapse_dims = base
+            .create_param("COLLAPSE_DIMS", asyn_rs::param::ParamType::Int32)
+            .unwrap();
+        p.name = base
+            .create_param("NAME", asyn_rs::param::ParamType::Octet)
+            .unwrap();
         p
     };
     (handle, params, jh)
@@ -429,7 +542,9 @@ mod tests {
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(ref mut v) = arr.data {
-            for i in 0..16 { v[i] = i as u8; }
+            for i in 0..16 {
+                v[i] = i as u8;
+            }
         }
         arr
     }
@@ -438,8 +553,22 @@ mod tests {
     fn test_extract_sub_region() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 1,
+            size: 2,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 1,
+            size: 2,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         assert_eq!(roi.dims[0].size, 2);
@@ -457,15 +586,29 @@ mod tests {
     fn test_binning_2x2() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 2, reverse: false, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 0, size: 4, bin: 2, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 0,
+            size: 4,
+            bin: 2,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 4,
+            bin: 2,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         assert_eq!(roi.dims[0].size, 2);
         assert_eq!(roi.dims[1].size, 2);
         if let NDDataBuffer::U8(ref v) = roi.data {
-            // top-left 2x2: (0+1+4+5)/4 = 2.5 → 2
-            assert_eq!(v[0], 2);
+            // top-left 2x2: sum = 0+1+4+5 = 10 (C++ sums, not averages)
+            assert_eq!(v[0], 10);
         }
     }
 
@@ -473,8 +616,22 @@ mod tests {
     fn test_reverse() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: true, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 0,
+            size: 4,
+            bin: 1,
+            reverse: true,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 1,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         if let NDDataBuffer::U8(ref v) = roi.data {
@@ -489,8 +646,22 @@ mod tests {
     fn test_collapse_dims() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 0,
+            size: 4,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 1,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
         config.collapse_dims = true;
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
@@ -502,15 +673,30 @@ mod tests {
     fn test_scale() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 0,
+            size: 2,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 1,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
         config.enable_scale = true;
         config.scale = 2.0;
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         if let NDDataBuffer::U8(ref v) = roi.data {
-            assert_eq!(v[0], 0); // 0 * 2 = 0
-            assert_eq!(v[1], 2); // 1 * 2 = 2
+            // C++: scale is a divisor
+            assert_eq!(v[0], 0); // 0 / 2 = 0
+            assert_eq!(v[1], 0); // 1 / 2 = 0.5 → 0
         }
     }
 
@@ -518,8 +704,22 @@ mod tests {
     fn test_type_convert() {
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 0, size: 1, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 0,
+            size: 2,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 1,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
         config.data_type = Some(NDDataType::UInt16);
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
@@ -531,8 +731,22 @@ mod tests {
     #[test]
     fn test_roi_processor() {
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 1, size: 2, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 1,
+            size: 2,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 1,
+            size: 2,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
 
         let mut proc = ROIProcessor::new(config);
         let pool = NDArrayPool::new(1_000_000);
@@ -551,19 +765,27 @@ mod tests {
         // 4x4 image, min_x=1 with auto_size => size_x = 4-1 = 3
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 1, size: 0, bin: 1, reverse: false, enable: true, auto_size: true };
-        config.dims[1] = ROIDimConfig { min: 0, size: 0, bin: 1, reverse: false, enable: true, auto_size: true };
+        config.dims[0] = ROIDimConfig {
+            min: 1,
+            size: 0,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: true,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 0,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: true,
+        };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
-        assert_eq!(roi.dims[0].size, 3); // 4 - 1 = 3
-        assert_eq!(roi.dims[1].size, 4); // 4 - 0 = 4
-
-        if let NDDataBuffer::U8(ref v) = roi.data {
-            // First row (y=0): pixels at x=1,2,3 => values 1,2,3
-            assert_eq!(v[0], 1);
-            assert_eq!(v[1], 2);
-            assert_eq!(v[2], 3);
-        }
+        // C++: autoSize uses full dimension size, not src_dim - min
+        assert_eq!(roi.dims[0].size, 4); // full dim size
+        assert_eq!(roi.dims[1].size, 4); // full dim size
     }
 
     #[test]
@@ -571,8 +793,22 @@ mod tests {
         // Disabled dim uses full range: min=0, size=src_dim
         let arr = make_4x4_u8();
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 2, size: 1, bin: 1, reverse: false, enable: false, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 2,
+            size: 1,
+            bin: 1,
+            reverse: false,
+            enable: false,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 4,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
 
         let roi = extract_roi_2d(&arr, &config).unwrap();
         // X dim disabled, so full range: size=4
@@ -588,14 +824,30 @@ mod tests {
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(ref mut v) = arr.data {
-            for i in 0..64 { v[i] = 1; }
+            for i in 0..64 {
+                v[i] = 1;
+            }
             // Place peak at x=6, y=5
             v[5 * 8 + 6] = 255;
         }
 
         let mut config = ROIConfig::default();
-        config.dims[0] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
-        config.dims[1] = ROIDimConfig { min: 0, size: 4, bin: 1, reverse: false, enable: true, auto_size: false };
+        config.dims[0] = ROIDimConfig {
+            min: 0,
+            size: 4,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
+        config.dims[1] = ROIDimConfig {
+            min: 0,
+            size: 4,
+            bin: 1,
+            reverse: false,
+            enable: true,
+            auto_size: false,
+        };
         config.autocenter = AutoCenter::PeakPosition;
 
         let roi = extract_roi_2d(&arr, &config).unwrap();

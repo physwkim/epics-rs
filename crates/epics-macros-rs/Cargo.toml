@@ -3,7 +3,7 @@ name = "epics-macros-rs"
 version.workspace = true
 edition.workspace = true
 description = "Procedural macros for epics-base-rs"
-license.workspace = true
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 
@@ -14,6 +14,7 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+proc-macro-crate = "3"
 
 [dev-dependencies]
 epics-base-rs = { workspace = true }

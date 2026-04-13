@@ -109,6 +109,10 @@ pub struct PortDriverBase {
     /// Exception sink injected by [`crate::manager::PortManager`] on registration.
     pub exception_sink: Option<Arc<ExceptionManager>>,
     pub options: HashMap<String, String>,
+    /// Input EOS sequence (max 2 bytes). Used by EOS interpose and drivers.
+    pub input_eos: Vec<u8>,
+    /// Output EOS sequence (max 2 bytes). Used by EOS interpose and drivers.
+    pub output_eos: Vec<u8>,
     pub interpose_octet: OctetInterposeStack,
     pub trace: Option<Arc<TraceManager>>,
     /// Per-address device state for multi-device ports.
@@ -130,6 +134,8 @@ impl PortDriverBase {
             auto_connect: true,
             exception_sink: None,
             options: HashMap::new(),
+            input_eos: Vec::new(),
+            output_eos: Vec::new(),
             interpose_octet: OctetInterposeStack::new(),
             trace: None,
             device_states: HashMap::new(),
@@ -146,6 +152,21 @@ impl PortDriverBase {
                 addr,
             });
         }
+    }
+
+    /// Query whether the port is connected.
+    pub fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Query whether the port is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Query whether auto-connect is enabled.
+    pub fn is_auto_connect(&self) -> bool {
+        self.auto_connect
     }
 
     /// Check that the port is both enabled and connected.
@@ -196,7 +217,9 @@ impl PortDriverBase {
 
     /// Check if a specific device address is connected.
     pub fn is_device_connected(&self, addr: i32) -> bool {
-        self.device_states.get(&addr).map_or(true, |ds| ds.connected)
+        self.device_states
+            .get(&addr)
+            .map_or(true, |ds| ds.connected)
     }
 
     /// Set a specific device address as connected.
@@ -233,7 +256,9 @@ impl PortDriverBase {
 
     /// Get current timestamp from the registered source, or SystemTime::now().
     pub fn current_timestamp(&self) -> SystemTime {
-        self.timestamp_source.as_ref().map_or_else(SystemTime::now, |f| f())
+        self.timestamp_source
+            .as_ref()
+            .map_or_else(SystemTime::now, |f| f())
     }
 
     pub fn create_param(&mut self, name: &str, param_type: ParamType) -> AsynResult<usize> {
@@ -296,24 +321,98 @@ impl PortDriverBase {
         self.params.get_enum(index, addr)
     }
 
-    pub fn set_enum_index_param(&mut self, index: usize, addr: i32, value: usize) -> AsynResult<()> {
+    pub fn set_enum_index_param(
+        &mut self,
+        index: usize,
+        addr: i32,
+        value: usize,
+    ) -> AsynResult<()> {
         self.params.set_enum_index(index, addr, value)
     }
 
-    pub fn set_enum_choices_param(&mut self, index: usize, addr: i32, choices: Arc<[EnumEntry]>) -> AsynResult<()> {
+    pub fn set_enum_choices_param(
+        &mut self,
+        index: usize,
+        addr: i32,
+        choices: Arc<[EnumEntry]>,
+    ) -> AsynResult<()> {
         self.params.set_enum_choices(index, addr, choices)
     }
 
-    pub fn get_generic_pointer_param(&self, index: usize, addr: i32) -> AsynResult<Arc<dyn Any + Send + Sync>> {
+    pub fn get_generic_pointer_param(
+        &self,
+        index: usize,
+        addr: i32,
+    ) -> AsynResult<Arc<dyn Any + Send + Sync>> {
         self.params.get_generic_pointer(index, addr)
     }
 
-    pub fn set_generic_pointer_param(&mut self, index: usize, addr: i32, value: Arc<dyn Any + Send + Sync>) -> AsynResult<()> {
+    pub fn set_generic_pointer_param(
+        &mut self,
+        index: usize,
+        addr: i32,
+        value: Arc<dyn Any + Send + Sync>,
+    ) -> AsynResult<()> {
         self.params.set_generic_pointer(index, addr, value)
     }
 
-    pub fn set_param_timestamp(&mut self, index: usize, addr: i32, ts: SystemTime) -> AsynResult<()> {
+    pub fn set_param_timestamp(
+        &mut self,
+        index: usize,
+        addr: i32,
+        ts: SystemTime,
+    ) -> AsynResult<()> {
         self.params.set_timestamp(index, addr, ts)
+    }
+
+    pub fn set_param_status(
+        &mut self,
+        index: usize,
+        addr: i32,
+        status: AsynStatus,
+        alarm_status: u16,
+        alarm_severity: u16,
+    ) -> AsynResult<()> {
+        self.params
+            .set_param_status(index, addr, status, alarm_status, alarm_severity)
+    }
+
+    pub fn get_param_status(&self, index: usize, addr: i32) -> AsynResult<(AsynStatus, u16, u16)> {
+        self.params.get_param_status(index, addr)
+    }
+
+    /// Detailed parameter report matching C asynPortDriver::reportParams.
+    pub fn report_params(&self, level: i32) {
+        eprintln!("  Number of parameters is {}", self.params.len());
+        if level < 1 {
+            return;
+        }
+        for i in 0..self.params.len() {
+            let name = self.params.param_name(i).unwrap_or("?");
+            let ptype = self
+                .params
+                .param_type(i)
+                .map(|t| format!("{t:?}"))
+                .unwrap_or("?".into());
+            if level >= 2 {
+                for addr in 0..self.max_addr.max(1) {
+                    let val = self
+                        .params
+                        .get_value(i, addr as i32)
+                        .map(|v| format!("{v:?}"))
+                        .unwrap_or("undefined".into());
+                    let (status, alarm_st, alarm_sev) = self
+                        .params
+                        .get_param_status(i, addr as i32)
+                        .unwrap_or((AsynStatus::Success, 0, 0));
+                    eprintln!(
+                        "  param[{i}] name={name} type={ptype} addr={addr} val={val} status={status:?} alarm=({alarm_st},{alarm_sev})"
+                    );
+                }
+            } else {
+                eprintln!("  param[{i}] name={name} type={ptype}");
+            }
+        }
     }
 
     /// Push an interpose layer onto the octet I/O stack.
@@ -333,11 +432,16 @@ impl PortDriverBase {
         for reason in changed {
             let value = self.params.get_value(reason, addr)?.clone();
             let ts = self.params.get_timestamp(reason, addr)?.unwrap_or(now);
+            let uint32_mask = self
+                .params
+                .get_uint32_interrupt_mask(reason, addr)
+                .unwrap_or(0);
             self.interrupts.notify(InterruptValue {
                 reason,
                 addr,
                 value,
                 timestamp: ts,
+                uint32_changed_mask: uint32_mask,
             });
         }
         Ok(())
@@ -351,11 +455,16 @@ impl PortDriverBase {
             let now = self.current_timestamp();
             let value = self.params.get_value(reason, addr)?.clone();
             let ts = self.params.get_timestamp(reason, addr)?.unwrap_or(now);
+            let uint32_mask = self
+                .params
+                .get_uint32_interrupt_mask(reason, addr)
+                .unwrap_or(0);
             self.interrupts.notify(InterruptValue {
                 reason,
                 addr,
                 value,
                 timestamp: ts,
+                uint32_changed_mask: uint32_mask,
             });
         }
         Ok(())
@@ -435,33 +544,32 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn get_option(&self, key: &str) -> AsynResult<String> {
-        self.base().options.get(key)
+        self.base()
+            .options
+            .get(key)
             .cloned()
             .ok_or_else(|| AsynError::OptionNotFound(key.to_string()))
     }
 
     fn set_option(&mut self, key: &str, value: &str) -> AsynResult<()> {
-        self.base_mut().options.insert(key.to_string(), value.to_string());
+        self.base_mut()
+            .options
+            .insert(key.to_string(), value.to_string());
         Ok(())
     }
 
     fn report(&self, level: i32) {
         let base = self.base();
         eprintln!("Port: {}", base.port_name);
-        eprintln!("  connected: {}, max_addr: {}, params: {}, options: {}",
-            base.connected, base.max_addr, base.params.len(), base.options.len());
+        eprintln!(
+            "  connected: {}, max_addr: {}, params: {}, options: {}",
+            base.connected,
+            base.max_addr,
+            base.params.len(),
+            base.options.len()
+        );
         if level >= 1 {
-            for i in 0..base.params.len() {
-                if let (Some(name), Some(ptype)) = (base.params.param_name(i), base.params.param_type(i)) {
-                    if level >= 3 {
-                        let val = base.params.get_value(i, 0)
-                            .map(|v| format!("{v:?}")).unwrap_or("?".into());
-                        eprintln!("  param[{i}]: {name} ({ptype:?}) = {val}");
-                    } else {
-                        eprintln!("  param[{i}]: {name} ({ptype:?})");
-                    }
-                }
-            }
+            base.report_params(level.saturating_sub(1));
         }
         if level >= 2 {
             for (k, v) in &base.options {
@@ -472,13 +580,15 @@ pub trait PortDriver: Send + Sync + 'static {
 
     // --- Scalar I/O (cache-based defaults, timeout not applicable) ---
 
+    // Cache-based defaults do NOT check connection state (C parity).
+    // The port actor checks check_ready_addr() before dispatching, matching
+    // C asyn where asynManager checks connection before calling the driver.
+
     fn read_int32(&mut self, user: &AsynUser) -> AsynResult<i32> {
-        self.base().check_ready()?;
         self.base().params.get_int32(user.reason, user.addr)
     }
 
     fn write_int32(&mut self, user: &mut AsynUser, value: i32) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_int32(user.reason, user.addr, value)?;
@@ -486,16 +596,18 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_int64(&mut self, user: &AsynUser) -> AsynResult<i64> {
-        self.base().check_ready()?;
         self.base().params.get_int64(user.reason, user.addr)
     }
 
     fn write_int64(&mut self, user: &mut AsynUser, value: i64) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_int64(user.reason, user.addr, value)?;
         self.base_mut().call_param_callbacks(user.addr)
+    }
+
+    fn get_bounds_int32(&self, _user: &AsynUser) -> AsynResult<(i32, i32)> {
+        Ok((i32::MIN, i32::MAX))
     }
 
     fn get_bounds_int64(&self, _user: &AsynUser) -> AsynResult<(i64, i64)> {
@@ -503,12 +615,10 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_float64(&mut self, user: &AsynUser) -> AsynResult<f64> {
-        self.base().check_ready()?;
         self.base().params.get_float64(user.reason, user.addr)
     }
 
     fn write_float64(&mut self, user: &mut AsynUser, value: f64) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_float64(user.reason, user.addr, value)?;
@@ -516,7 +626,6 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_octet(&mut self, user: &AsynUser, buf: &mut [u8]) -> AsynResult<usize> {
-        self.base().check_ready()?;
         let s = self.base().params.get_string(user.reason, user.addr)?;
         let bytes = s.as_bytes();
         let n = bytes.len().min(buf.len());
@@ -525,7 +634,6 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn write_octet(&mut self, user: &mut AsynUser, data: &[u8]) -> AsynResult<()> {
-        self.base().check_ready()?;
         let s = String::from_utf8_lossy(data).into_owned();
         self.base_mut()
             .params
@@ -534,7 +642,6 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn read_uint32_digital(&mut self, user: &AsynUser, mask: u32) -> AsynResult<u32> {
-        self.base().check_ready()?;
         let val = self.base().params.get_uint32(user.reason, user.addr)?;
         Ok(val & mask)
     }
@@ -545,7 +652,6 @@ pub trait PortDriver: Send + Sync + 'static {
         value: u32,
         mask: u32,
     ) -> AsynResult<()> {
-        self.base().check_ready()?;
         self.base_mut()
             .params
             .set_uint32(user.reason, user.addr, value, mask)?;
@@ -555,45 +661,56 @@ pub trait PortDriver: Send + Sync + 'static {
     // --- Enum I/O (cache-based defaults) ---
 
     fn read_enum(&mut self, user: &AsynUser) -> AsynResult<(usize, Arc<[EnumEntry]>)> {
-        self.base().check_ready()?;
         self.base().params.get_enum(user.reason, user.addr)
     }
 
     fn write_enum(&mut self, user: &mut AsynUser, index: usize) -> AsynResult<()> {
-        self.base().check_ready()?;
-        self.base_mut().params.set_enum_index(user.reason, user.addr, index)?;
+        self.base_mut()
+            .params
+            .set_enum_index(user.reason, user.addr, index)?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
-    fn write_enum_choices(&mut self, user: &mut AsynUser, choices: Arc<[EnumEntry]>) -> AsynResult<()> {
-        self.base().check_ready()?;
-        self.base_mut().params.set_enum_choices(user.reason, user.addr, choices)?;
+    fn write_enum_choices(
+        &mut self,
+        user: &mut AsynUser,
+        choices: Arc<[EnumEntry]>,
+    ) -> AsynResult<()> {
+        self.base_mut()
+            .params
+            .set_enum_choices(user.reason, user.addr, choices)?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
     // --- GenericPointer I/O (cache-based defaults) ---
 
     fn read_generic_pointer(&mut self, user: &AsynUser) -> AsynResult<Arc<dyn Any + Send + Sync>> {
-        self.base().check_ready()?;
-        self.base().params.get_generic_pointer(user.reason, user.addr)
+        self.base()
+            .params
+            .get_generic_pointer(user.reason, user.addr)
     }
 
-    fn write_generic_pointer(&mut self, user: &mut AsynUser, value: Arc<dyn Any + Send + Sync>) -> AsynResult<()> {
-        self.base().check_ready()?;
-        self.base_mut().params.set_generic_pointer(user.reason, user.addr, value)?;
+    fn write_generic_pointer(
+        &mut self,
+        user: &mut AsynUser,
+        value: Arc<dyn Any + Send + Sync>,
+    ) -> AsynResult<()> {
+        self.base_mut()
+            .params
+            .set_generic_pointer(user.reason, user.addr, value)?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
     // --- Array I/O (default: not supported) ---
 
     fn read_float64_array(&mut self, _user: &AsynUser, _buf: &mut [f64]) -> AsynResult<usize> {
-        Err(AsynError::InterfaceNotSupported(
-            "asynFloat64Array".into(),
-        ))
+        Err(AsynError::InterfaceNotSupported("asynFloat64Array".into()))
     }
 
     fn write_float64_array(&mut self, user: &AsynUser, data: &[f64]) -> AsynResult<()> {
-        self.base_mut().params.set_float64_array(user.reason, user.addr, data.to_vec())?;
+        self.base_mut()
+            .params
+            .set_float64_array(user.reason, user.addr, data.to_vec())?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
@@ -602,7 +719,9 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn write_int32_array(&mut self, user: &AsynUser, data: &[i32]) -> AsynResult<()> {
-        self.base_mut().params.set_int32_array(user.reason, user.addr, data.to_vec())?;
+        self.base_mut()
+            .params
+            .set_int32_array(user.reason, user.addr, data.to_vec())?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
@@ -611,7 +730,9 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn write_int8_array(&mut self, user: &AsynUser, data: &[i8]) -> AsynResult<()> {
-        self.base_mut().params.set_int8_array(user.reason, user.addr, data.to_vec())?;
+        self.base_mut()
+            .params
+            .set_int8_array(user.reason, user.addr, data.to_vec())?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
@@ -620,7 +741,9 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn write_int16_array(&mut self, user: &AsynUser, data: &[i16]) -> AsynResult<()> {
-        self.base_mut().params.set_int16_array(user.reason, user.addr, data.to_vec())?;
+        self.base_mut()
+            .params
+            .set_int16_array(user.reason, user.addr, data.to_vec())?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
@@ -629,7 +752,9 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn write_int64_array(&mut self, user: &AsynUser, data: &[i64]) -> AsynResult<()> {
-        self.base_mut().params.set_int64_array(user.reason, user.addr, data.to_vec())?;
+        self.base_mut()
+            .params
+            .set_int64_array(user.reason, user.addr, data.to_vec())?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
@@ -638,7 +763,9 @@ pub trait PortDriver: Send + Sync + 'static {
     }
 
     fn write_float32_array(&mut self, user: &AsynUser, data: &[f32]) -> AsynResult<()> {
-        self.base_mut().params.set_float32_array(user.reason, user.addr, data.to_vec())?;
+        self.base_mut()
+            .params
+            .set_float32_array(user.reason, user.addr, data.to_vec())?;
         self.base_mut().call_param_callbacks(user.addr)
     }
 
@@ -695,6 +822,46 @@ pub trait PortDriver: Send + Sync + 'static {
         Ok(())
     }
 
+    // --- Octet EOS (delegates to interpose stack by default) ---
+
+    fn set_input_eos(&mut self, eos: &[u8]) -> AsynResult<()> {
+        if eos.len() > 2 {
+            return Err(AsynError::Status {
+                status: AsynStatus::Error,
+                message: format!("illegal eoslen {}", eos.len()),
+            });
+        }
+        self.base_mut().input_eos = eos.to_vec();
+        Ok(())
+    }
+
+    fn get_input_eos(&self) -> Vec<u8> {
+        self.base().input_eos.clone()
+    }
+
+    fn set_output_eos(&mut self, eos: &[u8]) -> AsynResult<()> {
+        if eos.len() > 2 {
+            return Err(AsynError::Status {
+                status: AsynStatus::Error,
+                message: format!("illegal eoslen {}", eos.len()),
+            });
+        }
+        self.base_mut().output_eos = eos.to_vec();
+        Ok(())
+    }
+
+    fn get_output_eos(&self) -> Vec<u8> {
+        self.base().output_eos.clone()
+    }
+
+    // --- Lifecycle ---
+
+    /// Called when the port is being shut down. Drivers override this
+    /// to release hardware resources. Matches C asynPortDriver::shutdownPortDriver().
+    fn shutdown(&mut self) -> AsynResult<()> {
+        Ok(())
+    }
+
     // --- drvUser ---
 
     /// Resolve a driver info string to a parameter index.
@@ -718,8 +885,6 @@ pub trait PortDriver: Send + Sync + 'static {
     fn supports(&self, cap: crate::interfaces::Capability) -> bool {
         self.capabilities().contains(&cap)
     }
-
-    // --- Lifecycle ---
 
     fn init(&mut self) -> AsynResult<()> {
         Ok(())
@@ -813,7 +978,7 @@ mod tests {
     #[test]
     fn test_call_param_callbacks() {
         let mut drv = TestDriver::new();
-        let rx = drv.base_mut().interrupts.subscribe_sync().unwrap();
+        let mut rx = drv.base_mut().interrupts.subscribe_async();
 
         drv.base_mut().set_int32_param(0, 0, 100).unwrap();
         drv.base_mut().set_float64_param(1, 0, 2.0).unwrap();
@@ -829,7 +994,7 @@ mod tests {
     #[test]
     fn test_no_callback_for_unchanged() {
         let mut drv = TestDriver::new();
-        let rx = drv.base_mut().interrupts.subscribe_sync().unwrap();
+        let mut rx = drv.base_mut().interrupts.subscribe_async();
 
         drv.base_mut().set_int32_param(0, 0, 5).unwrap();
         drv.base_mut().call_param_callbacks(0).unwrap();
@@ -879,7 +1044,7 @@ mod tests {
     #[test]
     fn test_callback_uses_param_timestamp() {
         let mut drv = TestDriver::new();
-        let rx = drv.base_mut().interrupts.subscribe_sync().unwrap();
+        let mut rx = drv.base_mut().interrupts.subscribe_async();
 
         let custom_ts = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
         drv.base_mut().set_int32_param(0, 0, 77).unwrap();
@@ -898,16 +1063,30 @@ mod tests {
         let mut base = PortDriverBase::new("test_enum", 1, PortFlags::default());
         base.create_param("MODE", ParamType::Enum).unwrap();
 
-        struct EnumDriver { base: PortDriverBase }
+        struct EnumDriver {
+            base: PortDriverBase,
+        }
         impl PortDriver for EnumDriver {
-            fn base(&self) -> &PortDriverBase { &self.base }
-            fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+            fn base(&self) -> &PortDriverBase {
+                &self.base
+            }
+            fn base_mut(&mut self) -> &mut PortDriverBase {
+                &mut self.base
+            }
         }
 
         let mut drv = EnumDriver { base };
         let choices: Arc<[EnumEntry]> = Arc::from(vec![
-            EnumEntry { string: "Off".into(), value: 0, severity: 0 },
-            EnumEntry { string: "On".into(), value: 1, severity: 0 },
+            EnumEntry {
+                string: "Off".into(),
+                value: 0,
+                severity: 0,
+            },
+            EnumEntry {
+                string: "On".into(),
+                value: 1,
+                severity: 0,
+            },
         ]);
         let mut user = AsynUser::new(0);
         drv.write_enum_choices(&mut user, choices).unwrap();
@@ -923,20 +1102,36 @@ mod tests {
 
         let mut base = PortDriverBase::new("test_enum_cb", 1, PortFlags::default());
         base.create_param("MODE", ParamType::Enum).unwrap();
-        let rx = base.interrupts.subscribe_sync().unwrap();
+        let mut rx = base.interrupts.subscribe_async();
 
-        struct EnumDriver { base: PortDriverBase }
+        struct EnumDriver {
+            base: PortDriverBase,
+        }
         impl PortDriver for EnumDriver {
-            fn base(&self) -> &PortDriverBase { &self.base }
-            fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+            fn base(&self) -> &PortDriverBase {
+                &self.base
+            }
+            fn base_mut(&mut self) -> &mut PortDriverBase {
+                &mut self.base
+            }
         }
 
         let mut drv = EnumDriver { base };
         let choices: Arc<[EnumEntry]> = Arc::from(vec![
-            EnumEntry { string: "A".into(), value: 0, severity: 0 },
-            EnumEntry { string: "B".into(), value: 1, severity: 0 },
+            EnumEntry {
+                string: "A".into(),
+                value: 0,
+                severity: 0,
+            },
+            EnumEntry {
+                string: "B".into(),
+                value: 1,
+                severity: 0,
+            },
         ]);
-        drv.base_mut().set_enum_choices_param(0, 0, choices).unwrap();
+        drv.base_mut()
+            .set_enum_choices_param(0, 0, choices)
+            .unwrap();
         drv.base_mut().set_enum_index_param(0, 0, 1).unwrap();
         drv.base_mut().call_param_callbacks(0).unwrap();
 
@@ -950,10 +1145,16 @@ mod tests {
         let mut base = PortDriverBase::new("test_gp", 1, PortFlags::default());
         base.create_param("PTR", ParamType::GenericPointer).unwrap();
 
-        struct GpDriver { base: PortDriverBase }
+        struct GpDriver {
+            base: PortDriverBase,
+        }
         impl PortDriver for GpDriver {
-            fn base(&self) -> &PortDriverBase { &self.base }
-            fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+            fn base(&self) -> &PortDriverBase {
+                &self.base
+            }
+            fn base_mut(&mut self) -> &mut PortDriverBase {
+                &mut self.base
+            }
         }
 
         let mut drv = GpDriver { base };
@@ -970,17 +1171,25 @@ mod tests {
 
         let mut base = PortDriverBase::new("test_gp_cb", 1, PortFlags::default());
         base.create_param("PTR", ParamType::GenericPointer).unwrap();
-        let rx = base.interrupts.subscribe_sync().unwrap();
+        let mut rx = base.interrupts.subscribe_async();
 
-        struct GpDriver { base: PortDriverBase }
+        struct GpDriver {
+            base: PortDriverBase,
+        }
         impl PortDriver for GpDriver {
-            fn base(&self) -> &PortDriverBase { &self.base }
-            fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+            fn base(&self) -> &PortDriverBase {
+                &self.base
+            }
+            fn base_mut(&mut self) -> &mut PortDriverBase {
+                &mut self.base
+            }
         }
 
         let mut drv = GpDriver { base };
         let data: Arc<dyn std::any::Any + Send + Sync> = Arc::new(vec![1, 2, 3]);
-        drv.base_mut().set_generic_pointer_param(0, 0, data).unwrap();
+        drv.base_mut()
+            .set_generic_pointer_param(0, 0, data)
+            .unwrap();
         drv.base_mut().call_param_callbacks(0).unwrap();
 
         let v = rx.try_recv().unwrap();
@@ -991,15 +1200,25 @@ mod tests {
     #[test]
     fn test_interpose_push_requires_lock() {
         use crate::interpose::{OctetInterpose, OctetNext, OctetReadResult};
-        use std::sync::Arc;
         use parking_lot::Mutex;
+        use std::sync::Arc;
 
         struct NoopInterpose;
         impl OctetInterpose for NoopInterpose {
-            fn read(&mut self, user: &AsynUser, buf: &mut [u8], next: &mut dyn OctetNext) -> AsynResult<OctetReadResult> {
+            fn read(
+                &mut self,
+                user: &AsynUser,
+                buf: &mut [u8],
+                next: &mut dyn OctetNext,
+            ) -> AsynResult<OctetReadResult> {
                 next.read(user, buf)
             }
-            fn write(&mut self, user: &mut AsynUser, data: &[u8], next: &mut dyn OctetNext) -> AsynResult<usize> {
+            fn write(
+                &mut self,
+                user: &mut AsynUser,
+                data: &[u8],
+                next: &mut dyn OctetNext,
+            ) -> AsynResult<usize> {
                 next.write(user, data)
             }
             fn flush(&mut self, user: &mut AsynUser, next: &mut dyn OctetNext) -> AsynResult<()> {
@@ -1011,7 +1230,9 @@ mod tests {
 
         {
             let mut guard = port.lock();
-            guard.base_mut().push_octet_interpose(Box::new(NoopInterpose));
+            guard
+                .base_mut()
+                .push_octet_interpose(Box::new(NoopInterpose));
             assert_eq!(guard.base().interpose_octet.len(), 1);
         }
     }
@@ -1021,10 +1242,16 @@ mod tests {
         let mut base = PortDriverBase::new("test_i64", 1, PortFlags::default());
         base.create_param("BIG", ParamType::Int64).unwrap();
 
-        struct I64Driver { base: PortDriverBase }
+        struct I64Driver {
+            base: PortDriverBase,
+        }
         impl PortDriver for I64Driver {
-            fn base(&self) -> &PortDriverBase { &self.base }
-            fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+            fn base(&self) -> &PortDriverBase {
+                &self.base
+            }
+            fn base_mut(&mut self) -> &mut PortDriverBase {
+                &mut self.base
+            }
         }
 
         let mut drv = I64Driver { base };
@@ -1036,10 +1263,16 @@ mod tests {
     #[test]
     fn test_get_bounds_int64_default() {
         let base = PortDriverBase::new("test_bounds", 1, PortFlags::default());
-        struct BoundsDriver { base: PortDriverBase }
+        struct BoundsDriver {
+            base: PortDriverBase,
+        }
         impl PortDriver for BoundsDriver {
-            fn base(&self) -> &PortDriverBase { &self.base }
-            fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+            fn base(&self) -> &PortDriverBase {
+                &self.base
+            }
+            fn base_mut(&mut self) -> &mut PortDriverBase {
+                &mut self.base
+            }
         }
         let drv = BoundsDriver { base };
         let (lo, hi) = drv.get_bounds_int64(&AsynUser::default()).unwrap();
@@ -1049,11 +1282,15 @@ mod tests {
 
     #[test]
     fn test_per_addr_device_state() {
-        let mut base = PortDriverBase::new("multi", 4, PortFlags {
-            multi_device: true,
-            can_block: false,
-            destructible: true,
-        });
+        let mut base = PortDriverBase::new(
+            "multi",
+            4,
+            PortFlags {
+                multi_device: true,
+                can_block: false,
+                destructible: true,
+            },
+        );
         base.create_param("V", ParamType::Int32).unwrap();
 
         // Default: all connected
@@ -1095,15 +1332,21 @@ mod tests {
     fn test_timestamp_source_in_callbacks() {
         let mut base = PortDriverBase::new("ts_cb", 1, PortFlags::default());
         base.create_param("V", ParamType::Int32).unwrap();
-        let rx = base.interrupts.subscribe_sync().unwrap();
+        let mut rx = base.interrupts.subscribe_async();
 
         let fixed_ts = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(123456);
         base.register_timestamp_source(move || fixed_ts);
 
-        struct TsDriver { base: PortDriverBase }
+        struct TsDriver {
+            base: PortDriverBase,
+        }
         impl PortDriver for TsDriver {
-            fn base(&self) -> &PortDriverBase { &self.base }
-            fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+            fn base(&self) -> &PortDriverBase {
+                &self.base
+            }
+            fn base_mut(&mut self) -> &mut PortDriverBase {
+                &mut self.base
+            }
         }
         let mut drv = TsDriver { base };
         drv.base_mut().set_int32_param(0, 0, 42).unwrap();
@@ -1129,11 +1372,15 @@ mod tests {
 
     #[test]
     fn test_connect_addr() {
-        let mut base = PortDriverBase::new("multi_conn", 4, PortFlags {
-            multi_device: true,
-            can_block: false,
-            destructible: true,
-        });
+        let mut base = PortDriverBase::new(
+            "multi_conn",
+            4,
+            PortFlags {
+                multi_device: true,
+                can_block: false,
+                destructible: true,
+            },
+        );
         base.create_param("V", ParamType::Int32).unwrap();
 
         base.disconnect_addr(1);
@@ -1147,11 +1394,15 @@ mod tests {
 
     #[test]
     fn test_enable_disable_addr() {
-        let mut base = PortDriverBase::new("multi_en", 4, PortFlags {
-            multi_device: true,
-            can_block: false,
-            destructible: true,
-        });
+        let mut base = PortDriverBase::new(
+            "multi_en",
+            4,
+            PortFlags {
+                multi_device: true,
+                can_block: false,
+                destructible: true,
+            },
+        );
         base.create_param("V", ParamType::Int32).unwrap();
 
         base.disable_addr(2);
@@ -1164,11 +1415,15 @@ mod tests {
 
     #[test]
     fn test_port_level_overrides_addr() {
-        let mut base = PortDriverBase::new("multi_override", 4, PortFlags {
-            multi_device: true,
-            can_block: false,
-            destructible: true,
-        });
+        let mut base = PortDriverBase::new(
+            "multi_override",
+            4,
+            PortFlags {
+                multi_device: true,
+                can_block: false,
+                destructible: true,
+            },
+        );
         base.create_param("V", ParamType::Int32).unwrap();
 
         // Port-level disabled overrides addr-level enabled
@@ -1182,11 +1437,15 @@ mod tests {
     fn test_per_addr_exception_announced() {
         use std::sync::atomic::{AtomicI32, Ordering};
 
-        let mut base = PortDriverBase::new("multi_exc", 4, PortFlags {
-            multi_device: true,
-            can_block: false,
-            destructible: true,
-        });
+        let mut base = PortDriverBase::new(
+            "multi_exc",
+            4,
+            PortFlags {
+                multi_device: true,
+                can_block: false,
+                destructible: true,
+            },
+        );
         base.create_param("V", ParamType::Int32).unwrap();
 
         let exc_mgr = Arc::new(crate::exception::ExceptionManager::new());

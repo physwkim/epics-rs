@@ -32,7 +32,10 @@ fn set_mode_val_produces_set_position() {
 
     // Should produce SetPosition command
     assert_eq!(effects.commands.len(), 1);
-    assert!(matches!(effects.commands[0], MotorCommand::SetPosition { .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::SetPosition { .. }
+    ));
 
     // No DMOV change, no phase change
     assert!(rec.stat.dmov);
@@ -55,32 +58,59 @@ fn set_mode_dval_produces_set_position() {
     let effects = rec.plan_motion(CommandSource::Set);
 
     assert_eq!(effects.commands.len(), 1);
-    assert!(matches!(effects.commands[0], MotorCommand::SetPosition { .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::SetPosition { .. }
+    ));
     assert!(rec.stat.dmov);
     assert_eq!(rec.stat.phase, MotionPhase::Idle);
 }
 
 #[test]
-fn dir_change_recalculates_user_coords() {
+fn dir_change_foff_variable_preserves_val() {
     let mut rec = make_record();
     rec.pos.dval = 10.0;
     rec.pos.drbv = 10.0;
     rec.pos.val = 10.0;
     rec.pos.rbv = 10.0;
     rec.pos.off = 0.0;
+    // FOFF defaults to Variable
 
     // Change DIR to Neg
     rec.put_field("DIR", EpicsValue::Short(1)).unwrap();
 
-    // VAL = dir.sign() * DVAL + OFF = -1*10 + 0 = -10
-    assert_eq!(rec.pos.val, -10.0);
-    assert_eq!(rec.pos.rbv, -10.0);
+    // C: FOFF=Variable → OFF is recalculated to preserve VAL
+    // OFF = VAL - dir.sign() * DVAL = 10 - (-1)*10 = 20
+    assert_eq!(rec.pos.val, 10.0); // preserved
+    assert_eq!(rec.pos.off, 20.0);
+    // RBV = dir.sign() * DRBV + OFF = -1*10 + 20 = 10
+    assert_eq!(rec.pos.rbv, 10.0);
     // DVAL, DRBV unchanged
     assert_eq!(rec.pos.dval, 10.0);
     assert_eq!(rec.pos.drbv, 10.0);
     // Limits recalculated
     let (hlm, llm) = (rec.limits.hlm, rec.limits.llm);
     assert!(hlm >= llm);
+}
+
+#[test]
+fn dir_change_foff_frozen_recalculates_val() {
+    let mut rec = make_record();
+    rec.pos.dval = 10.0;
+    rec.pos.drbv = 10.0;
+    rec.pos.val = 10.0;
+    rec.pos.rbv = 10.0;
+    rec.pos.off = 0.0;
+    rec.conv.foff = FreezeOffset::Frozen;
+
+    // Change DIR to Neg
+    rec.put_field("DIR", EpicsValue::Short(1)).unwrap();
+
+    // C: FOFF=Frozen → VAL is recalculated from DVAL
+    // VAL = dir.sign() * DVAL + OFF = -1*10 + 0 = -10
+    assert_eq!(rec.pos.val, -10.0);
+    assert_eq!(rec.pos.rbv, -10.0);
+    assert_eq!(rec.pos.off, 0.0); // unchanged
 }
 
 #[test]
@@ -103,19 +133,19 @@ fn off_change_recalculates_user_coords() {
 }
 
 #[test]
-fn foff_frozen_val_write_preserves_dval() {
+fn foff_frozen_val_write_cascades_normally() {
     let mut rec = make_record();
     rec.conv.foff = FreezeOffset::Frozen;
     rec.pos.val = 10.0;
     rec.pos.dval = 10.0;
     rec.pos.off = 0.0;
 
-    // Write VAL=20: FOFF=Frozen → DVAL stays 10, OFF adjusts
+    // C: FOFF has no effect in non-SET mode -- VAL cascades to DVAL normally
     rec.put_field("VAL", EpicsValue::Double(20.0)).unwrap();
 
-    assert_eq!(rec.pos.dval, 10.0); // preserved
+    assert_eq!(rec.pos.dval, 20.0); // cascaded normally
     assert_eq!(rec.pos.val, 20.0);
-    assert_eq!(rec.pos.off, 10.0); // 20 - 1*10
+    assert_eq!(rec.pos.off, 0.0); // unchanged
 }
 
 #[test]
@@ -129,23 +159,23 @@ fn foff_variable_val_write_changes_dval() {
     rec.put_field("VAL", EpicsValue::Double(20.0)).unwrap();
 
     assert_eq!(rec.pos.dval, 20.0); // changed
-    assert_eq!(rec.pos.off, 0.0);   // unchanged
+    assert_eq!(rec.pos.off, 0.0); // unchanged
 }
 
 #[test]
-fn foff_frozen_dval_write_preserves_val() {
+fn foff_frozen_dval_write_cascades_normally() {
     let mut rec = make_record();
     rec.conv.foff = FreezeOffset::Frozen;
     rec.pos.val = 10.0;
     rec.pos.dval = 5.0;
     rec.pos.off = 5.0;
 
-    // Write DVAL=20: FOFF=Frozen → VAL stays 10, OFF adjusts
+    // C: FOFF has no effect in non-SET mode -- VAL recalculated normally
     rec.put_field("DVAL", EpicsValue::Double(20.0)).unwrap();
 
-    assert_eq!(rec.pos.val, 10.0);  // preserved
+    assert_eq!(rec.pos.val, 25.0); // dial_to_user(20.0, Pos, 5.0)
     assert_eq!(rec.pos.dval, 20.0);
-    assert_eq!(rec.pos.off, -10.0); // 10 - 1*20
+    assert_eq!(rec.pos.off, 5.0); // unchanged
 }
 
 #[test]

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use epics_base_rs::runtime::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use epics_base_rs::runtime::sync::mpsc;
 
 use crate::channel::AccessRights;
 use crate::protocol::*;
@@ -13,6 +13,14 @@ use super::types::{TransportCommand, TransportEvent};
 
 /// Timeout for echo response before declaring connection dead (matches C EPICS CA_ECHO_TIMEOUT).
 const ECHO_TIMEOUT_SECS: u64 = 5;
+
+/// Maximum accumulated TCP read buffer before disconnecting.
+/// Protects against malformed servers declaring huge payloads.
+const MAX_ACCUMULATED: usize = 1024 * 1024; // 1 MB
+
+/// Send buffer backpressure threshold (matches C EPICS flushBlockThreshold).
+/// If more than this many frames are pending, the connection is stalled.
+const SEND_BACKPRESSURE_FRAMES: usize = 4096;
 
 /// Default echo interval in seconds (matches C EPICS CA_CONN_VERIFY_PERIOD).
 /// Overridden by EPICS_CA_CONN_TMO environment variable.
@@ -25,6 +33,10 @@ fn echo_idle_secs() -> u64 {
 
 struct ServerConnection {
     write_tx: mpsc::UnboundedSender<Vec<u8>>,
+    pending_frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Signal read_loop to enter echo_pending mode immediately
+    /// (beacon anomaly → fast dead-connection detection).
+    echo_probe: std::sync::Arc<tokio::sync::Notify>,
     _read_task: tokio::task::JoinHandle<()>,
     _write_task: tokio::task::JoinHandle<()>,
 }
@@ -104,7 +116,12 @@ pub(crate) async fn run_transport_manager(
                 } else {
                     hdr.count = count as u16;
                 }
-                send_frame(&mut connections, server_addr, hdr.to_bytes_extended(), &event_tx);
+                send_frame(
+                    &mut connections,
+                    server_addr,
+                    hdr.to_bytes_extended(),
+                    &event_tx,
+                );
             }
             TransportCommand::Write {
                 sid,
@@ -184,7 +201,12 @@ pub(crate) async fn run_transport_manager(
                 hdr.data_type = data_type;
                 hdr.cid = sid;
                 hdr.available = subid;
-                send_frame(&mut connections, server_addr, hdr.to_bytes().to_vec(), &event_tx);
+                send_frame(
+                    &mut connections,
+                    server_addr,
+                    hdr.to_bytes().to_vec(),
+                    &event_tx,
+                );
             }
             TransportCommand::ClearChannel {
                 cid,
@@ -194,7 +216,38 @@ pub(crate) async fn run_transport_manager(
                 let mut hdr = CaHeader::new(CA_PROTO_CLEAR_CHANNEL);
                 hdr.cid = sid;
                 hdr.available = cid;
-                send_frame(&mut connections, server_addr, hdr.to_bytes().to_vec(), &event_tx);
+                send_frame(
+                    &mut connections,
+                    server_addr,
+                    hdr.to_bytes().to_vec(),
+                    &event_tx,
+                );
+            }
+            TransportCommand::EchoProbe { server_addr } => {
+                // Beacon anomaly detected — wake the read_loop so it
+                // immediately enters echo_pending mode with a 5s timeout
+                // instead of waiting for the 30s idle timeout.
+                if let Some(conn) = connections.get(&server_addr) {
+                    conn.echo_probe.notify_one();
+                }
+            }
+            TransportCommand::EventsOff { server_addr } => {
+                let hdr = CaHeader::new(CA_PROTO_EVENTS_OFF);
+                send_frame(
+                    &mut connections,
+                    server_addr,
+                    hdr.to_bytes().to_vec(),
+                    &event_tx,
+                );
+            }
+            TransportCommand::EventsOn { server_addr } => {
+                let hdr = CaHeader::new(CA_PROTO_EVENTS_ON);
+                send_frame(
+                    &mut connections,
+                    server_addr,
+                    hdr.to_bytes().to_vec(),
+                    &event_tx,
+                );
             }
         }
     }
@@ -206,9 +259,21 @@ fn send_frame(
     frame: Vec<u8>,
     event_tx: &mpsc::UnboundedSender<TransportEvent>,
 ) {
-    let failed = connections
-        .get(&server_addr)
-        .is_some_and(|c| c.write_tx.send(frame).is_err());
+    let failed = if let Some(conn) = connections.get(&server_addr) {
+        let pending = conn
+            .pending_frames
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if pending >= SEND_BACKPRESSURE_FRAMES {
+            eprintln!("CA: {server_addr}: send buffer stalled ({pending} frames pending), closing");
+            true
+        } else {
+            conn.pending_frames
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            conn.write_tx.send(frame).is_err()
+        }
+    } else {
+        false
+    };
     if failed {
         connections.remove(&server_addr);
         let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
@@ -242,6 +307,8 @@ async fn connect_server(
 
     let (reader, write_half) = stream.into_split();
     let (write_tx, write_rx) = mpsc::unbounded_channel();
+    let pending_frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let echo_probe = std::sync::Arc::new(tokio::sync::Notify::new());
 
     // Build initial handshake as a single frame (VERSION + HOST + CLIENT)
     let mut handshake = Vec::new();
@@ -266,13 +333,28 @@ async fn connect_server(
     handshake.extend_from_slice(&user_hdr.to_bytes());
     handshake.extend_from_slice(&user_payload);
 
+    pending_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = write_tx.send(handshake);
 
-    let write_task = epics_base_rs::runtime::task::spawn(write_loop(write_half, write_rx, server_addr, event_tx.clone()));
-    let read_task = epics_base_rs::runtime::task::spawn(read_loop(reader, server_addr, event_tx, write_tx.clone()));
+    let write_task = epics_base_rs::runtime::task::spawn(write_loop(
+        write_half,
+        write_rx,
+        server_addr,
+        event_tx.clone(),
+        pending_frames.clone(),
+    ));
+    let read_task = epics_base_rs::runtime::task::spawn(read_loop(
+        reader,
+        server_addr,
+        event_tx,
+        write_tx.clone(),
+        echo_probe.clone(),
+    ));
 
     Some(ServerConnection {
         write_tx,
+        pending_frames,
+        echo_probe,
         _read_task: read_task,
         _write_task: write_task,
     })
@@ -283,19 +365,31 @@ async fn write_loop(
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
+    pending_frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
     // Send watchdog: if write stalls for 2x echo timeout, declare circuit dead.
     // Matches C EPICS tcpSendWatchdog behavior.
     let send_timeout = Duration::from_secs(ECHO_TIMEOUT_SECS * 2);
     let mut batch = Vec::with_capacity(4096);
     while let Some(frame) = rx.recv().await {
+        let mut drained: usize = 1;
         batch.extend_from_slice(&frame);
         // Drain all pending frames into a single write
         while let Ok(frame) = rx.try_recv() {
             batch.extend_from_slice(&frame);
+            drained += 1;
         }
         match tokio::time::timeout(send_timeout, writer.write_all(&batch)).await {
-            Ok(Ok(())) => batch.clear(),
+            Ok(Ok(())) => {
+                batch.clear();
+                // Saturating: read_loop also sends frames (echo, flow
+                // control) that bypass send_frame's increment.
+                let prev = pending_frames.load(std::sync::atomic::Ordering::Relaxed);
+                pending_frames.store(
+                    prev.saturating_sub(drained),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             Ok(Err(_)) | Err(_) => {
                 let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
                 return;
@@ -309,6 +403,7 @@ async fn read_loop(
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
     write_tx: mpsc::UnboundedSender<Vec<u8>>,
+    echo_probe: std::sync::Arc<tokio::sync::Notify>,
 ) {
     let mut buf = vec![0u8; 8192];
     let mut accumulated = Vec::new();
@@ -318,35 +413,49 @@ async fn read_loop(
     let mut unresponsive_notified = false;
     let mut server_minor_version: u16 = 0;
 
-    // Monitor flow control (C EPICS contiguousMsgCountWhichTriggersFlowControl)
-    let mut contiguous_read_count: u32 = 0;
-    let mut flow_control_active = false;
-    const FLOW_CONTROL_THRESHOLD: u32 = 10;
-
     loop {
-        let timeout = if echo_pending { echo_timeout } else { idle_timeout };
+        let timeout = if echo_pending {
+            echo_timeout
+        } else {
+            idle_timeout
+        };
 
-        let n = match tokio::time::timeout(timeout, reader.read(&mut buf)).await {
+        let read_result = tokio::select! {
+            result = tokio::time::timeout(timeout, reader.read(&mut buf)) => result,
+            () = echo_probe.notified(), if !echo_pending => {
+                // Beacon anomaly — immediately send echo probe and
+                // switch to the short 5s echo timeout.
+                let cmd = if server_minor_version >= 3 {
+                    CA_PROTO_ECHO
+                } else {
+                    CA_PROTO_READ_SYNC
+                };
+                let echo_hdr = CaHeader::new(cmd);
+                if write_tx.send(echo_hdr.to_bytes().to_vec()).is_err() {
+                    let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
+                    return;
+                }
+                echo_pending = true;
+                continue;
+            }
+        };
+        let n = match read_result {
             Ok(Ok(0)) | Ok(Err(_)) => {
                 let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
                 return;
             }
             Ok(Ok(n)) => n,
             Err(_) => {
-                // Timeout expired — we caught up (no contiguous data)
-                contiguous_read_count = 0;
-                if flow_control_active {
-                    let hdr = CaHeader::new(CA_PROTO_EVENTS_ON);
-                    let _ = write_tx.send(hdr.to_bytes().to_vec());
-                    flow_control_active = false;
-                }
-
                 if echo_pending {
                     if !unresponsive_notified {
                         // First echo timeout: mark unresponsive, try one more echo
                         let _ = event_tx.send(TransportEvent::CircuitUnresponsive { server_addr });
                         unresponsive_notified = true;
-                        let cmd = if server_minor_version >= 3 { CA_PROTO_ECHO } else { CA_PROTO_READ_SYNC };
+                        let cmd = if server_minor_version >= 3 {
+                            CA_PROTO_ECHO
+                        } else {
+                            CA_PROTO_READ_SYNC
+                        };
                         let echo_hdr = CaHeader::new(cmd);
                         if write_tx.send(echo_hdr.to_bytes().to_vec()).is_err() {
                             let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
@@ -360,7 +469,11 @@ async fn read_loop(
                 }
                 // Idle timeout — send echo heartbeat
                 // Use READ_SYNC for pre-v4.3 servers that don't understand ECHO
-                let cmd = if server_minor_version >= 3 { CA_PROTO_ECHO } else { CA_PROTO_READ_SYNC };
+                let cmd = if server_minor_version >= 3 {
+                    CA_PROTO_ECHO
+                } else {
+                    CA_PROTO_READ_SYNC
+                };
                 let echo_hdr = CaHeader::new(cmd);
                 if write_tx.send(echo_hdr.to_bytes().to_vec()).is_err() {
                     let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
@@ -378,20 +491,31 @@ async fn read_loop(
             let _ = event_tx.send(TransportEvent::CircuitResponsive { server_addr });
         }
 
-        // Flow control: count contiguous reads without a gap
-        contiguous_read_count += 1;
-        if !flow_control_active && contiguous_read_count >= FLOW_CONTROL_THRESHOLD {
-            let hdr = CaHeader::new(CA_PROTO_EVENTS_OFF);
-            let _ = write_tx.send(hdr.to_bytes().to_vec());
-            flow_control_active = true;
-        }
+        // Automatic CA flow control is intentionally disabled here. The
+        // previous implementation counted TCP reads, which can overshoot badly
+        // on fragmented links and stall remote C IOCs with EVENTS_OFF. A
+        // correct implementation must count parsed monitor messages and resume
+        // based on downstream consumption, not socket read timing.
         accumulated.extend_from_slice(&buf[..n]);
+
+        // Guard against unbounded buffer growth from malformed servers.
+        if accumulated.len() > MAX_ACCUMULATED {
+            eprintln!(
+                "CA: {server_addr}: accumulated TCP buffer exceeded {} bytes, closing",
+                MAX_ACCUMULATED
+            );
+            let _ = event_tx.send(TransportEvent::TcpClosed { server_addr });
+            return;
+        }
 
         let mut offset = 0;
         while offset + CaHeader::SIZE <= accumulated.len() {
             let (hdr, hdr_size) = match CaHeader::from_bytes_extended(&accumulated[offset..]) {
                 Ok(v) => v,
-                Err(_) => break,
+                Err(_) => {
+                    eprintln!("CA: {server_addr}: malformed TCP header, skipping");
+                    break;
+                }
             };
             let actual_post = hdr.actual_postsize();
             let msg_len = hdr_size + align8(actual_post);
@@ -401,6 +525,14 @@ async fn read_loop(
             }
 
             let data_start = offset + hdr_size;
+            let data_end = data_start + actual_post;
+
+            // Defense-in-depth: verify payload is within buffer bounds
+            // even though msg_len check above should guarantee this.
+            if data_end > accumulated.len() {
+                eprintln!("CA: {server_addr}: payload exceeds buffer bounds, skipping");
+                break;
+            }
 
             match hdr.cmmd {
                 CA_PROTO_VERSION => {
@@ -454,14 +586,13 @@ async fn read_loop(
                     });
                 }
                 CA_PROTO_ECHO | CA_PROTO_READ_SYNC => {
-                    // Server-initiated echo (or READ_SYNC response): respond immediately
-                    let echo_hdr = CaHeader::new(CA_PROTO_ECHO);
-                    let _ = write_tx.send(echo_hdr.to_bytes().to_vec());
+                    // Echo response from server — liveness already handled
+                    // above (echo_pending=false).  Do NOT echo back; only
+                    // the server echoes requests.  Responding here would
+                    // create a tight ping-pong loop.
                 }
                 CA_PROTO_CREATE_CH_FAIL => {
-                    let _ = event_tx.send(TransportEvent::ChannelCreateFailed {
-                        cid: hdr.cid,
-                    });
+                    let _ = event_tx.send(TransportEvent::ChannelCreateFailed { cid: hdr.cid });
                 }
                 CA_PROTO_ERROR => {
                     let orig_cmd = if actual_post >= 16 {
@@ -472,7 +603,10 @@ async fn read_loop(
                     };
                     let msg = if actual_post > 16 {
                         let msg_bytes = &accumulated[data_start + 16..data_start + actual_post];
-                        let end = msg_bytes.iter().position(|&b| b == 0).unwrap_or(msg_bytes.len());
+                        let end = msg_bytes
+                            .iter()
+                            .position(|&b| b == 0)
+                            .unwrap_or(msg_bytes.len());
                         String::from_utf8_lossy(&msg_bytes[..end]).to_string()
                     } else {
                         String::new()

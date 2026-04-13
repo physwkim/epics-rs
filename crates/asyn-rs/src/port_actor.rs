@@ -82,7 +82,8 @@ pub(crate) struct PortActor {
     driver: Box<dyn PortDriver>,
     rx: mpsc::Receiver<ActorMessage>,
     heap: BinaryHeap<ActorMessage>,
-    blocked_by: Option<u64>,
+    /// (token, nesting_count) — C parity: blockPortCount with nested lock support.
+    blocked_by: Option<(u64, u32)>,
     pending_while_blocked: Vec<ActorMessage>,
 }
 
@@ -98,6 +99,7 @@ impl PortActor {
     }
 
     /// Run the actor loop. Returns when the channel is closed (all senders dropped).
+    /// Calls `shutdown()` on the driver before returning.
     #[cfg(test)]
     pub fn run(mut self) {
         loop {
@@ -108,7 +110,7 @@ impl PortActor {
                 // No work — block on the channel
                 match self.rx.blocking_recv() {
                     Some(msg) => self.enqueue_message(msg),
-                    None => return,
+                    None => break,
                 }
                 // Drain any more that arrived
                 self.drain_channel();
@@ -117,9 +119,11 @@ impl PortActor {
             // Process one eligible request from the heap
             self.process_one();
         }
+        let _ = self.driver.shutdown();
     }
 
     /// Run the actor loop with a dedicated shutdown channel.
+    /// Calls `shutdown()` on the driver before returning.
     ///
     /// Returns when either:
     /// - The main request channel is closed (all senders dropped)
@@ -139,10 +143,10 @@ impl PortActor {
                         msg = self.rx.recv() => {
                             match msg {
                                 Some(m) => self.enqueue_message(m),
-                                None => return,
+                                None => break,
                             }
                         }
-                        _ = shutdown_rx.recv() => return,
+                        _ = shutdown_rx.recv() => break,
                     }
                     // Drain any more that arrived
                     self.drain_channel();
@@ -152,6 +156,7 @@ impl PortActor {
                 self.process_one();
             }
         });
+        let _ = self.driver.shutdown();
     }
 
     fn drain_channel(&mut self) {
@@ -161,7 +166,7 @@ impl PortActor {
     }
 
     fn enqueue_message(&mut self, msg: ActorMessage) {
-        if let Some(owner) = self.blocked_by {
+        if let Some((owner, _)) = self.blocked_by {
             let is_owner = msg.block_token == Some(owner);
             let is_unblock = matches!(msg.op, RequestOp::UnblockProcess);
             if !is_owner && !is_unblock {
@@ -205,18 +210,33 @@ impl PortActor {
             return;
         }
 
-        let is_connect_op = matches!(op, RequestOp::Connect | RequestOp::Disconnect);
+        let is_connect_op = matches!(
+            op,
+            RequestOp::Connect
+                | RequestOp::Disconnect
+                | RequestOp::ConnectAddr
+                | RequestOp::DisconnectAddr
+                | RequestOp::EnableAddr
+                | RequestOp::DisableAddr
+                | RequestOp::BlockProcess
+                | RequestOp::UnblockProcess
+        );
+        let is_connect_priority = user.priority == QueuePriority::Connect;
 
-        if !is_connect_op {
-            // Auto-connect
-            let should_auto = if self.driver.base().flags.multi_device {
+        // Connect ops and Connect-priority requests bypass enabled/connected checks
+        // (C parity: Connect priority processed even when disabled/disconnected)
+        if !is_connect_op && !is_connect_priority {
+            // Auto-connect: try to reconnect if disconnected and auto_connect is set
+            if self.driver.base().flags.multi_device {
                 let ds = self.driver.base().device_states.get(&user.addr);
-                !ds.map_or(true, |d| d.connected)
-                    && ds.map_or(self.driver.base().auto_connect, |d| d.auto_connect)
-            } else {
-                !self.driver.base().connected && self.driver.base().auto_connect
-            };
-            if should_auto {
+                let dev_disconnected = !ds.map_or(true, |d| d.connected);
+                let dev_auto = ds.map_or(self.driver.base().auto_connect, |d| d.auto_connect);
+                if dev_disconnected && dev_auto {
+                    // For multi-device, auto-connect the specific address
+                    let connect_user = AsynUser::new(user.reason).with_addr(user.addr);
+                    let _ = self.driver.connect_addr(&connect_user);
+                }
+            } else if !self.driver.base().connected && self.driver.base().auto_connect {
                 let _ = self.driver.connect(&AsynUser::default());
             }
 
@@ -312,16 +332,66 @@ impl PortActor {
                 self.driver.disconnect(user)?;
                 Ok(RequestResult::write_ok())
             }
+            RequestOp::ConnectAddr => {
+                self.driver.connect_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::DisconnectAddr => {
+                self.driver.disconnect_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::EnableAddr => {
+                self.driver.enable_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::DisableAddr => {
+                self.driver.disable_addr(user)?;
+                Ok(RequestResult::write_ok())
+            }
+            RequestOp::GetBoundsInt32 => {
+                let (low, high) = self.driver.get_bounds_int32(user)?;
+                Ok(RequestResult::bounds_read(low as i64, high as i64))
+            }
+            RequestOp::GetBoundsInt64 => {
+                let (low, high) = self.driver.get_bounds_int64(user)?;
+                Ok(RequestResult::bounds_read(low, high))
+            }
             RequestOp::BlockProcess => {
                 let token = user.block_token.unwrap_or(user.reason as u64);
-                self.blocked_by = Some(token);
+                if let Some((existing, ref mut count)) = self.blocked_by {
+                    if existing == token {
+                        // C parity: nested lock — increment counter
+                        *count += 1;
+                    } else {
+                        return Err(AsynError::Status {
+                            status: AsynStatus::Error,
+                            message: "port already blocked by another user".into(),
+                        });
+                    }
+                } else {
+                    self.blocked_by = Some((token, 1));
+                }
                 Ok(RequestResult::write_ok())
             }
             RequestOp::UnblockProcess => {
-                self.blocked_by = None;
-                let pending = std::mem::take(&mut self.pending_while_blocked);
-                for msg in pending {
-                    self.heap.push(msg);
+                let token = user.block_token.unwrap_or(user.reason as u64);
+                if let Some((owner, count)) = self.blocked_by {
+                    if owner != token {
+                        // C parity: only the block holder can unblock
+                        return Err(AsynError::Status {
+                            status: AsynStatus::Error,
+                            message: "unblock rejected: not the block holder".into(),
+                        });
+                    }
+                    if count > 1 {
+                        self.blocked_by = Some((owner, count - 1));
+                    } else {
+                        self.blocked_by = None;
+                        let pending = std::mem::take(&mut self.pending_while_blocked);
+                        for msg in pending {
+                            self.heap.push(msg);
+                        }
+                    }
                 }
                 Ok(RequestResult::write_ok())
             }
@@ -397,8 +467,41 @@ impl PortActor {
                 self.driver.write_float32_array(user, data)?;
                 Ok(RequestResult::write_ok())
             }
-            RequestOp::CallParamCallbacks { addr } => {
-                self.driver.base_mut().call_param_callbacks(*addr)?;
+            RequestOp::CallParamCallbacks { addr, updates } => {
+                let base = self.driver.base_mut();
+                for u in updates {
+                    match u {
+                        crate::request::ParamSetValue::Int32 {
+                            reason,
+                            addr,
+                            value,
+                        } => {
+                            let _ = base.set_int32_param(*reason, *addr, *value);
+                        }
+                        crate::request::ParamSetValue::Float64 {
+                            reason,
+                            addr,
+                            value,
+                        } => {
+                            let _ = base.set_float64_param(*reason, *addr, *value);
+                        }
+                        crate::request::ParamSetValue::Octet {
+                            reason,
+                            addr,
+                            value,
+                        } => {
+                            let _ = base.params.set_string(*reason, *addr, value.clone());
+                        }
+                        crate::request::ParamSetValue::Float64Array {
+                            reason,
+                            addr,
+                            value,
+                        } => {
+                            let _ = base.params.set_float64_array(*reason, *addr, value.clone());
+                        }
+                    }
+                }
+                base.call_param_callbacks(*addr)?;
                 Ok(RequestResult::write_ok())
             }
             RequestOp::GetOption { key } => {
@@ -533,12 +636,7 @@ mod tests {
         .unwrap();
 
         let user = AsynUser::new(2).with_timeout(Duration::from_secs(1));
-        let result = send_and_wait(
-            &tx,
-            RequestOp::OctetRead { buf_size: 256 },
-            user,
-        )
-        .unwrap();
+        let result = send_and_wait(&tx, RequestOp::OctetRead { buf_size: 256 }, user).unwrap();
         assert_eq!(&result.data.unwrap()[..5], b"hello");
     }
 
@@ -625,8 +723,9 @@ mod tests {
         user.block_token = Some(42);
         send_and_wait(&tx, RequestOp::Int32Write { value: 99 }, user).unwrap();
 
-        // Unblock
-        let user = AsynUser::new(0).with_timeout(Duration::from_secs(1));
+        // Unblock (must use same token as the block holder)
+        let mut user = AsynUser::new(0).with_timeout(Duration::from_secs(1));
+        user.block_token = Some(42);
         send_and_wait(&tx, RequestOp::UnblockProcess, user).unwrap();
 
         // Non-owner should now work
@@ -637,8 +736,8 @@ mod tests {
 
     #[test]
     fn actor_serialization() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct CountingDriver {
             base: PortDriverBase,
@@ -653,11 +752,7 @@ mod tests {
             fn base_mut(&mut self) -> &mut PortDriverBase {
                 &mut self.base
             }
-            fn io_write_int32(
-                &mut self,
-                _user: &mut AsynUser,
-                value: i32,
-            ) -> AsynResult<()> {
+            fn io_write_int32(&mut self, _user: &mut AsynUser, value: i32) -> AsynResult<()> {
                 let c = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
                 let _ = self.max_concurrent.fetch_max(c, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(1));
@@ -707,7 +802,9 @@ mod tests {
     #[test]
     fn actor_uint32_digital() {
         let mut drv = TestDriver::new();
-        drv.base.create_param("BITS", ParamType::UInt32Digital).unwrap();
+        drv.base
+            .create_param("BITS", ParamType::UInt32Digital)
+            .unwrap();
         let tx = spawn_actor(drv);
 
         let user = AsynUser::new(4).with_timeout(Duration::from_secs(1));
@@ -722,12 +819,7 @@ mod tests {
         .unwrap();
 
         let user = AsynUser::new(4).with_timeout(Duration::from_secs(1));
-        let result = send_and_wait(
-            &tx,
-            RequestOp::UInt32DigitalRead { mask: 0xFF },
-            user,
-        )
-        .unwrap();
+        let result = send_and_wait(&tx, RequestOp::UInt32DigitalRead { mask: 0xFF }, user).unwrap();
         assert_eq!(result.uint_val, Some(0x0F));
     }
 

@@ -4,8 +4,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
 
-use tokio::net::UdpSocket;
 use epics_base_rs::runtime::sync::mpsc;
+use tokio::net::UdpSocket;
 
 use crate::protocol::*;
 
@@ -135,11 +135,9 @@ impl SendBudget {
             return;
         }
         if self.sent_this_window > 0 {
-            let rate =
-                self.responded_this_window as f64 / self.sent_this_window as f64;
+            let rate = self.responded_this_window as f64 / self.sent_this_window as f64;
             if rate > 0.5 {
-                self.frames_per_try =
-                    (self.frames_per_try + 1).min(MAX_FRAMES_PER_TRY);
+                self.frames_per_try = (self.frames_per_try + 1).min(MAX_FRAMES_PER_TRY);
             } else if rate < 0.1 && self.frames_per_try > 1 {
                 self.frames_per_try = 1;
             }
@@ -170,6 +168,12 @@ struct SearchEngineState {
     budget: SendBudget,
     penalty: HashMap<SocketAddr, PenaltyEntry>,
     max_search_period: Duration,
+    /// Sequence number for datagram validation (matches C EPICS
+    /// lastReceivedSeqNo).  Embedded in VERSION header CID field;
+    /// servers echo it back, letting us reject stale responses.
+    dgram_seq: u32,
+    /// Last validated sequence number from a VERSION response.
+    last_valid_seq: Option<u32>,
 }
 
 impl SearchEngineState {
@@ -181,6 +185,8 @@ impl SearchEngineState {
             budget: SendBudget::new(),
             penalty: HashMap::new(),
             max_search_period: parse_max_search_period(),
+            dgram_seq: 0,
+            last_valid_seq: None,
         }
     }
 
@@ -383,15 +389,32 @@ fn handle_udp_response(
         };
 
         match hdr.cmmd {
+            CA_PROTO_VERSION => {
+                // Any VERSION in the datagram marks subsequent SEARCH
+                // responses as fresh.  If the server echoed our
+                // sequenceNoIsValid flag, record the exact seq_no.
+                if hdr.data_type & 0x8000 != 0 {
+                    state.last_valid_seq = Some(hdr.cid);
+                } else {
+                    // Server didn't echo our seq — still accept
+                    // responses in this datagram (older servers,
+                    // or our own Rust IOC, don't echo the flag).
+                    state.last_valid_seq = Some(0);
+                }
+                offset += CaHeader::SIZE + align8(hdr.postsize as usize);
+                continue;
+            }
             CA_PROTO_SEARCH => {
                 let server_port = hdr.data_type;
-                let server_ip = if hdr.cid == 0xFFFFFFFF {
+                // CA v4.8+: cid contains server IP, or 0 (INADDR_ANY)
+                // meaning "use UDP source address" (matches C EPICS
+                // udpiiu.cpp searchRespAction).
+                let server_ip = if hdr.cid == 0 {
                     src.ip()
                 } else {
                     std::net::IpAddr::V4(Ipv4Addr::from(hdr.cid.to_be_bytes()))
                 };
-                let server_addr =
-                    SocketAddr::new(server_ip, server_port as u16);
+                let server_addr = SocketAddr::new(server_ip, server_port as u16);
                 let cid = hdr.available;
 
                 // Check penalty box — skip penalized servers so the channel
@@ -409,14 +432,20 @@ fn handle_udp_response(
                     continue;
                 }
 
+                // Reject stale responses from previous search rounds.
+                // A valid VERSION with our sequence must precede SEARCH
+                // responses in the same datagram.
+                if state.last_valid_seq.is_none() {
+                    offset += CaHeader::SIZE + align8(hdr.postsize as usize);
+                    continue;
+                }
+
                 if let Some(ch) = state.channels.remove(&cid) {
                     state.deadline_set.remove(&(ch.next_deadline, cid));
 
                     // RTT measurement.
                     if let Some(sent_at) = ch.last_sent_at {
-                        let sample = recv_time
-                            .duration_since(sent_at)
-                            .as_secs_f64();
+                        let sample = recv_time.duration_since(sent_at).as_secs_f64();
                         state
                             .rtt_per_path
                             .entry(server_addr)
@@ -426,8 +455,7 @@ fn handle_udp_response(
 
                     state.budget.responded_this_window += 1;
 
-                    let _ = response_tx
-                        .send(SearchResponse::Found { cid, server_addr });
+                    let _ = response_tx.send(SearchResponse::Found { cid, server_addr });
                 }
             }
             _ => {}
@@ -468,10 +496,16 @@ async fn send_due_searches(
         return;
     }
 
-    // VERSION header — one per datagram.
+    // VERSION header — one per datagram.  Embed sequence number in CID
+    // field (with sequenceNoIsValid flag in data_type) so we can reject
+    // stale responses from previous search rounds (matches C EPICS
+    // dgSeqNoAtTimerExpire).
+    state.dgram_seq = state.dgram_seq.wrapping_add(1);
     let version_hdr = {
         let mut h = CaHeader::new(CA_PROTO_VERSION);
         h.count = CA_MINOR_VERSION;
+        h.data_type = 0x8000; // sequenceNoIsValid flag
+        h.cid = state.dgram_seq;
         h.to_bytes()
     };
 
@@ -554,8 +588,7 @@ fn build_search_payload(cid: u32, pv_name: &str) -> Vec<u8> {
     search_hdr.cid = cid;
     search_hdr.available = cid;
 
-    let mut payload =
-        Vec::with_capacity(CaHeader::SIZE + pv_payload.len());
+    let mut payload = Vec::with_capacity(CaHeader::SIZE + pv_payload.len());
     payload.extend_from_slice(&search_hdr.to_bytes());
     payload.extend_from_slice(&pv_payload);
     payload
@@ -585,10 +618,7 @@ fn finalize_due_searches(
             ch.last_sent_at = Some(now);
             ch.lane_index += 1;
             let mut period = lane_period(ch.lane_index, base_rtte, max_period);
-            if ch
-                .fast_rescan_until
-                .is_some_and(|until| now < until)
-            {
+            if ch.fast_rescan_until.is_some_and(|until| now < until) {
                 period = period.min(BEACON_FAST_RESCAN_PERIOD);
             } else {
                 ch.fast_rescan_until = None;
@@ -714,8 +744,7 @@ mod tests {
         budget.frames_per_try = 1;
         budget.sent_this_window = 10;
         budget.responded_this_window = 8; // 80% > 50%
-        budget.window_start =
-            Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
+        budget.window_start = Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
         budget.evaluate(Instant::now());
         assert_eq!(budget.frames_per_try, 2);
     }
@@ -726,8 +755,7 @@ mod tests {
         budget.frames_per_try = 5;
         budget.sent_this_window = 10;
         budget.responded_this_window = 0; // 0% < 10%
-        budget.window_start =
-            Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
+        budget.window_start = Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
         budget.evaluate(Instant::now());
         assert_eq!(budget.frames_per_try, 1);
     }
@@ -738,8 +766,7 @@ mod tests {
         budget.frames_per_try = 3;
         budget.sent_this_window = 10;
         budget.responded_this_window = 3; // 30% — between 10% and 50%
-        budget.window_start =
-            Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
+        budget.window_start = Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
         budget.evaluate(Instant::now());
         assert_eq!(budget.frames_per_try, 3);
     }

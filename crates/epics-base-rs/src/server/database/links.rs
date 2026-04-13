@@ -5,7 +5,7 @@ use crate::runtime::sync::RwLock;
 use crate::server::record::{AlarmSeverity, RecordInstance, ScanType};
 use crate::types::EpicsValue;
 
-use super::{select_link_indices, PvDatabase};
+use super::{PvDatabase, select_link_indices};
 
 /// Alarm state from a link source, used for MS/NMS propagation.
 #[derive(Clone, Copy, Debug)]
@@ -16,14 +16,29 @@ pub(crate) struct LinkAlarm {
 
 impl PvDatabase {
     /// Read a value from a parsed link (DB, Constant, or external Ca/Pva).
-    pub(crate) async fn read_link_value(&self, link: &crate::server::record::ParsedLink) -> Option<EpicsValue> {
+    pub(crate) async fn read_link_value(
+        &self,
+        link: &crate::server::record::ParsedLink,
+    ) -> Option<EpicsValue> {
         match link {
             crate::server::record::ParsedLink::None => None,
-            crate::server::record::ParsedLink::Ca(name) | crate::server::record::ParsedLink::Pva(name) => {
-                self.resolve_external_pv(name).await
-            }
+            crate::server::record::ParsedLink::Ca(name)
+            | crate::server::record::ParsedLink::Pva(name) => self.resolve_external_pv(name).await,
             crate::server::record::ParsedLink::Constant(_) => link.constant_value(),
             crate::server::record::ParsedLink::Db(db) => {
+                // PP: process source record if Passive before reading
+                if db.policy == crate::server::record::LinkProcessPolicy::ProcessPassive {
+                    if let Some(src) = self.get_record(&db.record).await {
+                        let is_passive = src.read().await.common.scan
+                            == crate::server::record::ScanType::Passive;
+                        if is_passive {
+                            let mut visited = std::collections::HashSet::new();
+                            let _ = self
+                                .process_record_with_links(&db.record, &mut visited, 0)
+                                .await;
+                        }
+                    }
+                }
                 let pv_name = if db.field == "VAL" {
                     db.record.clone()
                 } else {
@@ -50,7 +65,10 @@ impl PvDatabase {
                 // Read source record's alarm state
                 let alarm = if let Some(rec) = self.inner.records.read().await.get(&db.record) {
                     let inst = rec.read().await;
-                    Some(LinkAlarm { stat: inst.common.stat, sevr: inst.common.sevr })
+                    Some(LinkAlarm {
+                        stat: inst.common.stat,
+                        sevr: inst.common.sevr,
+                    })
                 } else {
                     None
                 };
@@ -70,6 +88,19 @@ impl PvDatabase {
         match link {
             crate::server::record::ParsedLink::Constant(_) => link.constant_value(),
             crate::server::record::ParsedLink::Db(db) if is_soft => {
+                // PP: process source record if Passive before reading
+                if db.policy == crate::server::record::LinkProcessPolicy::ProcessPassive {
+                    if let Some(src) = self.get_record(&db.record).await {
+                        let is_passive = src.read().await.common.scan
+                            == crate::server::record::ScanType::Passive;
+                        if is_passive {
+                            let mut visited = std::collections::HashSet::new();
+                            let _ = self
+                                .process_record_with_links(&db.record, &mut visited, 0)
+                                .await;
+                        }
+                    }
+                }
                 let pv_name = if db.field == "VAL" {
                     db.record.clone()
                 } else {
@@ -77,7 +108,10 @@ impl PvDatabase {
                 };
                 self.get_pv(&pv_name).await.ok()
             }
-            crate::server::record::ParsedLink::Ca(name) | crate::server::record::ParsedLink::Pva(name) if is_soft => {
+            crate::server::record::ParsedLink::Ca(name)
+            | crate::server::record::ParsedLink::Pva(name)
+                if is_soft =>
+            {
                 self.resolve_external_pv(name).await
             }
             _ => None,
@@ -123,75 +157,188 @@ impl PvDatabase {
             let rtype = instance.record.record_type().to_string();
             match rtype.as_str() {
                 "fanout" => {
-                    let selm = instance.record.get_field("SELM")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
-                    let seln = instance.record.get_field("SELN")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
-                    let links: Vec<String> = ["LNK1","LNK2","LNK3","LNK4","LNK5","LNK6"]
-                        .iter()
-                        .map(|f| instance.record.get_field(f)
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
-                            .unwrap_or_default())
-                        .collect();
-                    (rtype, Some(("fanout".to_string(), selm, seln, links, None::<EpicsValue>)))
+                    let selm = instance
+                        .record
+                        .get_field("SELM")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
+                    let seln = instance
+                        .record
+                        .get_field("SELN")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
+                    let links: Vec<String> = [
+                        "LNK1", "LNK2", "LNK3", "LNK4", "LNK5", "LNK6", "LNK7", "LNK8", "LNK9",
+                        "LNKA", "LNKB", "LNKC", "LNKD", "LNKE", "LNKF",
+                    ]
+                    .iter()
+                    .map(|f| {
+                        instance
+                            .record
+                            .get_field(f)
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                    (
+                        rtype,
+                        Some(("fanout".to_string(), selm, seln, links, None::<EpicsValue>)),
+                    )
                 }
                 "dfanout" => {
-                    let selm = instance.record.get_field("SELM")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
-                    let seln = instance.record.get_field("SELN")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
+                    let selm = instance
+                        .record
+                        .get_field("SELM")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
+                    let seln = instance
+                        .record
+                        .get_field("SELN")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
                     let val = instance.record.val();
-                    let links: Vec<String> = ["OUTA","OUTB","OUTC","OUTD","OUTE","OUTF","OUTG","OUTH"]
-                        .iter()
-                        .map(|f| instance.record.get_field(f)
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
-                            .unwrap_or_default())
-                        .collect();
+                    let links: Vec<String> = [
+                        "OUTA", "OUTB", "OUTC", "OUTD", "OUTE", "OUTF", "OUTG", "OUTH", "OUTI",
+                        "OUTJ", "OUTK", "OUTL", "OUTM", "OUTN", "OUTO", "OUTP",
+                    ]
+                    .iter()
+                    .map(|f| {
+                        instance
+                            .record
+                            .get_field(f)
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
                     (rtype, Some(("dfanout".to_string(), selm, seln, links, val)))
                 }
                 "seq" => {
-                    let selm = instance.record.get_field("SELM")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
-                    let seln = instance.record.get_field("SELN")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
+                    let selm = instance
+                        .record
+                        .get_field("SELM")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
+                    let seln = instance
+                        .record
+                        .get_field("SELN")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
                     // Collect DOL/LNK pairs
-                    let dol_names = ["DOL1","DOL2","DOL3","DOL4","DOL5","DOL6","DOL7","DOL8","DOL9","DOLA"];
-                    let lnk_names = ["LNK1","LNK2","LNK3","LNK4","LNK5","LNK6","LNK7","LNK8","LNK9","LNKA"];
+                    let dol_names = [
+                        "DOL1", "DOL2", "DOL3", "DOL4", "DOL5", "DOL6", "DOL7", "DOL8", "DOL9",
+                        "DOLA",
+                    ];
+                    let lnk_names = [
+                        "LNK1", "LNK2", "LNK3", "LNK4", "LNK5", "LNK6", "LNK7", "LNK8", "LNK9",
+                        "LNKA",
+                    ];
                     let mut pairs = Vec::new();
                     for (dol_f, lnk_f) in dol_names.iter().zip(lnk_names.iter()) {
-                        let dol_str = instance.record.get_field(dol_f)
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                        let dol_str = instance
+                            .record
+                            .get_field(dol_f)
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default();
-                        let lnk_str = instance.record.get_field(lnk_f)
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                        let lnk_str = instance
+                            .record
+                            .get_field(lnk_f)
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default();
                         pairs.push(format!("{}\0{}", dol_str, lnk_str));
                     }
                     (rtype, Some(("seq".to_string(), selm, seln, pairs, None)))
                 }
                 "sseq" => {
-                    let selm = instance.record.get_field("SELM")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
-                    let seln = instance.record.get_field("SELN")
-                        .and_then(|v| v.to_f64()).unwrap_or(0.0) as i16;
+                    let selm = instance
+                        .record
+                        .get_field("SELM")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
+                    let seln = instance
+                        .record
+                        .get_field("SELN")
+                        .and_then(|v| v.to_f64())
+                        .unwrap_or(0.0) as i16;
                     // Collect DOL/LNK pairs (same as seq but also read DO/STR fields)
-                    let dol_names = ["DOL1","DOL2","DOL3","DOL4","DOL5","DOL6","DOL7","DOL8","DOL9","DOLA"];
-                    let lnk_names = ["LNK1","LNK2","LNK3","LNK4","LNK5","LNK6","LNK7","LNK8","LNK9","LNKA"];
-                    let do_names = ["DO1","DO2","DO3","DO4","DO5","DO6","DO7","DO8","DO9","DOA"];
-                    let str_names = ["STR1","STR2","STR3","STR4","STR5","STR6","STR7","STR8","STR9","STRA"];
+                    let dol_names = [
+                        "DOL1", "DOL2", "DOL3", "DOL4", "DOL5", "DOL6", "DOL7", "DOL8", "DOL9",
+                        "DOLA",
+                    ];
+                    let lnk_names = [
+                        "LNK1", "LNK2", "LNK3", "LNK4", "LNK5", "LNK6", "LNK7", "LNK8", "LNK9",
+                        "LNKA",
+                    ];
+                    let do_names = [
+                        "DO1", "DO2", "DO3", "DO4", "DO5", "DO6", "DO7", "DO8", "DO9", "DOA",
+                    ];
+                    let str_names = [
+                        "STR1", "STR2", "STR3", "STR4", "STR5", "STR6", "STR7", "STR8", "STR9",
+                        "STRA",
+                    ];
                     let mut pairs = Vec::new();
                     for i in 0..10 {
-                        let dol_str = instance.record.get_field(dol_names[i])
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                        let dol_str = instance
+                            .record
+                            .get_field(dol_names[i])
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default();
-                        let lnk_str = instance.record.get_field(lnk_names[i])
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                        let lnk_str = instance
+                            .record
+                            .get_field(lnk_names[i])
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default();
                         // For sseq: if DOL is empty, use DO/STR value directly
-                        let do_val = instance.record.get_field(do_names[i])
-                            .and_then(|v| v.to_f64()).unwrap_or(0.0);
-                        let str_val = instance.record.get_field(str_names[i])
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                        let do_val = instance
+                            .record
+                            .get_field(do_names[i])
+                            .and_then(|v| v.to_f64())
+                            .unwrap_or(0.0);
+                        let str_val = instance
+                            .record
+                            .get_field(str_names[i])
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default();
                         // Encode: dol\0lnk\0do_val\0str_val
                         pairs.push(format!("{}\0{}\0{}\0{}", dol_str, lnk_str, do_val, str_val));
@@ -213,10 +360,14 @@ impl PvDatabase {
             "fanout" => {
                 for idx in indices {
                     let link_str = &links[idx];
-                    if link_str.is_empty() { continue; }
+                    if link_str.is_empty() {
+                        continue;
+                    }
                     let parsed = crate::server::record::parse_link_v2(link_str);
                     if let crate::server::record::ParsedLink::Db(ref db) = parsed {
-                        let _ = self.process_record_with_links(&db.record, visited, depth + 1).await;
+                        let _ = self
+                            .process_record_with_links(&db.record, visited, depth + 1)
+                            .await;
                     }
                 }
             }
@@ -224,10 +375,13 @@ impl PvDatabase {
                 if let Some(ref val) = val {
                     for idx in indices {
                         let link_str = &links[idx];
-                        if link_str.is_empty() { continue; }
+                        if link_str.is_empty() {
+                            continue;
+                        }
                         let parsed = crate::server::record::parse_link_v2(link_str);
                         if let crate::server::record::ParsedLink::Db(ref db) = parsed {
-                            self.write_db_link_value(db, val.clone(), visited, depth).await;
+                            self.write_db_link_value(db, val.clone(), visited, depth)
+                                .await;
                         }
                     }
                 }
@@ -236,9 +390,13 @@ impl PvDatabase {
                 for idx in indices {
                     let pair_str = &links[idx];
                     let parts: Vec<&str> = pair_str.splitn(2, '\0').collect();
-                    if parts.len() != 2 { continue; }
+                    if parts.len() != 2 {
+                        continue;
+                    }
                     let (dol_str, lnk_str) = (parts[0], parts[1]);
-                    if lnk_str.is_empty() { continue; }
+                    if lnk_str.is_empty() {
+                        continue;
+                    }
                     // Read value from DOL
                     let dol_val = if !dol_str.is_empty() {
                         let dol_parsed = crate::server::record::parse_link_v2(dol_str);
@@ -258,9 +416,14 @@ impl PvDatabase {
                 for idx in indices {
                     let pair_str = &links[idx];
                     let parts: Vec<&str> = pair_str.splitn(4, '\0').collect();
-                    if parts.len() != 4 { continue; }
-                    let (dol_str, lnk_str, do_val_str, str_val) = (parts[0], parts[1], parts[2], parts[3]);
-                    if lnk_str.is_empty() { continue; }
+                    if parts.len() != 4 {
+                        continue;
+                    }
+                    let (dol_str, lnk_str, do_val_str, str_val) =
+                        (parts[0], parts[1], parts[2], parts[3]);
+                    if lnk_str.is_empty() {
+                        continue;
+                    }
                     // Determine value: read from DOL link, or use DO/STR field
                     let value = if !dol_str.is_empty() {
                         let dol_parsed = crate::server::record::parse_link_v2(dol_str);
@@ -293,7 +456,8 @@ impl PvDatabase {
 
     /// Get target records that should be processed when source_record changes (CP links).
     pub async fn get_cp_targets(&self, source_record: &str) -> Vec<String> {
-        self.inner.cp_links
+        self.inner
+            .cp_links
             .read()
             .await
             .get(source_record)
@@ -325,8 +489,11 @@ impl PvDatabase {
                         if !link_str.is_empty() {
                             let parsed = crate::server::record::parse_link_v2(&link_str);
                             if let crate::server::record::ParsedLink::Db(ref db) = parsed {
-                                if db.policy == crate::server::record::LinkProcessPolicy::ChannelProcess {
-                                    links_to_register.push((db.record.clone(), target_name.clone()));
+                                if db.policy
+                                    == crate::server::record::LinkProcessPolicy::ChannelProcess
+                                {
+                                    links_to_register
+                                        .push((db.record.clone(), target_name.clone()));
                                 }
                             }
                         }
@@ -336,17 +503,21 @@ impl PvDatabase {
                 // DOL (ao/bo/longout/mbbo), DOL1-DOLA (seq/sseq),
                 // NVL (sel), SELL (sseq), SDIS (common), SGNL (histogram)
                 const CP_INPUT_LINK_FIELDS: &[&str] = &[
-                    "DOL",
-                    "DOL1","DOL2","DOL3","DOL4","DOL5","DOL6","DOL7","DOL8","DOL9","DOLA",
-                    "NVL", "SELL", "SGNL",
+                    "DOL", "DOL1", "DOL2", "DOL3", "DOL4", "DOL5", "DOL6", "DOL7", "DOL8", "DOL9",
+                    "DOLA", "NVL", "SELL", "SGNL",
                 ];
                 for field_name in CP_INPUT_LINK_FIELDS {
-                    if let Some(EpicsValue::String(link_str)) = instance.record.get_field(field_name) {
+                    if let Some(EpicsValue::String(link_str)) =
+                        instance.record.get_field(field_name)
+                    {
                         if !link_str.is_empty() {
                             let parsed = crate::server::record::parse_link_v2(&link_str);
                             if let crate::server::record::ParsedLink::Db(ref db) = parsed {
-                                if db.policy == crate::server::record::LinkProcessPolicy::ChannelProcess {
-                                    links_to_register.push((db.record.clone(), target_name.clone()));
+                                if db.policy
+                                    == crate::server::record::LinkProcessPolicy::ChannelProcess
+                                {
+                                    links_to_register
+                                        .push((db.record.clone(), target_name.clone()));
                                 }
                             }
                         }

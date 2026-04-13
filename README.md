@@ -12,7 +12,7 @@ EPICS is the proven standard for large-scale control systems at accelerator faci
 
 As a controls engineer working across many device types, I needed an environment where **every device could be simulated in software** — motors, detectors, beam diagnostics — all running together on a single laptop without any real hardware. EPICS already supports this through simulation drivers, but the path to get there involves building EPICS Base, then each support module in dependency order, configuring `RELEASE` paths between them, writing `.dbd` registrations, and wiring `Makefile` rules. For experienced EPICS developers this is routine work, but it adds up when the goal is simply to prototype a new driver or test a control sequence.
 
-To give a concrete example: the sim-detector IOC in this project boots with **7,387 records** (5,273 with device support, 1,543 I/O Intr scanned). Reaching that scale in C EPICS means building and linking EPICS Base, asyn, areaDetector core, and every plugin (Stats, ROI, FFT, file writers, overlay, etc.) — each with its own `configure/RELEASE`, `Makefile`, and `.dbd` wiring. In epics-rs, the same full-featured areaDetector plugin environment is a single `cargo build`.
+To give a concrete example: the sim-detector IOC in this project boots with **8,367 records** (5,323 with device support, 2,991 I/O Intr scanned). Reaching that scale in C EPICS means building and linking EPICS Base, asyn, areaDetector core, and every plugin (Stats, ROI, FFT, file writers, overlay, etc.) — each with its own `configure/RELEASE`, `Makefile`, and `.dbd` wiring. In epics-rs, the same full-featured areaDetector plugin environment is a single `cargo build`.
 
 epics-rs takes a different approach to this setup problem by leveraging Rust's Cargo package system. All support modules live in a single workspace, dependencies are declared in `Cargo.toml`, and the entire stack — from Channel Access protocol to areaDetector plugins — builds with one command:
 
@@ -36,6 +36,7 @@ The wire protocol is identical to C EPICS, so existing clients (`caget`, `camoni
 epics-rs reimplements the core components of C/C++ EPICS in Rust:
 
 - **Channel Access protocol** — client & server (UDP name resolution + TCP virtual circuit)
+- **pvAccess bridge** — QSRV equivalent, exposes records as PVA channels (NTScalar, NTEnum, Group PV)
 - **IOC runtime** — 23 record types, .db file loading, link chains, scan scheduling
 - **asyn framework** — actor-based async port driver model
 - **Motor record** — 9-phase state machine, coordinate transforms, backlash compensation
@@ -43,16 +44,26 @@ epics-rs reimplements the core components of C/C++ EPICS in Rust:
 - **Optics** — 6-DOF table record, monochromator/slit/filter/BPM controllers, X-ray absorption data
 - **Standard records** — epid (PID/MaxMin feedback), throttle (rate-limited output), timestamp
 - **Scaler** — 64-channel counter with presets, auto-count, delayed start
+- **MQTT** — MQTT broker bridge (FLAT/JSON payloads, bidirectional)
 - **Calc engine** — numeric/string/array expressions
 - **Autosave** — PV save/restore
 
 ## Installation
 
-Add `epics-rs` as a git dependency with feature flags for the modules you need:
+All crates are published on [crates.io](https://crates.io/crates/epics-rs). Add `epics-rs` with the feature flags you need:
 
 ```toml
 [dependencies]
-epics-rs = { git = "https://github.com/epics-rs/epics-rs" }
+epics-rs = { version = "0.8", features = ["ad"] }
+```
+
+This single dependency pulls in everything needed. In your code:
+
+```rust
+use epics_rs::base;        // IOC runtime, records, iocsh
+use epics_rs::ad_core;     // NDArray, driver base
+use epics_rs::ad_plugins;  // Stats, ROI, HDF5, ...
+use epics_rs::asyn;        // port driver framework
 ```
 
 ### Feature Flags
@@ -61,23 +72,35 @@ epics-rs = { git = "https://github.com/epics-rs/epics-rs" }
 |---------|-------------|---------|
 | `ca` | Channel Access client & server | **yes** |
 | `pva` | pvAccess client (experimental) | no |
+| `bridge` | Record <-> PVA bridge (QSRV equivalent) | no |
 | `asyn` | Async port driver framework | no |
 | `motor` | Motor record + SimMotor | no |
 | `ad` | areaDetector (core + 23 plugins) | no |
-| `calc` | Calc expression engine | no |
-| `autosave` | PV save/restore | no |
-| `busy` | Busy record | no |
+| `calc` | Calc expression engine | always |
+| `autosave` | PV save/restore | always |
+| `busy` | Busy record | always |
 | `std` | Standard records (epid, throttle, timestamp) | no |
 | `scaler` | Scaler record (64-channel counter) | no |
 | `optics` | Optics (table, monochromator, slit, filter, BPM) | no |
+| `mqtt` | MQTT driver (broker bridge, FLAT/JSON) | no |
 | `full` | Everything | no |
 
 ```toml
 # Motor + areaDetector
-epics-rs = { git = "https://github.com/epics-rs/epics-rs", features = ["motor", "ad"] }
+epics-rs = { version = "0.8", features = ["motor", "ad"] }
 
 # Everything
-epics-rs = { git = "https://github.com/epics-rs/epics-rs", features = ["full"] }
+epics-rs = { version = "0.8", features = ["full"] }
+```
+
+### Individual Crates
+
+You can also depend on sub-crates directly if you only need specific functionality:
+
+```toml
+[dependencies]
+ad-plugins-rs = "0.8"   # just the areaDetector plugins
+epics-base-rs = "0.8"   # just the IOC runtime
 ```
 
 ## Workspace Structure
@@ -89,6 +112,7 @@ epics-rs/
 │   ├── epics-base-rs/    # Core: IOC runtime, 23 record types, iocsh, db loader
 │   ├── epics-ca-rs/      # Channel Access protocol (client + server)
 │   ├── epics-pva-rs/     # pvAccess protocol (experimental)
+│   ├── epics-bridge-rs/  # Record <-> PVA bridge (QSRV equivalent)
 │   ├── epics-macros-rs/  # #[derive(EpicsRecord)] proc macro
 │   ├── asyn-rs/          # Async device I/O framework (port driver model)
 │   ├── motor-rs/         # Motor record + SimMotor
@@ -96,11 +120,13 @@ epics-rs/
 │   ├── ad-plugins-rs/    # 23 NDPlugins (Stats, ROI, FFT, TIFF, JPEG, HDF5, etc.)
 │   ├── std-rs/           # Standard records (epid, throttle, timestamp) + device support
 │   ├── scaler-rs/        # Scaler record (64-channel counter) + device support
-│   └── optics-rs/        # Optics (table, monochromator, slit, filter, BPM)
+│   ├── optics-rs/        # Optics (table, monochromator, slit, filter, BPM)
+│   └── mqtt-rs/          # MQTT driver (broker bridge, FLAT/JSON payloads)
 └── examples/
     ├── scope-ioc/        # Digital oscilloscope simulator
     ├── mini-beamline/    # Beamline simulator with DCM, slit, BPM, detectors
     ├── sim-detector/     # areaDetector simulation driver
+    ├── mqtt-ioc/         # MQTT IOC example
     └── ...               # Other examples
 ```
 
@@ -118,10 +144,14 @@ epics-rs (umbrella — feature-gated re-exports)
     │       │    └── ad-plugins-rs
     │       ├── std-rs (epid, throttle, timestamp)
     │       ├── scaler-rs (64-channel counter)
-    │       └── optics-rs (table, monochromator, slit, filter, BPM)
+    │       ├── optics-rs (table, monochromator, slit, filter, BPM)
+    │       └── mqtt-rs (MQTT broker bridge)
     │
     ├── epics-ca-rs (Channel Access protocol)
-    └── epics-pva-rs (pvAccess protocol, experimental)
+    ├── epics-pva-rs (pvAccess protocol, experimental)
+    └── epics-bridge-rs (Record <-> PVA bridge)
+             ├── epics-base-rs
+             └── epics-pva-rs
 ```
 
 ## Architecture: C EPICS vs epics-rs
@@ -408,6 +438,17 @@ Channel Access protocol client and server.
 ### epics-pva-rs (experimental)
 
 pvAccess protocol client.
+
+### epics-bridge-rs (experimental)
+
+QSRV equivalent — bridges EPICS database records to pvAccess channels:
+
+- **Single record channels** — NTScalar, NTEnum (with choices), NTScalarArray with full metadata (alarm, timeStamp, display, control, valueAlarm)
+- **Group PV channels** — composite PvStructure from multiple records (C++ QSRV JSON format compatible)
+- **Monitor bridge** — full Snapshot on every update, initial snapshot on connect, fan-in group monitor with trigger rules
+- **pvRequest support** — field selection, `record._options.process`/`block`
+- **Group config** — external JSON files + `info(Q:group, ...)` record tags, member merge
+- **Infrastructure** — ChannelProvider/Channel/PvaMonitor traits, record metadata cache, pluggable access control
 
 ### asyn-rs
 
@@ -752,14 +793,6 @@ Test coverage: protocol encoding, wire format golden packets, snapshot generatio
 
 - Rust 1.85+ (edition 2024)
 - Async runtime (provided by `epics-base-rs` — no direct tokio dependency needed)
-
-### Optional System Dependencies
-
-| Feature | Library | Installation |
-|---------|---------|--------------|
-| `ad-plugins-rs/hdf5` | cmake | `brew install cmake` (macOS) / `apt install cmake` (Debian) / `winget install Kitware.CMake` (Windows) |
-
-The `hdf5` feature builds HDF5 2.0 from bundled source (via `hdf5-metno-src`), so no separate HDF5 installation is needed — only cmake is required. All other crates are pure Rust and require no system libraries.
 
 ## Development Note
 

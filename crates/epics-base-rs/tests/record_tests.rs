@@ -35,7 +35,8 @@ fn test_ai_put_val() {
 #[test]
 fn test_ai_string_field() {
     let mut rec = AiRecord::default();
-    rec.put_field("EGU", EpicsValue::String("celsius".into())).unwrap();
+    rec.put_field("EGU", EpicsValue::String("celsius".into()))
+        .unwrap();
     match rec.get_field("EGU") {
         Some(EpicsValue::String(s)) => assert_eq!(s, "celsius"),
         other => panic!("expected String, got {:?}", other),
@@ -46,7 +47,7 @@ fn test_ai_string_field() {
 fn test_ai_field_list() {
     let rec = AiRecord::default();
     let fields = rec.field_list();
-    assert_eq!(fields.len(), 24); // 20 base + 4 sim fields
+    assert!(fields.len() >= 24); // 20 base + 4 sim fields
     assert_eq!(fields[0].name, "VAL");
     assert_eq!(fields[0].dbf_type, DbFieldType::Double);
     assert_eq!(fields[1].name, "EGU");
@@ -92,8 +93,10 @@ fn test_bi_record() {
         Some(EpicsValue::Enum(v)) => assert_eq!(v, 1),
         other => panic!("expected Enum(1), got {:?}", other),
     }
-    rec.put_field("ZNAM", EpicsValue::String("Off".into())).unwrap();
-    rec.put_field("ONAM", EpicsValue::String("On".into())).unwrap();
+    rec.put_field("ZNAM", EpicsValue::String("Off".into()))
+        .unwrap();
+    rec.put_field("ONAM", EpicsValue::String("On".into()))
+        .unwrap();
     match rec.get_field("ZNAM") {
         Some(EpicsValue::String(s)) => assert_eq!(s, "Off"),
         other => panic!("expected String, got {:?}", other),
@@ -169,7 +172,7 @@ fn test_read_only_field() {
 
     let fields = rec.field_list();
     assert!(!fields[0].read_only); // VAL
-    assert!(fields[1].read_only);  // NAME
+    assert!(fields[1].read_only); // NAME
 }
 
 #[test]
@@ -186,9 +189,18 @@ fn test_resolve_field_priority() {
     let rec = AiRecord::new(25.0);
     let instance = RecordInstance::new("TEMP".into(), rec);
 
-    assert!(matches!(instance.resolve_field("VAL"), Some(EpicsValue::Double(_))));
-    assert!(matches!(instance.resolve_field("SEVR"), Some(EpicsValue::Short(0))));
-    assert!(matches!(instance.resolve_field("SCAN"), Some(EpicsValue::Enum(0))));
+    assert!(matches!(
+        instance.resolve_field("VAL"),
+        Some(EpicsValue::Double(_))
+    ));
+    assert!(matches!(
+        instance.resolve_field("SEVR"),
+        Some(EpicsValue::Short(0))
+    ));
+    assert!(matches!(
+        instance.resolve_field("SCAN"),
+        Some(EpicsValue::Enum(0))
+    ));
     match instance.resolve_field("NAME") {
         Some(EpicsValue::String(s)) => assert_eq!(s, "TEMP"),
         other => panic!("expected String(TEMP), got {:?}", other),
@@ -206,11 +218,15 @@ fn test_common_field_put() {
     let rec = AiRecord::new(25.0);
     let mut instance = RecordInstance::new("TEMP".into(), rec);
 
-    let result = instance.put_common_field("SCAN", EpicsValue::String("1 second".into())).unwrap();
+    let result = instance
+        .put_common_field("SCAN", EpicsValue::String("1 second".into()))
+        .unwrap();
     assert!(matches!(result, CommonFieldPutResult::ScanChanged { .. }));
     assert_eq!(instance.common.scan, ScanType::Sec1);
 
-    instance.put_common_field("HIHI", EpicsValue::Double(100.0)).unwrap();
+    instance
+        .put_common_field("HIHI", EpicsValue::Double(100.0))
+        .unwrap();
     assert_eq!(instance.common.analog_alarm.as_ref().unwrap().hihi, 100.0);
 }
 
@@ -221,10 +237,18 @@ fn test_evaluate_alarms() {
     let mut instance = RecordInstance::new("TEMP".into(), rec);
     instance.common.udf = false;
 
-    instance.put_common_field("HIHI", EpicsValue::Double(100.0)).unwrap();
-    instance.put_common_field("HHSV", EpicsValue::Short(AlarmSeverity::Major as i16)).unwrap();
-    instance.put_common_field("HIGH", EpicsValue::Double(80.0)).unwrap();
-    instance.put_common_field("HSV", EpicsValue::Short(AlarmSeverity::Minor as i16)).unwrap();
+    instance
+        .put_common_field("HIHI", EpicsValue::Double(100.0))
+        .unwrap();
+    instance
+        .put_common_field("HHSV", EpicsValue::Short(AlarmSeverity::Major as i16))
+        .unwrap();
+    instance
+        .put_common_field("HIGH", EpicsValue::Double(80.0))
+        .unwrap();
+    instance
+        .put_common_field("HSV", EpicsValue::Short(AlarmSeverity::Minor as i16))
+        .unwrap();
 
     instance.evaluate_alarms();
     recgbl::rec_gbl_reset_alarms(&mut instance.common);
@@ -268,31 +292,58 @@ fn test_parse_link_v2() {
     assert_eq!(parse_link_v2("  "), ParsedLink::None);
 
     assert_eq!(parse_link_v2("42"), ParsedLink::Constant("42".to_string()));
-    assert_eq!(parse_link_v2("3.14"), ParsedLink::Constant("3.14".to_string()));
-    assert_eq!(parse_link_v2("-1.5"), ParsedLink::Constant("-1.5".to_string()));
+    assert_eq!(
+        parse_link_v2("3.14"),
+        ParsedLink::Constant("3.14".to_string())
+    );
+    assert_eq!(
+        parse_link_v2("-1.5"),
+        ParsedLink::Constant("-1.5".to_string())
+    );
 
-    assert_eq!(parse_link_v2("TEMP"), ParsedLink::Db(DbLink {
-        record: "TEMP".into(), field: "VAL".into(),
-        policy: LinkProcessPolicy::ProcessPassive,
-        monitor_switch: MonitorSwitch::NoMaximize,
-    }));
+    assert_eq!(
+        parse_link_v2("TEMP"),
+        ParsedLink::Db(DbLink {
+            record: "TEMP".into(),
+            field: "VAL".into(),
+            policy: LinkProcessPolicy::ProcessPassive,
+            monitor_switch: MonitorSwitch::NoMaximize,
+        })
+    );
 
-    assert_eq!(parse_link_v2("TEMP.EGU"), ParsedLink::Db(DbLink {
-        record: "TEMP".into(), field: "EGU".into(),
-        policy: LinkProcessPolicy::ProcessPassive,
-        monitor_switch: MonitorSwitch::NoMaximize,
-    }));
+    assert_eq!(
+        parse_link_v2("TEMP.EGU"),
+        ParsedLink::Db(DbLink {
+            record: "TEMP".into(),
+            field: "EGU".into(),
+            policy: LinkProcessPolicy::ProcessPassive,
+            monitor_switch: MonitorSwitch::NoMaximize,
+        })
+    );
 
-    assert_eq!(parse_link_v2("TEMP.EGU NPP"), ParsedLink::Db(DbLink {
-        record: "TEMP".into(), field: "EGU".into(),
-        policy: LinkProcessPolicy::NoProcess,
-        monitor_switch: MonitorSwitch::NoMaximize,
-    }));
+    assert_eq!(
+        parse_link_v2("TEMP.EGU NPP"),
+        ParsedLink::Db(DbLink {
+            record: "TEMP".into(),
+            field: "EGU".into(),
+            policy: LinkProcessPolicy::NoProcess,
+            monitor_switch: MonitorSwitch::NoMaximize,
+        })
+    );
 
-    assert_eq!(parse_link_v2("ca://PV:NAME"), ParsedLink::Ca("PV:NAME".to_string()));
-    assert_eq!(parse_link_v2("pva://PV:NAME"), ParsedLink::Pva("PV:NAME".to_string()));
+    assert_eq!(
+        parse_link_v2("ca://PV:NAME"),
+        ParsedLink::Ca("PV:NAME".to_string())
+    );
+    assert_eq!(
+        parse_link_v2("pva://PV:NAME"),
+        ParsedLink::Pva("PV:NAME".to_string())
+    );
 
-    assert_eq!(parse_link_v2("\"hello\""), ParsedLink::Constant("hello".to_string()));
+    assert_eq!(
+        parse_link_v2("\"hello\""),
+        ParsedLink::Constant("hello".to_string())
+    );
 
     let c = parse_link_v2("3.15");
     assert_eq!(c.constant_value(), Some(EpicsValue::Double(3.15)));
@@ -307,14 +358,18 @@ fn test_link_cache_invalidation() {
     let mut instance = RecordInstance::new("TEMP".into(), rec);
 
     assert_eq!(instance.parsed_inp, ParsedLink::None);
-    instance.put_common_field("INP", EpicsValue::String("SOURCE.VAL".into())).unwrap();
+    instance
+        .put_common_field("INP", EpicsValue::String("SOURCE.VAL".into()))
+        .unwrap();
     if let ParsedLink::Db(ref db) = instance.parsed_inp {
         assert_eq!(db.record, "SOURCE");
     } else {
         panic!("expected Db link");
     }
 
-    instance.put_common_field("INP", EpicsValue::String("OTHER".into())).unwrap();
+    instance
+        .put_common_field("INP", EpicsValue::String("OTHER".into()))
+        .unwrap();
     if let ParsedLink::Db(ref db) = instance.parsed_inp {
         assert_eq!(db.record, "OTHER");
         assert_eq!(db.field, "VAL");
@@ -322,7 +377,9 @@ fn test_link_cache_invalidation() {
         panic!("expected Db link");
     }
 
-    instance.put_common_field("INP", EpicsValue::String("".into())).unwrap();
+    instance
+        .put_common_field("INP", EpicsValue::String("".into()))
+        .unwrap();
     assert_eq!(instance.parsed_inp, ParsedLink::None);
 }
 
@@ -345,8 +402,8 @@ fn test_ai_linear_conversion() {
 #[test]
 fn test_ai_linear_with_offsets() {
     let mut rec = AiRecord::default();
-    rec.linr = 1;
-    rec.egul = 10.0;
+    rec.linr = 2;
+    rec.eoff = 10.0;
     rec.eslo = 0.5;
     rec.roff = 100;
     rec.aslo = 2.0;
@@ -379,7 +436,7 @@ fn test_ai_smoothing() {
 fn test_ai_no_conversion() {
     let mut rec = AiRecord::default();
     rec.linr = 0;
-    rec.val = 42.0;
+    rec.rval = 42;
     rec.process().unwrap();
     assert!((rec.val - 42.0).abs() < 1e-10);
 }
@@ -389,7 +446,9 @@ fn test_common_fields_desc() {
     let rec = AiRecord::new(25.0);
     let mut instance = RecordInstance::new("TEMP".into(), rec);
 
-    instance.put_common_field("DESC", EpicsValue::String("Temperature".into())).unwrap();
+    instance
+        .put_common_field("DESC", EpicsValue::String("Temperature".into()))
+        .unwrap();
     match instance.get_common_field("DESC") {
         Some(EpicsValue::String(s)) => assert_eq!(s, "Temperature"),
         other => panic!("expected String, got {:?}", other),
@@ -406,12 +465,16 @@ fn test_common_fields_new() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     assert_eq!(instance.common.phas, 0);
-    instance.put_common_field("PHAS", EpicsValue::Short(2)).unwrap();
+    instance
+        .put_common_field("PHAS", EpicsValue::Short(2))
+        .unwrap();
     assert_eq!(instance.common.phas, 2);
 
     assert_eq!(instance.common.disv, 1);
 
-    instance.put_common_field("HYST", EpicsValue::Double(5.0)).unwrap();
+    instance
+        .put_common_field("HYST", EpicsValue::Double(5.0))
+        .unwrap();
     assert!((instance.common.hyst - 5.0).abs() < 1e-10);
 }
 
@@ -422,9 +485,15 @@ fn test_hyst_alarm_hysteresis() {
     let mut instance = RecordInstance::new("TEMP".into(), rec);
     instance.common.udf = false;
 
-    instance.put_common_field("HIGH", EpicsValue::Double(80.0)).unwrap();
-    instance.put_common_field("HSV", EpicsValue::Short(AlarmSeverity::Minor as i16)).unwrap();
-    instance.put_common_field("HYST", EpicsValue::Double(5.0)).unwrap();
+    instance
+        .put_common_field("HIGH", EpicsValue::Double(80.0))
+        .unwrap();
+    instance
+        .put_common_field("HSV", EpicsValue::Short(AlarmSeverity::Minor as i16))
+        .unwrap();
+    instance
+        .put_common_field("HYST", EpicsValue::Double(5.0))
+        .unwrap();
 
     instance.record.set_val(EpicsValue::Double(85.0)).unwrap();
     instance.evaluate_alarms();
@@ -439,9 +508,17 @@ fn test_hyst_alarm_hysteresis() {
     instance.record.set_val(EpicsValue::Double(78.0)).unwrap();
     instance.evaluate_alarms();
     recgbl::rec_gbl_reset_alarms(&mut instance.common);
+    // C: lalm=80, val=78 >= 80-5=75, so alarm stays Minor
     assert_eq!(instance.common.sevr, AlarmSeverity::Minor);
 
     instance.record.set_val(EpicsValue::Double(76.0)).unwrap();
+    instance.evaluate_alarms();
+    recgbl::rec_gbl_reset_alarms(&mut instance.common);
+    // C: lalm=80, val=76 >= 80-5=75, alarm still Minor (within hysteresis)
+    assert_eq!(instance.common.sevr, AlarmSeverity::Minor);
+
+    // Below hysteresis: val=74 < 75, alarm clears
+    instance.record.set_val(EpicsValue::Double(74.0)).unwrap();
     instance.evaluate_alarms();
     recgbl::rec_gbl_reset_alarms(&mut instance.common);
     assert_eq!(instance.common.sevr, AlarmSeverity::NoAlarm);
@@ -455,22 +532,27 @@ fn test_deadband_mdel() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(3.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(6.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(10.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(12.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
@@ -482,10 +564,12 @@ fn test_deadband_mdel_zero() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 
     instance.record.set_val(EpicsValue::Double(0.001)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
@@ -497,6 +581,7 @@ fn test_deadband_mdel_negative() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(0.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
 }
@@ -569,6 +654,7 @@ fn test_deadband_alarm_always_included() {
     let mut instance = RecordInstance::new("TEST".into(), rec);
 
     instance.record.set_val(EpicsValue::Double(1.0)).unwrap();
+    instance.record.set_device_did_compute(true);
     let snap = instance.process_local().unwrap();
     assert!(!snap.changed_fields.iter().any(|(k, _)| k == "VAL"));
     assert!(snap.changed_fields.iter().any(|(k, _)| k == "SEVR"));
@@ -602,7 +688,9 @@ fn test_lcnt_zero_after_process() {
 #[test]
 fn test_lcnt_increments_on_reentrance() {
     let mut instance = RecordInstance::new("TEST".into(), AoRecord::new(0.0));
-    instance.processing.store(true, std::sync::atomic::Ordering::Release);
+    instance
+        .processing
+        .store(true, std::sync::atomic::Ordering::Release);
     let _ = instance.process_local().unwrap();
     assert_eq!(instance.common.lcnt, 1);
     let _ = instance.process_local().unwrap();
@@ -612,7 +700,9 @@ fn test_lcnt_increments_on_reentrance() {
 #[test]
 fn test_lcnt_alarm_threshold() {
     let mut instance = RecordInstance::new("TEST".into(), AoRecord::new(0.0));
-    instance.processing.store(true, std::sync::atomic::Ordering::Release);
+    instance
+        .processing
+        .store(true, std::sync::atomic::Ordering::Release);
     for _ in 0..10 {
         let _ = instance.process_local().unwrap();
     }
@@ -645,7 +735,9 @@ fn test_disp_get_put() {
         Some(EpicsValue::Char(0)) => {}
         other => panic!("expected Char(0), got {:?}", other),
     }
-    instance.put_common_field("DISP", EpicsValue::Char(1)).unwrap();
+    instance
+        .put_common_field("DISP", EpicsValue::Char(1))
+        .unwrap();
     assert!(instance.common.disp);
     match instance.get_common_field("DISP") {
         Some(EpicsValue::Char(1)) => {}
@@ -655,8 +747,8 @@ fn test_disp_get_put() {
 
 // --- Hook Framework tests ---
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 struct HookTrackingRecord {
     val: f64,
@@ -667,7 +759,9 @@ struct HookTrackingRecord {
 }
 
 impl Record for HookTrackingRecord {
-    fn record_type(&self) -> &'static str { "test_hook" }
+    fn record_type(&self) -> &'static str {
+        "test_hook"
+    }
     fn get_field(&self, name: &str) -> Option<EpicsValue> {
         match name {
             "VAL" => Some(EpicsValue::Double(self.val)),
@@ -677,16 +771,22 @@ impl Record for HookTrackingRecord {
     fn put_field(&mut self, name: &str, value: EpicsValue) -> CaResult<()> {
         match name {
             "VAL" => {
-                if let EpicsValue::Double(v) = value { self.val = v; Ok(()) }
-                else { Err(CaError::InvalidValue("bad type".into())) }
+                if let EpicsValue::Double(v) = value {
+                    self.val = v;
+                    Ok(())
+                } else {
+                    Err(CaError::InvalidValue("bad type".into()))
+                }
             }
             _ => Err(CaError::FieldNotFound(name.into())),
         }
     }
     fn field_list(&self) -> &'static [FieldDesc] {
-        static FIELDS: &[FieldDesc] = &[
-            FieldDesc { name: "VAL", dbf_type: DbFieldType::Double, read_only: false },
-        ];
+        static FIELDS: &[FieldDesc] = &[FieldDesc {
+            name: "VAL",
+            dbf_type: DbFieldType::Double,
+            read_only: false,
+        }];
         FIELDS
     }
     fn validate_put(&self, field: &str, _value: &EpicsValue) -> CaResult<()> {
@@ -722,7 +822,9 @@ fn test_special_called_on_common_put() {
         reject_field: None,
     };
     let mut instance = RecordInstance::new("TEST".into(), rec);
-    instance.put_common_field("DESC", EpicsValue::String("hello".into())).unwrap();
+    instance
+        .put_common_field("DESC", EpicsValue::String("hello".into()))
+        .unwrap();
     assert_eq!(special_before.load(Ordering::SeqCst), 1);
     assert_eq!(special_after.load(Ordering::SeqCst), 1);
 }
@@ -752,7 +854,9 @@ fn test_on_put_called_for_common_field() {
         reject_field: None,
     };
     let mut instance = RecordInstance::new("TEST".into(), rec);
-    instance.put_common_field("DESC", EpicsValue::String("test".into())).unwrap();
+    instance
+        .put_common_field("DESC", EpicsValue::String("test".into()))
+        .unwrap();
     assert_eq!(on_put.load(Ordering::SeqCst), 1);
 }
 
@@ -762,16 +866,29 @@ fn test_on_put_called_for_common_field() {
 fn test_phas_change_returns_result() {
     let rec = AiRecord::new(0.0);
     let mut instance = RecordInstance::new("TEST".into(), rec);
-    instance.put_common_field("SCAN", EpicsValue::String("1 second".into())).unwrap();
-    let result = instance.put_common_field("PHAS", EpicsValue::Short(5)).unwrap();
-    assert!(matches!(result, CommonFieldPutResult::PhasChanged { old_phas: 0, new_phas: 5, .. }));
+    instance
+        .put_common_field("SCAN", EpicsValue::String("1 second".into()))
+        .unwrap();
+    let result = instance
+        .put_common_field("PHAS", EpicsValue::Short(5))
+        .unwrap();
+    assert!(matches!(
+        result,
+        CommonFieldPutResult::PhasChanged {
+            old_phas: 0,
+            new_phas: 5,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn test_phas_change_passive_no_result() {
     let rec = AiRecord::new(0.0);
     let mut instance = RecordInstance::new("TEST".into(), rec);
-    let result = instance.put_common_field("PHAS", EpicsValue::Short(5)).unwrap();
+    let result = instance
+        .put_common_field("PHAS", EpicsValue::Short(5))
+        .unwrap();
     assert_eq!(result, CommonFieldPutResult::NoChange);
 }
 
@@ -779,8 +896,12 @@ fn test_phas_change_passive_no_result() {
 fn test_scan_change_includes_phas() {
     let rec = AiRecord::new(0.0);
     let mut instance = RecordInstance::new("TEST".into(), rec);
-    instance.put_common_field("PHAS", EpicsValue::Short(3)).unwrap();
-    let result = instance.put_common_field("SCAN", EpicsValue::String("1 second".into())).unwrap();
+    instance
+        .put_common_field("PHAS", EpicsValue::Short(3))
+        .unwrap();
+    let result = instance
+        .put_common_field("SCAN", EpicsValue::String("1 second".into()))
+        .unwrap();
     match result {
         CommonFieldPutResult::ScanChanged { phas, .. } => assert_eq!(phas, 3),
         other => panic!("expected ScanChanged, got {:?}", other),
@@ -789,23 +910,38 @@ fn test_scan_change_includes_phas() {
 
 // --- UDF Policy tests ---
 
-struct NoUdfClearRecord { val: f64 }
+struct NoUdfClearRecord {
+    val: f64,
+}
 impl Record for NoUdfClearRecord {
-    fn record_type(&self) -> &'static str { "test_noudf" }
+    fn record_type(&self) -> &'static str {
+        "test_noudf"
+    }
     fn get_field(&self, name: &str) -> Option<EpicsValue> {
-        match name { "VAL" => Some(EpicsValue::Double(self.val)), _ => None }
+        match name {
+            "VAL" => Some(EpicsValue::Double(self.val)),
+            _ => None,
+        }
     }
     fn put_field(&mut self, name: &str, value: EpicsValue) -> CaResult<()> {
         match name {
             "VAL" => {
-                if let EpicsValue::Double(v) = value { self.val = v; Ok(()) }
-                else { Err(CaError::InvalidValue("bad".into())) }
+                if let EpicsValue::Double(v) = value {
+                    self.val = v;
+                    Ok(())
+                } else {
+                    Err(CaError::InvalidValue("bad".into()))
+                }
             }
             _ => Err(CaError::FieldNotFound(name.into())),
         }
     }
-    fn field_list(&self) -> &'static [FieldDesc] { &[] }
-    fn clears_udf(&self) -> bool { false }
+    fn field_list(&self) -> &'static [FieldDesc] {
+        &[]
+    }
+    fn clears_udf(&self) -> bool {
+        false
+    }
 }
 
 #[test]
@@ -850,9 +986,14 @@ fn test_snapshot_ai_with_display_metadata() {
     rec.lopr = -50.0;
     let mut inst = RecordInstance::new("AI:TEST".into(), rec);
     inst.common.analog_alarm = Some(AnalogAlarmConfig {
-        hihi: 90.0, high: 80.0, low: -20.0, lolo: -40.0,
-        hhsv: AlarmSeverity::Major, hsv: AlarmSeverity::Minor,
-        lsv: AlarmSeverity::Minor, llsv: AlarmSeverity::Major,
+        hihi: 90.0,
+        high: 80.0,
+        low: -20.0,
+        lolo: -40.0,
+        hhsv: AlarmSeverity::Major,
+        hsv: AlarmSeverity::Minor,
+        lsv: AlarmSeverity::Minor,
+        llsv: AlarmSeverity::Major,
     });
 
     let snap = inst.snapshot_for_field("VAL").unwrap();

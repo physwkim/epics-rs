@@ -1,6 +1,31 @@
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Data, Fields, Lit, ItemFn};
+use syn::{Data, DeriveInput, Fields, ItemFn, Lit, parse_macro_input};
+
+/// Resolve the path to `epics_base_rs`, supporting both direct dependency
+/// (`epics-base-rs`) and umbrella crate (`epics-rs`) usage.
+fn epics_base_path() -> proc_macro2::TokenStream {
+    if let Ok(found) = crate_name("epics-base-rs") {
+        match found {
+            FoundCrate::Itself => quote!(crate),
+            FoundCrate::Name(name) => {
+                let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
+                quote!(::#ident)
+            }
+        }
+    } else if let Ok(found) = crate_name("epics-rs") {
+        match found {
+            FoundCrate::Itself => quote!(crate::base),
+            FoundCrate::Name(name) => {
+                let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
+                quote!(::#ident::base)
+            }
+        }
+    } else {
+        quote!(::epics_base_rs)
+    }
+}
 
 /// Marks an `async fn main()` as an EPICS IOC entry point.
 ///
@@ -57,11 +82,12 @@ pub fn epics_main(attr: TokenStream, item: TokenStream) -> TokenStream {
     let vis = &input.vis;
     let ret = &sig.output;
     let body = &input.block;
+    let base = epics_base_path();
 
     quote! {
         #(#attrs)*
         #vis fn main() #ret {
-            ::epics_base_rs::__tokio::runtime::Builder::new_multi_thread()
+            #base::__tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("failed to build tokio runtime")
@@ -118,7 +144,11 @@ pub fn epics_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
     if input.attrs.iter().any(|a| a.path().is_ident("test")) {
         return syn::Error::new_spanned(
-            input.attrs.iter().find(|a| a.path().is_ident("test")).unwrap(),
+            input
+                .attrs
+                .iter()
+                .find(|a| a.path().is_ident("test"))
+                .unwrap(),
             "#[epics_test] already adds #[test]; remove the duplicate",
         )
         .to_compile_error()
@@ -130,12 +160,13 @@ pub fn epics_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let name = &sig.ident;
     let ret = &sig.output;
     let body = &input.block;
+    let base = epics_base_path();
 
     quote! {
         #[test]
         #(#attrs)*
         #vis fn #name() #ret {
-            ::epics_base_rs::__tokio::runtime::Builder::new_current_thread()
+            #base::__tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("failed to build tokio runtime")
@@ -191,9 +222,19 @@ fn impl_epics_record(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => fields,
-            _ => return Err(syn::Error::new_spanned(input, "EpicsRecord requires named fields")),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    input,
+                    "EpicsRecord requires named fields",
+                ));
+            }
         },
-        _ => return Err(syn::Error::new_spanned(input, "EpicsRecord can only be derived for structs")),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                input,
+                "EpicsRecord can only be derived for structs",
+            ));
+        }
     };
 
     let mut field_infos = Vec::new();
@@ -212,48 +253,57 @@ fn impl_epics_record(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let field_count = field_infos.len();
 
     // Generate field_list entries
-    let field_descs: Vec<_> = field_infos.iter().map(|fi| {
-        let name_str = &fi.epics_name;
-        let dbf = dbf_type_ident(&fi.dbf_type);
-        let ro = fi.read_only;
-        quote! {
-            #krate::server::record::FieldDesc {
-                name: #name_str,
-                dbf_type: #krate::types::DbFieldType::#dbf,
-                read_only: #ro,
-            }
-        }
-    }).collect();
-
-    // Generate get_field match arms
-    let get_arms: Vec<_> = field_infos.iter().map(|fi| {
-        let epics_name = &fi.epics_name;
-        let ident = &fi.ident;
-        let conversion = value_to_epics(&krate, &fi.dbf_type, quote!(self.#ident));
-        quote! {
-            #epics_name => Some(#conversion),
-        }
-    }).collect();
-
-    // Generate put_field match arms
-    let put_arms: Vec<_> = field_infos.iter().map(|fi| {
-        let epics_name = &fi.epics_name;
-        let ident = &fi.ident;
-        if fi.read_only {
+    let field_descs: Vec<_> = field_infos
+        .iter()
+        .map(|fi| {
+            let name_str = &fi.epics_name;
+            let dbf = dbf_type_ident(&fi.dbf_type);
+            let ro = fi.read_only;
             quote! {
-                #epics_name => {
-                    return Err(#krate::error::CaError::ReadOnlyField(
-                        #epics_name.to_string()
-                    ));
+                #krate::server::record::FieldDesc {
+                    name: #name_str,
+                    dbf_type: #krate::types::DbFieldType::#dbf,
+                    read_only: #ro,
                 }
             }
-        } else {
-            let extraction = value_from_epics(&krate, &fi.dbf_type, ident);
+        })
+        .collect();
+
+    // Generate get_field match arms
+    let get_arms: Vec<_> = field_infos
+        .iter()
+        .map(|fi| {
+            let epics_name = &fi.epics_name;
+            let ident = &fi.ident;
+            let conversion = value_to_epics(&krate, &fi.dbf_type, quote!(self.#ident));
             quote! {
-                #epics_name => { #extraction }
+                #epics_name => Some(#conversion),
             }
-        }
-    }).collect();
+        })
+        .collect();
+
+    // Generate put_field match arms
+    let put_arms: Vec<_> = field_infos
+        .iter()
+        .map(|fi| {
+            let epics_name = &fi.epics_name;
+            let ident = &fi.ident;
+            if fi.read_only {
+                quote! {
+                    #epics_name => {
+                        return Err(#krate::error::CaError::ReadOnlyField(
+                            #epics_name.to_string()
+                        ));
+                    }
+                }
+            } else {
+                let extraction = value_from_epics(&krate, &fi.dbf_type, ident);
+                quote! {
+                    #epics_name => { #extraction }
+                }
+            }
+        })
+        .collect();
 
     let expanded = quote! {
         impl #krate::server::record::Record for #name {
@@ -320,11 +370,13 @@ fn parse_record_attrs(input: &DeriveInput) -> syn::Result<RecordAttrs> {
         }
     }
 
-    let record_type = record_type.ok_or_else(|| {
-        syn::Error::new_spanned(input, "missing #[record(type = \"...\")]")
-    })?;
+    let record_type = record_type
+        .ok_or_else(|| syn::Error::new_spanned(input, "missing #[record(type = \"...\")]"))?;
 
-    Ok(RecordAttrs { record_type, crate_path })
+    Ok(RecordAttrs {
+        record_type,
+        crate_path,
+    })
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<(String, bool)> {
@@ -351,9 +403,8 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<(String, bool)> {
         }
     }
 
-    let dbf_type = dbf_type.ok_or_else(|| {
-        syn::Error::new_spanned(field, "missing #[field(type = \"...\")]")
-    })?;
+    let dbf_type = dbf_type
+        .ok_or_else(|| syn::Error::new_spanned(field, "missing #[field(type = \"...\")]"))?;
 
     Ok((dbf_type, read_only))
 }
@@ -362,7 +413,11 @@ fn dbf_type_ident(type_str: &str) -> proc_macro2::Ident {
     proc_macro2::Ident::new(type_str, proc_macro2::Span::call_site())
 }
 
-fn value_to_epics(krate: &proc_macro2::TokenStream, dbf_type: &str, field_expr: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn value_to_epics(
+    krate: &proc_macro2::TokenStream,
+    dbf_type: &str,
+    field_expr: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     match dbf_type {
         "Double" => quote! { #krate::types::EpicsValue::Double(#field_expr) },
         "Float" => quote! { #krate::types::EpicsValue::Float(#field_expr) },
@@ -375,7 +430,11 @@ fn value_to_epics(krate: &proc_macro2::TokenStream, dbf_type: &str, field_expr: 
     }
 }
 
-fn value_from_epics(krate: &proc_macro2::TokenStream, dbf_type: &str, field_ident: &syn::Ident) -> proc_macro2::TokenStream {
+fn value_from_epics(
+    krate: &proc_macro2::TokenStream,
+    dbf_type: &str,
+    field_ident: &syn::Ident,
+) -> proc_macro2::TokenStream {
     // Enum fields accept Enum, Long, and Short values (common in asyn drivers)
     if dbf_type == "Enum" {
         return quote! {

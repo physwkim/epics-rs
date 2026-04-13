@@ -3,7 +3,7 @@ name = "epics-base-rs"
 version.workspace = true
 edition.workspace = true
 description = "Pure Rust EPICS IOC core — record system, database, iocsh, calc engine"
-license.workspace = true
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 

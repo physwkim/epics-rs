@@ -1,21 +1,81 @@
-use std::collections::HashSet;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::collections::HashMap;
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket as StdUdpSocket};
 
 use tokio::net::UdpSocket;
 
 use crate::protocol::*;
 
+/// Per-client connected UDP socket, matching C EPICS repeaterClient.
+/// Using a connected socket lets the OS detect dead clients via
+/// ECONNREFUSED on send().
+struct RepeaterClient {
+    sock: StdUdpSocket,
+    addr: SocketAddr,
+}
+
+impl RepeaterClient {
+    fn new(addr: SocketAddr) -> io::Result<Self> {
+        let sock = StdUdpSocket::bind("0.0.0.0:0")?;
+        sock.connect(addr)?;
+        sock.set_nonblocking(true)?;
+        Ok(Self { sock, addr })
+    }
+
+    fn send_confirm(&self) -> bool {
+        let mut confirm = CaHeader::new(CA_PROTO_REPEATER_CONFIRM);
+        if let SocketAddr::V4(v4) = self.addr {
+            confirm.available = u32::from_be_bytes(v4.ip().octets());
+        }
+        self.sock.send(&confirm.to_bytes()).is_ok()
+    }
+
+    fn send_message(&self, data: &[u8]) -> bool {
+        match self.sock.send(data) {
+            Ok(_) => true,
+            Err(e) => {
+                // ECONNREFUSED means client is gone
+                matches!(e.kind(), io::ErrorKind::ConnectionRefused)
+                    .then_some(false)
+                    .unwrap_or(false)
+            }
+        }
+    }
+
+    /// Check if client is still alive by trying to bind to its port.
+    /// If bind succeeds, the client has released the port (dead).
+    fn verify(&self) -> bool {
+        let port = match self.addr {
+            SocketAddr::V4(v4) => v4.port(),
+            _ => return false,
+        };
+        match StdUdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)) {
+            Ok(_) => false,                                    // port free → client gone
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => true, // port in use → alive
+            Err(_) => true,                                    // other error → assume alive
+        }
+    }
+}
+
 /// Run the CA repeater daemon.
 /// Binds to UDP 5065, accepts client registrations, and fans out beacons.
-pub async fn run_repeater() -> std::io::Result<()> {
+pub async fn run_repeater() -> io::Result<()> {
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, CA_REPEATER_PORT);
     let socket = UdpSocket::bind(bind_addr).await?;
 
-    let mut clients: HashSet<SocketAddr> = HashSet::new();
+    let mut clients: HashMap<u16, RepeaterClient> = HashMap::new();
     let mut buf = [0u8; 4096];
 
     loop {
         let (len, src) = socket.recv_from(&mut buf).await?;
+
+        // C CA clients send a zero-length UDP packet for repeater
+        // registration (backward compat with pre-3.12 repeaters).
+        if len == 0 {
+            register_client(&mut clients, src);
+            continue;
+        }
+
         if len < CaHeader::SIZE {
             continue;
         }
@@ -26,37 +86,88 @@ pub async fn run_repeater() -> std::io::Result<()> {
 
         match hdr.cmmd {
             CA_PROTO_REPEATER_REGISTER => {
-                // Client wants to register. The client's IP is in available field,
-                // but we use the actual source address.
-                clients.insert(src);
-
-                // Send REPEATER_CONFIRM back
-                let mut confirm = CaHeader::new(CA_PROTO_REPEATER_CONFIRM);
-                // Put the client's IP in the available field
-                if let SocketAddr::V4(v4) = src {
-                    confirm.available = u32::from_be_bytes(v4.ip().octets());
-                }
-                let _ = socket.send_to(&confirm.to_bytes(), src).await;
+                register_client(&mut clients, src);
             }
             _ => {
-                // Beacon or other message from server — fan out to all registered clients
-                let data = &buf[..len];
-                // Remove dead clients on send failure
-                let mut dead = Vec::new();
-                for client in &clients {
-                    // Don't echo back to the source
-                    if *client == src {
-                        continue;
-                    }
-                    if socket.send_to(data, client).await.is_err() {
-                        dead.push(*client);
+                // Beacon or other message from server — fan out to all
+                // registered clients.  Fill in available=0 with source IP
+                // so clients can identify the server (matches C repeater).
+                let mut data = buf[..len].to_vec();
+                if len >= CaHeader::SIZE {
+                    let avail_offset = 12; // available field at bytes 12..16
+                    let avail = u32::from_be_bytes([
+                        data[avail_offset],
+                        data[avail_offset + 1],
+                        data[avail_offset + 2],
+                        data[avail_offset + 3],
+                    ]);
+                    if avail == 0 {
+                        if let SocketAddr::V4(v4) = src {
+                            data[avail_offset..avail_offset + 4]
+                                .copy_from_slice(&v4.ip().octets());
+                        }
                     }
                 }
-                for d in dead {
-                    clients.remove(&d);
+
+                let src_port = src.port();
+                let mut dead = Vec::new();
+                for (port, client) in &clients {
+                    // Don't reflect back to sender
+                    if *port == src_port {
+                        continue;
+                    }
+                    if !client.send_message(&data) {
+                        if !client.verify() {
+                            dead.push(*port);
+                        }
+                    }
+                }
+                for p in dead {
+                    clients.remove(&p);
                 }
             }
         }
+    }
+}
+
+fn register_client(clients: &mut HashMap<u16, RepeaterClient>, src: SocketAddr) {
+    let port = src.port();
+
+    // Already registered — just re-send confirm
+    if let Some(client) = clients.get(&port) {
+        client.send_confirm();
+        return;
+    }
+
+    // Create per-client connected socket (matches C EPICS repeater)
+    let client = match RepeaterClient::new(src) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    if !client.send_confirm() {
+        return;
+    }
+
+    clients.insert(port, client);
+
+    // Send VERSION noop to all other clients so we don't accumulate
+    // sockets when there are no beacons (matches C EPICS).
+    let noop = CaHeader::new(CA_PROTO_VERSION);
+    let noop_bytes = noop.to_bytes();
+    let mut dead = Vec::new();
+    for (p, c) in clients.iter() {
+        if *p == port {
+            continue;
+        }
+        if !c.send_message(&noop_bytes) {
+            if !c.verify() {
+                dead.push(*p);
+            }
+        }
+    }
+    for p in dead {
+        clients.remove(&p);
     }
 }
 

@@ -2,12 +2,16 @@
 //!
 //! Corresponds to C asyn's `asynInterposeEos.c`. Supports up to 2-character
 //! input/output EOS sequences. On read, buffers data and scans for the EOS
-//! pattern. On write, appends the output EOS to outgoing data.
+//! pattern using a character-by-character state machine with resynchronization.
+//! On write, appends the output EOS to outgoing data.
 
 use crate::error::AsynResult;
 use crate::user::AsynUser;
 
 use super::{EomReason, OctetInterpose, OctetNext, OctetReadResult};
+
+/// Fixed internal buffer size matching C asyn's INPUT_SIZE.
+const INPUT_BUFFER_SIZE: usize = 2048;
 
 /// EOS configuration — input and output terminator sequences.
 #[derive(Debug, Clone)]
@@ -27,24 +31,40 @@ impl Default for EosConfig {
     }
 }
 
-/// EOS interpose layer with internal read buffer and state machine.
+/// EOS interpose layer with internal read buffer and character-by-character
+/// state machine matching, including resynchronization on partial matches.
+///
+/// Matches the C implementation's behavior:
+/// - Fixed-size internal buffer (2048 bytes)
+/// - Character-by-character EOS matching with resynchronization
+/// - Filters ASYN_EOM_CNT from lower layer reads
+/// - Null-terminates output when there's room
 pub struct EosInterpose {
     config: EosConfig,
-    read_buffer: Vec<u8>,
-    read_pos: usize,
+    /// Fixed-size internal read buffer.
+    in_buf: Vec<u8>,
+    /// How far the internal buffer has been filled by the lower layer.
+    in_buf_head: usize,
+    /// How far the internal buffer has been consumed.
+    in_buf_tail: usize,
+    /// Current EOS match position for the resynchronization state machine.
+    eos_in_match: usize,
 }
 
 impl EosInterpose {
     pub fn new(config: EosConfig) -> Self {
         Self {
             config,
-            read_buffer: Vec::with_capacity(256),
-            read_pos: 0,
+            in_buf: vec![0u8; INPUT_BUFFER_SIZE],
+            in_buf_head: 0,
+            in_buf_tail: 0,
+            eos_in_match: 0,
         }
     }
 
     pub fn set_input_eos(&mut self, eos: &[u8]) {
         self.config.input_eos = eos.to_vec();
+        self.eos_in_match = 0;
     }
 
     pub fn set_output_eos(&mut self, eos: &[u8]) {
@@ -57,27 +77,6 @@ impl EosInterpose {
 
     pub fn get_output_eos(&self) -> &[u8] {
         &self.config.output_eos
-    }
-
-    /// Scan the buffer [read_pos..] for the input EOS sequence.
-    /// Returns Some(end_index) where end_index is the position right after
-    /// the last EOS byte, or None if not found.
-    fn find_eos(&self) -> Option<usize> {
-        let eos = &self.config.input_eos;
-        if eos.is_empty() {
-            return None;
-        }
-        let data = &self.read_buffer[self.read_pos..];
-        if eos.len() == 1 {
-            data.iter()
-                .position(|b| *b == eos[0])
-                .map(|pos| self.read_pos + pos + 1)
-        } else {
-            // 2-byte EOS
-            data.windows(2)
-                .position(|w| w[0] == eos[0] && w[1] == eos[1])
-                .map(|pos| self.read_pos + pos + 2)
-        }
     }
 }
 
@@ -93,105 +92,83 @@ impl OctetInterpose for EosInterpose {
             return next.read(user, buf);
         }
 
+        let maxchars = buf.len();
+        let mut n_read: usize = 0;
+        let mut eom = EomReason::empty();
+
         loop {
-            // Check if we already have EOS in the buffer
-            if let Some(eos_end) = self.find_eos() {
-                // Copy up to (but not including) the EOS chars
-                let eos_len = self.config.input_eos.len();
-                let data_end = eos_end - eos_len;
-                let avail = data_end - self.read_pos;
-                let n = avail.min(buf.len());
-                buf[..n].copy_from_slice(&self.read_buffer[self.read_pos..self.read_pos + n]);
-                // Advance past the EOS
-                self.read_pos = eos_end;
+            // Process buffered data character by character
+            if self.in_buf_tail != self.in_buf_head {
+                let c = self.in_buf[self.in_buf_tail];
+                self.in_buf_tail += 1;
+                buf[n_read] = c;
+                n_read += 1;
 
-                // If we've consumed the entire buffer, reset
-                if self.read_pos >= self.read_buffer.len() {
-                    self.read_buffer.clear();
-                    self.read_pos = 0;
-                }
-
-                return Ok(OctetReadResult {
-                    nbytes_transferred: n,
-                    eom_reason: EomReason::EOS,
-                });
-            }
-
-            // Check if there's buffered data that fills the user buffer
-            let buffered = self.read_buffer.len() - self.read_pos;
-            if buffered >= buf.len() {
-                // Return what we have (no EOS found yet), buffer is full
-                let n = buf.len();
-                buf.copy_from_slice(&self.read_buffer[self.read_pos..self.read_pos + n]);
-                self.read_pos += n;
-                if self.read_pos >= self.read_buffer.len() {
-                    self.read_buffer.clear();
-                    self.read_pos = 0;
-                }
-                return Ok(OctetReadResult {
-                    nbytes_transferred: n,
-                    eom_reason: EomReason::CNT,
-                });
-            }
-
-            // Read more data from next layer
-            let mut tmp = vec![0u8; buf.len().max(256)];
-            let result = next.read(user, &mut tmp)?;
-            if result.nbytes_transferred == 0 {
-                // EOF from lower layer — return whatever we have
-                let avail = self.read_buffer.len() - self.read_pos;
-                let n = avail.min(buf.len());
-                if n > 0 {
-                    buf[..n].copy_from_slice(&self.read_buffer[self.read_pos..self.read_pos + n]);
-                    self.read_pos += n;
-                }
-                if self.read_pos >= self.read_buffer.len() {
-                    self.read_buffer.clear();
-                    self.read_pos = 0;
-                }
-                return Ok(OctetReadResult {
-                    nbytes_transferred: n,
-                    eom_reason: result.eom_reason,
-                });
-            }
-
-            self.read_buffer
-                .extend_from_slice(&tmp[..result.nbytes_transferred]);
-
-            // If the lower layer indicated END, check for EOS one more time,
-            // then return what we have
-            if result.eom_reason.contains(EomReason::END) {
-                if let Some(eos_end) = self.find_eos() {
-                    let eos_len = self.config.input_eos.len();
-                    let data_end = eos_end - eos_len;
-                    let avail = data_end - self.read_pos;
-                    let n = avail.min(buf.len());
-                    buf[..n].copy_from_slice(&self.read_buffer[self.read_pos..self.read_pos + n]);
-                    self.read_pos = eos_end;
-                    if self.read_pos >= self.read_buffer.len() {
-                        self.read_buffer.clear();
-                        self.read_pos = 0;
+                let eos = &self.config.input_eos;
+                if c == eos[self.eos_in_match] {
+                    self.eos_in_match += 1;
+                    if self.eos_in_match == eos.len() {
+                        // Full EOS match — remove EOS bytes from output count
+                        self.eos_in_match = 0;
+                        n_read -= eos.len();
+                        eom |= EomReason::EOS;
+                        break;
                     }
-                    return Ok(OctetReadResult {
-                        nbytes_transferred: n,
-                        eom_reason: EomReason::EOS | EomReason::END,
-                    });
+                } else {
+                    // Resynchronize the search. Since asyn allows a maximum
+                    // two-character EOS, we only need to check if the current
+                    // character matches the first EOS character.
+                    if c == eos[0] {
+                        self.eos_in_match = 1;
+                    } else {
+                        self.eos_in_match = 0;
+                    }
                 }
-                // No EOS found, return buffered data with END
-                let avail = self.read_buffer.len() - self.read_pos;
-                let n = avail.min(buf.len());
-                buf[..n].copy_from_slice(&self.read_buffer[self.read_pos..self.read_pos + n]);
-                self.read_pos += n;
-                if self.read_pos >= self.read_buffer.len() {
-                    self.read_buffer.clear();
-                    self.read_pos = 0;
+
+                if n_read >= maxchars {
+                    eom = EomReason::CNT;
+                    break;
                 }
-                return Ok(OctetReadResult {
-                    nbytes_transferred: n,
-                    eom_reason: EomReason::END,
-                });
+                continue;
             }
+
+            // If we have end-of-message flags from a previous lower read, stop
+            if !eom.is_empty() {
+                break;
+            }
+
+            // Read more data from the lower layer into our internal buffer
+            let result = match next.read(user, &mut self.in_buf[..]) {
+                Ok(r) => r,
+                Err(_) if n_read > 0 => {
+                    // Return accumulated data; error will surface on next read
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
+
+            if result.nbytes_transferred == 0 {
+                break;
+            }
+
+            self.in_buf_tail = 0;
+            self.in_buf_head = result.nbytes_transferred;
+
+            // Filter out CNT from lower layer — the lower read may have set CNT
+            // because available data exceeded our buffer size. This is not a
+            // reason for us to stop reading. (C parity: eom &= ~ASYN_EOM_CNT)
+            eom = result.eom_reason & !EomReason::CNT;
         }
+
+        // Null terminate if there's room (C parity)
+        if n_read < maxchars {
+            buf[n_read] = 0;
+        }
+
+        Ok(OctetReadResult {
+            nbytes_transferred: n_read,
+            eom_reason: eom,
+        })
     }
 
     fn write(
@@ -208,16 +185,15 @@ impl OctetInterpose for EosInterpose {
         let mut buf = Vec::with_capacity(data.len() + self.config.output_eos.len());
         buf.extend_from_slice(data);
         buf.extend_from_slice(&self.config.output_eos);
-        next.write(user, &buf)
+        let actual = next.write(user, &buf)?;
+        // Report only user data bytes, not EOS bytes (C parity)
+        Ok(actual.min(data.len()))
     }
 
-    fn flush(
-        &mut self,
-        user: &mut AsynUser,
-        next: &mut dyn OctetNext,
-    ) -> AsynResult<()> {
-        self.read_buffer.clear();
-        self.read_pos = 0;
+    fn flush(&mut self, user: &mut AsynUser, next: &mut dyn OctetNext) -> AsynResult<()> {
+        self.in_buf_head = 0;
+        self.in_buf_tail = 0;
+        self.eos_in_match = 0;
         next.flush(user)
     }
 }
@@ -250,11 +226,7 @@ mod tests {
             self.pos += n;
             Ok(OctetReadResult {
                 nbytes_transferred: n,
-                eom_reason: if self.pos >= self.data.len() {
-                    EomReason::CNT
-                } else {
-                    EomReason::CNT
-                },
+                eom_reason: EomReason::CNT,
             })
         }
 
@@ -315,8 +287,10 @@ mod tests {
         let mut base = MockOctetBase::new(b"");
         let mut user = AsynUser::default();
 
-        interpose.write(&mut user, b"hello", &mut base).unwrap();
+        let n = interpose.write(&mut user, b"hello", &mut base).unwrap();
         assert_eq!(&base.written, b"hello\r\n");
+        // Return value should be user data length, not including EOS
+        assert_eq!(n, 5);
     }
 
     #[test]
@@ -346,9 +320,9 @@ mod tests {
         // Flush should clear internal state
         let mut user2 = AsynUser::default();
         interpose.flush(&mut user2, &mut base).unwrap();
-        // After flush, the internal buffer should be empty
-        assert_eq!(interpose.read_buffer.len(), 0);
-        assert_eq!(interpose.read_pos, 0);
+        assert_eq!(interpose.in_buf_head, 0);
+        assert_eq!(interpose.in_buf_tail, 0);
+        assert_eq!(interpose.eos_in_match, 0);
     }
 
     #[test]
@@ -361,5 +335,116 @@ mod tests {
 
         interpose.set_output_eos(b"\r\n");
         assert_eq!(interpose.get_output_eos(), b"\r\n");
+    }
+
+    #[test]
+    fn test_null_termination() {
+        let mut interpose = EosInterpose::new(EosConfig {
+            input_eos: vec![b'\n'],
+            output_eos: vec![],
+        });
+        let mut base = MockOctetBase::new(b"hi\n");
+        let user = AsynUser::default();
+        let mut buf = [0xFFu8; 64];
+
+        let r = interpose.read(&user, &mut buf, &mut base).unwrap();
+        assert_eq!(r.nbytes_transferred, 2);
+        assert_eq!(&buf[..2], b"hi");
+        // Null terminated after data
+        assert_eq!(buf[2], 0);
+    }
+
+    #[test]
+    fn test_eos_resynchronization() {
+        // Test resync: EOS is "\r\n", input has a lone \r followed by \r\n
+        let mut interpose = EosInterpose::new(EosConfig {
+            input_eos: vec![b'\r', b'\n'],
+            output_eos: vec![],
+        });
+        let mut base = MockOctetBase::new(b"a\rb\r\n");
+        let user = AsynUser::default();
+        let mut buf = [0u8; 64];
+
+        let r = interpose.read(&user, &mut buf, &mut base).unwrap();
+        // Should get "a\rb" — the lone \r doesn't match \r\n, resync finds real \r\n
+        assert_eq!(&buf[..r.nbytes_transferred], b"a\rb");
+        assert!(r.eom_reason.contains(EomReason::EOS));
+    }
+
+    #[test]
+    fn test_cnt_filtering_from_lower_layer() {
+        // If lower layer sets CNT (buffer full), EOS layer should ignore it
+        // and keep reading for EOS
+        struct CntBase {
+            chunks: Vec<Vec<u8>>,
+            idx: usize,
+        }
+        impl OctetNext for CntBase {
+            fn read(&mut self, _user: &AsynUser, buf: &mut [u8]) -> AsynResult<OctetReadResult> {
+                if self.idx < self.chunks.len() {
+                    let chunk = &self.chunks[self.idx];
+                    self.idx += 1;
+                    let n = chunk.len().min(buf.len());
+                    buf[..n].copy_from_slice(&chunk[..n]);
+                    Ok(OctetReadResult {
+                        nbytes_transferred: n,
+                        // Lower layer reports CNT (its buffer was full)
+                        eom_reason: EomReason::CNT,
+                    })
+                } else {
+                    Ok(OctetReadResult {
+                        nbytes_transferred: 0,
+                        eom_reason: EomReason::empty(),
+                    })
+                }
+            }
+            fn write(&mut self, _user: &mut AsynUser, _data: &[u8]) -> AsynResult<usize> {
+                Ok(0)
+            }
+            fn flush(&mut self, _user: &mut AsynUser) -> AsynResult<()> {
+                Ok(())
+            }
+        }
+
+        let mut interpose = EosInterpose::new(EosConfig {
+            input_eos: vec![b'\n'],
+            output_eos: vec![],
+        });
+        // Data split across two lower reads, both with CNT
+        let mut base = CntBase {
+            chunks: vec![b"hel".to_vec(), b"lo\n".to_vec()],
+            idx: 0,
+        };
+        let user = AsynUser::default();
+        let mut buf = [0u8; 64];
+
+        let r = interpose.read(&user, &mut buf, &mut base).unwrap();
+        assert_eq!(&buf[..r.nbytes_transferred], b"hello");
+        assert!(r.eom_reason.contains(EomReason::EOS));
+        // CNT from lower layer should NOT be in the result
+        assert!(!r.eom_reason.contains(EomReason::CNT));
+    }
+
+    #[test]
+    fn test_buffer_full_returns_cnt() {
+        let mut interpose = EosInterpose::new(EosConfig {
+            input_eos: vec![b'\n'],
+            output_eos: vec![],
+        });
+        let mut base = MockOctetBase::new(b"abcdefgh\n");
+        let user = AsynUser::default();
+        let mut buf = [0u8; 4]; // small buffer
+
+        // First read fills user buffer → CNT
+        let r = interpose.read(&user, &mut buf, &mut base).unwrap();
+        assert_eq!(r.nbytes_transferred, 4);
+        assert_eq!(&buf[..4], b"abcd");
+        assert!(r.eom_reason.contains(EomReason::CNT));
+
+        // Second read gets rest up to EOS (need larger buffer to fit remaining data)
+        let mut buf2 = [0u8; 64];
+        let r = interpose.read(&user, &mut buf2, &mut base).unwrap();
+        assert_eq!(&buf2[..r.nbytes_transferred], b"efgh");
+        assert!(r.eom_reason.contains(EomReason::EOS));
     }
 }

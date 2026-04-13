@@ -33,7 +33,7 @@ fn complete_move(rec: &mut MotorRecord, target_pos: f64) {
 }
 
 #[test]
-fn rmod_default_retry_uses_rdbd_step() {
+fn rmod_default_retry_moves_to_original_target() {
     let mut rec = make_record();
     rec.retry.rdbd = 0.1;
     rec.retry.rtry = 5;
@@ -48,10 +48,9 @@ fn rmod_default_retry_uses_rdbd_step() {
 
     assert_eq!(rec.stat.phase, MotionPhase::Retry);
     assert_eq!(rec.retry.rcnt, 1);
-    // Default: target = drbv + rdbd * sign(error)
-    // = 9.0 + 0.1 * 1.0 = 9.1
+    // C Default: retry moves to the original target position (dval)
     if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((*position - 9.1).abs() < 1e-10);
+        assert!((*position - 10.0).abs() < 1e-10);
     } else {
         panic!("expected MoveAbsolute");
     }
@@ -72,9 +71,11 @@ fn rmod_arithmetic_retry() {
     let effects = rec.check_completion();
 
     assert_eq!(rec.stat.phase, MotionPhase::Retry);
-    // Arithmetic: target = drbv + (dval - drbv) * frac = 9.0 + 1.0*0.5 = 9.5
+    // C Arithmetic: factor = (rtry - rcnt + 1) / rtry = (5 - 1 + 1) / 5 = 1.0
+    // retry_target = 9.0 + (10.0 - 9.0) * 1.0 = 10.0
+    // For use_rel=false: position = dval + frac*(retry_target - dval) = 10 + 0.5*(10-10) = 10.0
     if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((*position - 9.5).abs() < 1e-10);
+        assert!((*position - 10.0).abs() < 1e-10);
     } else {
         panic!("expected MoveAbsolute");
     }
@@ -193,7 +194,7 @@ fn spdb_allows_larger_move() {
 #[test]
 fn spdb_vs_rdbd_are_independent() {
     let mut rec = make_record();
-    rec.retry.spdb = 0.5;  // move initiation deadband
+    rec.retry.spdb = 0.5; // move initiation deadband
     rec.retry.rdbd = 0.01; // completion deadband
     rec.retry.rtry = 3;
     rec.retry.rmod = RetryMode::Geometric;

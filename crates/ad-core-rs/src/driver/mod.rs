@@ -1,9 +1,9 @@
-pub mod ndarray_driver;
 pub mod ad_driver;
+pub mod ndarray_driver;
 
 // Re-exports for backward compatibility
-pub use ad_driver::{ADDriverBase, ADDriver};
 pub use crate::color::NDColorMode as ColorMode;
+pub use ad_driver::{ADDriver, ADDriverBase};
 
 /// Detector status states matching ADStatus_t.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,23 +41,22 @@ impl ImageMode {
     }
 }
 
-/// Shutter mode.
+/// Shutter mode (C++ has 3 modes: None, EPICS, Detector).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ShutterMode {
     None = 0,
     EpicsOnly = 1,
     DetectorOnly = 2,
-    EpicsAndDetector = 3,
 }
 
 impl ShutterMode {
-    pub fn from_i32(v: i32) -> Self {
+    pub fn from_i32(v: i32) -> Option<Self> {
         match v {
-            0 => Self::None,
-            1 => Self::EpicsOnly,
-            2 => Self::DetectorOnly,
-            _ => Self::EpicsAndDetector,
+            0 => Some(Self::None),
+            1 => Some(Self::EpicsOnly),
+            2 => Some(Self::DetectorOnly),
+            _ => None,
         }
     }
 }

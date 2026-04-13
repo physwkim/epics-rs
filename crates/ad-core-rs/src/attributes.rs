@@ -2,8 +2,14 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum NDAttrSource {
     Driver,
-    Param { port_name: String, param_name: String },
+    Param {
+        port_name: String,
+        param_name: String,
+    },
+    EpicsPV,
+    Function,
     Constant,
+    Undefined,
 }
 
 /// Data type tags for NDAttribute values.
@@ -36,6 +42,7 @@ pub enum NDAttrValue {
     Float32(f32),
     Float64(f64),
     String(String),
+    Undefined,
 }
 
 impl NDAttrValue {
@@ -52,6 +59,7 @@ impl NDAttrValue {
             Self::Float32(_) => NDAttrDataType::Float32,
             Self::Float64(_) => NDAttrDataType::Float64,
             Self::String(_) => NDAttrDataType::String,
+            Self::Undefined => NDAttrDataType::Int32,
         }
     }
 
@@ -67,7 +75,7 @@ impl NDAttrValue {
             Self::UInt64(v) => Some(*v as f64),
             Self::Float32(v) => Some(*v as f64),
             Self::Float64(v) => Some(*v),
-            Self::String(_) => None,
+            Self::String(_) | Self::Undefined => None,
         }
     }
 
@@ -83,7 +91,7 @@ impl NDAttrValue {
             Self::UInt64(v) => Some(*v as i64),
             Self::Float32(v) => Some(*v as i64),
             Self::Float64(v) => Some(*v as i64),
-            Self::String(_) => None,
+            Self::String(_) | Self::Undefined => None,
         }
     }
 
@@ -100,6 +108,7 @@ impl NDAttrValue {
             Self::Float32(v) => v.to_string(),
             Self::Float64(v) => v.to_string(),
             Self::String(v) => v.clone(),
+            Self::Undefined => String::new(),
         }
     }
 }
@@ -156,6 +165,13 @@ impl NDAttributeList {
 
     pub fn is_empty(&self) -> bool {
         self.attrs.is_empty()
+    }
+
+    /// Merge attributes from another list: adds new ones, updates existing by name.
+    pub fn copy_from(&mut self, other: &NDAttributeList) {
+        for attr in other.iter() {
+            self.add(attr.clone());
+        }
     }
 }
 
@@ -259,7 +275,10 @@ mod tests {
             value: NDAttrValue::Float64(25.0),
         };
         match &attr.source {
-            NDAttrSource::Param { port_name, param_name } => {
+            NDAttrSource::Param {
+                port_name,
+                param_name,
+            } => {
                 assert_eq!(port_name, "SIM1");
                 assert_eq!(param_name, "TEMPERATURE");
             }

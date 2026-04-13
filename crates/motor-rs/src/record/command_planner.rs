@@ -3,12 +3,21 @@ use super::*;
 impl MotorRecord {
     /// Plan and start a motion from a user write.
     pub fn plan_motion(&mut self, src: CommandSource) -> ProcessEffects {
+        // Reset DMOV notification flag so the upcoming DMOV 1→0 transition
+        // fires AsyncPendingNotify. Without this, back-to-back motions
+        // (previous done + new write in same process cycle) would skip
+        // the notification because dmov_notified was still true from the
+        // previous motion.
+        self.internal.dmov_notified = false;
         let mut effects = ProcessEffects::default();
 
         // SPMG, STOP, and SYNC always processed regardless of command gate
         match src {
-            CommandSource::Spmg | CommandSource::Stop | CommandSource::Sync
-            | CommandSource::Set | CommandSource::Cnen => {}
+            CommandSource::Spmg
+            | CommandSource::Stop
+            | CommandSource::Sync
+            | CommandSource::Set
+            | CommandSource::Cnen => {}
             _ => {
                 if !self.can_accept_command() {
                     return effects;
@@ -39,25 +48,15 @@ impl MotorRecord {
                             return effects;
                         }
                         RetargetAction::ExtendMove => {
-                            // Cancel any pending backlash/retry state, issue new move
-                            self.internal.backlash_pending = false;
-                            self.retry.rcnt = 0;
-                            // Re-evaluate backlash for new target
-                            let backlash = self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
-                            let move_target = if backlash {
-                                Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst)
-                            } else {
-                                self.pos.dval
-                            };
-                            self.internal.backlash_pending = backlash;
-                            self.stat.tdir = move_target > self.pos.drbv;
-                            self.internal.ldvl = self.pos.dval;
-                            effects.commands.push(MotorCommand::MoveAbsolute {
-                                position: move_target,
-                                velocity: self.vel.velo,
-                                acceleration: self.vel.accl,
-                            });
-                            effects.request_poll = true;
+                            // C: same-direction target changes are simply accepted.
+                            // The new DVAL is stored and the motor continues to the
+                            // current target; backlash/retry will be re-evaluated
+                            // when the current move completes.
+                            // NOTE: do NOT update ldvl here -- ldvl must remain the
+                            // original target so is_preferred_direction works correctly
+                            // when the move completes.
+                            self.internal.backlash_pending =
+                                self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
                             effects.suppress_forward_link = true;
                             return effects;
                         }
@@ -71,8 +70,13 @@ impl MotorRecord {
                 self.pos.rlv = 0.0;
                 // Cascade from VAL
                 if let Ok((dval, rval, off)) = coordinate::cascade_from_val(
-                    self.pos.val, self.conv.dir, self.pos.off,
-                    self.conv.foff, self.conv.mres, false, self.pos.dval,
+                    self.pos.val,
+                    self.conv.dir,
+                    self.pos.off,
+                    self.conv.foff,
+                    self.conv.mres,
+                    false,
+                    self.pos.dval,
                 ) {
                     self.pos.dval = dval;
                     self.pos.rval = rval;
@@ -85,7 +89,11 @@ impl MotorRecord {
             }
             CommandSource::Jogf | CommandSource::Jogr => {
                 let forward = src == CommandSource::Jogf;
-                let starting = if forward { self.ctrl.jogf } else { self.ctrl.jogr };
+                let starting = if forward {
+                    self.ctrl.jogf
+                } else {
+                    self.ctrl.jogr
+                };
                 if starting {
                     self.start_jog(forward, &mut effects);
                 } else {
@@ -110,10 +118,19 @@ impl MotorRecord {
                 // SET mode: recalculate RBV from new offset, then issue SetPosition
                 self.pos.rbv = coordinate::dial_to_user(self.pos.drbv, self.conv.dir, self.pos.off);
                 self.pos.diff = self.pos.dval - self.pos.drbv;
-                self.pos.rdif = self.pos.val - self.pos.rbv;
-                let raw_pos = self.pos.dval;
+                // C: rdif = NINT(diff / mres)
+                self.pos.rdif = if self.conv.mres != 0.0 {
+                    (self.pos.diff / self.conv.mres).round() as i32
+                } else {
+                    0
+                };
+                // C: load_pos updates ldvl/lval/lrvl
+                self.internal.ldvl = self.pos.dval;
+                self.internal.lval = self.pos.val;
+                self.internal.lrvl = self.pos.rval;
+                // AsynMotor operates in dial coordinates
                 effects.commands.push(MotorCommand::SetPosition {
-                    position: raw_pos,
+                    position: self.pos.dval,
                 });
             }
             CommandSource::Cnen => {
@@ -128,16 +145,78 @@ impl MotorRecord {
 
     /// Plan an absolute move to current DVAL.
     pub(crate) fn plan_absolute_move(&mut self, effects: &mut ProcessEffects) {
-        // Check soft limits
-        if coordinate::check_soft_limits(self.pos.dval, self.limits.dhlm, self.limits.dllm) {
-            self.limits.lvio = true;
-            tracing::warn!(
-                "limit violation: dval={:.4}, limits=[{:.4}, {:.4}]",
-                self.pos.dval, self.limits.dllm, self.limits.dhlm
-            );
-            return;
+        // Check soft limits (C: disabled only when dhlm == dllm == 0.0)
+        if !(self.limits.dhlm == self.limits.dllm && self.limits.dllm == 0.0) {
+            // C: DLLM > DHLM means limits are inverted => always violation
+            if self.limits.dllm > self.limits.dhlm {
+                self.limits.lvio = true;
+                tracing::warn!(
+                    "limit violation: inverted limits dllm={:.4} > dhlm={:.4}",
+                    self.limits.dllm,
+                    self.limits.dhlm
+                );
+                return;
+            }
+
+            let preferred = self.is_preferred_direction(self.pos.dval, self.pos.drbv);
+
+            if preferred {
+                // C preferred_dir: check dval against limits
+                let target_outside =
+                    self.pos.dval > self.limits.dhlm || self.pos.dval < self.limits.dllm;
+                if target_outside {
+                    // C: allow if dval is closer to valid range than ldvl
+                    let ldvl_above = self.internal.ldvl > self.limits.dhlm;
+                    let ldvl_below = self.internal.ldvl < self.limits.dllm;
+                    let moving_toward_valid = (ldvl_above && self.pos.dval < self.internal.ldvl)
+                        || (ldvl_below && self.pos.dval > self.internal.ldvl);
+                    if !moving_toward_valid {
+                        self.limits.lvio = true;
+                        tracing::warn!(
+                            "limit violation: dval={:.4}, limits=[{:.4}, {:.4}]",
+                            self.pos.dval,
+                            self.limits.dllm,
+                            self.limits.dhlm
+                        );
+                        return;
+                    }
+                }
+            } else {
+                // C non-preferred: check backlash pretarget against limits
+                let pretarget = Self::compute_backlash_pretarget(self.pos.dval, self.retry.bdst);
+                if pretarget > self.limits.dhlm || pretarget < self.limits.dllm {
+                    self.limits.lvio = true;
+                    tracing::warn!(
+                        "limit violation: backlash pretarget={:.4}, limits=[{:.4}, {:.4}]",
+                        pretarget,
+                        self.limits.dllm,
+                        self.limits.dhlm
+                    );
+                    return;
+                }
+            }
         }
         self.limits.lvio = false;
+
+        // C: too_small check -- suppress moves smaller than one motor step
+        if self.conv.mres != 0.0 {
+            let npos = (self.pos.dval / self.conv.mres).round() as i64;
+            let rpos = (self.pos.drbv / self.conv.mres).round() as i64;
+            if (npos - rpos).abs() < 1 {
+                // Sub-step move: pulse DMOV 1→0→1 so clients
+                // (ophyd/bluesky) detect the move completed.
+                // Set dmov=false now; process() will flush DMOV=0 via
+                // AsyncPendingNotify, then the immediate re-process
+                // (with no pending event) will finalize with DMOV=1.
+                self.stat.dmov = false;
+                self.stat.movn = true;
+                self.suppress_flnk = true;
+                // Request a poll so the next I/O Intr cycle completes
+                effects.request_poll = true;
+                effects.suppress_forward_link = true;
+                return;
+            }
+        }
 
         // SPDB deadband: suppress move if already within setpoint deadband
         if self.retry.spdb > 0.0 && (self.pos.dval - self.pos.drbv).abs() <= self.retry.spdb {
@@ -173,17 +252,78 @@ impl MotorRecord {
 
         // tdir reflects the actual first-command direction
         self.stat.tdir = move_target > self.pos.drbv;
+        // CDIR: commanded direction from the position error
+        // C: cdir = (rdif < 0) ? 0 : 1, where rdif = diff/mres
+        // When MRES < 0, the sign inverts
+        self.stat.cdir = if self.conv.mres >= 0.0 {
+            self.pos.diff >= 0.0
+        } else {
+            self.pos.diff < 0.0
+        };
 
         // Set MIP and phase
         self.stat.mip = MipFlags::MOVE;
         self.set_phase(MotionPhase::MainMove);
         self.internal.backlash_pending = backlash;
 
-        effects.commands.push(MotorCommand::MoveAbsolute {
-            position: move_target,
-            velocity: self.vel.velo,
-            acceleration: self.vel.accl,
-        });
+        let use_rel = self.use_relative_moves();
+        let frac = self.retry.frac;
+        let preferred = self.is_preferred_direction(self.pos.dval, self.pos.drbv);
+        let position_error = self.pos.dval - self.pos.drbv;
+
+        // C has 3 cases (do_work lines 2479-2524):
+        // Case 1: No backlash OR (preferred + same vel/accel): slew vel, FRAC
+        // Case 2: Preferred + within backlash range: backlash vel, FRAC
+        // Case 3: Non-preferred (backlash): pretarget, no FRAC
+        let same_vel = (self.vel.bvel - self.vel.velo).abs() < 1e-12
+            && (self.vel.bacc - self.vel.accl).abs() < 1e-12;
+        let within_backlash_range =
+            preferred && self.retry.bdst != 0.0 && position_error.abs() <= self.retry.bdst.abs();
+
+        if backlash && !preferred {
+            // Case 3: Non-preferred direction: move to pretarget, no FRAC
+            self.emit_move(
+                effects,
+                use_rel,
+                move_target - self.pos.drbv,
+                move_target,
+                self.vel.velo,
+                self.vel.accl,
+            );
+        } else if !backlash || (preferred && same_vel) {
+            // Case 1: No backlash or preferred with matching vel/accel
+            // Apply FRAC scaling
+            self.emit_move(
+                effects,
+                use_rel,
+                position_error * frac,
+                self.pos.drbv + position_error * frac,
+                self.vel.velo,
+                self.vel.accl,
+            );
+        } else if within_backlash_range {
+            // Case 2: Preferred direction, within backlash range
+            // Use backlash velocity, apply FRAC
+            self.emit_move(
+                effects,
+                use_rel,
+                position_error * frac,
+                self.pos.drbv + position_error * frac,
+                self.vel.bvel,
+                self.vel.bacc,
+            );
+        } else {
+            // Preferred direction, outside backlash range, vel differs
+            // Use slew velocity, apply FRAC
+            self.emit_move(
+                effects,
+                use_rel,
+                position_error * frac,
+                self.pos.drbv + position_error * frac,
+                self.vel.velo,
+                self.vel.accl,
+            );
+        }
         effects.request_poll = true;
         effects.suppress_forward_link = true;
     }
@@ -207,7 +347,27 @@ impl MotorRecord {
 
     /// Start jogging.
     fn start_jog(&mut self, forward: bool, effects: &mut ProcessEffects) {
-        let dir = if forward { MotionDirection::Positive } else { MotionDirection::Negative };
+        // C: if motor is moving, stop first then queue jog for after stop
+        if self.stat.phase != MotionPhase::Idle && self.stat.movn {
+            self.stat.mip = if forward {
+                MipFlags::JOGF
+            } else {
+                MipFlags::JOGR
+            } | MipFlags::STOP;
+            self.internal.backlash_pending = false;
+            effects.commands.push(MotorCommand::Stop {
+                acceleration: self.vel.accl,
+            });
+            effects.request_poll = true;
+            effects.suppress_forward_link = true;
+            return;
+        }
+
+        let dir = if forward {
+            MotionDirection::Positive
+        } else {
+            MotionDirection::Negative
+        };
         if self.is_blocked_by_hw_limit(dir) {
             return;
         }
@@ -221,6 +381,21 @@ impl MotorRecord {
             self.stat.mip = MipFlags::JOGR;
         }
         self.set_phase(MotionPhase::Jog);
+        // Remember jog direction for backlash (MIP flags get cleared by stop_jog)
+        self.internal.jog_was_forward = forward;
+
+        // CDIR for jog: account for DIR and MRES sign
+        // C: cdir computed from jog direction considering dir polarity and MRES sign
+        let user_forward = if self.conv.dir == MotorDir::Neg {
+            !forward
+        } else {
+            forward
+        };
+        self.stat.cdir = if self.conv.mres >= 0.0 {
+            user_forward
+        } else {
+            !user_forward
+        };
 
         effects.commands.push(MotorCommand::MoveVelocity {
             direction: forward,
@@ -236,12 +411,57 @@ impl MotorRecord {
         self.stat.mip.insert(MipFlags::JOG_STOP);
         self.set_phase(MotionPhase::JogStopping);
         effects.commands.push(MotorCommand::Stop {
-            acceleration: if self.vel.jar > 0.0 { self.vel.jar } else { self.vel.accl },
+            acceleration: if self.vel.jar > 0.0 {
+                self.vel.jar
+            } else {
+                self.vel.accl
+            },
         });
     }
 
     /// Start homing.
     fn start_home(&mut self, forward: bool, effects: &mut ProcessEffects) {
+        // C: if motor is moving, stop first then queue home for after stop
+        if self.stat.phase != MotionPhase::Idle && self.stat.movn {
+            self.stat.mip = if forward {
+                MipFlags::HOMF
+            } else {
+                MipFlags::HOMR
+            } | MipFlags::STOP;
+            self.internal.backlash_pending = false;
+            self.internal.pending_retarget = None;
+            effects.commands.push(MotorCommand::Stop {
+                acceleration: self.vel.accl,
+            });
+            effects.request_poll = true;
+            effects.suppress_forward_link = true;
+            return;
+        }
+
+        // C: check limit switch in direction of home before starting
+        // HOMF blocked by HLS (when DIR=Pos) or LLS (when DIR=Neg)
+        let blocked = if forward {
+            if self.conv.dir == MotorDir::Pos {
+                self.limits.hls
+            } else {
+                self.limits.lls
+            }
+        } else {
+            if self.conv.dir == MotorDir::Pos {
+                self.limits.lls
+            } else {
+                self.limits.hls
+            }
+        };
+        if blocked {
+            if forward {
+                self.ctrl.homf = false;
+            } else {
+                self.ctrl.homr = false;
+            }
+            return;
+        }
+
         self.stat.dmov = false;
         self.suppress_flnk = true;
 
@@ -254,8 +474,23 @@ impl MotorRecord {
         }
         self.set_phase(MotionPhase::Homing);
 
+        // C: home direction is inverted when MRES is negative
+        // if ((MIP_HOMF && mres>0) || (MIP_HOMR && mres<0)) => HOME_FOR else HOME_REV
+        let hw_forward = if self.conv.mres >= 0.0 {
+            forward
+        } else {
+            !forward
+        };
+
+        // CDIR for homing: C accounts for MRES sign
+        self.stat.cdir = if self.conv.mres >= 0.0 {
+            forward
+        } else {
+            !forward
+        };
+
         effects.commands.push(MotorCommand::Home {
-            forward,
+            forward: hw_forward,
             velocity: self.vel.hvel,
             acceleration: self.vel.accl,
         });
@@ -271,18 +506,31 @@ impl MotorRecord {
             self.ctrl.twr = false; // pulse
         }
 
-        let dir = if forward { MotionDirection::Positive } else { MotionDirection::Negative };
+        let dir = if forward {
+            MotionDirection::Positive
+        } else {
+            MotionDirection::Negative
+        };
         if self.is_blocked_by_hw_limit(dir) {
             return;
         }
 
-        let delta = if forward { self.ctrl.twv } else { -self.ctrl.twv };
+        let delta = if forward {
+            self.ctrl.twv
+        } else {
+            -self.ctrl.twv
+        };
         self.pos.val += delta;
 
         // Cascade from VAL
         if let Ok((dval, rval, off)) = coordinate::cascade_from_val(
-            self.pos.val, self.conv.dir, self.pos.off,
-            self.conv.foff, self.conv.mres, false, self.pos.dval,
+            self.pos.val,
+            self.conv.dir,
+            self.pos.off,
+            self.conv.foff,
+            self.conv.mres,
+            false,
+            self.pos.dval,
         ) {
             self.pos.dval = dval;
             self.pos.rval = rval;
@@ -315,15 +563,15 @@ impl MotorRecord {
             }
             SpmgMode::Pause => {
                 if self.stat.phase != MotionPhase::Idle {
-                    self.internal.backlash_pending = false;
+                    // C: Pause sends STOP and sets MIP_STOP, but does NOT
+                    // clear phase/MIP or set DMOV here. The normal stop
+                    // completion pipeline handles that. DVAL is preserved
+                    // for potential resume via Go.
+                    self.stat.mip.insert(MipFlags::STOP);
+                    self.internal.pending_retarget = None;
                     effects.commands.push(MotorCommand::Stop {
                         acceleration: self.vel.accl,
                     });
-                    // Keep target (DVAL preserved) for potential resume via Go
-                    self.set_phase(MotionPhase::Idle);
-                    self.stat.mip = MipFlags::empty();
-                    self.stat.dmov = true;
-                    self.suppress_flnk = false;
                 }
             }
             SpmgMode::Go => {
@@ -336,7 +584,9 @@ impl MotorRecord {
             }
             SpmgMode::Move => {
                 // One-shot: like Go but will restore to Pause after completion
-                if matches!(old, SpmgMode::Pause | SpmgMode::Stop) && self.stat.phase == MotionPhase::Idle {
+                if matches!(old, SpmgMode::Pause | SpmgMode::Stop)
+                    && self.stat.phase == MotionPhase::Idle
+                {
                     if (self.pos.dval - self.pos.drbv).abs() > self.retry.rdbd.max(1e-12) {
                         self.plan_absolute_move(effects);
                     }
@@ -345,23 +595,85 @@ impl MotorRecord {
         }
     }
 
+    /// Helper to emit either MoveRelative or MoveAbsolute.
+    fn emit_move(
+        &self,
+        effects: &mut ProcessEffects,
+        use_rel: bool,
+        rel_distance: f64,
+        abs_position: f64,
+        velocity: f64,
+        acceleration: f64,
+    ) {
+        if use_rel {
+            effects.commands.push(MotorCommand::MoveRelative {
+                distance: rel_distance,
+                velocity,
+                acceleration,
+            });
+        } else {
+            effects.commands.push(MotorCommand::MoveAbsolute {
+                position: abs_position,
+                velocity,
+                acceleration,
+            });
+        }
+    }
+
+    /// C: use_rel = rtry != 0 && rmod != InPosition && (ueip || urip)
+    pub(crate) fn use_relative_moves(&self) -> bool {
+        self.retry.rtry != 0
+            && self.retry.rmod != RetryMode::InPosition
+            && (self.conv.ueip || self.conv.urip)
+    }
+
+    /// Check if move is in the preferred direction (same as BDST sign).
+    /// C: when use_rel=false, compares dval vs ldvl (previous target).
+    ///    when use_rel=true, compares diff (dval - drbv) vs 0.
+    fn is_preferred_direction(&self, dval: f64, drbv: f64) -> bool {
+        if self.retry.bdst == 0.0 {
+            return true;
+        }
+        let move_dir = if self.use_relative_moves() {
+            // use_rel: compare target vs current position
+            dval - drbv
+        } else {
+            // !use_rel: compare target vs previous target (ldvl)
+            dval - self.internal.ldvl
+        };
+        if move_dir == 0.0 {
+            return true;
+        }
+        (move_dir > 0.0) == (self.retry.bdst > 0.0)
+    }
+
     /// Handle retarget (NTM) -- new target while moving.
     pub fn handle_retarget(&mut self, new_dval: f64) -> RetargetAction {
         if !self.timing.ntm {
             return RetargetAction::Ignore;
         }
 
-        let _deadband = self.timing.ntmf * (self.retry.bdst.abs() + self.retry.rdbd);
-        let old_dval = self.internal.ldvl;
-        let direction_changed = (new_dval - self.pos.drbv).signum()
-            != (old_dval - self.pos.drbv).signum();
+        // Only retarget during active move or retry phases
+        let in_move = self.stat.mip.intersects(MipFlags::MOVE | MipFlags::RETRY);
+        if !in_move || self.stat.mip.contains(MipFlags::STOP) {
+            return RetargetAction::Ignore;
+        }
 
-        if direction_changed {
+        let diff = new_dval - self.pos.drbv;
+        let deadband = self.timing.ntmf * (self.retry.bdst.abs() + self.retry.rdbd);
+
+        // C: retarget only if direction changed AND error exceeds deadband
+        let sign_diff = diff >= 0.0;
+        let direction_changed = sign_diff != self.stat.cdir;
+
+        if direction_changed && diff.abs() > deadband {
             RetargetAction::StopAndReplan
-        } else if (new_dval - self.pos.drbv).abs() < (old_dval - self.pos.drbv).abs() {
-            RetargetAction::StopAndReplan
-        } else {
+        } else if !direction_changed {
+            // Same direction: extend the move without stopping
             RetargetAction::ExtendMove
+        } else {
+            // Direction changed but within deadband: ignore
+            RetargetAction::Ignore
         }
     }
 
@@ -388,6 +700,14 @@ impl MotorRecord {
             return effects;
         }
 
+        // Sub-step pulse recovery: if DMOV is false but phase is Idle
+        // (no real motion started), finalize to restore DMOV=1.
+        if !self.stat.dmov && self.stat.phase == MotionPhase::Idle && self.stat.mip.is_empty() {
+            let mut effects = ProcessEffects::default();
+            self.finalize_motion(&mut effects);
+            return effects;
+        }
+
         let event = self.pending_event.take();
         let src = self.last_write.take();
 
@@ -408,21 +728,21 @@ impl MotorRecord {
                 // Handled by device support init
                 ProcessEffects::default()
             }
-            Some(MotorEvent::UserWrite(cmd_src)) => {
-                self.plan_motion(cmd_src)
-            }
+            Some(MotorEvent::UserWrite(cmd_src)) => self.plan_motion(cmd_src),
             Some(MotorEvent::DeviceUpdate(status)) => {
                 self.process_motor_info(&status);
                 self.check_completion()
             }
             Some(MotorEvent::DelayExpired) => {
+                // C: after DLY, request fresh poll then evaluate for retry
                 let mut effects = ProcessEffects::default();
-                self.finalize_motion(&mut effects);
+                self.stat.mip.remove(MipFlags::DELAY_REQ);
+                self.stat.mip.insert(MipFlags::DELAY_ACK);
+                effects.status_refresh = true;
+                effects.suppress_forward_link = true;
                 effects
             }
-            None => {
-                ProcessEffects::default()
-            }
+            None => ProcessEffects::default(),
         }
     }
 }

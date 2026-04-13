@@ -99,11 +99,7 @@ impl PortHandle {
     }
 
     /// Submit a request and return an async completion handle (non-blocking submission).
-    pub fn try_submit(
-        &self,
-        op: RequestOp,
-        user: AsynUser,
-    ) -> AsynResult<AsyncCompletionHandle> {
+    pub fn try_submit(&self, op: RequestOp, user: AsynUser) -> AsynResult<AsyncCompletionHandle> {
         let cancel = CancelToken::new();
         self.try_submit_cancellable(op, user, cancel)
     }
@@ -134,11 +130,7 @@ impl PortHandle {
     ///
     /// Works both from plain threads and from within a tokio runtime context
     /// (uses `block_in_place` when called from an async context).
-    pub fn submit_blocking(
-        &self,
-        op: RequestOp,
-        user: AsynUser,
-    ) -> AsynResult<RequestResult> {
+    pub fn submit_blocking(&self, op: RequestOp, user: AsynUser) -> AsynResult<RequestResult> {
         if tokio::runtime::Handle::try_current().is_ok() {
             // Inside a tokio runtime — use block_in_place to avoid panicking
             tokio::task::block_in_place(|| {
@@ -220,7 +212,12 @@ impl PortHandle {
         Ok(())
     }
 
-    pub async fn read_octet(&self, reason: usize, addr: i32, buf_size: usize) -> AsynResult<Vec<u8>> {
+    pub async fn read_octet(
+        &self,
+        reason: usize,
+        addr: i32,
+        buf_size: usize,
+    ) -> AsynResult<Vec<u8>> {
         let user = AsynUser::new(reason).with_addr(addr);
         let result = self.submit(RequestOp::OctetRead { buf_size }, user).await?;
         result.data.ok_or_else(|| AsynError::Status {
@@ -235,9 +232,16 @@ impl PortHandle {
         Ok(())
     }
 
-    pub async fn read_uint32_digital(&self, reason: usize, addr: i32, mask: u32) -> AsynResult<u32> {
+    pub async fn read_uint32_digital(
+        &self,
+        reason: usize,
+        addr: i32,
+        mask: u32,
+    ) -> AsynResult<u32> {
         let user = AsynUser::new(reason).with_addr(addr);
-        let result = self.submit(RequestOp::UInt32DigitalRead { mask }, user).await?;
+        let result = self
+            .submit(RequestOp::UInt32DigitalRead { mask }, user)
+            .await?;
         result.uint_val.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "uint32 read returned no value".into(),
@@ -317,7 +321,8 @@ impl PortHandle {
         data: Vec<i32>,
     ) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Int32ArrayWrite { data }, user).await?;
+        self.submit(RequestOp::Int32ArrayWrite { data }, user)
+            .await?;
         Ok(())
     }
 
@@ -344,14 +349,22 @@ impl PortHandle {
         data: Vec<f64>,
     ) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Float64ArrayWrite { data }, user).await?;
+        self.submit(RequestOp::Float64ArrayWrite { data }, user)
+            .await?;
         Ok(())
     }
 
     /// Flush changed parameters as interrupt notifications (async).
     pub async fn call_param_callbacks(&self, addr: i32) -> AsynResult<()> {
         let user = AsynUser::new(0).with_addr(addr);
-        self.submit(RequestOp::CallParamCallbacks { addr }, user).await?;
+        self.submit(
+            RequestOp::CallParamCallbacks {
+                addr,
+                updates: vec![],
+            },
+            user,
+        )
+        .await?;
         Ok(())
     }
 
@@ -404,7 +417,13 @@ impl PortHandle {
     /// Flush changed parameters as interrupt notifications (blocking).
     pub fn call_param_callbacks_blocking(&self, addr: i32) -> AsynResult<()> {
         let user = AsynUser::new(0).with_addr(addr);
-        self.submit_blocking(RequestOp::CallParamCallbacks { addr }, user)?;
+        self.submit_blocking(
+            RequestOp::CallParamCallbacks {
+                addr,
+                updates: vec![],
+            },
+            user,
+        )?;
         Ok(())
     }
 
@@ -415,7 +434,47 @@ impl PortHandle {
     /// guaranteed to be applied before this callback runs.
     pub fn call_param_callbacks_no_wait(&self, addr: i32) {
         let user = AsynUser::new(0).with_addr(addr);
-        self.submit_no_wait(RequestOp::CallParamCallbacks { addr }, user);
+        self.submit_no_wait(
+            RequestOp::CallParamCallbacks {
+                addr,
+                updates: vec![],
+            },
+            user,
+        );
+    }
+
+    /// Set parameters directly and fire callbacks atomically.
+    ///
+    /// This is the correct way for **background/acquisition threads** to update
+    /// parameters. It mirrors the C ADCore pattern of:
+    /// ```c
+    /// setIntegerParam(reason, value);
+    /// setDoubleParam(reason, value);
+    /// callParamCallbacks();
+    /// ```
+    ///
+    /// # Why not `write_int32_no_wait` + `call_param_callbacks_no_wait`?
+    ///
+    /// `write_int32_no_wait` routes through the driver's `writeInt32()` method,
+    /// which is the **external write** path (designed for CA client puts). This
+    /// can trigger unwanted side effects (e.g., starting acquisition again) and
+    /// sends two separate messages to the actor queue — the callback may fire
+    /// before all writes are processed, or may miss changed flags.
+    ///
+    /// `set_params_and_notify` sets parameters directly in the param cache and
+    /// fires callbacks in a **single atomic actor message**, ensuring all I/O Intr
+    /// records see the updated values.
+    ///
+    /// # Example
+    /// ```ignore
+    /// port_handle.set_params_and_notify(0, vec![
+    ///     ParamSetValue::Int32 { reason: acquire_busy, addr: 0, value: 0 },
+    ///     ParamSetValue::Int32 { reason: status, addr: 0, value: ADStatus::Idle as i32 },
+    /// ]);
+    /// ```
+    pub fn set_params_and_notify(&self, addr: i32, updates: Vec<crate::request::ParamSetValue>) {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_no_wait(RequestOp::CallParamCallbacks { addr, updates }, user);
     }
 
     /// Send a write request without waiting for the reply.
@@ -427,6 +486,10 @@ impl PortHandle {
         let _ = self.tx.try_send(msg);
     }
 
+    /// Send a write request without waiting. Routes through the driver's `writeInt32()`.
+    ///
+    /// **Note:** For background thread parameter updates, prefer [`set_params_and_notify`]
+    /// which sets params directly without going through the driver's write method.
     pub fn write_int32_no_wait(&self, reason: usize, addr: i32, value: i32) {
         let user = AsynUser::new(reason).with_addr(addr);
         self.submit_no_wait(RequestOp::Int32Write { value }, user);
@@ -437,13 +500,14 @@ impl PortHandle {
         self.submit_no_wait(RequestOp::Float64Write { value }, user);
     }
 
-
     // --- Option convenience methods ---
 
     pub fn get_option_blocking(&self, key: &str) -> AsynResult<String> {
         let user = AsynUser::default();
         let result = self.submit_blocking(
-            RequestOp::GetOption { key: key.to_string() },
+            RequestOp::GetOption {
+                key: key.to_string(),
+            },
             user,
         )?;
         result.option_value.ok_or_else(|| AsynError::Status {
@@ -455,7 +519,10 @@ impl PortHandle {
     pub fn set_option_blocking(&self, key: &str, value: &str) -> AsynResult<()> {
         let user = AsynUser::default();
         self.submit_blocking(
-            RequestOp::SetOption { key: key.to_string(), value: value.to_string() },
+            RequestOp::SetOption {
+                key: key.to_string(),
+                value: value.to_string(),
+            },
             user,
         )?;
         Ok(())
@@ -463,10 +530,14 @@ impl PortHandle {
 
     pub async fn get_option(&self, key: &str) -> AsynResult<String> {
         let user = AsynUser::default();
-        let result = self.submit(
-            RequestOp::GetOption { key: key.to_string() },
-            user,
-        ).await?;
+        let result = self
+            .submit(
+                RequestOp::GetOption {
+                    key: key.to_string(),
+                },
+                user,
+            )
+            .await?;
         result.option_value.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "get_option returned no value".into(),
@@ -476,10 +547,60 @@ impl PortHandle {
     pub async fn set_option(&self, key: &str, value: &str) -> AsynResult<()> {
         let user = AsynUser::default();
         self.submit(
-            RequestOp::SetOption { key: key.to_string(), value: value.to_string() },
+            RequestOp::SetOption {
+                key: key.to_string(),
+                value: value.to_string(),
+            },
             user,
-        ).await?;
+        )
+        .await?;
         Ok(())
+    }
+
+    // --- Multi-device convenience methods ---
+
+    pub fn connect_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::ConnectAddr, user)?;
+        Ok(())
+    }
+
+    pub fn disconnect_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::DisconnectAddr, user)?;
+        Ok(())
+    }
+
+    pub fn enable_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::EnableAddr, user)?;
+        Ok(())
+    }
+
+    pub fn disable_addr_blocking(&self, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        self.submit_blocking(RequestOp::DisableAddr, user)?;
+        Ok(())
+    }
+
+    // --- Bounds convenience methods ---
+
+    pub fn get_bounds_int32_blocking(&self, reason: usize, addr: i32) -> AsynResult<(i64, i64)> {
+        let user = AsynUser::new(reason).with_addr(addr);
+        let result = self.submit_blocking(RequestOp::GetBoundsInt32, user)?;
+        result.bounds.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Error,
+            message: "get_bounds returned no bounds".into(),
+        })
+    }
+
+    pub fn get_bounds_int64_blocking(&self, reason: usize, addr: i32) -> AsynResult<(i64, i64)> {
+        let user = AsynUser::new(reason).with_addr(addr);
+        let result = self.submit_blocking(RequestOp::GetBoundsInt64, user)?;
+        result.bounds.ok_or_else(|| AsynError::Status {
+            status: AsynStatus::Error,
+            message: "get_bounds returned no bounds".into(),
+        })
     }
 }
 
@@ -570,9 +691,7 @@ mod tests {
         completion.wait_blocking(Duration::from_secs(1)).unwrap();
 
         let user = AsynUser::new(0).with_timeout(Duration::from_secs(1));
-        let completion = handle
-            .try_submit(RequestOp::Int32Read, user)
-            .unwrap();
+        let completion = handle.try_submit(RequestOp::Int32Read, user).unwrap();
         let result = completion.wait_blocking(Duration::from_secs(1)).unwrap();
         assert_eq!(result.int_val, Some(55));
     }

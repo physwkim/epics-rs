@@ -1,19 +1,30 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
-use tokio::net::tcp::OwnedWriteHalf;
-use tokio::net::TcpListener;
 use epics_base_rs::runtime::sync::{Mutex, RwLock};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::net::TcpListener;
+use tokio::net::tcp::OwnedWriteHalf;
+use tokio::sync::broadcast;
 
-use epics_base_rs::error::CaResult;
+/// Connection lifecycle event broadcast by the TCP listener.
+#[derive(Debug, Clone)]
+pub enum ServerConnectionEvent {
+    /// New client connection accepted.
+    Connected(SocketAddr),
+    /// Client connection closed.
+    Disconnected(SocketAddr),
+}
+
 use crate::protocol::*;
+use crate::server::monitor::{FlowControlGate, spawn_monitor_sender};
+use epics_base_rs::error::CaResult;
 use epics_base_rs::server::access_security::{AccessLevel, AccessSecurityConfig};
-use epics_base_rs::server::database::{parse_pv_name, PvDatabase, PvEntry};
-use crate::server::monitor::spawn_monitor_sender;
+use epics_base_rs::server::database::{PvDatabase, PvEntry, parse_pv_name};
 use epics_base_rs::server::pv::ProcessVariable;
 use epics_base_rs::server::record::RecordInstance;
-use epics_base_rs::types::{encode_dbr, native_type_for_dbr, DbFieldType, EpicsValue};
+use epics_base_rs::types::{DbFieldType, EpicsValue, encode_dbr, native_type_for_dbr};
 
 #[derive(Clone)]
 enum ChannelTarget {
@@ -46,6 +57,7 @@ struct ClientState {
     acf: Arc<Option<AccessSecurityConfig>>,
     tcp_port: u16,
     client_minor_version: u16,
+    flow_control: Arc<FlowControlGate>,
 }
 
 impl ClientState {
@@ -60,6 +72,7 @@ impl ClientState {
             acf,
             tcp_port,
             client_minor_version: 0,
+            flow_control: Arc::new(FlowControlGate::default()),
         }
     }
 
@@ -119,6 +132,7 @@ pub async fn run_tcp_listener(
     acf: Arc<Option<AccessSecurityConfig>>,
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
+    conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -136,9 +150,16 @@ pub async fn run_tcp_listener(
         let acf = acf.clone();
         let beacon_reset = beacon_reset.clone();
         beacon_reset.notify_one();
+        if let Some(tx) = &conn_events {
+            let _ = tx.send(ServerConnectionEvent::Connected(peer));
+        }
+        let conn_events = conn_events.clone();
         epics_base_rs::runtime::task::spawn(async move {
             let result = handle_client(stream, db, acf, actual_port).await;
             beacon_reset.notify_one();
+            if let Some(tx) = &conn_events {
+                let _ = tx.send(ServerConnectionEvent::Disconnected(peer));
+            }
             if let Err(e) = result {
                 // Suppress normal disconnection errors (client closed connection)
                 let is_disconnect = matches!(
@@ -285,21 +306,44 @@ async fn dispatch_message(
                 let (dbr_type, element_count, target) = match entry {
                     PvEntry::Simple(pv) => {
                         let value = pv.get().await;
-                        (value.dbr_type(), value.count() as u32, ChannelTarget::SimplePv(pv))
+                        (
+                            value.dbr_type(),
+                            value.count() as u32,
+                            ChannelTarget::SimplePv(pv),
+                        )
                     }
                     PvEntry::Record(rec) => {
                         let instance = rec.read().await;
                         // Use resolve_field for 3-level priority
                         let value = instance.resolve_field(&field);
                         match value {
-                            Some(v) => (
-                                v.dbr_type(),
-                                v.count() as u32,
-                                ChannelTarget::RecordField {
-                                    record: rec.clone(),
-                                    field: field.clone(),
-                                },
-                            ),
+                            Some(v) => {
+                                // For waveform records, get_field("VAL") returns
+                                // NORD elements (valid data) but the channel's
+                                // native count must be NELM (max capacity) so
+                                // clients allocate the right buffer.
+                                let element_count =
+                                    if field == "VAL" && instance.record.record_type() == "waveform"
+                                    {
+                                        instance
+                                            .resolve_field("NELM")
+                                            .and_then(|n| match n {
+                                                EpicsValue::Long(n) => Some(n.max(0) as u32),
+                                                _ => None,
+                                            })
+                                            .unwrap_or(v.count() as u32)
+                                    } else {
+                                        v.count() as u32
+                                    };
+                                (
+                                    v.dbr_type(),
+                                    element_count,
+                                    ChannelTarget::RecordField {
+                                        record: rec.clone(),
+                                        field: field.clone(),
+                                    },
+                                )
+                            }
                             None => {
                                 // Field not found — send CREATE_CH_FAIL
                                 let mut fail = CaHeader::new(CA_PROTO_CREATE_CH_FAIL);
@@ -362,14 +406,28 @@ async fn dispatch_message(
             let entry = match state.channels.get(&sid) {
                 Some(e) => e,
                 None => {
-                    send_cmd_error(writer, CA_PROTO_READ_NOTIFY, requested_type, ECA_BADCHID, ioid).await?;
+                    send_cmd_error(
+                        writer,
+                        CA_PROTO_READ_NOTIFY,
+                        requested_type,
+                        ECA_BADCHID,
+                        ioid,
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
 
             let snapshot = get_full_snapshot(&entry.target).await;
             let Some(mut snapshot) = snapshot else {
-                send_cmd_error(writer, CA_PROTO_READ_NOTIFY, requested_type, ECA_BADCHID, ioid).await?;
+                send_cmd_error(
+                    writer,
+                    CA_PROTO_READ_NOTIFY,
+                    requested_type,
+                    ECA_BADCHID,
+                    ioid,
+                )
+                .await?;
                 return Ok(());
             };
             // Respect client's requested element count (e.g. caget -# 10)
@@ -379,7 +437,14 @@ async fn dispatch_message(
             let data = match encode_dbr(requested_type, &snapshot) {
                 Ok(d) => d,
                 Err(_) => {
-                    send_cmd_error(writer, CA_PROTO_READ_NOTIFY, requested_type, ECA_BADTYPE, ioid).await?;
+                    send_cmd_error(
+                        writer,
+                        CA_PROTO_READ_NOTIFY,
+                        requested_type,
+                        ECA_BADTYPE,
+                        ioid,
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -409,7 +474,14 @@ async fn dispatch_message(
                 Ok(t) => t,
                 Err(_) => {
                     if is_notify {
-                        send_cmd_error(writer, CA_PROTO_WRITE_NOTIFY, hdr.data_type, ECA_BADTYPE, ioid).await?;
+                        send_cmd_error(
+                            writer,
+                            CA_PROTO_WRITE_NOTIFY,
+                            hdr.data_type,
+                            ECA_BADTYPE,
+                            ioid,
+                        )
+                        .await?;
                     }
                     return Ok(());
                 }
@@ -419,19 +491,30 @@ async fn dispatch_message(
                 Some(e) => e,
                 None => {
                     if is_notify {
-                        send_cmd_error(writer, CA_PROTO_WRITE_NOTIFY, hdr.data_type, ECA_BADCHID, ioid).await?;
+                        send_cmd_error(
+                            writer,
+                            CA_PROTO_WRITE_NOTIFY,
+                            hdr.data_type,
+                            ECA_BADCHID,
+                            ioid,
+                        )
+                        .await?;
                     }
                     return Ok(());
                 }
             };
 
             // Check access level
-            let access = state.channel_access.get(&sid).copied().unwrap_or(AccessLevel::ReadWrite);
+            let access = state
+                .channel_access
+                .get(&sid)
+                .copied()
+                .unwrap_or(AccessLevel::ReadWrite);
             if access != AccessLevel::ReadWrite {
                 if is_notify {
                     let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
                     resp.data_type = write_type as u16;
-                    resp.count = 1;
+                    resp.count = hdr.count;
                     resp.cid = ECA_NOWTACCESS;
                     resp.available = ioid;
                     let mut w = writer.lock().await;
@@ -442,11 +525,19 @@ async fn dispatch_message(
             }
 
             let count = hdr.actual_count() as usize;
+            let write_count = hdr.count; // Echo back in response (matches C EPICS)
             let new_value = match EpicsValue::from_bytes_array(write_type, payload, count) {
                 Ok(v) => v,
                 Err(_) => {
                     if is_notify {
-                        send_cmd_error(writer, CA_PROTO_WRITE_NOTIFY, hdr.data_type, ECA_BADTYPE, ioid).await?;
+                        send_cmd_error(
+                            writer,
+                            CA_PROTO_WRITE_NOTIFY,
+                            hdr.data_type,
+                            ECA_BADTYPE,
+                            ioid,
+                        )
+                        .await?;
                     }
                     return Ok(());
                 }
@@ -487,7 +578,7 @@ async fn dispatch_message(
 
                         let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
                         resp.data_type = write_type as u16;
-                        resp.count = 1;
+                        resp.count = write_count;
                         resp.cid = eca_status;
                         resp.available = ioid;
 
@@ -518,7 +609,14 @@ async fn dispatch_message(
             let native_type = match native_type_for_dbr(requested_type) {
                 Ok(t) => t,
                 Err(_) => {
-                    send_cmd_error(writer, CA_PROTO_EVENT_ADD, requested_type, ECA_BADTYPE, sub_id).await?;
+                    send_cmd_error(
+                        writer,
+                        CA_PROTO_EVENT_ADD,
+                        requested_type,
+                        ECA_BADTYPE,
+                        sub_id,
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -532,7 +630,14 @@ async fn dispatch_message(
             let entry = match state.channels.get(&sid) {
                 Some(e) => e,
                 None => {
-                    send_cmd_error(writer, CA_PROTO_EVENT_ADD, requested_type, ECA_BADCHID, sub_id).await?;
+                    send_cmd_error(
+                        writer,
+                        CA_PROTO_EVENT_ADD,
+                        requested_type,
+                        ECA_BADCHID,
+                        sub_id,
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -544,18 +649,14 @@ async fn dispatch_message(
 
                         // Send initial value
                         let snap = pv.snapshot().await;
-                        send_monitor_snapshot(
-                            writer,
-                            sub_id,
-                            requested_type,
-                            &snap,
-                        ).await?;
+                        send_monitor_snapshot(writer, sub_id, requested_type, &snap).await?;
 
                         let task = spawn_monitor_sender(
                             pv.clone(),
                             sub_id,
                             requested_type,
                             writer.clone(),
+                            state.flow_control.clone(),
                             rx,
                         );
 
@@ -571,30 +672,31 @@ async fn dispatch_message(
                     }
                     ChannelTarget::RecordField { record, field } => {
                         let mut instance = record.write().await;
-                        let rx =
-                            instance.add_subscriber(field, sub_id, native_type, mask);
+                        let rx = instance.add_subscriber(field, sub_id, native_type, mask);
 
                         // Send initial value with full metadata
                         if let Some(snap) = instance.snapshot_for_field(field) {
-                            send_monitor_snapshot(
-                                writer,
-                                sub_id,
-                                requested_type,
-                                &snap,
-                            ).await?;
+                            send_monitor_snapshot(writer, sub_id, requested_type, &snap).await?;
                         }
 
                         let writer_clone = writer.clone();
+                        let flow_control = state.flow_control.clone();
                         let task = epics_base_rs::runtime::task::spawn(async move {
                             let mut rx = rx;
-                            while let Some(event) = rx.recv().await {
-                                let payload_bytes = match encode_dbr(
-                                    requested_type,
-                                    &event.snapshot,
-                                ) {
-                                    Ok(bytes) => bytes,
-                                    Err(_) => break,
-                                };
+                            while let Some(mut event) = rx.recv().await {
+                                if flow_control.is_paused() {
+                                    let Some(coalesced) =
+                                        flow_control.coalesce_while_paused(&mut rx, event).await
+                                    else {
+                                        break;
+                                    };
+                                    event = coalesced;
+                                }
+                                let payload_bytes =
+                                    match encode_dbr(requested_type, &event.snapshot) {
+                                        Ok(bytes) => bytes,
+                                        Err(_) => break,
+                                    };
                                 let element_count = event.snapshot.value.count() as u32;
                                 let mut padded = payload_bytes;
                                 padded.resize(align8(padded.len()), 0);
@@ -635,7 +737,6 @@ async fn dispatch_message(
             }
         }
 
-
         CA_PROTO_EVENT_CANCEL => {
             let sub_id = hdr.available;
             if let Some(sub) = state.subscriptions.remove(&sub_id) {
@@ -662,8 +763,11 @@ async fn dispatch_message(
         }
 
         CA_PROTO_EVENTS_OFF | CA_PROTO_EVENTS_ON => {
-            // Flow control from client — acknowledge silently (no-op).
-            // Sending CA_PROTO_ERROR would confuse C libca clients.
+            if hdr.cmmd == CA_PROTO_EVENTS_OFF {
+                state.flow_control.pause();
+            } else {
+                state.flow_control.resume();
+            }
         }
 
         CA_PROTO_READ_SYNC => {
@@ -691,12 +795,12 @@ async fn dispatch_message(
             let pv_name = String::from_utf8_lossy(&payload[..end]).to_string();
 
             if db.has_name(&pv_name).await {
-                // Reply: data_type = tcp_port, cid = 0xFFFFFFFF, available = client's cid
+                // Reply: data_type = tcp_port, cid = 0 (INADDR_ANY), available = client's cid
                 // 8-byte payload containing CA_MINOR_VERSION as u16
                 let mut resp = CaHeader::new(CA_PROTO_SEARCH);
                 resp.data_type = state.tcp_port;
                 resp.set_payload_size(8, 0);
-                resp.cid = 0xFFFF_FFFF;
+                resp.cid = 0; // INADDR_ANY — client uses TCP peer addr
                 resp.available = hdr.available;
 
                 let mut search_payload = [0u8; 8];
@@ -715,6 +819,8 @@ async fn dispatch_message(
             let cid = hdr.available;
             if let Some(_entry) = state.channels.remove(&sid) {
                 let mut resp = CaHeader::new(CA_PROTO_CLEAR_CHANNEL);
+                resp.data_type = hdr.data_type;
+                resp.count = hdr.count;
                 resp.cid = sid;
                 resp.available = cid;
                 let mut w = writer.lock().await;

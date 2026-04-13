@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 use asyn_rs::interrupt::{InterruptManager, InterruptValue};
 use asyn_rs::param::{ParamType, ParamValue};
@@ -100,7 +100,7 @@ fn bench_concurrent_32_producers(c: &mut Criterion) {
 
 fn bench_interrupt_event_throughput(c: &mut Criterion) {
     let im = InterruptManager::new(4096);
-    let _rx = im.subscribe_sync().unwrap();
+    let _rx = im.subscribe_async();
 
     c.bench_function("interrupt_event_throughput", |b| {
         b.iter(|| {
@@ -110,6 +110,7 @@ fn bench_interrupt_event_throughput(c: &mut Criterion) {
                     addr: 0,
                     value: ParamValue::Int32(i),
                     timestamp: std::time::SystemTime::now(),
+                    uint32_changed_mask: 0,
                 });
             }
         });

@@ -29,7 +29,7 @@ pub trait NDFileWriter: Send + Sync {
     fn read_file(&mut self) -> ADResult<NDArray>;
     fn close_file(&mut self) -> ADResult<()>;
     fn supports_multiple_arrays(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -42,11 +42,14 @@ pub struct NDPluginFileBase {
     pub auto_increment: bool,
     pub temp_suffix: String,
     pub create_dir: i32,
+    pub lazy_open: bool,
+    pub delete_driver_file: bool,
     capture_buffer: Vec<Arc<NDArray>>,
     num_capture: usize,
     num_captured: usize,
     is_open: bool,
     mode: NDFileMode,
+    last_written_name: String,
 }
 
 impl NDPluginFileBase {
@@ -59,11 +62,14 @@ impl NDPluginFileBase {
             auto_increment: false,
             temp_suffix: String::new(),
             create_dir: 0,
+            lazy_open: false,
+            delete_driver_file: false,
             capture_buffer: Vec::new(),
             num_capture: 1,
             num_captured: 0,
             is_open: false,
             mode: NDFileMode::Single,
+            last_written_name: String::new(),
         }
     }
 
@@ -74,7 +80,10 @@ impl NDPluginFileBase {
     /// `%d` (with optional width/precision like `%3.3d`) → fileNumber.
     pub fn create_file_name(&self) -> String {
         if self.file_template.is_empty() {
-            format!("{}{}{:04}", self.file_path, self.file_name, self.file_number)
+            format!(
+                "{}{}{:04}",
+                self.file_path, self.file_name, self.file_number
+            )
         } else {
             let mut result = String::new();
             let mut chars = self.file_template.chars().peekable();
@@ -103,18 +112,28 @@ impl NDPluginFileBase {
                         Some('d') => {
                             // Parse width and precision from spec (e.g. "3.3" → width=3, precision=3)
                             let width: usize = if spec.contains('.') {
-                                spec.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+                                spec.split('.')
+                                    .next()
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(0)
                             } else {
                                 spec.parse().unwrap_or(0)
                             };
                             let precision: usize = if spec.contains('.') {
-                                spec.split('.').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
+                                spec.split('.')
+                                    .nth(1)
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(0)
                             } else {
                                 0
                             };
                             let pad = width.max(precision);
                             if pad > 0 {
-                                result.push_str(&format!("{:0>width$}", self.file_number, width = pad));
+                                result.push_str(&format!(
+                                    "{:0>width$}",
+                                    self.file_number,
+                                    width = pad
+                                ));
                             } else {
                                 result.push_str(&self.file_number.to_string());
                             }
@@ -144,7 +163,11 @@ impl NDPluginFileBase {
         }
     }
 
-    /// Create directory if needed.
+    /// Return the full file name that was last written.
+    pub fn last_written_name(&self) -> &str {
+        &self.last_written_name
+    }
+
     /// Create directory if needed.
     /// C ADCore behavior: createDir != 0 → create directories.
     /// Positive or negative values both trigger creation (negative = depth hint in C,
@@ -181,12 +204,21 @@ impl NDPluginFileBase {
     ) -> ADResult<()> {
         match self.mode {
             NDFileMode::Single => {
+                self.last_written_name = self.create_file_name();
                 let (write_path, final_path) = self.write_path();
                 writer.open_file(&write_path, NDFileMode::Single, &array)?;
                 writer.write_file(&array)?;
                 writer.close_file()?;
                 if let Some(final_path) = final_path {
                     Self::rename_temp(&write_path, &final_path)?;
+                }
+                if self.delete_driver_file {
+                    if let Some(attr) = array.attributes.get("DriverFileName") {
+                        let driver_file = attr.value.as_string();
+                        if !driver_file.is_empty() {
+                            let _ = std::fs::remove_file(&driver_file);
+                        }
+                    }
                 }
                 if self.auto_increment {
                     self.file_number += 1;
@@ -200,12 +232,27 @@ impl NDPluginFileBase {
                 }
             }
             NDFileMode::Stream => {
-                if !self.is_open {
+                if !self.is_open && !self.lazy_open {
+                    self.last_written_name = self.create_file_name();
+                    let (write_path, _) = self.write_path();
+                    writer.open_file(&write_path, NDFileMode::Stream, &array)?;
+                    self.is_open = true;
+                }
+                if self.lazy_open && !self.is_open {
+                    self.last_written_name = self.create_file_name();
                     let (write_path, _) = self.write_path();
                     writer.open_file(&write_path, NDFileMode::Stream, &array)?;
                     self.is_open = true;
                 }
                 writer.write_file(&array)?;
+                if self.delete_driver_file {
+                    if let Some(attr) = array.attributes.get("DriverFileName") {
+                        let driver_file = attr.value.as_string();
+                        if !driver_file.is_empty() {
+                            let _ = std::fs::remove_file(&driver_file);
+                        }
+                    }
+                }
                 self.num_captured += 1;
             }
         }
@@ -213,24 +260,52 @@ impl NDPluginFileBase {
     }
 
     /// Flush capture buffer: open file, write all buffered arrays, close.
+    ///
+    /// For writers that support multiple arrays (HDF5, NeXus), we open once,
+    /// write all frames, and close once.
+    /// For single-image writers (JPEG, TIFF), we open/write/close for each
+    /// frame individually, auto-incrementing the filename between each.
     pub fn flush_capture(&mut self, writer: &mut dyn NDFileWriter) -> ADResult<()> {
         if self.capture_buffer.is_empty() {
             return Ok(());
         }
-        let (write_path, final_path) = self.write_path();
-        writer.open_file(&write_path, NDFileMode::Capture, &self.capture_buffer[0])?;
-        for arr in &self.capture_buffer {
-            writer.write_file(arr)?;
+
+        if writer.supports_multiple_arrays() {
+            // Multi-array format: open once, write all, close once.
+            self.last_written_name = self.create_file_name();
+            let (write_path, final_path) = self.write_path();
+            writer.open_file(&write_path, NDFileMode::Capture, &self.capture_buffer[0])?;
+            for arr in &self.capture_buffer {
+                writer.write_file(arr)?;
+            }
+            writer.close_file()?;
+            if let Some(final_path) = final_path {
+                Self::rename_temp(&write_path, &final_path)?;
+            }
+            if self.auto_increment {
+                self.file_number += 1;
+            }
+        } else {
+            // Single-image format: open/write/close per frame with auto-increment.
+            let buffer = std::mem::take(&mut self.capture_buffer);
+            for arr in &buffer {
+                self.last_written_name = self.create_file_name();
+                let (write_path, final_path) = self.write_path();
+                writer.open_file(&write_path, NDFileMode::Single, arr)?;
+                writer.write_file(arr)?;
+                writer.close_file()?;
+                if let Some(final_path) = final_path {
+                    Self::rename_temp(&write_path, &final_path)?;
+                }
+                if self.auto_increment {
+                    self.file_number += 1;
+                }
+            }
+            self.capture_buffer = buffer;
         }
-        writer.close_file()?;
-        if let Some(final_path) = final_path {
-            Self::rename_temp(&write_path, &final_path)?;
-        }
+
         self.capture_buffer.clear();
         self.num_captured = 0;
-        if self.auto_increment {
-            self.file_number += 1;
-        }
         Ok(())
     }
 
@@ -302,7 +377,12 @@ mod tests {
 
     impl MockWriter {
         fn new(multi: bool) -> Self {
-            Self { opens: Vec::new(), writes: 0, closes: 0, multi }
+            Self {
+                opens: Vec::new(),
+                writes: 0,
+                closes: 0,
+                multi,
+            }
         }
     }
 
@@ -316,7 +396,9 @@ mod tests {
             Ok(())
         }
         fn read_file(&mut self) -> ADResult<NDArray> {
-            Err(crate::error::ADError::UnsupportedConversion("not implemented".into()))
+            Err(crate::error::ADError::UnsupportedConversion(
+                "not implemented".into(),
+            ))
         }
         fn close_file(&mut self) -> ADResult<()> {
             self.closes += 1;
@@ -371,6 +453,28 @@ mod tests {
         assert_eq!(writer.opens.len(), 1);
         assert_eq!(writer.writes, 3);
         assert_eq!(writer.closes, 1);
+    }
+
+    #[test]
+    fn test_capture_mode_single_image_format() {
+        let mut fb = NDPluginFileBase::new();
+        fb.file_path = "/tmp/".into();
+        fb.file_name = "jpeg_".into();
+        fb.file_number = 0;
+        fb.auto_increment = true;
+        fb.set_mode(NDFileMode::Capture);
+        fb.set_num_capture(3);
+
+        let mut writer = MockWriter::new(false); // single-image format
+
+        fb.process_array(make_array(1), &mut writer).unwrap();
+        fb.process_array(make_array(2), &mut writer).unwrap();
+        fb.process_array(make_array(3), &mut writer).unwrap();
+        // Should have flushed with open/write/close per frame
+        assert_eq!(writer.opens.len(), 3);
+        assert_eq!(writer.writes, 3);
+        assert_eq!(writer.closes, 3);
+        assert_eq!(fb.file_number, 3); // auto-incremented 3 times
     }
 
     #[test]

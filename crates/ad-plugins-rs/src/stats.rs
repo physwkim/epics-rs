@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 #[cfg(feature = "parallel")]
-use rayon::prelude::*;
-#[cfg(feature = "parallel")]
 use crate::par_util;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer};
 use ad_core_rs::ndarray_pool::NDArrayPool;
-use ad_core_rs::plugin::runtime::{NDPluginProcess, ParamUpdate, PluginParamSnapshot, PluginRuntimeHandle, ProcessResult};
+use ad_core_rs::plugin::runtime::{
+    NDPluginProcess, ParamUpdate, PluginParamSnapshot, PluginRuntimeHandle, ProcessResult,
+};
 use ad_core_rs::plugin::wiring::WiringRegistry;
 use asyn_rs::param::ParamType;
 use asyn_rs::port::PortDriverBase;
@@ -52,6 +54,21 @@ pub struct NDStatsParams {
     pub compute_profiles: usize,
     pub cursor_x: usize,
     pub cursor_y: usize,
+    pub cursor_val: usize,
+    pub profile_size_x: usize,
+    pub profile_size_y: usize,
+    pub skewx_value: usize,
+    pub skewy_value: usize,
+    pub profile_average_x: usize,
+    pub profile_average_y: usize,
+    pub profile_threshold_x: usize,
+    pub profile_threshold_y: usize,
+    pub profile_centroid_x: usize,
+    pub profile_centroid_y: usize,
+    pub profile_cursor_x: usize,
+    pub profile_cursor_y: usize,
+    pub hist_array: usize,
+    pub hist_x_array: usize,
 }
 
 /// Statistics computed from an NDArray.
@@ -80,6 +97,7 @@ pub struct StatsResult {
     pub profile_centroid_y: Vec<f64>,
     pub profile_cursor_x: Vec<f64>,
     pub profile_cursor_y: Vec<f64>,
+    pub cursor_value: f64,
 }
 
 /// Centroid and higher-order moment results.
@@ -136,31 +154,50 @@ pub fn compute_stats(
             {
                 if par_util::should_parallelize(v.len()) {
                     // Parallel: fold+reduce for min/max/total
-                    let (pmin, pmax, pmin_idx, pmax_idx, ptotal) = par_util::thread_pool().install(|| {
-                        v.par_iter().enumerate()
-                            .fold(
-                                || (f64::MAX, f64::MIN, 0usize, 0usize, 0.0f64),
-                                |(mn, mx, mn_i, mx_i, s), (i, &elem)| {
-                                    let f = elem as f64;
-                                    let (new_mn, new_mn_i) = if f < mn { (f, i) } else { (mn, mn_i) };
-                                    let (new_mx, new_mx_i) = if f > mx { (f, i) } else { (mx, mx_i) };
-                                    (new_mn, new_mx, new_mn_i, new_mx_i, s + f)
-                                },
-                            )
-                            .reduce(
-                                || (f64::MAX, f64::MIN, 0, 0, 0.0),
-                                |(mn1, mx1, mn_i1, mx_i1, s1), (mn2, mx2, mn_i2, mx_i2, s2)| {
-                                    let (rmn, rmn_i) = if mn1 <= mn2 { (mn1, mn_i1) } else { (mn2, mn_i2) };
-                                    let (rmx, rmx_i) = if mx1 >= mx2 { (mx1, mx_i1) } else { (mx2, mx_i2) };
-                                    (rmn, rmx, rmn_i, rmx_i, s1 + s2)
-                                },
-                            )
-                    });
-                    min = pmin; max = pmax; min_idx = pmin_idx; max_idx = pmax_idx; total = ptotal;
+                    let (pmin, pmax, pmin_idx, pmax_idx, ptotal) =
+                        par_util::thread_pool().install(|| {
+                            v.par_iter()
+                                .enumerate()
+                                .fold(
+                                    || (f64::MAX, f64::MIN, 0usize, 0usize, 0.0f64),
+                                    |(mn, mx, mn_i, mx_i, s), (i, &elem)| {
+                                        let f = elem as f64;
+                                        let (new_mn, new_mn_i) =
+                                            if f < mn { (f, i) } else { (mn, mn_i) };
+                                        let (new_mx, new_mx_i) =
+                                            if f > mx { (f, i) } else { (mx, mx_i) };
+                                        (new_mn, new_mx, new_mn_i, new_mx_i, s + f)
+                                    },
+                                )
+                                .reduce(
+                                    || (f64::MAX, f64::MIN, 0, 0, 0.0),
+                                    |(mn1, mx1, mn_i1, mx_i1, s1), (mn2, mx2, mn_i2, mx_i2, s2)| {
+                                        let (rmn, rmn_i) = if mn1 <= mn2 {
+                                            (mn1, mn_i1)
+                                        } else {
+                                            (mn2, mn_i2)
+                                        };
+                                        let (rmx, rmx_i) = if mx1 >= mx2 {
+                                            (mx1, mx_i1)
+                                        } else {
+                                            (mx2, mx_i2)
+                                        };
+                                        (rmn, rmx, rmn_i, rmx_i, s1 + s2)
+                                    },
+                                )
+                        });
+                    min = pmin;
+                    max = pmax;
+                    min_idx = pmin_idx;
+                    max_idx = pmax_idx;
+                    total = ptotal;
                     let mean_tmp = total / v.len() as f64;
                     variance = par_util::thread_pool().install(|| {
                         v.par_iter()
-                            .map(|&elem| { let d = elem as f64 - mean_tmp; d * d })
+                            .map(|&elem| {
+                                let d = elem as f64 - mean_tmp;
+                                d * d
+                            })
                             .sum::<f64>()
                     });
                 } else {
@@ -171,11 +208,21 @@ pub fn compute_stats(
                     let mut ltotal = 0.0f64;
                     for (i, &elem) in v.iter().enumerate() {
                         let f = elem as f64;
-                        if f < lmin { lmin = f; lmin_idx = i; }
-                        if f > lmax { lmax = f; lmax_idx = i; }
+                        if f < lmin {
+                            lmin = f;
+                            lmin_idx = i;
+                        }
+                        if f > lmax {
+                            lmax = f;
+                            lmax_idx = i;
+                        }
                         ltotal += f;
                     }
-                    min = lmin; max = lmax; min_idx = lmin_idx; max_idx = lmax_idx; total = ltotal;
+                    min = lmin;
+                    max = lmax;
+                    min_idx = lmin_idx;
+                    max_idx = lmax_idx;
+                    total = ltotal;
                     let mean_tmp = total / v.len() as f64;
                     let mut lvar = 0.0f64;
                     for &elem in v.iter() {
@@ -195,11 +242,21 @@ pub fn compute_stats(
                 let mut ltotal = 0.0f64;
                 for (i, &elem) in v.iter().enumerate() {
                     let f = elem as f64;
-                    if f < lmin { lmin = f; lmin_idx = i; }
-                    if f > lmax { lmax = f; lmax_idx = i; }
+                    if f < lmin {
+                        lmin = f;
+                        lmin_idx = i;
+                    }
+                    if f > lmax {
+                        lmax = f;
+                        lmax_idx = i;
+                    }
                     ltotal += f;
                 }
-                min = lmin; max = lmax; min_idx = lmin_idx; max_idx = lmax_idx; total = ltotal;
+                min = lmin;
+                max = lmax;
+                min_idx = lmin_idx;
+                max_idx = lmax_idx;
+                total = ltotal;
                 let mean_tmp = total / v.len() as f64;
                 let mut lvar = 0.0f64;
                 for &elem in v.iter() {
@@ -233,7 +290,11 @@ pub fn compute_stats(
                         }
                     }
                 }
-                let bgd_avg = if bgd_count > 0 { bgd_sum / bgd_count as f64 } else { 0.0 };
+                let bgd_avg = if bgd_count > 0 {
+                    bgd_sum / bgd_count as f64
+                } else {
+                    0.0
+                };
                 total - bgd_avg * v.len() as f64
             } else {
                 total
@@ -296,11 +357,14 @@ pub fn compute_centroid(
             let xs = x_size;
             let thr = threshold;
             let (pm00, pm10, pm01) = par_util::thread_pool().install(|| {
-                vals.par_iter().enumerate()
+                vals.par_iter()
+                    .enumerate()
                     .fold(
                         || (0.0f64, 0.0f64, 0.0f64),
                         |(s00, s10, s01), (i, &val)| {
-                            if val < thr { return (s00, s10, s01); }
+                            if val < thr {
+                                return (s00, s10, s01);
+                            }
                             let ix = i % xs;
                             let iy = i / xs;
                             (s00 + val, s10 + val * ix as f64, s01 + val * iy as f64)
@@ -311,7 +375,9 @@ pub fn compute_centroid(
                         |(a0, a1, a2), (b0, b1, b2)| (a0 + b0, a1 + b1, a2 + b2),
                     )
             });
-            m00 = pm00; m10 = pm10; m01 = pm01;
+            m00 = pm00;
+            m10 = pm10;
+            m01 = pm01;
         } else {
             let mut lm00 = 0.0f64;
             let mut lm10 = 0.0f64;
@@ -319,13 +385,17 @@ pub fn compute_centroid(
             for iy in 0..y_size {
                 for ix in 0..x_size {
                     let val = vals[iy * x_size + ix];
-                    if val < threshold { continue; }
+                    if val < threshold {
+                        continue;
+                    }
                     lm00 += val;
                     lm10 += val * ix as f64;
                     lm01 += val * iy as f64;
                 }
             }
-            m00 = lm00; m10 = lm10; m01 = lm01;
+            m00 = lm00;
+            m10 = lm10;
+            m01 = lm01;
         }
     }
 
@@ -337,13 +407,17 @@ pub fn compute_centroid(
         for iy in 0..y_size {
             for ix in 0..x_size {
                 let val = vals[iy * x_size + ix];
-                if val < threshold { continue; }
+                if val < threshold {
+                    continue;
+                }
                 lm00 += val;
                 lm10 += val * ix as f64;
                 lm01 += val * iy as f64;
             }
         }
-        m00 = lm00; m10 = lm10; m01 = lm01;
+        m00 = lm00;
+        m10 = lm10;
+        m01 = lm01;
     }
 
     if m00 == 0.0 {
@@ -362,11 +436,14 @@ pub fn compute_centroid(
             let xs = x_size;
             let thr = threshold;
             let (p20, p02, p11, p30, p03, p40, p04) = par_util::thread_pool().install(|| {
-                vals.par_iter().enumerate()
+                vals.par_iter()
+                    .enumerate()
                     .fold(
                         || (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64),
                         |(s20, s02, s11, s30, s03, s40, s04), (i, &val)| {
-                            if val < thr { return (s20, s02, s11, s30, s03, s40, s04); }
+                            if val < thr {
+                                return (s20, s02, s11, s30, s03, s40, s04);
+                            }
                             let ix = i % xs;
                             let iy = i / xs;
                             let dx = ix as f64 - cx;
@@ -386,53 +463,107 @@ pub fn compute_centroid(
                     )
                     .reduce(
                         || (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                        |(a0,a1,a2,a3,a4,a5,a6),(b0,b1,b2,b3,b4,b5,b6)|
-                            (a0+b0,a1+b1,a2+b2,a3+b3,a4+b4,a5+b5,a6+b6),
+                        |(a0, a1, a2, a3, a4, a5, a6), (b0, b1, b2, b3, b4, b5, b6)| {
+                            (
+                                a0 + b0,
+                                a1 + b1,
+                                a2 + b2,
+                                a3 + b3,
+                                a4 + b4,
+                                a5 + b5,
+                                a6 + b6,
+                            )
+                        },
                     )
             });
-            mu20 = p20; mu02 = p02; mu11 = p11;
-            m30_central = p30; m03_central = p03; m40_central = p40; m04_central = p04;
+            mu20 = p20;
+            mu02 = p02;
+            mu11 = p11;
+            m30_central = p30;
+            m03_central = p03;
+            m40_central = p40;
+            m04_central = p04;
         } else {
-            let mut l20 = 0.0f64; let mut l02 = 0.0f64; let mut l11 = 0.0f64;
-            let mut l30 = 0.0f64; let mut l03 = 0.0f64; let mut l40 = 0.0f64; let mut l04 = 0.0f64;
+            let mut l20 = 0.0f64;
+            let mut l02 = 0.0f64;
+            let mut l11 = 0.0f64;
+            let mut l30 = 0.0f64;
+            let mut l03 = 0.0f64;
+            let mut l40 = 0.0f64;
+            let mut l04 = 0.0f64;
             for iy in 0..y_size {
                 for ix in 0..x_size {
                     let val = vals[iy * x_size + ix];
-                    if val < threshold { continue; }
-                    let dx = ix as f64 - cx; let dy = iy as f64 - cy;
-                    let dx2 = dx * dx; let dy2 = dy * dy;
-                    l20 += val * dx2; l02 += val * dy2; l11 += val * dx * dy;
-                    l30 += val * dx2 * dx; l03 += val * dy2 * dy;
-                    l40 += val * dx2 * dx2; l04 += val * dy2 * dy2;
+                    if val < threshold {
+                        continue;
+                    }
+                    let dx = ix as f64 - cx;
+                    let dy = iy as f64 - cy;
+                    let dx2 = dx * dx;
+                    let dy2 = dy * dy;
+                    l20 += val * dx2;
+                    l02 += val * dy2;
+                    l11 += val * dx * dy;
+                    l30 += val * dx2 * dx;
+                    l03 += val * dy2 * dy;
+                    l40 += val * dx2 * dx2;
+                    l04 += val * dy2 * dy2;
                 }
             }
-            mu20 = l20; mu02 = l02; mu11 = l11;
-            m30_central = l30; m03_central = l03; m40_central = l40; m04_central = l04;
+            mu20 = l20;
+            mu02 = l02;
+            mu11 = l11;
+            m30_central = l30;
+            m03_central = l03;
+            m40_central = l40;
+            m04_central = l04;
         }
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        let mut l20 = 0.0f64; let mut l02 = 0.0f64; let mut l11 = 0.0f64;
-        let mut l30 = 0.0f64; let mut l03 = 0.0f64; let mut l40 = 0.0f64; let mut l04 = 0.0f64;
+        let mut l20 = 0.0f64;
+        let mut l02 = 0.0f64;
+        let mut l11 = 0.0f64;
+        let mut l30 = 0.0f64;
+        let mut l03 = 0.0f64;
+        let mut l40 = 0.0f64;
+        let mut l04 = 0.0f64;
         for iy in 0..y_size {
             for ix in 0..x_size {
                 let val = vals[iy * x_size + ix];
-                if val < threshold { continue; }
-                let dx = ix as f64 - cx; let dy = iy as f64 - cy;
-                let dx2 = dx * dx; let dy2 = dy * dy;
-                l20 += val * dx2; l02 += val * dy2; l11 += val * dx * dy;
-                l30 += val * dx2 * dx; l03 += val * dy2 * dy;
-                l40 += val * dx2 * dx2; l04 += val * dy2 * dy2;
+                if val < threshold {
+                    continue;
+                }
+                let dx = ix as f64 - cx;
+                let dy = iy as f64 - cy;
+                let dx2 = dx * dx;
+                let dy2 = dy * dy;
+                l20 += val * dx2;
+                l02 += val * dy2;
+                l11 += val * dx * dy;
+                l30 += val * dx2 * dx;
+                l03 += val * dy2 * dy;
+                l40 += val * dx2 * dx2;
+                l04 += val * dy2 * dy2;
             }
         }
-        mu20 = l20; mu02 = l02; mu11 = l11;
-        m30_central = l30; m03_central = l03; m40_central = l40; m04_central = l04;
+        mu20 = l20;
+        mu02 = l02;
+        mu11 = l11;
+        m30_central = l30;
+        m03_central = l03;
+        m40_central = l40;
+        m04_central = l04;
     }
 
     let sigma_x = (mu20 / m00).sqrt();
     let sigma_y = (mu02 / m00).sqrt();
-    let sigma_xy = mu11 / m00;
+    let sigma_xy = if sigma_x > 0.0 && sigma_y > 0.0 {
+        (mu11 / m00) / (sigma_x * sigma_y)
+    } else {
+        0.0
+    };
 
     // Skewness: M30_central / (M00 * sigma_x^3)
     let skewness_x = if sigma_x > 0.0 {
@@ -458,20 +589,17 @@ pub fn compute_centroid(
         0.0
     };
 
-    // Eccentricity: ((mu20 - mu02)^2 + 4*mu11^2) / (mu20 + mu02)^2
-    let mu20_norm = mu20 / m00;
-    let mu02_norm = mu02 / m00;
-    let mu11_norm = mu11 / m00;
-    let denom = mu20_norm + mu02_norm;
+    // Eccentricity: ((mu20 - mu02)^2 - 4*mu11^2) / (mu20 + mu02)^2
+    // Uses un-normalized central moments (normalization cancels in the ratio)
+    let denom = mu20 + mu02;
     let eccentricity = if denom > 0.0 {
-        ((mu20_norm - mu02_norm).powi(2) + 4.0 * mu11_norm.powi(2)) / denom.powi(2)
+        ((mu20 - mu02).powi(2) - 4.0 * mu11.powi(2)) / denom.powi(2)
     } else {
         0.0
     };
 
     // Orientation: 0.5 * atan2(2*mu11, mu20 - mu02) in degrees
-    let orientation =
-        0.5 * (2.0 * mu11_norm).atan2(mu20_norm - mu02_norm) * 180.0 / std::f64::consts::PI;
+    let orientation = 0.5 * (2.0 * mu11).atan2(mu20 - mu02) * 180.0 / std::f64::consts::PI;
 
     CentroidResult {
         centroid_x: cx,
@@ -571,17 +699,16 @@ pub fn compute_histogram(
         }
     }
 
-    // Compute entropy: -sum(p * ln(p)) for non-zero bins
-    let total_in_bins: f64 = histogram.iter().sum();
-    let entropy = if total_in_bins > 0.0 {
+    // Compute entropy matching C++: -sum(count * ln(count)) / nElements
+    // Zero-count bins are treated as count=1 (so ln(1)=0, effectively skipped)
+    let n_elements = data.len() as f64;
+    let entropy = if n_elements > 0.0 {
         let mut ent = 0.0f64;
         for &count in &histogram {
-            if count > 0.0 {
-                let p = count / total_in_bins;
-                ent -= p * p.ln();
-            }
+            let c = if count <= 0.0 { 1.0 } else { count };
+            ent += c * c.ln();
         }
-        ent
+        -ent / n_elements
     } else {
         0.0
     };
@@ -703,6 +830,7 @@ pub fn compute_profiles(
 /// Pure processing logic for statistics computation.
 pub struct StatsProcessor {
     latest_stats: Arc<Mutex<StatsResult>>,
+    do_compute_statistics: bool,
     do_compute_centroid: bool,
     do_compute_histogram: bool,
     do_compute_profiles: bool,
@@ -724,6 +852,7 @@ impl StatsProcessor {
     pub fn new() -> Self {
         Self {
             latest_stats: Arc::new(Mutex::new(StatsResult::default())),
+            do_compute_statistics: true,
             do_compute_centroid: true,
             do_compute_histogram: false,
             do_compute_profiles: false,
@@ -767,14 +896,21 @@ impl NDPluginProcess for StatsProcessor {
         let p = &self.params;
         let info = array.info();
 
-        let mut result = compute_stats(&array.data, &array.dims, self.bgd_width);
+        let mut result = if self.do_compute_statistics {
+            compute_stats(&array.data, &array.dims, self.bgd_width)
+        } else {
+            StatsResult::default()
+        };
 
         // Centroid computation
         let mut centroid = CentroidResult::default();
         if self.do_compute_centroid {
             if info.color_size == 1 && array.dims.len() >= 2 {
                 centroid = compute_centroid(
-                    &array.data, info.x_size, info.y_size, self.centroid_threshold,
+                    &array.data,
+                    info.x_size,
+                    info.y_size,
+                    self.centroid_threshold,
                 );
             }
         }
@@ -811,6 +947,15 @@ impl NDPluginProcess for StatsProcessor {
             result.profile_cursor_y = profiles.cursor_y;
         }
 
+        // Compute cursor value: pixel at (cursor_x, cursor_y)
+        if info.color_size == 1 && array.dims.len() >= 2 {
+            let cx = self.cursor_x;
+            let cy = self.cursor_y;
+            if cx < info.x_size && cy < info.y_size {
+                result.cursor_value = array.data.get_as_f64(cy * info.x_size + cx).unwrap_or(0.0);
+            }
+        }
+
         let updates = vec![
             ParamUpdate::float64(p.min_value, result.min),
             ParamUpdate::float64(p.max_value, result.max),
@@ -837,6 +982,9 @@ impl NDPluginProcess for StatsProcessor {
             ParamUpdate::float64(p.hist_below, result.hist_below),
             ParamUpdate::float64(p.hist_above, result.hist_above),
             ParamUpdate::float64(p.hist_entropy, result.hist_entropy),
+            ParamUpdate::float64(p.cursor_val, result.cursor_value),
+            ParamUpdate::int32(p.profile_size_x, info.x_size as i32),
+            ParamUpdate::int32(p.profile_size_y, info.y_size as i32),
         ];
 
         // Send time series data to TS port driver (if configured)
@@ -872,15 +1020,24 @@ impl NDPluginProcess for StatsProcessor {
         }
 
         *self.latest_stats.lock() = result;
-        ProcessResult::sink(updates)
+        // C++ Stats forwards the input array to downstream plugins
+        ProcessResult {
+            output_arrays: vec![Arc::new(array.clone())],
+            param_updates: updates,
+            scatter_index: None,
+        }
     }
 
     fn plugin_type(&self) -> &str {
         "NDPluginStats"
     }
 
-    fn register_params(&mut self, base: &mut PortDriverBase) -> Result<(), asyn_rs::error::AsynError> {
-        self.params.compute_statistics = base.create_param("COMPUTE_STATISTICS", ParamType::Int32)?;
+    fn register_params(
+        &mut self,
+        base: &mut PortDriverBase,
+    ) -> Result<(), asyn_rs::error::AsynError> {
+        self.params.compute_statistics =
+            base.create_param("COMPUTE_STATISTICS", ParamType::Int32)?;
         base.set_int32_param(self.params.compute_statistics, 0, 1)?;
 
         self.params.bgd_width = base.create_param("BGD_WIDTH", ParamType::Int32)?;
@@ -898,7 +1055,8 @@ impl NDPluginProcess for StatsProcessor {
         self.params.compute_centroid = base.create_param("COMPUTE_CENTROID", ParamType::Int32)?;
         base.set_int32_param(self.params.compute_centroid, 0, 1)?;
 
-        self.params.centroid_threshold = base.create_param("CENTROID_THRESHOLD", ParamType::Float64)?;
+        self.params.centroid_threshold =
+            base.create_param("CENTROID_THRESHOLD", ParamType::Float64)?;
         self.params.centroid_total = base.create_param("CENTROID_TOTAL", ParamType::Float64)?;
         self.params.centroid_x = base.create_param("CENTROIDX_VALUE", ParamType::Float64)?;
         self.params.centroid_y = base.create_param("CENTROIDY_VALUE", ParamType::Float64)?;
@@ -928,16 +1086,45 @@ impl NDPluginProcess for StatsProcessor {
         self.params.cursor_y = base.create_param("CURSOR_Y", ParamType::Int32)?;
         base.set_int32_param(self.params.cursor_y, 0, 0)?;
 
+        self.params.cursor_val = base.create_param("CURSOR_VAL", ParamType::Float64)?;
+        self.params.profile_size_x = base.create_param("PROFILE_SIZE_X", ParamType::Int32)?;
+        self.params.profile_size_y = base.create_param("PROFILE_SIZE_Y", ParamType::Int32)?;
+
+        self.params.skewx_value = base.create_param("SKEWX_VALUE", ParamType::Float64)?;
+        self.params.skewy_value = base.create_param("SKEWY_VALUE", ParamType::Float64)?;
+        self.params.profile_average_x =
+            base.create_param("PROFILE_AVERAGE_X", ParamType::Float64Array)?;
+        self.params.profile_average_y =
+            base.create_param("PROFILE_AVERAGE_Y", ParamType::Float64Array)?;
+        self.params.profile_threshold_x =
+            base.create_param("PROFILE_THRESHOLD_X", ParamType::Float64Array)?;
+        self.params.profile_threshold_y =
+            base.create_param("PROFILE_THRESHOLD_Y", ParamType::Float64Array)?;
+        self.params.profile_centroid_x =
+            base.create_param("PROFILE_CENTROID_X", ParamType::Float64Array)?;
+        self.params.profile_centroid_y =
+            base.create_param("PROFILE_CENTROID_Y", ParamType::Float64Array)?;
+        self.params.profile_cursor_x =
+            base.create_param("PROFILE_CURSOR_X", ParamType::Float64Array)?;
+        self.params.profile_cursor_y =
+            base.create_param("PROFILE_CURSOR_Y", ParamType::Float64Array)?;
+        self.params.hist_array = base.create_param("HIST_ARRAY", ParamType::Float64Array)?;
+        self.params.hist_x_array = base.create_param("HIST_X_ARRAY", ParamType::Float64Array)?;
+
         // Export params so create_stats_runtime can retrieve them after the move
         *self.params_out.lock() = self.params;
 
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) -> ad_core_rs::plugin::runtime::ParamChangeResult {
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        snapshot: &PluginParamSnapshot,
+    ) -> ad_core_rs::plugin::runtime::ParamChangeResult {
         let p = &self.params;
         if reason == p.compute_statistics {
-            // toggle handled by do_compute_centroid etc. if needed
+            self.do_compute_statistics = snapshot.value.as_i32() != 0;
         } else if reason == p.compute_centroid {
             self.do_compute_centroid = snapshot.value.as_i32() != 0;
         } else if reason == p.compute_histogram {
@@ -959,36 +1146,28 @@ impl NDPluginProcess for StatsProcessor {
         } else if reason == p.hist_max {
             self.hist_max = snapshot.value.as_f64();
         }
-            ad_core_rs::plugin::runtime::ParamChangeResult::empty()
+        ad_core_rs::plugin::runtime::ParamChangeResult::empty()
     }
 }
 
 /// Create a stats plugin runtime with an integrated time series port.
 ///
 /// Returns:
-/// - Plugin runtime handle (for the stats plugin)
-/// - Stats result accessor
-/// - Stats params (for building stats registry)
-/// - TS port runtime handle (for registering as a separate port)
-/// - TS params (for building TS registry)
-/// - Thread join handles (stats data, TS actor, TS data)
+/// Create a stats plugin runtime. The TS receiver is stored in the registry
+/// for later pickup by `NDTimeSeriesConfigure`.
 pub fn create_stats_runtime(
     port_name: &str,
     pool: Arc<NDArrayPool>,
     queue_size: usize,
     ndarray_port: &str,
     wiring: Arc<WiringRegistry>,
+    ts_registry: &crate::time_series::TsReceiverRegistry,
 ) -> (
     PluginRuntimeHandle,
     Arc<Mutex<StatsResult>>,
     NDStatsParams,
-    asyn_rs::runtime::port::PortRuntimeHandle,
-    crate::time_series::TSParams,
-    std::thread::JoinHandle<()>,
-    std::thread::JoinHandle<()>,
     std::thread::JoinHandle<()>,
 ) {
-    // Create TS channel
     let (ts_tx, ts_rx) = tokio::sync::mpsc::channel(256);
 
     let mut processor = StatsProcessor::new();
@@ -1005,21 +1184,16 @@ pub fn create_stats_runtime(
         wiring,
     );
 
-    // Params were populated by register_params (called during create_plugin_runtime)
-    // and exported via the shared params_out handle.
     let stats_params = *params_handle.lock();
 
-    // Create TS port with stats-specific channel names
-    let ts_port_name = format!("{port_name}_TS");
-    let (ts_runtime, ts_params, ts_actor_jh, ts_data_jh) =
-        crate::time_series::create_ts_port_runtime(
-            &ts_port_name,
-            &crate::time_series::STATS_TS_CHANNEL_NAMES,
-            2048,
-            ts_rx,
-        );
+    // Store the TS receiver for NDTimeSeriesConfigure to pick up
+    let channel_names: Vec<String> = crate::time_series::STATS_TS_CHANNEL_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    ts_registry.store(port_name, ts_rx, channel_names);
 
-    (plugin_handle, stats_handle, stats_params, ts_runtime, ts_params, data_jh, ts_actor_jh, ts_data_jh)
+    (plugin_handle, stats_handle, stats_params, data_jh)
 }
 
 #[cfg(test)]
@@ -1184,18 +1358,19 @@ mod tests {
         // Each bin should have ~1 count (uniform distribution)
         let total: f64 = hist.iter().sum();
         assert!((total - 10.0).abs() < 1e-10);
-        // Entropy of uniform distribution over 10 bins = ln(10)
-        assert!((entropy - 10.0f64.ln()).abs() < 0.1);
+        // C++ entropy: -sum(count * ln(count)) / nElements
+        // Uniform: each bin has 1, so sum(1*ln(1)) = 0, entropy = 0
+        assert!(entropy.abs() < 1e-10);
     }
 
     #[test]
     fn test_histogram_below_above() {
         let data = NDDataBuffer::F64(vec![-1.0, 0.5, 1.5, 3.0]);
         let (hist, below, above, _entropy) = compute_histogram(&data, 2, 0.0, 2.0);
-        assert_eq!(below, 1.0);  // -1.0 is below
-        assert_eq!(above, 1.0);  // 3.0 is above
+        assert_eq!(below, 1.0); // -1.0 is below
+        assert_eq!(above, 1.0); // 3.0 is above
         let total_in_bins: f64 = hist.iter().sum();
-        assert!((total_in_bins - 2.0).abs() < 1e-10);  // 0.5 and 1.5
+        assert!((total_in_bins - 2.0).abs() < 1e-10); // 0.5 and 1.5
     }
 
     #[test]
@@ -1204,8 +1379,11 @@ mod tests {
         let (hist, below, above, entropy) = compute_histogram(&data, 10, 0.0, 10.0);
         assert_eq!(below, 0.0);
         assert_eq!(above, 0.0);
-        // All values go to one bin -> entropy = 0
-        assert!((entropy - 0.0).abs() < 1e-10);
+        // C++ entropy: one bin has 100, 9 bins have 0→1
+        // sum = 100*ln(100) + 9*(1*ln(1)) = 100*ln(100)
+        // entropy = -100*ln(100)/100 = -ln(100)
+        let expected = -(100.0f64.ln());
+        assert!((entropy - expected).abs() < 1e-10);
         let total: f64 = hist.iter().sum();
         assert!((total - 100.0).abs() < 1e-10);
     }
@@ -1222,12 +1400,11 @@ mod tests {
         let data = NDDataBuffer::F64(pixels);
 
         let profiles = compute_profiles(
-            &data, 8, 8,
-            0.0,   // threshold
-            3.5,   // centroid_x (center)
-            3.5,   // centroid_y (center)
-            0,     // cursor_x
-            7,     // cursor_y
+            &data, 8, 8, 0.0, // threshold
+            3.5, // centroid_x (center)
+            3.5, // centroid_y (center)
+            0,   // cursor_x
+            7,   // cursor_y
         );
 
         // Average X profile: each column has the same values (0..7), avg = 3.5
@@ -1239,7 +1416,10 @@ mod tests {
         // Average Y profile: each row has uniform value = row index, avg = row index
         assert_eq!(profiles.avg_y.len(), 8);
         for (iy, &v) in profiles.avg_y.iter().enumerate() {
-            assert!((v - iy as f64).abs() < 1e-10, "avg_y[{iy}] should be {iy}, got {v}");
+            assert!(
+                (v - iy as f64).abs() < 1e-10,
+                "avg_y[{iy}] should be {iy}, got {v}"
+            );
         }
 
         // Cursor X profile: row at cursor_y=7 -> all pixels are 7.0
@@ -1275,10 +1455,8 @@ mod tests {
         let data = NDDataBuffer::F64(pixels);
 
         let profiles = compute_profiles(
-            &data, 4, 4,
-            5.0,   // threshold
-            2.0, 1.0,
-            0, 0,
+            &data, 4, 4, 5.0, // threshold
+            2.0, 1.0, 0, 0,
         );
 
         // Threshold X profile: only column 2 has a pixel >= 5.0 (at row 1)
@@ -1302,11 +1480,16 @@ mod tests {
 
         let mut arr = NDArray::new(vec![NDDimension::new(5)], NDDataType::UInt8);
         if let NDDataBuffer::U8(ref mut v) = arr.data {
-            v[0] = 10; v[1] = 20; v[2] = 30; v[3] = 40; v[4] = 50;
+            v[0] = 10;
+            v[1] = 20;
+            v[2] = 30;
+            v[3] = 40;
+            v[4] = 50;
         }
 
         let result = proc.process_array(&arr, &pool);
-        assert!(result.output_arrays.is_empty(), "stats is a sink");
+        // C++ Stats forwards the input array to downstream plugins
+        assert_eq!(result.output_arrays.len(), 1, "stats forwards the array");
 
         let stats = proc.stats_handle().lock().clone();
         assert_eq!(stats.min, 10.0);
@@ -1318,12 +1501,16 @@ mod tests {
     fn test_stats_runtime_end_to_end() {
         let pool = Arc::new(NDArrayPool::new(1_000_000));
         let wiring = Arc::new(WiringRegistry::new());
-        let (handle, stats, _params, _ts_runtime, _ts_params, _jh, _ts_actor_jh, _ts_data_jh) =
-            create_stats_runtime("STATS_RT", pool, 10, "", wiring);
+        let ts_registry = crate::time_series::TsReceiverRegistry::new();
+        let (handle, stats, _params, _jh) =
+            create_stats_runtime("STATS_RT", pool, 10, "", wiring, &ts_registry);
 
         // Plugins default to disabled — enable for test
-        handle.port_runtime().port_handle()
-            .write_int32_blocking(handle.plugin_params.enable_callbacks, 0, 1).unwrap();
+        handle
+            .port_runtime()
+            .port_handle()
+            .write_int32_blocking(handle.plugin_params.enable_callbacks, 0, 1)
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         let mut arr = NDArray::new(

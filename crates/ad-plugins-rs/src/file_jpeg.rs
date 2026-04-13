@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use ad_core_rs::color::{NDColorMode, convert_rgb_layout};
 use ad_core_rs::error::{ADError, ADResult};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
@@ -9,7 +10,7 @@ use ad_core_rs::plugin::runtime::{
     NDPluginProcess, ParamChangeResult, PluginParamSnapshot, ProcessResult,
 };
 
-use jpeg_encoder::{Encoder as JpegEncoder, ColorType as JpegColorType};
+use jpeg_encoder::{ColorType as JpegColorType, Encoder as JpegEncoder};
 
 /// JPEG file writer using `jpeg-encoder` for encoding and `jpeg-decoder` for decoding.
 pub struct JpegWriter {
@@ -32,9 +33,10 @@ impl JpegWriter {
 
 impl NDFileWriter for JpegWriter {
     fn open_file(&mut self, path: &Path, _mode: NDFileMode, array: &NDArray) -> ADResult<()> {
-        if array.data.data_type() != NDDataType::UInt8 {
+        let dt = array.data.data_type();
+        if dt != NDDataType::UInt8 && dt != NDDataType::Int8 {
             return Err(ADError::UnsupportedConversion(
-                "JPEG only supports UInt8 data".into(),
+                "JPEG only supports UInt8/Int8 data".into(),
             ));
         }
         self.current_path = Some(path.to_path_buf());
@@ -42,19 +44,57 @@ impl NDFileWriter for JpegWriter {
     }
 
     fn write_file(&mut self, array: &NDArray) -> ADResult<()> {
-        let path = self.current_path.as_ref()
+        let path = self
+            .current_path
+            .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
-        let info = array.info();
+        // Detect color mode and convert RGB2/RGB3 to RGB1 if needed
+        let color_mode = array
+            .attributes
+            .get("ColorMode")
+            .and_then(|attr| attr.value.as_i64())
+            .map(|v| NDColorMode::from_i32(v as i32))
+            .unwrap_or_else(|| {
+                if array.dims.len() == 3 {
+                    let d0 = array.dims[0].size;
+                    let d1 = array.dims[1].size;
+                    let d2 = array.dims[2].size;
+                    if d0 == 3 {
+                        NDColorMode::RGB1
+                    } else if d1 == 3 {
+                        NDColorMode::RGB2
+                    } else if d2 == 3 {
+                        NDColorMode::RGB3
+                    } else {
+                        NDColorMode::Mono
+                    }
+                } else {
+                    NDColorMode::Mono
+                }
+            });
+
+        let is_rgb = matches!(
+            color_mode,
+            NDColorMode::RGB1 | NDColorMode::RGB2 | NDColorMode::RGB3
+        );
+        let src = if is_rgb && color_mode != NDColorMode::RGB1 {
+            &convert_rgb_layout(array, color_mode, NDColorMode::RGB1)?
+        } else {
+            array
+        };
+
+        let info = src.info();
         let width = info.x_size;
         let height = info.y_size;
 
-        let data = match &array.data {
-            NDDataBuffer::U8(v) => v.as_slice(),
+        let data: Vec<u8> = match &src.data {
+            NDDataBuffer::U8(v) => v.clone(),
+            NDDataBuffer::I8(v) => v.iter().map(|&b| b as u8).collect(),
             _ => {
                 return Err(ADError::UnsupportedConversion(
-                    "JPEG only supports UInt8".into(),
-                ))
+                    "JPEG only supports UInt8/Int8".into(),
+                ));
             }
         };
 
@@ -67,7 +107,7 @@ impl NDFileWriter for JpegWriter {
         let mut buf = Vec::new();
         let encoder = JpegEncoder::new(&mut buf, self.quality);
         encoder
-            .encode(data, width as u16, height as u16, color_type)
+            .encode(&data, width as u16, height as u16, color_type)
             .map_err(|e| ADError::UnsupportedConversion(format!("JPEG encode error: {}", e)))?;
 
         std::fs::write(path, &buf)?;
@@ -75,7 +115,9 @@ impl NDFileWriter for JpegWriter {
     }
 
     fn read_file(&mut self) -> ADResult<NDArray> {
-        let path = self.current_path.as_ref()
+        let path = self
+            .current_path
+            .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
         let file_data = std::fs::read(path)?;
@@ -101,7 +143,7 @@ impl NDFileWriter for JpegWriter {
             _ => {
                 return Err(ADError::UnsupportedConversion(
                     "unsupported JPEG pixel format".into(),
-                ))
+                ));
             }
         };
 
@@ -137,7 +179,7 @@ impl JpegFileProcessor {
 
 impl Default for JpegFileProcessor {
     fn default() -> Self {
-        Self::new(90)
+        Self::new(50)
     }
 }
 
@@ -150,14 +192,21 @@ impl NDPluginProcess for JpegFileProcessor {
         "NDFileJPEG"
     }
 
-    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
         self.ctrl.register_params(base)?;
         use asyn_rs::param::ParamType;
         self.jpeg_quality_idx = Some(base.create_param("JPEG_QUALITY", ParamType::Int32)?);
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        params: &PluginParamSnapshot,
+    ) -> ParamChangeResult {
         // JPEG-specific: quality change
         if Some(reason) == self.jpeg_quality_idx {
             let q = params.value.as_i32().clamp(1, 100) as u8;
@@ -191,7 +240,9 @@ mod tests {
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(ref mut v) = arr.data {
-            for i in 0..64 { v[i] = (i * 4) as u8; }
+            for i in 0..64 {
+                v[i] = (i * 4) as u8;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -231,22 +282,33 @@ mod tests {
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(ref mut v) = arr.data {
-            for i in 0..v.len() { v[i] = (i % 256) as u8; }
+            for i in 0..v.len() {
+                v[i] = (i % 256) as u8;
+            }
         }
 
         let mut writer_high = JpegWriter::new(95);
-        writer_high.open_file(&path_high, NDFileMode::Single, &arr).unwrap();
+        writer_high
+            .open_file(&path_high, NDFileMode::Single, &arr)
+            .unwrap();
         writer_high.write_file(&arr).unwrap();
         writer_high.close_file().unwrap();
 
         let mut writer_low = JpegWriter::new(10);
-        writer_low.open_file(&path_low, NDFileMode::Single, &arr).unwrap();
+        writer_low
+            .open_file(&path_low, NDFileMode::Single, &arr)
+            .unwrap();
         writer_low.write_file(&arr).unwrap();
         writer_low.close_file().unwrap();
 
         let size_high = std::fs::metadata(&path_high).unwrap().len();
         let size_low = std::fs::metadata(&path_low).unwrap().len();
-        assert!(size_high > size_low, "high quality ({}) should be larger than low quality ({})", size_high, size_low);
+        assert!(
+            size_high > size_low,
+            "high quality ({}) should be larger than low quality ({})",
+            size_high,
+            size_low
+        );
 
         std::fs::remove_file(&path_high).ok();
         std::fs::remove_file(&path_low).ok();
@@ -263,7 +325,9 @@ mod tests {
         );
         if let NDDataBuffer::U8(ref mut v) = arr.data {
             // Use uniform value so JPEG compression is lossless at quality 100
-            for i in 0..64 { v[i] = 128; }
+            for i in 0..64 {
+                v[i] = 128;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -274,7 +338,11 @@ mod tests {
         if let NDDataBuffer::U8(ref v) = read_back.data {
             // With uniform input at max quality, decoded values should be close
             for &px in v.iter() {
-                assert!((px as i16 - 128).unsigned_abs() < 5, "pixel {} too far from 128", px);
+                assert!(
+                    (px as i16 - 128).unsigned_abs() < 5,
+                    "pixel {} too far from 128",
+                    px
+                );
             }
         }
 

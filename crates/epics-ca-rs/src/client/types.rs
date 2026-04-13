@@ -87,6 +87,11 @@ pub(crate) enum TransportCommand {
         sid: u32,
         server_addr: SocketAddr,
     },
+    /// Beacon anomaly detected — force immediate echo probe to detect
+    /// dead connections faster (matches C EPICS beaconAnomaly flag).
+    EchoProbe { server_addr: SocketAddr },
+    EventsOff { server_addr: SocketAddr },
+    EventsOn { server_addr: SocketAddr },
 }
 
 pub(crate) enum TransportEvent {

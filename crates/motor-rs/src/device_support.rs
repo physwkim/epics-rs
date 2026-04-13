@@ -6,6 +6,7 @@ use asyn_rs::user::AsynUser;
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::device_support::{DeviceReadOutcome, DeviceSupport};
 use epics_base_rs::server::record::{Record, ScanType};
+use epics_base_rs::types::EpicsValue;
 use tokio::sync::mpsc;
 
 use crate::device_state::*;
@@ -23,6 +24,7 @@ pub struct MotorDeviceSupport {
     device_state: SharedDeviceState,
     initialized: bool,
     dtyp_name: String,
+    polling_active: bool,
 }
 
 impl MotorDeviceSupport {
@@ -44,6 +46,7 @@ impl MotorDeviceSupport {
             device_state,
             initialized: false,
             dtyp_name: "asynMotor".to_string(),
+            polling_active: false,
         }
     }
 
@@ -63,7 +66,7 @@ impl MotorDeviceSupport {
     }
 
     /// Execute motor commands and manage poll loop from DeviceActions.
-    fn execute_actions(&self, actions: &DeviceActions) {
+    fn execute_actions(&mut self, actions: &DeviceActions) {
         let user = self.make_user();
         let mut motor = match self.motor.lock() {
             Ok(m) => m,
@@ -75,16 +78,36 @@ impl MotorDeviceSupport {
 
         for cmd in &actions.commands {
             let result = match cmd {
-                MotorCommand::MoveAbsolute { position, velocity, acceleration } => {
+                MotorCommand::MoveAbsolute {
+                    position,
+                    velocity,
+                    acceleration,
+                } => {
                     tracing::info!("motor command: MoveAbsolute pos={position}, vel={velocity}");
                     motor.move_absolute(&user, *position, *velocity, *acceleration)
                 }
-                MotorCommand::MoveVelocity { direction, velocity, acceleration } => {
-                    let target = if *direction { 1e9 } else { -1e9 };
-                    tracing::info!("motor command: MoveVelocity dir={direction}, vel={velocity}");
-                    motor.move_absolute(&user, target, *velocity, *acceleration)
+                MotorCommand::MoveRelative {
+                    distance,
+                    velocity,
+                    acceleration,
+                } => {
+                    tracing::info!("motor command: MoveRelative dist={distance}, vel={velocity}");
+                    motor.move_relative(&user, *distance, *velocity, *acceleration)
                 }
-                MotorCommand::Home { forward, velocity, acceleration: _ } => {
+                MotorCommand::MoveVelocity {
+                    direction,
+                    velocity,
+                    acceleration,
+                } => {
+                    let signed_vel = if *direction { *velocity } else { -*velocity };
+                    tracing::info!("motor command: MoveVelocity dir={direction}, vel={velocity}");
+                    motor.move_velocity(&user, signed_vel, *acceleration)
+                }
+                MotorCommand::Home {
+                    forward,
+                    velocity,
+                    acceleration: _,
+                } => {
                     tracing::info!("motor command: Home forward={forward}");
                     motor.home(&user, *velocity, *forward)
                 }
@@ -100,9 +123,31 @@ impl MotorDeviceSupport {
                     tracing::info!("motor command: SetClosedLoop enable={enable}");
                     motor.set_closed_loop(&user, *enable)
                 }
-                MotorCommand::Poll => {
-                    Ok(())
+                MotorCommand::DeferMoves { defer } => {
+                    tracing::info!("motor command: DeferMoves defer={defer}");
+                    motor.set_deferred_moves(&user, *defer)
                 }
+                MotorCommand::ProfileInitialize { max_points } => {
+                    tracing::info!("motor command: ProfileInitialize max_points={max_points}");
+                    motor.initialize_profile(&user, *max_points)
+                }
+                MotorCommand::ProfileBuild => {
+                    tracing::info!("motor command: ProfileBuild");
+                    motor.build_profile(&user)
+                }
+                MotorCommand::ProfileExecute => {
+                    tracing::info!("motor command: ProfileExecute");
+                    motor.execute_profile(&user)
+                }
+                MotorCommand::ProfileAbort => {
+                    tracing::info!("motor command: ProfileAbort");
+                    motor.abort_profile(&user)
+                }
+                MotorCommand::ProfileReadback => {
+                    tracing::info!("motor command: ProfileReadback");
+                    motor.readback_profile(&user).map(|_| ())
+                }
+                MotorCommand::Poll => Ok(()),
             };
 
             if let Err(e) = result {
@@ -111,14 +156,27 @@ impl MotorDeviceSupport {
         }
         drop(motor);
 
-        // Manage poll loop
+        // Manage poll loop — only send StartPolling when transitioning
+        // idle → active to avoid redundant messages while already polling.
         match actions.poll {
-            PollDirective::Start => { let _ = self.poll_cmd_tx.try_send(PollCommand::StartPolling); }
-            PollDirective::Stop => { let _ = self.poll_cmd_tx.try_send(PollCommand::StopPolling); }
+            PollDirective::Start => {
+                if !self.polling_active {
+                    let _ = self.poll_cmd_tx.try_send(PollCommand::StartPolling);
+                    self.polling_active = true;
+                }
+            }
+            PollDirective::Stop => {
+                let _ = self.poll_cmd_tx.try_send(PollCommand::StopPolling);
+                self.polling_active = false;
+            }
             PollDirective::None => {}
         }
         if let Some(ref delay) = actions.schedule_delay {
-            let _ = self.poll_cmd_tx.try_send(PollCommand::ScheduleDelay(delay.id, delay.duration));
+            let _ = self
+                .poll_cmd_tx
+                .try_send(PollCommand::ScheduleDelay(delay.id, delay.duration));
+            // Poll loop goes idle during delay — sync our tracking flag
+            self.polling_active = false;
         }
     }
 }
@@ -126,14 +184,33 @@ impl MotorDeviceSupport {
 impl DeviceSupport for MotorDeviceSupport {
     fn init(&mut self, record: &mut dyn Record) -> CaResult<()> {
         // Inject device_state into MotorRecord (for template-created records)
-        let motor_rec = record.as_any_mut()
+        let motor_rec = record
+            .as_any_mut()
             .and_then(|a| a.downcast_mut::<crate::record::MotorRecord>());
 
         if let Some(motor_rec) = motor_rec {
             motor_rec.set_device_state(self.device_state.clone());
         }
 
+        // Sync driver position with pass0-restored DVAL (if any).
+        // C: set_position uses dval/mres (raw steps), not val (user coordinates)
         let user = self.make_user();
+        let dval = record
+            .get_field("DVAL")
+            .and_then(|v| match v {
+                EpicsValue::Double(d) => Some(d),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        if dval != 0.0 {
+            let mut motor = self.motor.lock().map_err(|e| {
+                epics_base_rs::error::CaError::InvalidValue(format!("motor lock: {e}"))
+            })?;
+            // Send dial position directly — the AsynMotor interface
+            // operates in dial coordinates, not raw steps
+            let _ = motor.set_position(&user, dval);
+        }
+
         let status = {
             let mut motor = self.motor.lock().map_err(|e| {
                 epics_base_rs::error::CaError::InvalidValue(format!("motor lock: {e}"))
@@ -146,14 +223,21 @@ impl DeviceSupport for MotorDeviceSupport {
         let mut ds = self.device_state.lock().map_err(|e| {
             epics_base_rs::error::CaError::InvalidValue(format!("device state lock: {e}"))
         })?;
-        ds.latest_status = Some(StampedStatus { seq: 1, status: status.clone() });
+        ds.latest_status = Some(StampedStatus {
+            seq: 1,
+            status: status.clone(),
+        });
         drop(ds);
 
         // Apply initial status to record (sets RBV, clears LVIO, etc.)
-        if let Some(motor_rec) = record.as_any_mut()
+        // Clear last_write so pass0-restored values are not interpreted as
+        // move commands during PINI processing (matches C EPICS init_record).
+        if let Some(motor_rec) = record
+            .as_any_mut()
             .and_then(|a| a.downcast_mut::<crate::record::MotorRecord>())
         {
             motor_rec.process_motor_info(&status);
+            motor_rec.clear_last_write();
         }
 
         self.initialized = true;

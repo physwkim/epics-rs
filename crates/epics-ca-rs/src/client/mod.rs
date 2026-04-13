@@ -8,15 +8,14 @@ mod types;
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-
 use std::time::Duration;
 
 use epics_base_rs::runtime::sync::{broadcast, mpsc, oneshot};
 
-use crate::channel::{alloc_cid, alloc_ioid, alloc_subid, AccessRights, ChannelInfo};
-use epics_base_rs::error::{CaError, CaResult};
+use crate::channel::{AccessRights, ChannelInfo, alloc_cid, alloc_ioid, alloc_subid};
 use crate::protocol::*;
 use crate::repeater;
+use epics_base_rs::error::{CaError, CaResult};
 use epics_base_rs::server::snapshot::{DbrClass, Snapshot};
 use epics_base_rs::types::{DbFieldType, EpicsValue, decode_dbr};
 
@@ -24,26 +23,48 @@ pub use state::{ChannelState, ConnectionEvent};
 
 use state::ChannelInner;
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Type of diagnostic event recorded in the event history.
 #[derive(Debug, Clone)]
 pub enum DiagEvent {
-    Connected { pv: String, server: SocketAddr },
-    Disconnected { server: SocketAddr, channels: usize },
-    Reconnected { pv: String, restored: u32, stale: u32 },
-    Unresponsive { server: SocketAddr },
-    Responsive { server: SocketAddr },
-    BeaconAnomaly { server: SocketAddr },
+    Connected {
+        pv: String,
+        server: SocketAddr,
+    },
+    Disconnected {
+        server: SocketAddr,
+        channels: usize,
+    },
+    Reconnected {
+        pv: String,
+        restored: u32,
+        stale: u32,
+    },
+    Unresponsive {
+        server: SocketAddr,
+    },
+    Responsive {
+        server: SocketAddr,
+    },
+    BeaconAnomaly {
+        server: SocketAddr,
+    },
 }
 
 impl std::fmt::Display for DiagEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connected { pv, server } => write!(f, "Connected {pv} @ {server}"),
-            Self::Disconnected { server, channels } => write!(f, "Disconnected {server} ({channels} channels)"),
-            Self::Reconnected { pv, restored, stale } => write!(f, "Reconnected {pv} (restored={restored}, stale={stale})"),
+            Self::Disconnected { server, channels } => {
+                write!(f, "Disconnected {server} ({channels} channels)")
+            }
+            Self::Reconnected {
+                pv,
+                restored,
+                stale,
+            } => write!(f, "Reconnected {pv} (restored={restored}, stale={stale})"),
             Self::Unresponsive { server } => write!(f, "Unresponsive {server}"),
             Self::Responsive { server } => write!(f, "Responsive {server}"),
             Self::BeaconAnomaly { server } => write!(f, "Beacon anomaly {server}"),
@@ -93,7 +114,10 @@ impl Default for CaDiagnostics {
 impl CaDiagnostics {
     /// Record a diagnostic event with the current timestamp.
     pub fn record(&self, event: DiagEvent) {
-        let record = DiagRecord { time: std::time::Instant::now(), event };
+        let record = DiagRecord {
+            time: std::time::Instant::now(),
+            event,
+        };
         if let Ok(mut history) = self.history.lock() {
             if history.len() >= EVENT_HISTORY_CAPACITY {
                 history.remove(0);
@@ -104,9 +128,7 @@ impl CaDiagnostics {
 
     /// Get a snapshot of counters + recent event history.
     pub fn snapshot(&self) -> DiagnosticsSnapshot {
-        let history = self.history.lock()
-            .map(|h| h.clone())
-            .unwrap_or_default();
+        let history = self.history.lock().map(|h| h.clone()).unwrap_or_default();
         DiagnosticsSnapshot {
             connections: self.connections.load(Ordering::Relaxed),
             disconnections: self.disconnections.load(Ordering::Relaxed),
@@ -147,7 +169,11 @@ impl std::fmt::Display for DiagnosticsSnapshot {
         writeln!(f, "Search requests:        {}", self.search_requests)?;
         if !self.history.is_empty() {
             writeln!(f, "Recent events ({}):", self.history.len())?;
-            let start = self.history.first().map(|r| r.time).unwrap_or_else(std::time::Instant::now);
+            let start = self
+                .history
+                .first()
+                .map(|r| r.time)
+                .unwrap_or_else(std::time::Instant::now);
             for rec in &self.history {
                 let elapsed = rec.time.duration_since(start);
                 writeln!(f, "  +{:.1}s  {}", elapsed.as_secs_f64(), rec.event)?;
@@ -196,6 +222,9 @@ enum CoordRequest {
         reply: oneshot::Sender<CaResult<()>>,
     },
     Unsubscribe {
+        subid: u32,
+    },
+    MonitorConsumed {
         subid: u32,
     },
     DropChannel {
@@ -270,9 +299,9 @@ impl CaClient {
             diagnostics.clone(),
         ));
 
-        let beacon_task = epics_base_rs::runtime::task::spawn(
-            beacon_monitor::run_beacon_monitor(coord_tx.clone()),
-        );
+        let beacon_task = epics_base_rs::runtime::task::spawn(beacon_monitor::run_beacon_monitor(
+            coord_tx.clone(),
+        ));
 
         Ok(Self {
             search_tx,
@@ -333,7 +362,9 @@ impl CaClient {
         let ch = self.create_channel(pv_name);
         ch.wait_connected(Duration::from_secs(3)).await?;
         let result = ch.get().await;
-        let _ = self.coord_tx.send(CoordRequest::DropChannel { cid: ch.cid });
+        let _ = self
+            .coord_tx
+            .send(CoordRequest::DropChannel { cid: ch.cid });
         result
     }
 
@@ -354,14 +385,22 @@ impl CaClient {
 
         let value = EpicsValue::parse(snap.native_type, value_str)?;
         ch.put_nowait(&value).await?;
-        let _ = self.coord_tx.send(CoordRequest::DropChannel { cid: ch.cid });
+        let _ = self
+            .coord_tx
+            .send(CoordRequest::DropChannel { cid: ch.cid });
         Ok(())
     }
 
     /// Write with completion callback (CA_PROTO_WRITE_NOTIFY). Matches C `caput -c`.
-    pub async fn caput_callback(&self, pv_name: &str, value_str: &str, timeout_secs: f64) -> CaResult<()> {
+    pub async fn caput_callback(
+        &self,
+        pv_name: &str,
+        value_str: &str,
+        timeout_secs: f64,
+    ) -> CaResult<()> {
         let ch = self.create_channel(pv_name);
-        ch.wait_connected(Duration::from_secs(3)).await?;
+        let timeout = Duration::from_secs_f64(timeout_secs);
+        ch.wait_connected(timeout).await?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self.coord_tx.send(CoordRequest::GetChannelInfo {
@@ -374,8 +413,10 @@ impl CaClient {
             .ok_or(CaError::Disconnected)?;
 
         let value = EpicsValue::parse(snap.native_type, value_str)?;
-        ch.put_with_timeout(&value, Duration::from_secs_f64(timeout_secs)).await?;
-        let _ = self.coord_tx.send(CoordRequest::DropChannel { cid: ch.cid });
+        ch.put_with_timeout(&value, timeout).await?;
+        let _ = self
+            .coord_tx
+            .send(CoordRequest::DropChannel { cid: ch.cid });
         Ok(())
     }
 
@@ -393,7 +434,9 @@ impl CaClient {
             .map_err(|_| CaError::Shutdown)?
             .ok_or(CaError::Disconnected)?;
 
-        let _ = self.coord_tx.send(CoordRequest::DropChannel { cid: ch.cid });
+        let _ = self
+            .coord_tx
+            .send(CoordRequest::DropChannel { cid: ch.cid });
 
         Ok(ChannelInfo {
             pv_name: snap.pv_name,
@@ -471,6 +514,10 @@ impl CaChannel {
     }
 
     pub async fn get(&self) -> CaResult<(DbFieldType, EpicsValue)> {
+        self.get_with_timeout(Duration::from_secs(30)).await
+    }
+
+    pub async fn get_with_timeout(&self, timeout: Duration) -> CaResult<(DbFieldType, EpicsValue)> {
         let (info_tx, info_rx) = oneshot::channel();
         let _ = self.coord_tx.send(CoordRequest::GetChannelInfo {
             cid: self.cid,
@@ -501,7 +548,7 @@ impl CaChannel {
             server_addr: snap.server_addr,
         });
 
-        let (data_type, count, data) = tokio::time::timeout(Duration::from_secs(30), reply_rx)
+        let (data_type, count, data) = tokio::time::timeout(timeout, reply_rx)
             .await
             .map_err(|_| CaError::Timeout)?
             .map_err(|_| CaError::Shutdown)??;
@@ -535,7 +582,11 @@ impl CaChannel {
             return Err(CaError::Disconnected);
         }
 
-        let request_count = if count > 0 { count.min(snap.element_count) } else { snap.element_count };
+        let request_count = if count > 0 {
+            count.min(snap.element_count)
+        } else {
+            snap.element_count
+        };
 
         let native = DbFieldType::from_u16(snap.native_type as u16)?;
         let request_type = match class {
@@ -695,9 +746,6 @@ impl CaChannel {
     /// Subscribe with client-side deadband filtering.
     /// Events where |new - old| < deadband are suppressed (scalar values only).
     pub async fn subscribe_with_deadband(&self, deadband: f64) -> CaResult<MonitorHandle> {
-        // Wait for connection first
-        self.wait_connected(Duration::from_secs(30)).await?;
-
         let subid = alloc_subid();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
@@ -727,7 +775,9 @@ impl CaChannel {
 
 impl Drop for CaChannel {
     fn drop(&mut self) {
-        let _ = self.coord_tx.send(CoordRequest::DropChannel { cid: self.cid });
+        let _ = self
+            .coord_tx
+            .send(CoordRequest::DropChannel { cid: self.cid });
     }
 }
 
@@ -740,19 +790,69 @@ pub struct MonitorHandle {
 
 impl MonitorHandle {
     pub async fn recv(&mut self) -> Option<CaResult<Snapshot>> {
-        self.callback_rx.recv().await
+        let result = self.callback_rx.recv().await;
+        if result.is_some() {
+            let _ = self
+                .coord_tx
+                .send(CoordRequest::MonitorConsumed { subid: self.subid });
+        }
+        result
     }
 }
 
 impl Drop for MonitorHandle {
     fn drop(&mut self) {
-        let _ = self.coord_tx.send(CoordRequest::Unsubscribe {
-            subid: self.subid,
-        });
+        let _ = self
+            .coord_tx
+            .send(CoordRequest::Unsubscribe { subid: self.subid });
     }
 }
 
 // --- Coordinator ---
+
+const FLOW_CONTROL_OFF_THRESHOLD: usize = 10;
+const FLOW_CONTROL_ON_THRESHOLD: usize = 5;
+
+#[derive(Default)]
+struct FlowControlState {
+    outstanding: usize,
+    active: bool,
+}
+
+fn flow_control_note_queued(
+    flow_control: &mut HashMap<SocketAddr, FlowControlState>,
+    server_addr: SocketAddr,
+    transport_tx: &mpsc::UnboundedSender<TransportCommand>,
+) {
+    let state = flow_control.entry(server_addr).or_default();
+    state.outstanding = state.outstanding.saturating_add(1);
+    if !state.active && state.outstanding >= FLOW_CONTROL_OFF_THRESHOLD {
+        let _ = transport_tx.send(TransportCommand::EventsOff { server_addr });
+        state.active = true;
+    }
+}
+
+fn flow_control_note_consumed(
+    flow_control: &mut HashMap<SocketAddr, FlowControlState>,
+    server_addr: SocketAddr,
+    count: usize,
+    transport_tx: &mpsc::UnboundedSender<TransportCommand>,
+) {
+    if count == 0 {
+        return;
+    }
+    let Some(state) = flow_control.get_mut(&server_addr) else {
+        return;
+    };
+    state.outstanding = state.outstanding.saturating_sub(count);
+    if state.active && state.outstanding <= FLOW_CONTROL_ON_THRESHOLD {
+        let _ = transport_tx.send(TransportCommand::EventsOn { server_addr });
+        state.active = false;
+    }
+    if !state.active && state.outstanding == 0 {
+        flow_control.remove(&server_addr);
+    }
+}
 
 async fn run_coordinator(
     mut coord_rx: mpsc::UnboundedReceiver<CoordRequest>,
@@ -766,12 +866,14 @@ async fn run_coordinator(
     let mut pending_wait_connected: HashMap<u32, Vec<oneshot::Sender<()>>> = HashMap::new();
     let mut pending_found: HashMap<u32, SocketAddr> = HashMap::new();
     let mut subscriptions = SubscriptionRegistry::new();
-    let mut read_waiters: HashMap<u32, oneshot::Sender<CaResult<(u16, u32, Vec<u8>)>>> = HashMap::new();
-    let mut write_waiters: HashMap<u32, oneshot::Sender<CaResult<()>>> = HashMap::new();
+    let mut read_waiters: HashMap<u32, (u32, oneshot::Sender<CaResult<(u16, u32, Vec<u8>)>>)> =
+        HashMap::new();
+    let mut write_waiters: HashMap<u32, (u32, oneshot::Sender<CaResult<()>>)> = HashMap::new();
     // Reverse index: server_addr -> set of cids last seen on that server.
     // Keep disconnected channels indexed so beacon anomalies can trigger
     // immediate re-search for the affected IOC.
     let mut server_channels: HashMap<SocketAddr, HashSet<u32>> = HashMap::new();
+    let mut flow_control: HashMap<SocketAddr, FlowControlState> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -842,32 +944,38 @@ async fn run_coordinator(
                     }
                     CoordRequest::Subscribe { cid, subid, mask, deadband, callback_tx, reply } => {
                         if let Some(ch) = channels.get(&cid) {
-                            if ch.state == ChannelState::Connected {
-                                let native_type = ch.native_type.unwrap() as u16;
-                                // Request DBR_TIME to get EPICS timestamp + alarm
-                                let time_type = native_type + 14;
-                                let count = ch.element_count;
-                                let sid = ch.sid;
-                                let server_addr = ch.server_addr.unwrap();
+                            let server_addr = ch.server_addr.unwrap_or_else(|| {
+                                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+                            });
+                            let connected = ch.state == ChannelState::Connected;
+                            let data_type = ch.native_type.map(|t| t as u16 + 14);
+                            let count = ch.native_type.map(|_| ch.element_count);
 
-                                subscriptions.add(subscription::SubscriptionRecord {
-                                    subid, cid, data_type: time_type, count, mask,
-                                    deadband, callback_tx, needs_restore: false,
-                                    last_value: None,
-                                });
+                            subscriptions.add(subscription::SubscriptionRecord {
+                                subid,
+                                cid,
+                                data_type,
+                                count,
+                                mask,
+                                server_addr,
+                                deadband,
+                                callback_tx,
+                                needs_restore: !connected,
+                                last_value: None,
+                                pending_deliveries: 0,
+                            });
 
+                            if connected {
                                 let _ = transport_tx.send(TransportCommand::Subscribe {
-                                    sid,
-                                    data_type: time_type,
-                                    count,
+                                    sid: ch.sid,
+                                    data_type: data_type.expect("connected channel has native type"),
+                                    count: count.expect("connected channel has element count"),
                                     subid,
                                     mask,
                                     server_addr,
                                 });
-                                let _ = reply.send(Ok(()));
-                            } else {
-                                let _ = reply.send(Err(CaError::Disconnected));
                             }
+                            let _ = reply.send(Ok(()));
                         } else {
                             let _ = reply.send(Err(CaError::Disconnected));
                         }
@@ -877,16 +985,35 @@ async fn run_coordinator(
                             let cid = rec.cid;
                             if let Some(ch) = channels.get(&cid) {
                                 if ch.state == ChannelState::Connected {
-                                    let _ = transport_tx.send(TransportCommand::Unsubscribe {
-                                        sid: ch.sid,
-                                        subid,
-                                        data_type: rec.data_type,
-                                        server_addr: ch.server_addr.unwrap(),
-                                    });
+                                    if let Some(data_type) = rec.data_type {
+                                        let _ = transport_tx.send(TransportCommand::Unsubscribe {
+                                            sid: ch.sid,
+                                            subid,
+                                            data_type,
+                                            server_addr: ch.server_addr.unwrap(),
+                                        });
+                                    }
                                 }
                             }
                         }
-                        subscriptions.remove(subid);
+                        if let Some(rec) = subscriptions.remove(subid) {
+                            flow_control_note_consumed(
+                                &mut flow_control,
+                                rec.server_addr,
+                                rec.pending_deliveries,
+                                &transport_tx,
+                            );
+                        }
+                    }
+                    CoordRequest::MonitorConsumed { subid } => {
+                        if let Some(server_addr) = subscriptions.mark_consumed(subid) {
+                            flow_control_note_consumed(
+                                &mut flow_control,
+                                server_addr,
+                                1,
+                                &transport_tx,
+                            );
+                        }
                     }
                     CoordRequest::DropChannel { cid } => {
                         // Cancel all subscriptions for this channel
@@ -895,30 +1022,44 @@ async fn run_coordinator(
                             if let Some(rec) = subscriptions.get(subid) {
                                 if let Some(ch) = channels.get(&cid) {
                                     if ch.state == ChannelState::Connected {
-                                        let _ = transport_tx.send(TransportCommand::Unsubscribe {
-                                            sid: ch.sid,
-                                            subid,
-                                            data_type: rec.data_type,
-                                            server_addr: ch.server_addr.unwrap(),
-                                        });
+                                        if let Some(data_type) = rec.data_type {
+                                            let _ = transport_tx.send(TransportCommand::Unsubscribe {
+                                                sid: ch.sid,
+                                                subid,
+                                                data_type,
+                                                server_addr: ch.server_addr.unwrap(),
+                                            });
+                                        }
                                     }
                                 }
                             }
-                            subscriptions.remove(subid);
+                            if let Some(rec) = subscriptions.remove(subid) {
+                                flow_control_note_consumed(
+                                    &mut flow_control,
+                                    rec.server_addr,
+                                    rec.pending_deliveries,
+                                    &transport_tx,
+                                );
+                            }
                         }
 
                         // Clear channel on server + clean reverse index
                         if let Some(ch) = channels.get(&cid) {
-                            if ch.state == ChannelState::Connected {
+                            if ch.state.is_operational() {
                                 let _ = transport_tx.send(TransportCommand::ClearChannel {
                                     cid,
                                     sid: ch.sid,
                                     server_addr: ch.server_addr.unwrap(),
                                 });
                             }
-                            // Cancel search if still searching
-                            if ch.state == ChannelState::Searching {
-                                let _ = search_tx.send(SearchRequest::Cancel { cid });
+                            // Cancel search for any non-connected state
+                            match ch.state {
+                                ChannelState::Searching
+                                | ChannelState::Connecting
+                                | ChannelState::Disconnected => {
+                                    let _ = search_tx.send(SearchRequest::Cancel { cid });
+                                }
+                                _ => {}
                             }
                             if let Some(addr) = ch.server_addr {
                                 remove_server_channel(&mut server_channels, addr, cid);
@@ -926,11 +1067,11 @@ async fn run_coordinator(
                         }
                         channels.remove(&cid);
                     }
-                    CoordRequest::ReadNotify { cid: _, ioid, reply } => {
-                        read_waiters.insert(ioid, reply);
+                    CoordRequest::ReadNotify { cid, ioid, reply } => {
+                        read_waiters.insert(ioid, (cid, reply));
                     }
-                    CoordRequest::WriteNotify { cid: _, ioid, value: _, reply } => {
-                        write_waiters.insert(ioid, reply);
+                    CoordRequest::WriteNotify { cid, ioid, value: _, reply } => {
+                        write_waiters.insert(ioid, (cid, reply));
                     }
                     CoordRequest::Shutdown { reply } => {
                         // Send ClearChannel for all connected channels
@@ -951,21 +1092,32 @@ async fn run_coordinator(
                     CoordRequest::ForceRescanServer { server_addr } => {
                         diag.beacon_anomalies.fetch_add(1, Ordering::Relaxed);
                         diag.record(DiagEvent::BeaconAnomaly { server: server_addr });
-                        // Beacon anomaly: rescan Disconnected/Searching channels
-                        // for this server. Connected channels are left alone —
-                        // if the IOC truly restarted, TCP will break on its own.
-                        if let Some(cids) = server_channels.get(&server_addr) {
-                            for &cid in cids {
-                                if let Some(ch) = channels.get(&cid) {
-                                    if ch.state == ChannelState::Disconnected
-                                        || ch.state == ChannelState::Searching
-                                    {
-                                        let _ = search_tx.send(SearchRequest::Schedule {
-                                            cid,
-                                            pv_name: ch.pv_name.clone(),
-                                            reason: SearchReason::BeaconAnomaly,
-                                            initial_lane: 0,
-                                        });
+                        // Like the C CA client (libca), rescan ALL disconnected/
+                        // searching channels on any beacon anomaly.  The beacon
+                        // address may use INADDR_ANY and won't match our stored
+                        // server_addr, so a per-server lookup is unreliable.
+                        let mut probed_servers = HashSet::new();
+                        for ch in channels.values() {
+                            if ch.state == ChannelState::Disconnected
+                                || ch.state == ChannelState::Searching
+                            {
+                                let _ = search_tx.send(SearchRequest::Schedule {
+                                    cid: ch.cid,
+                                    pv_name: ch.pv_name.clone(),
+                                    reason: SearchReason::BeaconAnomaly,
+                                    initial_lane: 0,
+                                });
+                            } else if ch.state.is_operational() {
+                                // Beacon anomaly on a connected server: send
+                                // immediate echo probe to detect dead TCP faster
+                                // (matches C EPICS beaconAnomaly watchdog flag).
+                                if let Some(addr) = ch.server_addr {
+                                    if probed_servers.insert(addr) {
+                                        let _ = transport_tx.send(
+                                            TransportCommand::EchoProbe {
+                                                server_addr: addr,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -1026,7 +1178,14 @@ async fn run_coordinator(
                             });
 
                             // Restore subscriptions
-                            let (restored, stale) = subscriptions.restore_for_channel(cid, sid, server_addr, &transport_tx);
+                            let (restored, stale) = subscriptions.restore_for_channel(
+                                cid,
+                                sid,
+                                data_type,
+                                element_count,
+                                server_addr,
+                                &transport_tx,
+                            );
                             diag.connections.fetch_add(1, Ordering::Relaxed);
                             diag.record(DiagEvent::Connected { pv: ch.pv_name.clone(), server: server_addr });
                             if restored > 0 || stale > 0 {
@@ -1046,19 +1205,19 @@ async fn run_coordinator(
                         }
                     }
                     TransportEvent::ReadResponse { ioid, data_type, count, data } => {
-                        if let Some(waiter) = read_waiters.remove(&ioid) {
+                        if let Some((_, waiter)) = read_waiters.remove(&ioid) {
                             let _ = waiter.send(Ok((data_type, count, data)));
                         }
                     }
                     TransportEvent::ReadError { ioid, eca_status } => {
-                        if let Some(waiter) = read_waiters.remove(&ioid) {
+                        if let Some((_, waiter)) = read_waiters.remove(&ioid) {
                             let _ = waiter.send(Err(CaError::Protocol(
                                 format!("server returned ECA error {eca_status:#06x}")
                             )));
                         }
                     }
                     TransportEvent::WriteResponse { ioid, status } => {
-                        if let Some(waiter) = write_waiters.remove(&ioid) {
+                        if let Some((_, waiter)) = write_waiters.remove(&ioid) {
                             if status == 1 || status == ECA_NORMAL {
                                 let _ = waiter.send(Ok(()));
                             } else {
@@ -1067,7 +1226,15 @@ async fn run_coordinator(
                         }
                     }
                     TransportEvent::MonitorData { subid, data_type, count, data } => {
-                        subscriptions.on_monitor_data(subid, data_type, count, &data);
+                        if let Some(server_addr) =
+                            subscriptions.on_monitor_data(subid, data_type, count, &data)
+                        {
+                            flow_control_note_queued(
+                                &mut flow_control,
+                                server_addr,
+                                &transport_tx,
+                            );
+                        }
                     }
                     TransportEvent::AccessRightsChanged { cid, access } => {
                         if let Some(ch) = channels.get_mut(&cid) {
@@ -1107,7 +1274,8 @@ async fn run_coordinator(
                         // Logged in transport layer; no further action needed
                     }
                     TransportEvent::TcpClosed { server_addr } => {
-                        handle_disconnect(&mut channels, &mut subscriptions, &search_tx, server_addr, &diag);
+                        flow_control.remove(&server_addr);
+                        handle_disconnect(&mut channels, &mut subscriptions, &mut server_channels, &search_tx, server_addr, &diag, &mut read_waiters, &mut write_waiters);
                     }
                     TransportEvent::ServerDisconnect { cid, server_addr } => {
                         // Single channel disconnect (CA_PROTO_SERVER_DISCONN)
@@ -1117,7 +1285,15 @@ async fn run_coordinator(
                                 let _ = ch.conn_tx.send(ConnectionEvent::Disconnected);
 
                                 let cids = vec![cid];
-                                subscriptions.mark_disconnected(&cids);
+                                let cleared = subscriptions.mark_disconnected(&cids);
+                                for (addr, count) in cleared {
+                                    flow_control_note_consumed(
+                                        &mut flow_control,
+                                        addr,
+                                        count,
+                                        &transport_tx,
+                                    );
+                                }
 
                                 // Re-search
                                 let _ = search_tx.send(SearchRequest::Schedule {
@@ -1158,20 +1334,23 @@ async fn run_coordinator(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_disconnect(
     channels: &mut HashMap<u32, ChannelInner>,
     subscriptions: &mut SubscriptionRegistry,
+    server_channels: &mut HashMap<SocketAddr, HashSet<u32>>,
     search_tx: &mpsc::UnboundedSender<SearchRequest>,
     server_addr: SocketAddr,
     diag: &CaDiagnostics,
+    read_waiters: &mut HashMap<u32, (u32, oneshot::Sender<CaResult<(u16, u32, Vec<u8>)>>)>,
+    write_waiters: &mut HashMap<u32, (u32, oneshot::Sender<CaResult<()>>)>,
 ) {
     let mut affected_cids = Vec::new();
     let now = std::time::Instant::now();
 
     for ch in channels.values_mut() {
         if ch.server_addr == Some(server_addr)
-            && ch.state.is_operational()
-            || ch.state == ChannelState::Connecting
+            && (ch.state.is_operational() || ch.state == ChannelState::Connecting)
         {
             ch.state = ChannelState::Disconnected;
             affected_cids.push(ch.cid);
@@ -1180,7 +1359,8 @@ fn handle_disconnect(
             // Reconnection backoff: if the connection was short-lived (<30s),
             // increment reconnect_count for exponential backoff. Sustained
             // connections reset the counter.
-            let sustained = ch.last_connected_at
+            let sustained = ch
+                .last_connected_at
                 .map(|t| now.duration_since(t).as_secs() > 30)
                 .unwrap_or(false);
             if sustained {
@@ -1188,7 +1368,10 @@ fn handle_disconnect(
             } else {
                 ch.reconnect_count = ch.reconnect_count.saturating_add(1);
             }
-            let initial_lane = ch.reconnect_count.min(8);
+            // Minimum lane 1 for bulk disconnects so the search engine
+            // applies jitter and prevents a reconnection storm (similar
+            // to C EPICS disconnectGovernorTimer batching).
+            let initial_lane = ch.reconnect_count.clamp(1, 8);
 
             let _ = search_tx.send(SearchRequest::Schedule {
                 cid: ch.cid,
@@ -1200,9 +1383,39 @@ fn handle_disconnect(
     }
     if !affected_cids.is_empty() {
         diag.disconnections.fetch_add(1, Ordering::Relaxed);
-        diag.record(DiagEvent::Disconnected { server: server_addr, channels: affected_cids.len() });
+        diag.record(DiagEvent::Disconnected {
+            server: server_addr,
+            channels: affected_cids.len(),
+        });
     }
-    subscriptions.mark_disconnected(&affected_cids);
+    // Clean up stale server_channels entries so beacon anomaly
+    // lookups don't reference disconnected channels.
+    server_channels.remove(&server_addr);
+    let _ = subscriptions.mark_disconnected(&affected_cids);
+
+    // Fail pending read/write waiters for affected channels so callers
+    // don't hang forever waiting for a response that will never arrive.
+    let affected: HashSet<u32> = affected_cids.into_iter().collect();
+    let stale_reads: Vec<u32> = read_waiters
+        .iter()
+        .filter(|(_, (cid, _))| affected.contains(cid))
+        .map(|(ioid, _)| *ioid)
+        .collect();
+    for ioid in stale_reads {
+        if let Some((_, sender)) = read_waiters.remove(&ioid) {
+            let _ = sender.send(Err(CaError::Disconnected));
+        }
+    }
+    let stale_writes: Vec<u32> = write_waiters
+        .iter()
+        .filter(|(_, (cid, _))| affected.contains(cid))
+        .map(|(ioid, _)| *ioid)
+        .collect();
+    for ioid in stale_writes {
+        if let Some((_, sender)) = write_waiters.remove(&ioid) {
+            let _ = sender.send(Err(CaError::Disconnected));
+        }
+    }
 }
 
 fn remove_server_channel(

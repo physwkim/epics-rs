@@ -8,6 +8,14 @@ pub struct WaveformRecord {
     pub nelm: i32,
     pub nord: i32,
     pub ftvl: i16,
+    pub mpst: i16,  // Monitor Post Mode: 0=Always, 1=OnChange
+    pub apst: i16,  // Archive Post Mode: 0=Always, 1=OnChange
+    pub hash: u32,  // Hash of array for OnChange detection
+    pub busy: bool, // Record is busy (async operation pending)
+    pub egu: String,
+    pub hopr: f64,
+    pub lopr: f64,
+    pub prec: i16,
 }
 
 /// menuFtype constants for FTVL field.
@@ -20,6 +28,14 @@ impl Default for WaveformRecord {
             nelm: 1,
             nord: 0,
             ftvl: MENU_FTYPE_DOUBLE,
+            mpst: 0,
+            apst: 0,
+            hash: 0,
+            busy: false,
+            egu: String::new(),
+            hopr: 0.0,
+            lopr: 0.0,
+            prec: 0,
         }
     }
 }
@@ -29,18 +45,19 @@ impl WaveformRecord {
         // Map DBR type to menuFtype index for the ftvl field.
         // DBR and menuFtype have different numbering.
         let (val, ftvl_idx) = match ftvl {
-            DbFieldType::Char   => (EpicsValue::CharArray(vec![0; nelm as usize]),    1),  // CHAR
-            DbFieldType::Short  => (EpicsValue::ShortArray(vec![0; nelm as usize]),   3),  // SHORT
-            DbFieldType::Long   => (EpicsValue::LongArray(vec![0; nelm as usize]),    5),  // LONG
-            DbFieldType::Float  => (EpicsValue::FloatArray(vec![0.0; nelm as usize]), 9),  // FLOAT
+            DbFieldType::Char => (EpicsValue::CharArray(vec![0; nelm as usize]), 1), // CHAR
+            DbFieldType::Short => (EpicsValue::ShortArray(vec![0; nelm as usize]), 3), // SHORT
+            DbFieldType::Long => (EpicsValue::LongArray(vec![0; nelm as usize]), 5), // LONG
+            DbFieldType::Float => (EpicsValue::FloatArray(vec![0.0; nelm as usize]), 9), // FLOAT
             DbFieldType::Double => (EpicsValue::DoubleArray(vec![0.0; nelm as usize]), 10), // DOUBLE
-            _                   => (EpicsValue::DoubleArray(vec![0.0; nelm as usize]), 10),
+            _ => (EpicsValue::DoubleArray(vec![0.0; nelm as usize]), 10),
         };
         Self {
             val,
             nelm,
             nord: 0,
             ftvl: ftvl_idx,
+            ..Default::default()
         }
     }
 
@@ -51,49 +68,129 @@ impl WaveformRecord {
     fn reallocate_val(&mut self) {
         let n = self.nelm.max(0) as usize;
         self.val = match self.ftvl {
-            1 | 2 => EpicsValue::CharArray(vec![0; n]),           // CHAR, UCHAR
-            3 | 4 => EpicsValue::ShortArray(vec![0; n]),          // SHORT, USHORT
-            5 | 6 => EpicsValue::LongArray(vec![0; n]),           // LONG, ULONG
-            9     => EpicsValue::FloatArray(vec![0.0; n]),        // FLOAT
-            _     => EpicsValue::DoubleArray(vec![0.0; n]),       // DOUBLE, etc.
+            1 | 2 => EpicsValue::CharArray(vec![0; n]), // CHAR, UCHAR
+            3 | 4 => EpicsValue::ShortArray(vec![0; n]), // SHORT, USHORT
+            5 | 6 => EpicsValue::LongArray(vec![0; n]), // LONG, ULONG
+            9 => EpicsValue::FloatArray(vec![0.0; n]),  // FLOAT
+            _ => EpicsValue::DoubleArray(vec![0.0; n]), // DOUBLE, etc.
         };
         self.nord = 0;
     }
 }
 
 static WAVEFORM_FIELDS_CHAR: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Char, read_only: false },
-    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Char,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NELM",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NORD",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "FTVL",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
 ];
 
 static WAVEFORM_FIELDS_SHORT: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Short, read_only: false },
-    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NELM",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NORD",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "FTVL",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
 ];
 
 static WAVEFORM_FIELDS_LONG: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NELM",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NORD",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "FTVL",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
 ];
 
 static WAVEFORM_FIELDS_FLOAT: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Float, read_only: false },
-    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Float,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NELM",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NORD",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "FTVL",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
 ];
 
 static WAVEFORM_FIELDS_DOUBLE: &[FieldDesc] = &[
-    FieldDesc { name: "VAL", dbf_type: DbFieldType::Double, read_only: false },
-    FieldDesc { name: "NELM", dbf_type: DbFieldType::Long, read_only: false },
-    FieldDesc { name: "NORD", dbf_type: DbFieldType::Long, read_only: true },
-    FieldDesc { name: "FTVL", dbf_type: DbFieldType::Short, read_only: false },
+    FieldDesc {
+        name: "VAL",
+        dbf_type: DbFieldType::Double,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NELM",
+        dbf_type: DbFieldType::Long,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "NORD",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "FTVL",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
 ];
 
 impl Record for WaveformRecord {
@@ -103,7 +200,14 @@ impl Record for WaveformRecord {
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {
         match name {
-            "VAL" => Some(self.val.clone()),
+            "VAL" => {
+                // Return only NORD valid elements, not the full NELM buffer.
+                // CA clients use the returned element count to interpret the
+                // data (e.g. PyDMImageView computes height = count / width).
+                let mut val = self.val.clone();
+                val.truncate(self.nord.max(0) as usize);
+                Some(val)
+            }
             "NELM" => Some(EpicsValue::Long(self.nelm)),
             "NORD" => Some(EpicsValue::Long(self.nord)),
             "FTVL" => Some(EpicsValue::Short(self.ftvl)),
@@ -116,9 +220,7 @@ impl Record for WaveformRecord {
             "VAL" => {
                 // Coerce value to match FTVL (e.g. String → CharArray for FTVL=CHAR)
                 let value = match (&value, self.ftvl) {
-                    (EpicsValue::String(s), 1 | 2) => {
-                        EpicsValue::CharArray(s.as_bytes().to_vec())
-                    }
+                    (EpicsValue::String(s), 1 | 2) => EpicsValue::CharArray(s.as_bytes().to_vec()),
                     _ => value,
                 };
                 // Update NORD based on actual data length, but keep array
@@ -159,11 +261,18 @@ impl Record for WaveformRecord {
             }
             "NELM" => {
                 if let EpicsValue::Long(n) = value {
+                    if n <= 0 {
+                        return Err(CaError::InvalidValue(format!(
+                            "NELM must be positive, got {n}"
+                        )));
+                    }
                     self.nelm = n;
                     self.reallocate_val();
                     Ok(())
                 } else {
-                    Err(CaError::InvalidValue(format!("NELM requires Long, got {value:?}")))
+                    Err(CaError::InvalidValue(format!(
+                        "NELM requires Long, got {value:?}"
+                    )))
                 }
             }
             "FTVL" => {
@@ -172,12 +281,12 @@ impl Record for WaveformRecord {
                     self.reallocate_val();
                     Ok(())
                 } else {
-                    Err(CaError::InvalidValue(format!("FTVL requires Short, got {value:?}")))
+                    Err(CaError::InvalidValue(format!(
+                        "FTVL requires Short, got {value:?}"
+                    )))
                 }
             }
-            "NORD" => {
-                Err(CaError::ReadOnlyField(name.to_string()))
-            }
+            "NORD" => Err(CaError::ReadOnlyField(name.to_string())),
             _ => Err(CaError::FieldNotFound(name.to_string())),
         }
     }
@@ -187,8 +296,8 @@ impl Record for WaveformRecord {
             1 | 2 => WAVEFORM_FIELDS_CHAR,
             3 | 4 => WAVEFORM_FIELDS_SHORT,
             5 | 6 => WAVEFORM_FIELDS_LONG,
-            9     => WAVEFORM_FIELDS_FLOAT,
-            _     => WAVEFORM_FIELDS_DOUBLE,
+            9 => WAVEFORM_FIELDS_FLOAT,
+            _ => WAVEFORM_FIELDS_DOUBLE,
         }
     }
 }

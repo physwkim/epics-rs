@@ -1,0 +1,30 @@
+###################################################################
+#  MQTT manual record example (optional — Z2M builders create
+#  records automatically, so this file is only needed for
+#  non-Z2M MQTT devices)
+#
+#  Macros:
+#    P      - PV prefix (e.g. "TEST:")
+#    R      - Record prefix (e.g. "MQTT:")
+#    PORT   - asyn port name (e.g. "MQTT1")
+###################################################################
+
+# Example: flat float topic
+record(ai, "$(P)$(R)Example:Temperature") {
+    field(DESC, "Example temperature")
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT)) FLAT:FLOAT sensors/temperature")
+    field(SCAN, "I/O Intr")
+    field(EGU,  "degC")
+    field(PREC, "2")
+}
+
+# Example: JSON field extraction
+record(ai, "$(P)$(R)Example:Humidity") {
+    field(DESC, "Example humidity from JSON")
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT)) JSON:FLOAT sensors/environment humidity")
+    field(SCAN, "I/O Intr")
+    field(EGU,  "%")
+    field(PREC, "1")
+}

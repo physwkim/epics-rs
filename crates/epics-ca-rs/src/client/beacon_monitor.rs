@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
-use tokio::net::UdpSocket;
 use epics_base_rs::runtime::sync::mpsc;
+use tokio::net::UdpSocket;
 
 use crate::protocol::*;
 
@@ -31,9 +31,7 @@ struct BeaconState {
 /// with the repeater in case it restarted.
 const REREGISTER_INTERVAL: Duration = Duration::from_secs(300);
 
-pub(crate) async fn run_beacon_monitor(
-    coord_tx: mpsc::UnboundedSender<CoordRequest>,
-) {
+pub(crate) async fn run_beacon_monitor(coord_tx: mpsc::UnboundedSender<CoordRequest>) {
     // Bind a dedicated UDP socket for beacon reception.
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
@@ -76,18 +74,19 @@ pub(crate) async fn run_beacon_monitor(
             continue;
         }
 
-        let server_port = hdr.data_type;
+        // count = server TCP port (CA v4.1+), data_type = protocol version.
+        let server_port = if hdr.count != 0 {
+            hdr.count
+        } else {
+            CA_SERVER_PORT
+        };
         let beacon_id = hdr.cid;
 
-        // server_ip = 0 means "this host" — when relayed through the repeater,
-        // we can't determine the real server IP, so skip.
-        if hdr.available == 0 {
-            continue;
-        }
-
+        // New servers always set available=INADDR_ANY (0).  Use 0.0.0.0
+        // as-is for beacon tracking — each IOC still has a unique port,
+        // matching the approach used by the C CA client (libca).
         let server_ip = Ipv4Addr::from(hdr.available.to_be_bytes());
-        let server_addr =
-            SocketAddr::V4(SocketAddrV4::new(server_ip, server_port as u16));
+        let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
         let now = Instant::now();
 
         let entry = servers.entry(server_addr).or_insert_with(|| BeaconState {
@@ -122,9 +121,7 @@ pub(crate) async fn run_beacon_monitor(
         }
 
         if is_anomaly {
-            let _ = coord_tx.send(CoordRequest::ForceRescanServer {
-                server_addr,
-            });
+            let _ = coord_tx.send(CoordRequest::ForceRescanServer { server_addr });
         }
     }
 }
@@ -143,8 +140,7 @@ async fn register_with_repeater(socket: &UdpSocket) -> Result<(), ()> {
     let mut hdr = CaHeader::new(CA_PROTO_REPEATER_REGISTER);
     hdr.available = u32::from_be_bytes(local_ip.octets());
 
-    let repeater_addr =
-        SocketAddrV4::new(Ipv4Addr::LOCALHOST, CA_REPEATER_PORT);
+    let repeater_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, CA_REPEATER_PORT);
     socket
         .send_to(&hdr.to_bytes(), repeater_addr)
         .await

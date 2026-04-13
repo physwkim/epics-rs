@@ -15,7 +15,9 @@ impl MotorRecord {
             };
 
             let delay_id = ds.expired_delay_id.take();
-            let new_status = ds.latest_status.as_ref()
+            let new_status = ds
+                .latest_status
+                .as_ref()
                 .filter(|s| s.seq != self.last_seen_seq)
                 .cloned();
 
@@ -54,9 +56,7 @@ impl MotorRecord {
             PollDirective::Start
         } else if effects.status_refresh {
             PollDirective::Start
-        } else if effects.commands.is_empty()
-            && effects.schedule_delay.is_none()
-            && self.stat.dmov
+        } else if effects.commands.is_empty() && effects.schedule_delay.is_none() && self.stat.dmov
         {
             PollDirective::Stop
         } else {
@@ -79,8 +79,8 @@ impl MotorRecord {
 
     /// Compute DMOV from current state.
     pub fn compute_dmov(&self) -> bool {
-        let driver_done = self.stat.msta.contains(MstaFlags::DONE)
-            && !self.stat.msta.contains(MstaFlags::MOVING);
+        let driver_done =
+            self.stat.msta.contains(MstaFlags::DONE) && !self.stat.msta.contains(MstaFlags::MOVING);
         let no_pending = self.stat.phase == MotionPhase::Idle;
         driver_done && no_pending
     }
@@ -96,13 +96,32 @@ impl MotorRecord {
             self.pos.rep = (status.encoder_position / self.conv.eres).round() as i32;
         } else {
             if self.conv.ueip && !eres_valid {
-                tracing::warn!("UEIP set but ERES invalid ({:.6}), falling back to MRES for REP", self.conv.eres);
+                tracing::warn!(
+                    "UEIP set but ERES invalid ({:.6}), falling back to MRES for REP",
+                    self.conv.eres
+                );
             }
             self.pos.rep = (status.encoder_position / self.conv.mres).round() as i32;
         }
 
         // RRBV depends on UEIP
-        self.pos.rrbv = if self.conv.ueip { self.pos.rep } else { self.pos.rmp };
+        self.pos.rrbv = if self.conv.ueip {
+            self.pos.rep
+        } else {
+            self.pos.rmp
+        };
+
+        // URIP path: use external readback link value with RRES conversion
+        if !self.conv.ueip && self.conv.urip && self.initialized {
+            if let Some(rdbl_value) = self.conv.rdbl_value {
+                let rres = if self.conv.rres != 0.0 {
+                    self.conv.rres
+                } else {
+                    1.0
+                };
+                self.pos.rrbv = ((rdbl_value * rres) / self.conv.mres).round() as i32;
+            }
+        }
 
         // DRBV: use ERES for encoder path (UEIP), MRES for motor position path
         let resolution = if self.conv.ueip && eres_valid {
@@ -117,33 +136,84 @@ impl MotorRecord {
 
         // DIFF and RDIF
         self.pos.diff = self.pos.dval - self.pos.drbv;
-        self.pos.rdif = self.pos.val - self.pos.rbv;
+        // C: rdif = NINT(diff / mres) -- raw step difference
+        self.pos.rdif = if self.conv.mres != 0.0 {
+            (self.pos.diff / self.conv.mres).round() as i32
+        } else {
+            0
+        };
 
-        // MOVN: true if phase is active OR driver reports moving
-        self.stat.movn = self.stat.phase != MotionPhase::Idle || status.moving;
+        // MOVN: C uses RAW limit switches (rhls/rlls) with RAW cdir
+        // Must compute ls_active BEFORE mapping limits to user coordinates
+        let ls_active =
+            (status.high_limit && self.stat.cdir) || (status.low_limit && !self.stat.cdir);
+        self.stat.movn = !(ls_active || status.done || status.problem);
+
+        // Limit switches: map raw -> user based on DIR and MRES sign
+        // C: hls = ((dir == Pos) == (mres >= 0)) ? rhls : rlls
+        let same_polarity = (self.conv.dir == MotorDir::Pos) == (self.conv.mres >= 0.0);
+        if same_polarity {
+            self.limits.hls = status.high_limit;
+            self.limits.lls = status.low_limit;
+        } else {
+            self.limits.hls = status.low_limit;
+            self.limits.lls = status.high_limit;
+        }
 
         // Build MSTA from driver status
         let mut msta = MstaFlags::empty();
-        if status.done { msta |= MstaFlags::DONE; }
-        if status.moving { msta |= MstaFlags::MOVING; }
-        if status.high_limit { msta |= MstaFlags::PLUS_LS; }
-        if status.low_limit { msta |= MstaFlags::MINUS_LS; }
-        if status.home { msta |= MstaFlags::HOME_LS; }
-        if status.powered { msta |= MstaFlags::GAIN_SUPPORT; }
-        if status.problem { msta |= MstaFlags::PROBLEM; }
+        if status.direction {
+            msta |= MstaFlags::DIRECTION;
+        }
+        if status.done {
+            msta |= MstaFlags::DONE;
+        }
+        if status.moving {
+            msta |= MstaFlags::MOVING;
+        }
+        if status.high_limit {
+            msta |= MstaFlags::PLUS_LS;
+        }
+        if status.low_limit {
+            msta |= MstaFlags::MINUS_LS;
+        }
+        if status.home {
+            msta |= MstaFlags::HOME_LS;
+        }
+        if status.powered {
+            msta |= MstaFlags::POSITION;
+        }
+        if status.problem {
+            msta |= MstaFlags::PROBLEM;
+        }
+        if status.slip_stall {
+            msta |= MstaFlags::SLIP_STALL;
+        }
+        if status.comms_error {
+            msta |= MstaFlags::COMM_ERR;
+        }
+        if status.gain_support {
+            msta |= MstaFlags::GAIN_SUPPORT;
+        }
+        if status.has_encoder {
+            msta |= MstaFlags::ENCODER_PRESENT;
+        }
         // Preserve record-managed bits
-        if self.stat.msta.contains(MstaFlags::HOMED) { msta |= MstaFlags::HOMED; }
-        if self.stat.msta.contains(MstaFlags::ENCODER_PRESENT) { msta |= MstaFlags::ENCODER_PRESENT; }
+        if self.stat.msta.contains(MstaFlags::HOMED) || status.homed {
+            msta |= MstaFlags::HOMED;
+        }
+        // Preserve ENCODER_PRESENT if record set it (via UEIP)
+        if self.stat.msta.contains(MstaFlags::ENCODER_PRESENT) {
+            msta |= MstaFlags::ENCODER_PRESENT;
+        }
         self.stat.msta = msta;
 
-        // Limit switches
-        self.limits.hls = status.high_limit;
-        self.limits.lls = status.low_limit;
+        // C: tdir = msta.RA_DIRECTION (from driver on every poll)
+        self.stat.tdir = status.direction;
 
         // Recompute LVIO from current position and soft limits
-        self.limits.lvio = coordinate::check_soft_limits(
-            self.pos.dval, self.limits.dhlm, self.limits.dllm,
-        );
+        self.limits.lvio =
+            coordinate::check_soft_limits(self.pos.dval, self.limits.dhlm, self.limits.dllm);
     }
 
     /// Sync all positions from readback.
@@ -152,14 +222,17 @@ impl MotorRecord {
         self.pos.val = self.pos.rbv;
         self.pos.rval = self.pos.rrbv;
         self.pos.diff = 0.0;
-        self.pos.rdif = 0.0;
+        self.pos.rdif = 0;
         self.internal.lval = self.pos.val;
         self.internal.ldvl = self.pos.dval;
         self.internal.lrvl = self.pos.rval;
     }
 
     /// Initial readback and position sync at startup.
-    pub fn initial_readback(&mut self, status: &asyn_rs::interfaces::motor::MotorStatus) -> ProcessEffects {
+    pub fn initial_readback(
+        &mut self,
+        status: &asyn_rs::interfaces::motor::MotorStatus,
+    ) -> ProcessEffects {
         let mut effects = ProcessEffects::default();
 
         self.process_motor_info(status);
@@ -169,6 +242,7 @@ impl MotorRecord {
         self.stat.dmov = status.done && !status.moving;
 
         if status.moving {
+            // At startup, the poll loop may not be active yet — request it.
             effects.request_poll = true;
             effects.suppress_forward_link = true;
         }

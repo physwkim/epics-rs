@@ -1,5 +1,254 @@
 # Changelog
 
+## v0.9.0
+
+### motor-rs — Complete C parity (~95 fixes across 12 review rounds)
+
+#### State machine
+- Fix MSTA bit positions for wire compatibility with C clients
+- Fix all 4 retry modes (Default/Arithmetic/Geometric/InPosition)
+- Fix SPMG Pause/Stop/Go transitions to match C postProcess pipeline
+- Add MIP_EXTERNAL detection for externally-initiated motion
+- Add clear_buttons on limit switch hit or PROBLEM
+- Add stop-first pattern for home-while-moving and jog-while-moving
+- Add DLY → DELAY_ACK → fresh poll → retry evaluation flow
+- Add limit switch direction guard before retries (user_cdir)
+- Implement two-phase jog backlash (BL1 slew + BL2 backlash velocity)
+- Add sub-step deadband check with DMOV pulse for ophyd compatibility
+
+#### Coordinate system
+- Fix CDIR to account for MRES sign
+- Fix DIR handler FOFF branching (Variable preserves VAL)
+- Fix SET+FOFF=Frozen cascade for VAL/DVAL/RVAL
+- Fix FOFF=Frozen in non-SET mode (no effect, matches C)
+- Fix RDIF type (i32) and formula (NINT(diff/mres))
+- Fix LVIO escape logic using ldvl, pretarget only for non-preferred direction
+- Fix soft limit disable only when dhlm==dllm==0
+- Add RHLM/RLLM fields for MRES cascade invariance
+
+#### New features
+- Add MoveRelative command and use_rel logic (ueip/urip)
+- Add FRAC progressive approach scaling
+- Add dual poll rate (moving/idle intervals, forced fast polls)
+- Add auto power on/off with configurable delays
+- Add deferred moves and profile moves framework
+- Add RDBL/URIP readback link support
+- Add velocity cross-calculation and range validation
+
+#### Driver interface
+- Expand MotorStatus with direction, slip_stall, comms_error, homed, gain_support, has_encoder, velocity
+- Add move_velocity, move_relative, set_deferred_moves trait methods
+- Add profile move trait methods (initialize, define, build, execute, abort, readback)
+- Fix SetPosition to send dial coordinates (not raw steps)
+- Fix MOVN ls_active to use raw limit switches before user mapping
+
+### asyn-rs
+- Fix race condition in PortManager register/unregister
+- Fix COMM_ALARM constant, HTTP connect-per-transaction
+- Fix write retry timeout, HTTP write reconnect, EOS storage
+- Fix param defined tracking, IP port auto-disconnect
+- Fix trace masks, serial flush, baud rates, break/ixany
+- Fix asyn_record connect_device clearing drv_user_create error
+- Add PortHandle convenience methods for new operations
+- Add `set_params_and_notify` for atomic background thread parameter updates
+- Add ParamSetValue::Float64Array for waveform parameter updates
+- Add AsynMotor::move_relative, set_deferred_moves, profile move methods
+- Move set_rs485_option out of PortDriver trait impl
+- Document `set_params_and_notify` vs `write_int32_no_wait` for driver authors
+
+### epics-base-rs
+- Fix ai/ao conversion pipeline (ASLO/AOFF/ESLO/EOFF)
+- Fix bi/bo records and COS alarm
+- Fix calc division by zero to return NaN
+- Fix mbbi/mbbo state handling and field access
+- Fix sel record High/Low/Median algorithms
+- Fix calcout missing OUT link write (pval timing + cached should_output)
+- Fix WriteDbLink to use resolve_field for common fields (OUT/DOL)
+- Fix monitor deadband for binary records (bi/bo/busy/mbbi/mbbo always post)
+- Document DeviceReadOutcome ok() vs computed() convention
+
+### ad-core-rs
+- Fix ADDriverBase MaxSizeX/Y init from constructor args
+- Fix NDArrayPool threshold and free-list logic
+- Fix plugin runtime interrupt notifications
+- Add ParamUpdate::Float64Array for waveform param updates in plugins
+
+### ad-plugins-rs
+- Fix ROIStat time series waveform readback (was accumulating but never writing to params)
+- Fix ROI, Stats, Process, HDF5, TIFF, JPEG, NetCDF, Nexus plugins
+- Add attr_plot param indices and buffer output infrastructure
+
+### examples
+- Migrate all acquisition tasks to set_params_and_notify
+- Fix beam_current and time_of_day DeviceReadOutcome to skip ai conversion
+- Fix moving_dot acquire_busy and status in writeInt32
+
+## v0.8.3
+
+### asyn-rs
+
+- Remove unbounded sync channel from `InterruptManager`, replacing it with a simpler notification mechanism to eliminate memory leaks when interrupt callbacks accumulate faster than consumed.
+
+### motor-rs
+
+- Fix tight poll loop consuming excessive CPU when motor is in motion.
+- Defer `StartPolling` to `after_init` hook to prevent premature polling during st.cmd and autosave restore.
+- Throttle `StartPolling` and send only on idle-to-active transition, removing redundant poll requests.
+- Clear `last_write` in init to prevent restore-triggered moves.
+- Sync driver position from pass0-restored VAL during initialization.
+
+### epics-base-rs
+
+- Add `after_init` hooks that run after PINI processing, matching C EPICS `initHookAfterIocRun` timing.
+
+### epics-ca-rs
+
+#### Client
+
+- **Fix**: Slow reconnection after IOC restart (~50s → ~5s). Beacon monitor was skipping `available=INADDR_ANY` beacons (all modern IOCs), reading the wrong header field for server port, and doing per-server rescan instead of global rescan.
+- **Fix**: ECHO ping-pong loop causing 50%+ CPU usage. Client was echoing back the server's echo responses, creating a tight infinite loop after the first 30-second idle timeout.
+- **Fix**: Search response `INADDR_ANY` check (`0xFFFFFFFF` → `0`) for C server interoperability.
+- **Fix**: `handle_disconnect` operator precedence bug causing channels on unrelated servers to be incorrectly disconnected.
+- **Fix**: Pending read/write waiters now receive `CaError::Disconnected` on server disconnect instead of hanging forever.
+- **Fix**: `DropChannel` now properly cleans up all channel states (Connecting, Disconnected, Unresponsive).
+- Beacon-TCP watchdog integration: immediate echo probe on beacon anomaly detects dead connections in ~5s instead of ~35s.
+- Send buffer backpressure: close stalled connections at 4096 pending frames.
+- Search datagram sequence validation to reject stale responses from previous rounds.
+- TCP read buffer capped at 1MB to protect against malformed servers.
+- Defensive bounds checks and malformed message logging.
+- `align8` overflow protection with `saturating_add`.
+
+#### Server
+
+- **Fix**: Beacon header field swap (`data_type`/`count` were swapped), breaking C client interop.
+- **Fix**: Search response `INADDR_ANY` sentinel (`0xFFFFFFFF` → `0`), matching C protocol.
+- **Fix**: `WRITE_NOTIFY` response `count` field was hardcoded to 1 instead of echoing the request count.
+- **Fix**: `CLEAR_CHANNEL` response was missing `data_type` and `count` fields.
+
+#### Repeater
+
+- **Fix**: Accept zero-length UDP registration for C client backward compatibility (pre-3.12 protocol).
+- **Fix**: Fill in beacon `available` field with source IP on relay, matching C repeater behavior.
+
+### optics-rs
+
+- Add HSC and QXBPM async driver support with deferred poll start.
+
+## v0.8.2
+
+### epics-bridge-rs (new crate)
+
+New umbrella crate for EPICS protocol bridges. Hosts feature-gated sub-modules:
+
+- **`qsrv`** (default) — Record ↔ pvAccess channels (C++ EPICS QSRV equivalent). Single PVs (NTScalar/NTEnum/NTScalarArray) and multi-record group PVs with full metadata, pvRequest filtering, process/block put options, AccessControl enforcement on get/put/monitor, nested field paths, info(Q:group, ...) parsing, and trigger validation.
+- **`ca-gateway`** (default) — CA fan-out gateway (C++ ca-gateway equivalent). Includes `.pvlist` parser with regex backreferences, ACF integration, lazy on-demand resolution via search hook, per-host connection tracking, statistics PVs, beacon throttle, putlog, runtime command interface, and an auto-restart supervisor.
+- **`pvalink`**, **`pva-gateway`** — placeholders for future implementations.
+
+The `ca-gateway-rs` daemon binary builds via `cargo build --release -p epics-bridge-rs --bin ca-gateway-rs` and lands in `target/release/ca-gateway-rs`.
+
+The umbrella `epics-rs` crate gains a `bridge` feature that re-exports `epics-bridge-rs` as `epics_rs::bridge`.
+
+### epics-base-rs
+
+#### **Behavior change**: `PvDatabase::has_name()` / `find_entry()` now invoke an optional async search resolver on miss
+
+`PvDatabase` gained `set_search_resolver(SearchResolver)` / `clear_search_resolver()` plus a new `SearchResolver` type alias. When set, both `has_name()` and `find_entry()` invoke the resolver on a database miss; the resolver may populate the database (e.g. by subscribing to an upstream IOC) and return `true` to make the lookup succeed on the immediate re-check.
+
+**Compatibility**: with no resolver installed (the default), behavior is unchanged. However, callers that previously assumed `has_name()`/`find_entry()` were *cheap, side-effect-free* lookups should be aware these methods can now `.await` arbitrary work when a resolver is registered. The current in-tree usage (CA UDP search responder, TCP create-channel handler) is consistent with this design.
+
+This hook is what enables `epics-bridge-rs::ca_gateway` to lazily subscribe upstream PVs on first downstream search instead of requiring a `--preload` file.
+
+#### `Snapshot` / `DisplayInfo` — additive fields
+
+- `DisplayInfo` gained `form: i16` (display format hint, from `Q:form` info tag) and `description: String` (DESC). Existing initializers need `..Default::default()` to remain forward-compatible — internal call sites have been updated.
+- `Snapshot` gained `user_tag: i32` (from `Q:time:tag` nsec LSB splitting). Defaults to 0.
+
+These fields propagate into PVA NTScalar `display.form` / `display.description` and `timeStamp.userTag` via `epics-bridge-rs::qsrv::pvif`.
+
+### epics-ca-rs
+
+#### **Breaking**: `tcp::run_tcp_listener()` signature changed
+
+Added a 6th parameter:
+
+```rust
+pub async fn run_tcp_listener(
+    db: Arc<PvDatabase>,
+    port: u16,
+    acf: Arc<Option<AccessSecurityConfig>>,
+    tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
+    beacon_reset: Arc<tokio::sync::Notify>,
+    conn_events: Option<broadcast::Sender<ServerConnectionEvent>>, // ← new
+) -> CaResult<()>;
+```
+
+External callers of `run_tcp_listener()` must pass `None` (opt out of connection lifecycle events) or a `broadcast::Sender` to subscribe.
+
+In-workspace consumers (`server::ca_server::CaServer::run` and `crates/epics-base-rs/tests/client_server.rs`) have been updated.
+
+#### Additive: `CaServer::connection_events()` and `ServerConnectionEvent`
+
+`CaServer` now exposes `connection_events()` which returns a `broadcast::Receiver<ServerConnectionEvent>` (`Connected(SocketAddr)` / `Disconnected(SocketAddr)`). Used by `epics-bridge-rs::ca_gateway` for per-host downstream client tracking. Servers that don't subscribe see no behavior change.
+
+## v0.8.1
+
+### Fix: Plugin param update re-entrancy (CPU 100% on idle)
+
+Plugin `on_param_change` handlers that return `ParamUpdate` values (readback pushes)
+previously used `write_int32_no_wait` which sends `Int32Write` to the port actor.
+The port actor then calls `io_write_int32` → `on_param_change` again, causing
+**infinite re-entrancy loops** (e.g., Overlay Position↔Center bidirectional update).
+
+This is now fixed by introducing `ParamSetValue` and `set_params_and_notify()`,
+which mirrors C ADCore's `setIntegerParam()` + `callParamCallbacks()` pattern:
+values are stored directly in the param store without going through the driver's
+write path, so `on_param_change` is never re-triggered.
+
+- **asyn-rs**: Add `ParamSetValue` enum, extend `CallParamCallbacks` with inline param updates, add `PortHandle::set_params_and_notify()`
+- **ad-core-rs**: `publish_result` now uses `set_params_and_notify` instead of `write_int32_no_wait` for plugin readback values
+- **ad-plugins-rs**: Restore Overlay Position↔Center bidirectional readback (safe with new path)
+- **commonPlugins.cmd**: Add missing `NDTimeSeriesConfigure` commands for Stats/ROIStat/Attr TS ports
+
+## v0.8.0
+
+### HDF5 Plugin — Complete Rewrite
+- **Pure Rust HDF5**: Switch from fallback binary format to real HDF5 via `rust-hdf5` (crates.io `0.2`). No C dependencies.
+- **Compression**: zlib, SZIP, LZ4, Blosc (with sub-codecs: BloscLZ, LZ4, LZ4HC, Snappy, Zlib, Zstd). All via `rust-hdf5` filter pipeline.
+- **SWMR streaming**: Single Writer Multiple Reader support — `SwmrFileWriter` with `append_frame`, periodic flush, ordered fsyncs.
+- **Store performance**: Write timing measurement with Run time / I/O speed readback.
+- **Store attributes**: Controllable via param (on/off).
+- **File number fix**: Last filename now shows the actual written file, not the next incremented number.
+
+### NeXus File Plugin (New)
+- **NDFileNexus**: HDF5-based NeXus format writer with `/entry/instrument/detector/data` group hierarchy via `rust-hdf5` group API.
+
+### Plugin on_param_change — All Plugins Complete
+- **Process**: Full `on_param_change` for all 34 params. Filter type presets (RecursiveAve, Average, Sum, Difference, RecursiveAveDiff, CopyToFilter). Auto offset/scale calc. Separate low/high clip threshold and value. Scale flat field param.
+- **Transform**: `on_param_change` for TRANSFORM_TYPE.
+- **ColorConvert**: `on_param_change` for COLOR_MODE_OUT and FALSE_COLOR.
+- **Overlay**: 8 runtime-configurable overlay slots via addr, with Position↔Center bidirectional readback.
+- **FFT**: `on_param_change` for direction, suppress DC, num_average, reset_average. Num averaged readback.
+- **CircularBuff**: `on_param_change` for Start/Stop, trigger A/B attributes, calc expression, pre/post count, preset triggers, soft trigger, flush on trigger. Status/triggered/trigger count readback.
+- **Codec**: `on_param_change` for mode, compressor (LZ4/JPEG/Blosc), JPEG quality, Blosc sub-compressor/level/shuffle. Compression factor and status readback. Blosc compress/decompress via `rust-hdf5` filter pipeline.
+- **Stats**: `on_param_change` for compute_statistics toggle.
+- **BadPixel**: `on_param_change` for BAD_PIXEL_FILE_NAME — loads JSON bad pixel list at runtime. Moved from stub to real processor.
+- **Attribute**: 8-channel multi-addr attribute extraction with TimeSeries integration. Moved from stub to real processor.
+
+### Scatter/Gather — C ADCore Compatible
+- **Scatter**: Round-robin distribution via `ProcessResult::scatter_index`. New `NDArrayOutput::publish_to(index)` for selective delivery.
+- **Gather**: Multi-upstream wiring in `NDGatherConfigure` — accepts multiple port names.
+
+### TimeSeries Refactor
+- **`TsReceiverRegistry`**: Shared registry pattern. Stats/ROIStat/Attribute store TS receivers; `NDTimeSeriesConfigure` picks them up. Eliminates duplicate TS port creation code.
+- **`NDTimeSeriesConfigure`**: Fully implemented (no longer a stub).
+
+### File Plugin Infrastructure
+- **Lazy open / Delete driver file / Free buffer**: Params wired in `FilePluginController` (shared by all file plugins).
+- **ROIStat**: 32 ROIs (up from 8), with `NDROIStatN.template` × 32 in commonPlugins.cmd.
+
+### Dependencies
+- **rust-hdf5**: Switch from git dependency to crates.io `0.2`. Pure Rust HDF5 with all compression filters.
+
 ## v0.7.12
 
 ### CA Client Connection Stability

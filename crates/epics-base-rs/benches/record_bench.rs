@@ -1,6 +1,6 @@
 #![allow(clippy::approx_constant)]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use epics_base_rs::calc;
 use epics_base_rs::types::EpicsValue;
 
@@ -35,7 +35,7 @@ fn bench_calc_eval(c: &mut Criterion) {
         inputs.vars[5] = 6.0; // F
         inputs.vars[6] = 0.5; // G
         inputs.vars[7] = 10.0; // H
-        inputs.vars[8] = 3.0;  // I
+        inputs.vars[8] = 3.0; // I
         b.iter(|| calc::eval(black_box(&complex), &mut inputs))
     });
 }

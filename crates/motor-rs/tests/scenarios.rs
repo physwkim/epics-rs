@@ -111,7 +111,10 @@ fn backlash_generates_two_phase_move() {
     // First command should go to pretarget (dval - bdst = -10 - 1 = -11)
     assert_eq!(effects.commands.len(), 1);
     if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((*position - (-11.0)).abs() < 1e-10, "pretarget should be -11.0, got {position}");
+        assert!(
+            (*position - (-11.0)).abs() < 1e-10,
+            "pretarget should be -11.0, got {position}"
+        );
     } else {
         panic!("expected MoveAbsolute");
     }
@@ -125,7 +128,10 @@ fn backlash_generates_two_phase_move() {
     assert!(rec.stat.mip.contains(MipFlags::MOVE_BL));
     assert!(!rec.internal.backlash_pending);
     assert_eq!(effects.commands.len(), 1);
-    if let MotorCommand::MoveAbsolute { position, velocity, .. } = &effects.commands[0] {
+    if let MotorCommand::MoveAbsolute {
+        position, velocity, ..
+    } = &effects.commands[0]
+    {
         assert!((*position - (-10.0)).abs() < 1e-10);
         assert_eq!(*velocity, rec.vel.bvel);
     } else {
@@ -159,7 +165,10 @@ fn retry_reissues_move_when_error_exceeds_rdbd() {
     assert_eq!(rec.stat.phase, MotionPhase::Retry);
     assert_eq!(rec.retry.rcnt, 1);
     assert!(!rec.retry.miss);
-    assert!(matches!(effects.commands[0], MotorCommand::MoveAbsolute { .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::MoveAbsolute { .. }
+    ));
 
     // Second retry
     complete_move(&mut rec, 9.98); // still > rdbd
@@ -187,9 +196,11 @@ fn retry_modes_arithmetic_geometric_inposition() {
     complete_move(&mut rec, 9.0);
     let effects = rec.check_completion();
 
-    // Arithmetic: target = 9.0 + (10.0 - 9.0) * 0.5 = 9.5
+    // C Arithmetic: factor = (rtry - rcnt + 1) / rtry = (5 - 1 + 1) / 5 = 1.0
+    // retry_target = 10.0 (= dval), use_rel=false:
+    // position = dval + frac*(retry_target - dval) = 10.0 + 0.5*0 = 10.0
     if let MotorCommand::MoveAbsolute { position, .. } = &effects.commands[0] {
-        assert!((position - 9.5).abs() < 1e-6);
+        assert!((position - 10.0).abs() < 1e-6);
     } else {
         panic!("expected MoveAbsolute");
     }
@@ -226,7 +237,13 @@ fn jog_start_stop_backlash_sequence() {
     assert!(!rec.stat.dmov);
     assert_eq!(rec.stat.phase, MotionPhase::Jog);
     assert!(rec.stat.mip.contains(MipFlags::JOGF));
-    assert!(matches!(effects.commands[0], MotorCommand::MoveVelocity { direction: true, .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::MoveVelocity {
+            direction: true,
+            ..
+        }
+    ));
 
     // Stop jog
     rec.ctrl.jogf = false;
@@ -234,10 +251,23 @@ fn jog_start_stop_backlash_sequence() {
     assert!(rec.stat.mip.contains(MipFlags::JOG_STOP));
     assert!(matches!(effects.commands[0], MotorCommand::Stop { .. }));
 
-    // Motor stops at position 20.0 (jog was forward, bdst > 0 → no jog backlash)
+    // Motor stops at position 20.0
+    complete_move(&mut rec, 20.0);
+    let effects = rec.check_completion();
+    // C: jog backlash is unconditional when |BDST| >= |MRES|
+    // Phase 1 (BL1): move to pretarget at slew velocity
+    assert_eq!(rec.stat.phase, MotionPhase::JogBacklash);
+    assert!(!effects.commands.is_empty());
+
+    // BL1 completes at pretarget
+    complete_move(&mut rec, 20.0 - 1.0); // pretarget = dval - bdst
+    let effects = rec.check_completion();
+    // Phase 2 (BL2): move to final at backlash velocity
+    assert!(!effects.commands.is_empty());
+
+    // BL2 completes
     complete_move(&mut rec, 20.0);
     let _effects = rec.check_completion();
-    // Jog forward with positive BDST → no backlash needed
     assert!(rec.stat.dmov);
 }
 
@@ -252,7 +282,10 @@ fn home_forward_reverse_marks_homed() {
     assert_eq!(rec.stat.phase, MotionPhase::Homing);
     assert!(rec.stat.mip.contains(MipFlags::HOMF));
     assert!(!rec.ctrl.homf); // pulse cleared
-    assert!(matches!(effects.commands[0], MotorCommand::Home { forward: true, .. }));
+    assert!(matches!(
+        effects.commands[0],
+        MotorCommand::Home { forward: true, .. }
+    ));
 
     // Homing completes
     complete_move(&mut rec, 0.0);
@@ -280,9 +313,15 @@ fn dly_delays_final_dmov_assertion() {
     assert!(effects.schedule_delay.is_some());
     assert!(!rec.stat.dmov);
 
-    // Delay expires
+    // Delay expires — C: sets DELAY_ACK, requests fresh poll
     rec.set_event(MotorEvent::DelayExpired);
-    let _effects = rec.do_process();
+    let effects = rec.do_process();
+    assert!(effects.status_refresh);
+    assert!(!rec.stat.dmov); // not yet finalized
+
+    // Fresh poll arrives — evaluate position error, finalize
+    complete_move(&mut rec, 10.0);
+    let _effects = rec.check_completion();
     assert!(rec.stat.dmov);
     assert_eq!(rec.stat.phase, MotionPhase::Idle);
 }
@@ -301,22 +340,31 @@ fn spmg_stop_blocks_new_commands() {
 }
 
 #[test]
-fn spmg_pause_retains_target() {
+fn spmg_pause_sends_stop_and_syncs_after_completion() {
     let mut rec = make_record();
 
     // Start a move
     rec.pos.dval = 50.0;
     rec.plan_motion(CommandSource::Val);
     assert!(!rec.stat.dmov);
-    let saved_dval = rec.pos.dval;
 
-    // Pause
+    // Motor moving at 25
+    motor_moving(&mut rec, 25.0);
+
+    // Pause: sends STOP, sets MIP_STOP, motor still running
     rec.ctrl.spmg = SpmgMode::Pause;
     let effects = rec.plan_motion(CommandSource::Spmg);
     assert!(matches!(effects.commands[0], MotorCommand::Stop { .. }));
+    assert!(!rec.stat.dmov); // still moving
+    assert!(rec.stat.mip.contains(MipFlags::STOP));
+
+    // Motor stops at 25
+    complete_move(&mut rec, 25.0);
+    let _effects = rec.check_completion();
+    // C: postProcess syncs VAL=RBV, DVAL=DRBV
     assert!(rec.stat.dmov);
-    // Target retained
-    assert_eq!(rec.pos.dval, saved_dval);
+    assert_eq!(rec.pos.dval, 25.0);
+    assert_eq!(rec.pos.val, 25.0);
 }
 
 #[test]
@@ -333,14 +381,18 @@ fn ntm_retargets_while_in_motion() {
     // Motor moving at position 25
     motor_moving(&mut rec, 25.0);
 
+    // Ensure MIP and CDIR are set (plan_motion sets these)
+    assert!(rec.stat.mip.contains(MipFlags::MOVE));
+    assert!(rec.stat.cdir); // positive direction
+
     // New target: 80 (same direction, farther)
     assert_eq!(rec.handle_retarget(80.0), RetargetAction::ExtendMove);
 
-    // New target: -10 (opposite direction)
+    // New target: -10 (opposite direction, beyond deadband)
     assert_eq!(rec.handle_retarget(-10.0), RetargetAction::StopAndReplan);
 
-    // New target: 30 (same direction, closer than current)
-    assert_eq!(rec.handle_retarget(30.0), RetargetAction::StopAndReplan);
+    // New target: 30 (same direction, closer) -> ExtendMove (same dir in C)
+    assert_eq!(rec.handle_retarget(30.0), RetargetAction::ExtendMove);
 }
 
 #[test]
@@ -364,18 +416,18 @@ fn set_mode_redefines_coordinates() {
 }
 
 #[test]
-fn frozen_offset_preserves_off() {
+fn frozen_offset_non_set_cascades_normally() {
     let mut rec = make_record();
     rec.conv.foff = FreezeOffset::Frozen;
     rec.pos.val = 10.0;
     rec.pos.off = 5.0;
 
-    // Write DVAL — OFF should change to keep VAL constant
+    // C: FOFF has no effect in non-SET mode -- VAL recalculated, OFF unchanged
     rec.put_field("DVAL", EpicsValue::Double(20.0)).unwrap();
 
-    assert_eq!(rec.pos.val, 10.0); // preserved
+    assert_eq!(rec.pos.val, 25.0); // dial_to_user(20.0, Pos, 5.0)
     assert_eq!(rec.pos.dval, 20.0);
-    assert_eq!(rec.pos.off, -10.0); // 10 - 1*20
+    assert_eq!(rec.pos.off, 5.0); // unchanged
 }
 
 #[test]
@@ -387,11 +439,7 @@ fn startup_syncs_positions_from_driver() {
         encoder_position: 25.0,
         done: true,
         moving: false,
-        high_limit: false,
-        low_limit: false,
-        home: false,
-        powered: true,
-        problem: false,
+        ..Default::default()
     };
 
     let effects = rec.initial_readback(&status);
@@ -429,15 +477,25 @@ fn comm_error_sets_alarm_and_safe_state() {
 }
 
 #[test]
-fn dmov_pulse_guaranteed_even_for_noop() {
+fn sub_step_move_pulses_dmov() {
     let mut rec = make_record();
 
-    // Move to current position (noop)
+    // Move to current position (< 1 step) -- no motor command, but DMOV pulses
     rec.pos.dval = 0.0;
     rec.pos.drbv = 0.0;
-    // Still goes through motion pipeline
     let effects = rec.plan_motion(CommandSource::Val);
-    assert!(!rec.stat.dmov); // DMOV pulsed to false
+    assert!(!rec.stat.dmov); // DMOV pulsed to 0
+    assert!(effects.commands.is_empty()); // no motor command
+    assert!(effects.request_poll); // triggers re-process
+
+    // Next process cycle: finalize restores DMOV=1
+    let _effects = rec.do_process();
+    assert!(rec.stat.dmov);
+
+    // Move that is at least 1 step should proceed normally
+    rec.pos.dval = rec.conv.mres * 2.0; // 2 steps
+    let effects = rec.plan_motion(CommandSource::Val);
+    assert!(!rec.stat.dmov);
     assert!(!effects.commands.is_empty());
 }
 
@@ -490,8 +548,15 @@ fn sim_motor_end_to_end() {
     assert!(!rec.stat.dmov);
 
     // Execute command on motor — use very high velocity for test speed
-    if let MotorCommand::MoveAbsolute { position, acceleration, .. } = &effects.commands[0] {
-        motor.move_absolute(&user, *position, 100000.0, *acceleration).unwrap();
+    if let MotorCommand::MoveAbsolute {
+        position,
+        acceleration,
+        ..
+    } = &effects.commands[0]
+    {
+        motor
+            .move_absolute(&user, *position, 100000.0, *acceleration)
+            .unwrap();
     }
 
     // Wait for completion
@@ -512,10 +577,9 @@ fn sim_motor_end_to_end() {
 /// Setting VAL to the current position must still produce a DMOV 1→0→1
 /// transition. ophyd/bluesky rely on this to detect move completion.
 #[test]
-fn move_to_same_position_produces_dmov_transition() {
+fn move_to_same_position_pulses_dmov() {
     let mut rec = make_record();
 
-    // Start at position 0 with DMOV=1 (idle)
     rec.pos.val = 0.0;
     rec.pos.dval = 0.0;
     rec.pos.rval = 0;
@@ -524,33 +588,22 @@ fn move_to_same_position_produces_dmov_transition() {
     rec.stat.dmov = true;
     rec.stat.phase = MotionPhase::Idle;
 
-    // Write VAL=0 (same position)
+    // Write VAL=0 (same position) — DMOV pulses 1→0→1
     rec.put_field("VAL", EpicsValue::Double(0.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // DMOV must go to 0 even though target == current position
-    assert!(!rec.stat.dmov, "DMOV should be 0 after move command to same position");
-    assert_eq!(rec.stat.phase, MotionPhase::MainMove);
-    assert!(!effects.commands.is_empty(), "should issue move command even for same position");
+    assert!(!rec.stat.dmov, "DMOV should pulse to 0");
+    assert!(effects.commands.is_empty(), "no motor command for sub-step");
 
-    // Simulate motor immediately reporting done (already at target)
-    complete_move(&mut rec, 0.0);
-    let _effects = rec.check_completion();
-
-    // DMOV must return to 1
-    assert!(rec.stat.dmov, "DMOV should be 1 after completion");
+    // Next process cycle restores DMOV=1
+    let _effects = rec.do_process();
+    assert!(rec.stat.dmov, "DMOV should return to 1");
     assert_eq!(rec.stat.phase, MotionPhase::Idle);
 }
 
 /// Same-position DMOV transition with SimMotor end-to-end.
 #[test]
-fn sim_motor_same_position_dmov_transition() {
-    let mut motor = SimMotor::new();
-    let user = AsynUser::new(0);
-
-    // Set SimMotor position to 5.0 first
-    motor.set_position(&user, 5.0).unwrap();
-
+fn sim_motor_same_position_pulses_dmov() {
     let mut rec = make_record();
     rec.pos.val = 5.0;
     rec.pos.dval = 5.0;
@@ -560,38 +613,15 @@ fn sim_motor_same_position_dmov_transition() {
     rec.stat.dmov = true;
     rec.stat.phase = MotionPhase::Idle;
 
-    // Write VAL=5 (same position)
+    // Write VAL=5 (same position) — DMOV pulses
     rec.put_field("VAL", EpicsValue::Double(5.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // DMOV 1→0
-    assert!(!rec.stat.dmov);
+    assert!(!rec.stat.dmov, "DMOV should pulse to 0");
+    assert!(effects.commands.is_empty());
 
-    // Execute move command on SimMotor
-    for cmd in &effects.commands {
-        if let MotorCommand::MoveAbsolute {
-            position,
-            velocity,
-            acceleration,
-        } = cmd
-        {
-            motor.move_absolute(&user, *position, *velocity, *acceleration)
-                .unwrap();
-        }
-    }
-
-    // SimMotor should complete immediately (no distance to travel)
-    std::thread::sleep(Duration::from_millis(10));
-    let status = motor.poll(&user).unwrap();
-    assert!(status.done);
-
-    rec.process_motor_info(&status);
-    let _effects = rec.check_completion();
-
-    // DMOV 0→1
-    assert!(rec.stat.dmov, "DMOV must return to 1 after same-position move completes");
-    assert_eq!(rec.stat.phase, MotionPhase::Idle);
-    assert!((rec.pos.rbv - 5.0).abs() < 1e-6);
+    let _effects = rec.do_process();
+    assert!(rec.stat.dmov, "DMOV should return to 1");
 }
 
 /// Sequential moves: move to multiple positions and verify each.
@@ -600,20 +630,23 @@ fn sim_motor_same_position_dmov_transition() {
 fn sequential_moves_verify_position() {
     let mut rec = make_record();
 
-    let positions = [0.1, 0.0, 0.1, 0.1, 0.0, -5.0, 5.0];
+    // C: moves to same position (< 1 step) are suppressed, so skip duplicates
+    let positions = [0.1, 0.0, 0.1, -5.0, 5.0];
 
     for &target in &positions {
         rec.put_field("VAL", EpicsValue::Double(target)).unwrap();
         let _effects = rec.plan_motion(CommandSource::Val);
 
-        // Move should always start (DMOV=0), even for same position
         assert!(!rec.stat.dmov, "DMOV should be 0 after move to {target}");
 
         // Simulate completion
         complete_move(&mut rec, target);
         let _effects = rec.check_completion();
 
-        assert!(rec.stat.dmov, "DMOV should be 1 after completion at {target}");
+        assert!(
+            rec.stat.dmov,
+            "DMOV should be 1 after completion at {target}"
+        );
         assert_eq!(rec.stat.phase, MotionPhase::Idle);
         assert!(
             (rec.pos.rbv - target).abs() < 1e-6,
@@ -650,7 +683,10 @@ fn calibration_set_current_position_updates_offset() {
 
     // Should issue SetPosition, not a move
     assert!(
-        effects.commands.iter().any(|c| matches!(c, MotorCommand::SetPosition { .. })),
+        effects
+            .commands
+            .iter()
+            .any(|c| matches!(c, MotorCommand::SetPosition { .. })),
         "SET mode should issue SetPosition command"
     );
 
@@ -680,7 +716,10 @@ fn calibration_set_current_position_updates_offset() {
     let effects = rec.plan_motion(CommandSource::Val);
     assert!(!rec.stat.dmov);
     assert!(
-        effects.commands.iter().any(|c| matches!(c, MotorCommand::MoveAbsolute { .. })),
+        effects
+            .commands
+            .iter()
+            .any(|c| matches!(c, MotorCommand::MoveAbsolute { .. })),
         "Should issue a real move after leaving SET mode"
     );
 }
@@ -701,8 +740,15 @@ fn sim_motor_sequential_moves() {
         assert!(!rec.stat.dmov);
 
         for cmd in &effects.commands {
-            if let MotorCommand::MoveAbsolute { position, velocity, acceleration } = cmd {
-                motor.move_absolute(&user, *position, *velocity, *acceleration).unwrap();
+            if let MotorCommand::MoveAbsolute {
+                position,
+                velocity,
+                acceleration,
+            } = cmd
+            {
+                motor
+                    .move_absolute(&user, *position, *velocity, *acceleration)
+                    .unwrap();
             }
         }
 
@@ -739,8 +785,15 @@ fn rbv_updates_during_move() {
     let effects = rec.plan_motion(CommandSource::Val);
 
     for cmd in &effects.commands {
-        if let MotorCommand::MoveAbsolute { position, velocity, acceleration } = cmd {
-            motor.move_absolute(&user, *position, *velocity, *acceleration).unwrap();
+        if let MotorCommand::MoveAbsolute {
+            position,
+            velocity,
+            acceleration,
+        } = cmd
+        {
+            motor
+                .move_absolute(&user, *position, *velocity, *acceleration)
+                .unwrap();
         }
     }
 
@@ -792,8 +845,15 @@ fn sim_motor_homing() {
     rec.put_field("VAL", EpicsValue::Double(5.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
     for cmd in &effects.commands {
-        if let MotorCommand::MoveAbsolute { position, velocity, acceleration } = cmd {
-            motor.move_absolute(&user, *position, *velocity, *acceleration).unwrap();
+        if let MotorCommand::MoveAbsolute {
+            position,
+            velocity,
+            acceleration,
+        } = cmd
+        {
+            motor
+                .move_absolute(&user, *position, *velocity, *acceleration)
+                .unwrap();
         }
     }
     // Wait for move to complete (distance=5, velocity=10 → 0.5s)
@@ -802,7 +862,9 @@ fn sim_motor_homing() {
         let status = motor.poll(&user).unwrap();
         rec.process_motor_info(&status);
         let _ = rec.check_completion();
-        if rec.stat.dmov { break; }
+        if rec.stat.dmov {
+            break;
+        }
     }
     assert!(rec.stat.dmov, "First move to 5.0 should complete");
 
@@ -811,12 +873,18 @@ fn sim_motor_homing() {
     let effects = rec.plan_motion(CommandSource::Homf);
     assert!(!rec.stat.dmov);
     assert!(
-        effects.commands.iter().any(|c| matches!(c, MotorCommand::Home { .. })),
+        effects
+            .commands
+            .iter()
+            .any(|c| matches!(c, MotorCommand::Home { .. })),
         "Should issue Home command"
     );
 
     for cmd in &effects.commands {
-        if let MotorCommand::Home { velocity, forward, .. } = cmd {
+        if let MotorCommand::Home {
+            velocity, forward, ..
+        } = cmd
+        {
             motor.home(&user, *velocity, *forward).unwrap();
         }
     }

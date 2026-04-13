@@ -21,7 +21,9 @@ impl From<&RequestOp> for PortCommand {
             RequestOp::Int64Write { value } => Self::Int64Write { value: *value },
             RequestOp::Float64Read => Self::Float64Read,
             RequestOp::Float64Write { value } => Self::Float64Write { value: *value },
-            RequestOp::OctetRead { buf_size } => Self::OctetRead { buf_size: *buf_size },
+            RequestOp::OctetRead { buf_size } => Self::OctetRead {
+                buf_size: *buf_size,
+            },
             RequestOp::OctetWrite { data } => Self::OctetWrite { data: data.clone() },
             RequestOp::OctetWriteRead { data, buf_size } => Self::OctetWriteRead {
                 data: data.clone(),
@@ -42,23 +44,37 @@ impl From<&RequestOp> for PortCommand {
                 max_elements: *max_elements,
             },
             RequestOp::Float64ArrayWrite { data } => Self::Float64ArrayWrite { data: data.clone() },
-            RequestOp::Int8ArrayRead { max_elements } => Self::Int8ArrayRead { max_elements: *max_elements },
+            RequestOp::Int8ArrayRead { max_elements } => Self::Int8ArrayRead {
+                max_elements: *max_elements,
+            },
             RequestOp::Int8ArrayWrite { data } => Self::Int8ArrayWrite { data: data.clone() },
-            RequestOp::Int16ArrayRead { max_elements } => Self::Int16ArrayRead { max_elements: *max_elements },
+            RequestOp::Int16ArrayRead { max_elements } => Self::Int16ArrayRead {
+                max_elements: *max_elements,
+            },
             RequestOp::Int16ArrayWrite { data } => Self::Int16ArrayWrite { data: data.clone() },
-            RequestOp::Int64ArrayRead { max_elements } => Self::Int64ArrayRead { max_elements: *max_elements },
+            RequestOp::Int64ArrayRead { max_elements } => Self::Int64ArrayRead {
+                max_elements: *max_elements,
+            },
             RequestOp::Int64ArrayWrite { data } => Self::Int64ArrayWrite { data: data.clone() },
-            RequestOp::Float32ArrayRead { max_elements } => Self::Float32ArrayRead { max_elements: *max_elements },
+            RequestOp::Float32ArrayRead { max_elements } => Self::Float32ArrayRead {
+                max_elements: *max_elements,
+            },
             RequestOp::Float32ArrayWrite { data } => Self::Float32ArrayWrite { data: data.clone() },
             RequestOp::Flush => Self::Flush,
             RequestOp::Connect => Self::Connect,
             RequestOp::Disconnect => Self::Disconnect,
+            RequestOp::ConnectAddr => Self::ConnectAddr,
+            RequestOp::DisconnectAddr => Self::DisconnectAddr,
+            RequestOp::EnableAddr => Self::EnableAddr,
+            RequestOp::DisableAddr => Self::DisableAddr,
+            RequestOp::GetBoundsInt32 => Self::GetBoundsInt32,
+            RequestOp::GetBoundsInt64 => Self::GetBoundsInt64,
             RequestOp::BlockProcess => Self::BlockProcess,
             RequestOp::UnblockProcess => Self::UnblockProcess,
             RequestOp::DrvUserCreate { drv_info } => Self::DrvUserCreate {
                 drv_info: drv_info.clone(),
             },
-            RequestOp::CallParamCallbacks { addr } => Self::CallParamCallbacks { addr: *addr },
+            RequestOp::CallParamCallbacks { addr, .. } => Self::CallParamCallbacks { addr: *addr },
             RequestOp::GetOption { key } => Self::GetOption { key: key.clone() },
             RequestOp::SetOption { key, value } => Self::SetOption {
                 key: key.clone(),
@@ -83,7 +99,9 @@ impl From<&PortCommand> for RequestOp {
             PortCommand::Int64Write { value } => Self::Int64Write { value: *value },
             PortCommand::Float64Read => Self::Float64Read,
             PortCommand::Float64Write { value } => Self::Float64Write { value: *value },
-            PortCommand::OctetRead { buf_size } => Self::OctetRead { buf_size: *buf_size },
+            PortCommand::OctetRead { buf_size } => Self::OctetRead {
+                buf_size: *buf_size,
+            },
             PortCommand::OctetWrite { data } => Self::OctetWrite { data: data.clone() },
             PortCommand::OctetWriteRead { data, buf_size } => Self::OctetWriteRead {
                 data: data.clone(),
@@ -103,24 +121,45 @@ impl From<&PortCommand> for RequestOp {
             PortCommand::Float64ArrayRead { max_elements } => Self::Float64ArrayRead {
                 max_elements: *max_elements,
             },
-            PortCommand::Float64ArrayWrite { data } => Self::Float64ArrayWrite { data: data.clone() },
-            PortCommand::Int8ArrayRead { max_elements } => Self::Int8ArrayRead { max_elements: *max_elements },
+            PortCommand::Float64ArrayWrite { data } => {
+                Self::Float64ArrayWrite { data: data.clone() }
+            }
+            PortCommand::Int8ArrayRead { max_elements } => Self::Int8ArrayRead {
+                max_elements: *max_elements,
+            },
             PortCommand::Int8ArrayWrite { data } => Self::Int8ArrayWrite { data: data.clone() },
-            PortCommand::Int16ArrayRead { max_elements } => Self::Int16ArrayRead { max_elements: *max_elements },
+            PortCommand::Int16ArrayRead { max_elements } => Self::Int16ArrayRead {
+                max_elements: *max_elements,
+            },
             PortCommand::Int16ArrayWrite { data } => Self::Int16ArrayWrite { data: data.clone() },
-            PortCommand::Int64ArrayRead { max_elements } => Self::Int64ArrayRead { max_elements: *max_elements },
+            PortCommand::Int64ArrayRead { max_elements } => Self::Int64ArrayRead {
+                max_elements: *max_elements,
+            },
             PortCommand::Int64ArrayWrite { data } => Self::Int64ArrayWrite { data: data.clone() },
-            PortCommand::Float32ArrayRead { max_elements } => Self::Float32ArrayRead { max_elements: *max_elements },
-            PortCommand::Float32ArrayWrite { data } => Self::Float32ArrayWrite { data: data.clone() },
+            PortCommand::Float32ArrayRead { max_elements } => Self::Float32ArrayRead {
+                max_elements: *max_elements,
+            },
+            PortCommand::Float32ArrayWrite { data } => {
+                Self::Float32ArrayWrite { data: data.clone() }
+            }
             PortCommand::Flush => Self::Flush,
             PortCommand::Connect => Self::Connect,
             PortCommand::Disconnect => Self::Disconnect,
+            PortCommand::ConnectAddr => Self::ConnectAddr,
+            PortCommand::DisconnectAddr => Self::DisconnectAddr,
+            PortCommand::EnableAddr => Self::EnableAddr,
+            PortCommand::DisableAddr => Self::DisableAddr,
+            PortCommand::GetBoundsInt32 => Self::GetBoundsInt32,
+            PortCommand::GetBoundsInt64 => Self::GetBoundsInt64,
             PortCommand::BlockProcess => Self::BlockProcess,
             PortCommand::UnblockProcess => Self::UnblockProcess,
             PortCommand::DrvUserCreate { drv_info } => Self::DrvUserCreate {
                 drv_info: drv_info.clone(),
             },
-            PortCommand::CallParamCallbacks { addr } => Self::CallParamCallbacks { addr: *addr },
+            PortCommand::CallParamCallbacks { addr } => Self::CallParamCallbacks {
+                addr: *addr,
+                updates: vec![],
+            },
             PortCommand::GetOption { key } => Self::GetOption { key: key.clone() },
             PortCommand::SetOption { key, value } => Self::SetOption {
                 key: key.clone(),
@@ -235,24 +274,41 @@ mod tests {
             RequestOp::Float64Read,
             RequestOp::Float64Write { value: 3.14 },
             RequestOp::OctetRead { buf_size: 256 },
-            RequestOp::OctetWrite { data: vec![1, 2, 3] },
-            RequestOp::OctetWriteRead { data: vec![4, 5], buf_size: 128 },
+            RequestOp::OctetWrite {
+                data: vec![1, 2, 3],
+            },
+            RequestOp::OctetWriteRead {
+                data: vec![4, 5],
+                buf_size: 128,
+            },
             RequestOp::UInt32DigitalRead { mask: 0xFF },
-            RequestOp::UInt32DigitalWrite { value: 0xAB, mask: 0xFF },
+            RequestOp::UInt32DigitalWrite {
+                value: 0xAB,
+                mask: 0xFF,
+            },
             RequestOp::EnumRead,
             RequestOp::EnumWrite { index: 2 },
             RequestOp::Int32ArrayRead { max_elements: 100 },
-            RequestOp::Int32ArrayWrite { data: vec![1, 2, 3] },
+            RequestOp::Int32ArrayWrite {
+                data: vec![1, 2, 3],
+            },
             RequestOp::Float64ArrayRead { max_elements: 50 },
-            RequestOp::Float64ArrayWrite { data: vec![1.0, 2.0] },
+            RequestOp::Float64ArrayWrite {
+                data: vec![1.0, 2.0],
+            },
             RequestOp::Flush,
             RequestOp::Connect,
             RequestOp::Disconnect,
             RequestOp::BlockProcess,
             RequestOp::UnblockProcess,
-            RequestOp::DrvUserCreate { drv_info: "INFO".into() },
+            RequestOp::DrvUserCreate {
+                drv_info: "INFO".into(),
+            },
             RequestOp::GetOption { key: "baud".into() },
-            RequestOp::SetOption { key: "baud".into(), value: "9600".into() },
+            RequestOp::SetOption {
+                key: "baud".into(),
+                value: "9600".into(),
+            },
         ];
         for op in ops {
             let cmd = PortCommand::from(&op);
@@ -284,7 +340,10 @@ mod tests {
     fn result_to_reply_float64_read() {
         let result = RequestResult::float64_read(3.14);
         let reply = result_to_reply(&result, 3);
-        assert_eq!(reply.payload, ReplyPayload::Value(ParamValue::Float64(3.14)));
+        assert_eq!(
+            reply.payload,
+            ReplyPayload::Value(ParamValue::Float64(3.14))
+        );
     }
 
     #[test]
@@ -302,10 +361,15 @@ mod tests {
 
     #[test]
     fn result_to_reply_with_alarm() {
-        let result = RequestResult::int32_read(0)
-            .with_alarm(1, 2, Some(SystemTime::UNIX_EPOCH));
+        let result = RequestResult::int32_read(0).with_alarm(1, 2, Some(SystemTime::UNIX_EPOCH));
         let reply = result_to_reply(&result, 5);
-        assert_eq!(reply.alarm, Some(AlarmMeta { status: 1, severity: 2 }));
+        assert_eq!(
+            reply.alarm,
+            Some(AlarmMeta {
+                status: 1,
+                severity: 2
+            })
+        );
         assert!(reply.timestamp.is_some());
     }
 
@@ -333,10 +397,15 @@ mod tests {
             addr: 2,
             value: crate::param::ParamValue::Float64(1.5),
             timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
         };
         let payload = EventPayload::from(&iv);
         match payload {
-            EventPayload::ValueChanged { reason, addr, value } => {
+            EventPayload::ValueChanged {
+                reason,
+                addr,
+                value,
+            } => {
                 assert_eq!(reason, 5);
                 assert_eq!(addr, 2);
                 assert_eq!(value, ParamValue::Float64(1.5));

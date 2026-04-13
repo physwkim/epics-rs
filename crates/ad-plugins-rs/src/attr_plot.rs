@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 
 use ad_core_rs::ndarray::NDArray;
 use ad_core_rs::ndarray_pool::NDArrayPool;
-use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ParamUpdate, ProcessResult};
 
 /// Processor that tracks attribute values over time in circular buffers.
 pub struct AttrPlotProcessor {
@@ -28,6 +28,13 @@ pub struct AttrPlotProcessor {
     initialized: bool,
     /// The unique_id from the last processed frame.
     last_uid: i32,
+    /// Parameter indices for per-attribute waveform output.
+    /// Set by `set_param_indices` after plugin registration.
+    attr_param_indices: Vec<usize>,
+    /// Parameter index for the UID waveform.
+    uid_param_index: Option<usize>,
+    /// Parameter index for the number of data points.
+    n_data_param_index: Option<usize>,
 }
 
 impl AttrPlotProcessor {
@@ -40,7 +47,25 @@ impl AttrPlotProcessor {
             max_points,
             initialized: false,
             last_uid: -1,
+            attr_param_indices: Vec::new(),
+            uid_param_index: None,
+            n_data_param_index: None,
         }
+    }
+
+    /// Set param indices for waveform output after plugin registration.
+    /// `attr_indices`: one Float64Array param per attribute slot.
+    /// `uid_index`: Float64Array param for UID buffer.
+    /// `n_data_index`: Int32 param for number of data points.
+    pub fn set_param_indices(
+        &mut self,
+        attr_indices: Vec<usize>,
+        uid_index: usize,
+        n_data_index: usize,
+    ) {
+        self.attr_param_indices = attr_indices;
+        self.uid_param_index = Some(uid_index);
+        self.n_data_param_index = Some(n_data_index);
     }
 
     /// Get the list of tracked attribute names.
@@ -124,17 +149,46 @@ impl NDPluginProcess for AttrPlotProcessor {
         }
 
         // Push unique_id
-        Self::push_capped(&mut self.uid_buffer, array.unique_id as f64, self.max_points);
+        Self::push_capped(
+            &mut self.uid_buffer,
+            array.unique_id as f64,
+            self.max_points,
+        );
 
         // Push each tracked attribute's value
         for (i, name) in self.attributes.iter().enumerate() {
-            let value = array.attributes.get(name)
+            let value = array
+                .attributes
+                .get(name)
                 .and_then(|attr| attr.value.as_f64())
-                .unwrap_or(0.0);
+                .unwrap_or(f64::NAN);
             Self::push_capped(&mut self.buffers[i], value, self.max_points);
         }
 
-        ProcessResult::sink(vec![])
+        // Write buffers to params for waveform readback
+        let mut updates = Vec::new();
+        for (i, buf) in self.buffers.iter().enumerate() {
+            if let Some(&param) = self.attr_param_indices.get(i) {
+                updates.push(ParamUpdate::float64_array(
+                    param,
+                    buf.iter().copied().collect(),
+                ));
+            }
+        }
+        if let Some(uid_param) = self.uid_param_index {
+            updates.push(ParamUpdate::float64_array(
+                uid_param,
+                self.uid_buffer.iter().copied().collect(),
+            ));
+        }
+        if let Some(n_data_param) = self.n_data_param_index {
+            updates.push(ParamUpdate::int32(
+                n_data_param,
+                self.uid_buffer.len() as i32,
+            ));
+        }
+
+        ProcessResult::sink(updates)
     }
 
     fn plugin_type(&self) -> &str {
@@ -265,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_attribute_uses_zero() {
+    fn test_missing_attribute_uses_nan() {
         let mut proc = AttrPlotProcessor::new(100);
         let pool = NDArrayPool::new(1_000_000);
 
@@ -283,7 +337,7 @@ mod tests {
         let buf = proc.buffer(idx).unwrap();
         assert_eq!(buf.len(), 2);
         assert!((buf[0] - 25.0).abs() < 1e-10);
-        assert!((buf[1] - 0.0).abs() < 1e-10);
+        assert!(buf[1].is_nan());
     }
 
     #[test]

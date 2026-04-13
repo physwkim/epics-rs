@@ -3,7 +3,7 @@ name = "epics-rs"
 version.workspace = true
 edition.workspace = true
 description = "Pure Rust EPICS control system framework"
-license.workspace = true
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 
@@ -11,6 +11,7 @@ repository.workspace = true
 epics-base-rs = { workspace = true }
 epics-ca-rs = { workspace = true, optional = true }
 epics-pva-rs = { workspace = true, optional = true }
+epics-bridge-rs = { workspace = true, optional = true }
 asyn-rs = { workspace = true, optional = true }
 motor-rs = { workspace = true, optional = true }
 ad-core-rs = { workspace = true, optional = true }
@@ -23,9 +24,11 @@ optics-rs = { workspace = true, optional = true }
 default = ["ca"]
 ca = ["dep:epics-ca-rs"]
 pva = ["dep:epics-pva-rs"]
+bridge = ["dep:epics-bridge-rs", "pva"]
 asyn = ["dep:asyn-rs"]
 motor = ["dep:asyn-rs", "dep:motor-rs"]
 ad = ["dep:asyn-rs", "dep:ad-core-rs", "dep:ad-plugins-rs"]
+ioc = ["ad", "ad-plugins-rs/ioc"]
 # calc, autosave, and busy are always available through epics-base-rs
 calc = []
 autosave = []
@@ -33,4 +36,4 @@ busy = []
 std = ["dep:std-rs"]
 scaler = ["dep:scaler-rs"]
 optics = ["dep:optics-rs"]
-full = ["ca", "pva", "asyn", "motor", "ad", "calc", "autosave", "busy", "std", "scaler", "optics"]
+full = ["ca", "pva", "bridge", "asyn", "motor", "ad", "ioc", "calc", "autosave", "busy", "std", "scaler", "optics"]

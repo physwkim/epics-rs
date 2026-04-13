@@ -1,7 +1,7 @@
-mod state_machine;
 mod command_planner;
-mod status_update;
 mod field_access;
+mod state_machine;
+mod status_update;
 
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::record::{FieldDesc, ProcessOutcome, Record, RecordProcessResult};
@@ -94,8 +94,15 @@ impl MotorRecord {
     pub fn set_event(&mut self, event: MotorEvent) {
         self.pending_event = Some(event);
     }
-}
 
+    /// Clear any pending write command source.
+    ///
+    /// Called by device support init() so that pass0-restored field values
+    /// are not interpreted as move commands during PINI processing.
+    pub fn clear_last_write(&mut self) {
+        self.last_write = None;
+    }
+}
 
 impl Record for MotorRecord {
     fn record_type(&self) -> &'static str {
@@ -123,22 +130,28 @@ impl Record for MotorRecord {
         }
 
         let effects = self.do_process();
-        let move_started = !self.stat.dmov && !effects.commands.is_empty();
+        // DMOV=0 means a move started (or sub-step pulse).
+        // Flush DMOV=0 even if no commands were emitted (sub-step case).
+        let move_started = !self.stat.dmov;
 
         // Write effects to shared mailbox for DeviceSupport.write() to consume
         if let Some(state) = self.device_state.clone() {
             self.suppress_flnk = effects.suppress_forward_link;
             let actions = self.effects_to_actions(&effects);
             match state.lock() {
-                Ok(mut ds) => { ds.pending_actions = Some(actions); }
-                Err(e) => { tracing::error!("device state lock poisoned in process: {e}"); }
+                Ok(mut ds) => {
+                    ds.pending_actions = Some(actions);
+                }
+                Err(e) => {
+                    tracing::error!("device state lock poisoned in process: {e}");
+                }
             }
         }
 
-        if move_started {
-            // Flush DMOV=0 immediately so monitors see the 1->0 transition
-            // before the move completes. The next I/O Intr cycle will
-            // process again and eventually notify DMOV=1.
+        if move_started && !self.internal.dmov_notified {
+            // First DMOV 1→0 transition: flush immediately so monitors see
+            // the transition before the move completes.
+            self.internal.dmov_notified = true;
             use epics_base_rs::types::EpicsValue;
             let fields = vec![
                 ("DMOV".to_string(), EpicsValue::Short(0)),
@@ -146,9 +159,20 @@ impl Record for MotorRecord {
                 ("VAL".to_string(), EpicsValue::Double(self.pos.val)),
                 ("DVAL".to_string(), EpicsValue::Double(self.pos.dval)),
                 ("RVAL".to_string(), EpicsValue::Long(self.pos.rval)),
+                ("RBV".to_string(), EpicsValue::Double(self.pos.rbv)),
+                ("DRBV".to_string(), EpicsValue::Double(self.pos.drbv)),
             ];
-            Ok(ProcessOutcome { result: RecordProcessResult::AsyncPendingNotify(fields), actions: Vec::new(), device_did_compute: false })
+            Ok(ProcessOutcome {
+                result: RecordProcessResult::AsyncPendingNotify(fields),
+                actions: Vec::new(),
+                device_did_compute: false,
+            })
         } else {
+            // Ongoing motion or idle: full snapshot so all changed fields
+            // (RBV, DRBV, MSTA, limits, etc.) get posted as monitors.
+            if !move_started {
+                self.internal.dmov_notified = false;
+            }
             Ok(ProcessOutcome::complete())
         }
     }
@@ -172,7 +196,6 @@ impl Record for MotorRecord {
     fn primary_field(&self) -> &'static str {
         "VAL"
     }
-
 }
 
 #[cfg(test)]

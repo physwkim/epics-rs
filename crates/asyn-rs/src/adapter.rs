@@ -51,9 +51,7 @@ pub fn parse_asyn_link(s: &str) -> Result<AsynLink, AsynError> {
         args_str.split_whitespace().collect()
     };
     if parts.is_empty() || parts[0].is_empty() {
-        return Err(AsynError::InvalidLinkSyntax(
-            "portName is required".into(),
-        ));
+        return Err(AsynError::InvalidLinkSyntax("portName is required".into()));
     }
 
     let port_name = parts[0].to_string();
@@ -65,9 +63,9 @@ pub fn parse_asyn_link(s: &str) -> Result<AsynLink, AsynError> {
         0
     };
     let timeout = if parts.len() > 2 {
-        let secs: f64 = parts[2].parse().map_err(|_| {
-            AsynError::InvalidLinkSyntax(format!("invalid timeout: {}", parts[2]))
-        })?;
+        let secs: f64 = parts[2]
+            .parse()
+            .map_err(|_| AsynError::InvalidLinkSyntax(format!("invalid timeout: {}", parts[2])))?;
         Duration::from_secs_f64(secs)
     } else {
         Duration::from_secs(1)
@@ -121,7 +119,10 @@ pub fn parse_asyn_mask_link(s: &str) -> Result<AsynMaskLink, AsynError> {
 
     // Parse mask: support hex (0x...) and decimal
     let mask_str = parts[2];
-    let mask = if let Some(hex) = mask_str.strip_prefix("0x").or_else(|| mask_str.strip_prefix("0X")) {
+    let mask = if let Some(hex) = mask_str
+        .strip_prefix("0x")
+        .or_else(|| mask_str.strip_prefix("0X"))
+    {
         u32::from_str_radix(hex, 16)
             .map_err(|_| AsynError::InvalidLinkSyntax(format!("invalid mask: {mask_str}")))?
     } else {
@@ -131,9 +132,9 @@ pub fn parse_asyn_mask_link(s: &str) -> Result<AsynMaskLink, AsynError> {
     };
 
     let timeout = if parts.len() > 3 {
-        let secs: f64 = parts[3].parse().map_err(|_| {
-            AsynError::InvalidLinkSyntax(format!("invalid timeout: {}", parts[3]))
-        })?;
+        let secs: f64 = parts[3]
+            .parse()
+            .map_err(|_| AsynError::InvalidLinkSyntax(format!("invalid timeout: {}", parts[3])))?;
         Duration::from_secs_f64(secs)
     } else {
         Duration::from_secs(1)
@@ -176,21 +177,23 @@ pub struct AsynDeviceSupport {
     write_only: bool,
     /// RAII interrupt subscription — dropping unsubscribes.
     interrupt_sub: Option<InterruptSubscription>,
-    /// Shared cache for the latest interrupt value. Written by the I/O Intr
-    /// forwarding task, read by read(). When an I/O Intr record is processed
-    /// due to an interrupt, read() uses this cached value instead of sending
-    /// a blocking read to the port driver. This matches C EPICS behavior
+    /// Shared cache for the latest interrupt value and its timestamp. Written by
+    /// the I/O Intr forwarding task, read by read(). When an I/O Intr record is
+    /// processed due to an interrupt, read() uses this cached value instead of
+    /// sending a blocking read to the port driver. This matches C EPICS behavior
     /// where the interrupt callback directly provides the value.
-    interrupt_cache: Arc<std::sync::Mutex<Option<crate::param::ParamValue>>>,
+    interrupt_cache: Arc<std::sync::Mutex<Option<CachedInterrupt>>>,
+}
+
+/// Cached interrupt value with metadata for alarm/timestamp propagation.
+struct CachedInterrupt {
+    value: crate::param::ParamValue,
+    timestamp: SystemTime,
 }
 
 impl AsynDeviceSupport {
     /// Create from a [`PortHandle`].
-    pub fn from_handle(
-        handle: PortHandle,
-        link: AsynLink,
-        iface_type: &str,
-    ) -> Self {
+    pub fn from_handle(handle: PortHandle, link: AsynLink, iface_type: &str) -> Self {
         let iface = InterfaceType::from_asyn_name(iface_type);
         Self {
             handle,
@@ -216,11 +219,7 @@ impl AsynDeviceSupport {
     }
 
     /// Create with a typed interface from a [`PortHandle`].
-    pub fn with_interface_handle(
-        handle: PortHandle,
-        link: AsynLink,
-        iface: InterfaceType,
-    ) -> Self {
+    pub fn with_interface_handle(handle: PortHandle, link: AsynLink, iface: InterfaceType) -> Self {
         Self::from_handle(handle, link, iface.asyn_name())
     }
 
@@ -284,6 +283,30 @@ fn asyn_to_ca_error(e: AsynError) -> CaError {
     CaError::Protocol(e.to_string())
 }
 
+/// Convert an asyn error to EPICS alarm status/severity pair.
+/// Matches C asyn's `asynStatusToEpicsAlarm()` conversion:
+/// - Success → no alarm (0, 0)
+/// - Timeout → READ alarm, MAJOR severity
+/// - Error/Overflow → READ alarm, MAJOR severity
+/// - Disconnected/Disabled → COMM alarm, INVALID severity
+fn asyn_error_to_alarm(e: &AsynError) -> (u16, u16) {
+    match e {
+        AsynError::Status {
+            status: crate::error::AsynStatus::Timeout,
+            ..
+        } => (7, 2), // READ_ALARM=7, MAJOR_ALARM=2
+        AsynError::Status {
+            status: crate::error::AsynStatus::Disconnected,
+            ..
+        }
+        | AsynError::Status {
+            status: crate::error::AsynStatus::Disabled,
+            ..
+        } => (9, 3), // COMM_ALARM=9, INVALID_ALARM=3
+        _ => (7, 2), // Default: READ_ALARM, MAJOR
+    }
+}
+
 /// Convert an asyn ParamValue to an EpicsValue.
 fn param_value_to_epics_value(pv: &crate::param::ParamValue) -> Option<EpicsValue> {
     use crate::param::ParamValue;
@@ -294,10 +317,14 @@ fn param_value_to_epics_value(pv: &crate::param::ParamValue) -> Option<EpicsValu
         ParamValue::Octet(s) => Some(EpicsValue::String(s.clone())),
         ParamValue::UInt32Digital(v) => Some(EpicsValue::Long(*v as i32)),
         ParamValue::Enum { index, .. } => Some(EpicsValue::Enum(*index as u16)),
-        ParamValue::Int8Array(a) => Some(EpicsValue::CharArray(a.iter().map(|&x| x as u8).collect())),
+        ParamValue::Int8Array(a) => {
+            Some(EpicsValue::CharArray(a.iter().map(|&x| x as u8).collect()))
+        }
         ParamValue::Int16Array(a) => Some(EpicsValue::ShortArray(a.to_vec())),
         ParamValue::Int32Array(a) => Some(EpicsValue::LongArray(a.to_vec())),
-        ParamValue::Int64Array(a) => Some(EpicsValue::LongArray(a.iter().map(|&x| x as i32).collect())),
+        ParamValue::Int64Array(a) => {
+            Some(EpicsValue::LongArray(a.iter().map(|&x| x as i32).collect()))
+        }
         ParamValue::Float32Array(a) => Some(EpicsValue::FloatArray(a.to_vec())),
         ParamValue::Float64Array(a) => Some(EpicsValue::DoubleArray(a.to_vec())),
         _ => None,
@@ -332,12 +359,24 @@ impl AsynDeviceSupport {
             "asynOctet" => Some(RequestOp::OctetRead { buf_size: 256 }),
             "asynUInt32Digital" => Some(RequestOp::UInt32DigitalRead { mask: self.mask }),
             "asynEnum" => Some(RequestOp::EnumRead),
-            "asynInt8Array" => Some(RequestOp::Int8ArrayRead { max_elements: self.max_array_elements }),
-            "asynInt16Array" => Some(RequestOp::Int16ArrayRead { max_elements: self.max_array_elements }),
-            "asynInt32Array" => Some(RequestOp::Int32ArrayRead { max_elements: self.max_array_elements }),
-            "asynInt64Array" => Some(RequestOp::Int64ArrayRead { max_elements: self.max_array_elements }),
-            "asynFloat32Array" => Some(RequestOp::Float32ArrayRead { max_elements: self.max_array_elements }),
-            "asynFloat64Array" => Some(RequestOp::Float64ArrayRead { max_elements: self.max_array_elements }),
+            "asynInt8Array" => Some(RequestOp::Int8ArrayRead {
+                max_elements: self.max_array_elements,
+            }),
+            "asynInt16Array" => Some(RequestOp::Int16ArrayRead {
+                max_elements: self.max_array_elements,
+            }),
+            "asynInt32Array" => Some(RequestOp::Int32ArrayRead {
+                max_elements: self.max_array_elements,
+            }),
+            "asynInt64Array" => Some(RequestOp::Int64ArrayRead {
+                max_elements: self.max_array_elements,
+            }),
+            "asynFloat32Array" => Some(RequestOp::Float32ArrayRead {
+                max_elements: self.max_array_elements,
+            }),
+            "asynFloat64Array" => Some(RequestOp::Float64ArrayRead {
+                max_elements: self.max_array_elements,
+            }),
             _ => None,
         }
     }
@@ -346,18 +385,24 @@ impl AsynDeviceSupport {
     fn result_to_value(&self, result: &RequestResult) -> Option<EpicsValue> {
         match self.iface_type.as_str() {
             "asynInt32" => result.int_val.map(EpicsValue::Long),
-            "asynInt64" => result.int64_val.map(|v| EpicsValue::Long(v as i32)),
+            "asynInt64" => result.int64_val.map(|v| EpicsValue::Double(v as f64)),
             "asynFloat64" => result.float_val.map(EpicsValue::Double),
             "asynOctet" => result.data.as_ref().map(|d| {
                 let n = result.nbytes.min(d.len());
                 EpicsValue::String(String::from_utf8_lossy(&d[..n]).into_owned())
             }),
             "asynUInt32Digital" => result.uint_val.map(|v| EpicsValue::Long(v as i32)),
-            "asynEnum" => result.enum_index.map(|v| EpicsValue::Long(v as i32)),
-            "asynInt8Array" => result.int8_array.clone().map(|v| EpicsValue::CharArray(v.iter().map(|&x| x as u8).collect())),
+            "asynEnum" => result.enum_index.map(|v| EpicsValue::Enum(v as u16)),
+            "asynInt8Array" => result
+                .int8_array
+                .clone()
+                .map(|v| EpicsValue::CharArray(v.iter().map(|&x| x as u8).collect())),
             "asynInt16Array" => result.int16_array.clone().map(EpicsValue::ShortArray),
             "asynInt32Array" => result.int32_array.clone().map(EpicsValue::LongArray),
-            "asynInt64Array" => result.int64_array.clone().map(|v| EpicsValue::LongArray(v.iter().map(|&x| x as i32).collect())),
+            "asynInt64Array" => result
+                .int64_array
+                .clone()
+                .map(|v| EpicsValue::LongArray(v.iter().map(|&x| x as i32).collect())),
             "asynFloat32Array" => result.float32_array.clone().map(EpicsValue::FloatArray),
             "asynFloat64Array" => result.float64_array.clone().map(EpicsValue::DoubleArray),
             _ => None,
@@ -372,45 +417,66 @@ impl AsynDeviceSupport {
             ("asynInt32", EpicsValue::Long(v)) => Some(RequestOp::Int32Write { value: *v }),
             ("asynInt32", EpicsValue::Enum(v)) => Some(RequestOp::Int32Write { value: *v as i32 }),
             ("asynInt32", EpicsValue::Short(v)) => Some(RequestOp::Int32Write { value: *v as i32 }),
-            ("asynInt32", EpicsValue::Double(v)) => Some(RequestOp::Int32Write { value: *v as i32 }),
+            ("asynInt32", EpicsValue::Double(v)) => {
+                Some(RequestOp::Int32Write { value: *v as i32 })
+            }
             ("asynInt32", EpicsValue::Float(v)) => Some(RequestOp::Int32Write { value: *v as i32 }),
             ("asynInt64", EpicsValue::Long(v)) => Some(RequestOp::Int64Write { value: *v as i64 }),
-            ("asynInt64", EpicsValue::Double(v)) => Some(RequestOp::Int64Write { value: *v as i64 }),
+            ("asynInt64", EpicsValue::Double(v)) => {
+                Some(RequestOp::Int64Write { value: *v as i64 })
+            }
             ("asynFloat64", EpicsValue::Double(v)) => Some(RequestOp::Float64Write { value: *v }),
-            ("asynFloat64", EpicsValue::Long(v)) => Some(RequestOp::Float64Write { value: *v as f64 }),
-            ("asynFloat64", EpicsValue::Float(v)) => Some(RequestOp::Float64Write { value: *v as f64 }),
-            ("asynFloat64", EpicsValue::Short(v)) => Some(RequestOp::Float64Write { value: *v as f64 }),
-            ("asynFloat64", EpicsValue::Enum(v)) => Some(RequestOp::Float64Write { value: *v as f64 }),
+            ("asynFloat64", EpicsValue::Long(v)) => {
+                Some(RequestOp::Float64Write { value: *v as f64 })
+            }
+            ("asynFloat64", EpicsValue::Float(v)) => {
+                Some(RequestOp::Float64Write { value: *v as f64 })
+            }
+            ("asynFloat64", EpicsValue::Short(v)) => {
+                Some(RequestOp::Float64Write { value: *v as f64 })
+            }
+            ("asynFloat64", EpicsValue::Enum(v)) => {
+                Some(RequestOp::Float64Write { value: *v as f64 })
+            }
             ("asynOctet", EpicsValue::String(s)) => Some(RequestOp::OctetWrite {
                 data: s.as_bytes().to_vec(),
             }),
             ("asynOctet", EpicsValue::CharArray(data)) => {
                 // Trim trailing nulls (waveform FTVL=CHAR pads to NELM)
                 let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-                Some(RequestOp::OctetWrite { data: data[..len].to_vec() })
+                Some(RequestOp::OctetWrite {
+                    data: data[..len].to_vec(),
+                })
             }
             // Coerce numeric types to octet (e.g. longout writing to NDArrayPort string param)
             ("asynOctet", v) => {
                 let s = format!("{v}");
-                Some(RequestOp::OctetWrite { data: s.as_bytes().to_vec() })
+                Some(RequestOp::OctetWrite {
+                    data: s.as_bytes().to_vec(),
+                })
             }
             ("asynUInt32Digital", EpicsValue::Long(v)) => Some(RequestOp::UInt32DigitalWrite {
                 value: *v as u32,
                 mask: self.mask,
             }),
+            ("asynUInt32Digital", EpicsValue::Enum(v)) => Some(RequestOp::UInt32DigitalWrite {
+                value: *v as u32,
+                mask: self.mask,
+            }),
             ("asynEnum", EpicsValue::Long(v)) => Some(RequestOp::EnumWrite { index: *v as usize }),
-            ("asynInt8Array", EpicsValue::CharArray(data)) => {
-                Some(RequestOp::Int8ArrayWrite { data: data.iter().map(|&x| x as i8).collect() })
-            }
+            ("asynEnum", EpicsValue::Enum(v)) => Some(RequestOp::EnumWrite { index: *v as usize }),
+            ("asynInt8Array", EpicsValue::CharArray(data)) => Some(RequestOp::Int8ArrayWrite {
+                data: data.iter().map(|&x| x as i8).collect(),
+            }),
             ("asynInt16Array", EpicsValue::ShortArray(data)) => {
                 Some(RequestOp::Int16ArrayWrite { data: data.clone() })
             }
             ("asynInt32Array", EpicsValue::LongArray(data)) => {
                 Some(RequestOp::Int32ArrayWrite { data: data.clone() })
             }
-            ("asynInt64Array", EpicsValue::LongArray(data)) => {
-                Some(RequestOp::Int64ArrayWrite { data: data.iter().map(|&x| x as i64).collect() })
-            }
+            ("asynInt64Array", EpicsValue::LongArray(data)) => Some(RequestOp::Int64ArrayWrite {
+                data: data.iter().map(|&x| x as i64).collect(),
+            }),
             ("asynFloat32Array", EpicsValue::FloatArray(data)) => {
                 Some(RequestOp::Float32ArrayWrite { data: data.clone() })
             }
@@ -420,17 +486,22 @@ impl AsynDeviceSupport {
             _ => None,
         }
     }
-
 }
 
 impl DeviceSupport for AsynDeviceSupport {
     fn init(&mut self, record: &mut dyn Record) -> CaResult<()> {
         if !self.reason_set {
             match self.handle.drv_user_create_blocking(&self.drv_info) {
-                Ok(reason) => self.reason = reason,
-                Err(_) => {
+                Ok(reason) => {
+                    self.reason = reason;
+                }
+                Err(e) => {
                     // Param not found — this record has no corresponding driver param.
-                    // Silently disable this device support (no-op reads/writes).
+                    eprintln!(
+                        "[asyn] init FAILED: port='{}' drv_info='{}' err={e}",
+                        self.handle.port_name(),
+                        self.drv_info
+                    );
                     self.reason_set = false;
                     return Ok(());
                 }
@@ -461,7 +532,9 @@ impl DeviceSupport for AsynDeviceSupport {
     }
 
     fn read(&mut self, record: &mut dyn Record) -> CaResult<DeviceReadOutcome> {
-        if !self.reason_set { return Ok(DeviceReadOutcome::ok()); }
+        if !self.reason_set {
+            return Ok(DeviceReadOutcome::ok());
+        }
 
         // Write-only (asynOctetWrite): waveform is an input record type so
         // process calls read(), not write(). Perform the write here instead.
@@ -482,39 +555,53 @@ impl DeviceSupport for AsynDeviceSupport {
         // where the interrupt callback directly provides the new value.
         if self.scan == ScanType::IoIntr {
             let cached = self.interrupt_cache.lock().unwrap().take();
-            if let Some(pv) = cached {
-                if let Some(val) = param_value_to_epics_value(&pv) {
+            if let Some(ci) = cached {
+                if let Some(val) = param_value_to_epics_value(&ci.value) {
                     let _ = record.set_val(val);
                 }
-                return Ok(DeviceReadOutcome::ok());
+                self.last_ts = Some(ci.timestamp);
             }
-            return Ok(DeviceReadOutcome::ok());
+            // Return computed() so the record skips its built-in
+            // RVAL→VAL conversion and uses the value we just set.
+            return Ok(DeviceReadOutcome::computed());
         }
 
         if let Some(op) = self.read_op() {
             let user = AsynUser::new(self.reason)
                 .with_addr(self.addr)
                 .with_timeout(self.timeout);
-            if let Ok(result) = self.handle.submit_blocking(op, user) {
-                if let Some(val) = self.result_to_value(&result) {
-                    let _ = record.set_val(val);
+            match self.handle.submit_blocking(op, user) {
+                Ok(result) => {
+                    if let Some(val) = self.result_to_value(&result) {
+                        let _ = record.set_val(val);
+                    }
+                    self.last_alarm_status = result.alarm_status;
+                    self.last_alarm_severity = result.alarm_severity;
+                    self.last_ts = result.timestamp;
                 }
-                self.last_alarm_status = result.alarm_status;
-                self.last_alarm_severity = result.alarm_severity;
-                self.last_ts = result.timestamp;
+                Err(e) => {
+                    // Convert asyn error to EPICS alarm (C parity: asynStatusToEpicsAlarm)
+                    let (alarm_status, alarm_severity) = asyn_error_to_alarm(&e);
+                    self.last_alarm_status = alarm_status;
+                    self.last_alarm_severity = alarm_severity;
+                }
             }
         }
-        Ok(DeviceReadOutcome::ok())
+        Ok(DeviceReadOutcome::computed())
     }
 
     fn write(&mut self, record: &mut dyn Record) -> CaResult<()> {
-        if !self.reason_set { return Ok(()); }
+        if !self.reason_set {
+            return Ok(());
+        }
         if let Some(val) = record.val() {
             if let Some(op) = self.write_op(&val) {
                 let user = AsynUser::new(self.reason)
                     .with_addr(self.addr)
                     .with_timeout(self.timeout);
-                self.handle.submit_blocking(op, user).map_err(asyn_to_ca_error)?;
+                self.handle
+                    .submit_blocking(op, user)
+                    .map_err(asyn_to_ca_error)?;
             }
         }
         Ok(())
@@ -541,7 +628,10 @@ impl DeviceSupport for AsynDeviceSupport {
         self.scan = scan;
     }
 
-    fn write_begin(&mut self, record: &mut dyn Record) -> CaResult<Option<Box<dyn WriteCompletion>>> {
+    fn write_begin(
+        &mut self,
+        record: &mut dyn Record,
+    ) -> CaResult<Option<Box<dyn WriteCompletion>>> {
         let val = match record.val() {
             Some(v) => v,
             None => return Ok(None),
@@ -559,7 +649,10 @@ impl DeviceSupport for AsynDeviceSupport {
         // see the updated value immediately. This prevents actor channel overflow
         // and stale reads during fast motor moves.
         if !self.handle.can_block() {
-            let _ = self.handle.submit_blocking(op, user).map_err(asyn_to_ca_error)?;
+            let _ = self
+                .handle
+                .submit_blocking(op, user)
+                .map_err(asyn_to_ca_error)?;
             return Ok(None); // completed synchronously, no async completion needed
         }
 
@@ -577,6 +670,7 @@ impl DeviceSupport for AsynDeviceSupport {
         let filter = InterruptFilter {
             reason: Some(self.reason),
             addr: Some(self.addr),
+            uint32_mask: None,
         };
 
         let (sub, intr_rx) = self.handle.interrupts().register_interrupt_user(filter);
@@ -587,10 +681,10 @@ impl DeviceSupport for AsynDeviceSupport {
         let cache = self.interrupt_cache.clone();
         tokio::spawn(async move {
             while let Some(iv) = intr_rx.recv().await {
-                // Cache the interrupt value so read() can use it without
-                // a blocking port request. This matches C EPICS where the
-                // interrupt callback directly provides the new value.
-                *cache.lock().unwrap() = Some(iv.value);
+                *cache.lock().unwrap() = Some(CachedInterrupt {
+                    value: iv.value,
+                    timestamp: iv.timestamp,
+                });
                 if tx.send(()).await.is_err() {
                     break;
                 }
@@ -836,11 +930,11 @@ mod tests {
         assert!(parse_asyn_mask_link("@asyn(port1, 0, 0xFF) BITS").is_err());
     }
 
-    use std::sync::Arc;
-    use crate::port::{PortDriver, PortDriverBase, PortFlags};
-    use crate::param::ParamType;
-    use crate::port_actor::PortActor;
     use crate::interrupt::InterruptManager;
+    use crate::param::ParamType;
+    use crate::port::{PortDriver, PortDriverBase, PortFlags};
+    use crate::port_actor::PortActor;
+    use std::sync::Arc;
 
     struct TestPort {
         base: PortDriverBase,
@@ -853,8 +947,12 @@ mod tests {
         }
     }
     impl PortDriver for TestPort {
-        fn base(&self) -> &PortDriverBase { &self.base }
-        fn base_mut(&mut self) -> &mut PortDriverBase { &mut self.base }
+        fn base(&self) -> &PortDriverBase {
+            &self.base
+        }
+        fn base_mut(&mut self) -> &mut PortDriverBase {
+            &mut self.base
+        }
     }
 
     fn make_adapter(scan: ScanType) -> AsynDeviceSupport {

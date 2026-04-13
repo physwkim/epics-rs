@@ -51,6 +51,7 @@ pub struct BadPixelProcessor {
     bad_set: HashSet<(usize, usize)>,
     /// Cached image width from the last array.
     width: usize,
+    file_name_idx: Option<usize>,
 }
 
 impl BadPixelProcessor {
@@ -61,6 +62,7 @@ impl BadPixelProcessor {
             pixels,
             bad_set,
             width: 0,
+            file_name_idx: None,
         }
     }
 
@@ -87,7 +89,18 @@ impl BadPixelProcessor {
     }
 
     /// Apply corrections to a mutable data buffer.
-    fn apply_corrections(&self, data: &mut NDDataBuffer, width: usize, height: usize) {
+    /// `offset_x`/`offset_y` and `binning_x`/`binning_y` are used to adjust bad pixel
+    /// coordinates from the original sensor space to the current array space.
+    fn apply_corrections(
+        &self,
+        data: &mut NDDataBuffer,
+        width: usize,
+        height: usize,
+        offset_x: i64,
+        offset_y: i64,
+        binning_x: i64,
+        binning_y: i64,
+    ) {
         // We need to read original values for Replace/Median, so take a snapshot first.
         // For Set mode, we could do it in-place, but for consistency we read from the
         // original and write to a separate buffer when needed.
@@ -96,7 +109,15 @@ impl BadPixelProcessor {
         let mut corrections: Vec<(usize, f64)> = Vec::with_capacity(self.pixels.len());
 
         for bp in &self.pixels {
-            if bp.x >= width || bp.y >= height {
+            // Adjust pixel coordinates for dimension offset and binning
+            let adj_x = (bp.x as i64 - offset_x) / binning_x;
+            let adj_y = (bp.y as i64 - offset_y) / binning_y;
+            if adj_x < 0 || adj_y < 0 {
+                continue;
+            }
+            let adj_x = adj_x as usize;
+            let adj_y = adj_y as usize;
+            if adj_x >= width || adj_y >= height {
                 continue;
             }
 
@@ -104,8 +125,8 @@ impl BadPixelProcessor {
                 BadPixelMode::Set { value } => *value,
 
                 BadPixelMode::Replace { dx, dy } => {
-                    let nx = bp.x as i64 + *dx as i64;
-                    let ny = bp.y as i64 + *dy as i64;
+                    let nx = adj_x as i64 + *dx as i64;
+                    let ny = adj_y as i64 + *dy as i64;
 
                     if nx < 0 || nx >= width as i64 || ny < 0 || ny >= height as i64 {
                         continue; // replacement out of bounds, skip
@@ -129,8 +150,8 @@ impl BadPixelProcessor {
                 BadPixelMode::Median { kernel_x, kernel_y } => {
                     let half_x = (*kernel_x / 2) as i64;
                     let half_y = (*kernel_y / 2) as i64;
-                    let cx = bp.x as i64;
-                    let cy = bp.y as i64;
+                    let cx = adj_x as i64;
+                    let cy = adj_y as i64;
 
                     let mut neighbors = Vec::new();
                     for ky in (cy - half_y)..=(cy + half_y) {
@@ -141,7 +162,7 @@ impl BadPixelProcessor {
                             let kxu = kx as usize;
                             let kyu = ky as usize;
                             // Skip the bad pixel itself and other bad pixels
-                            if kxu == bp.x && kyu == bp.y {
+                            if kxu == adj_x && kyu == adj_y {
                                 continue;
                             }
                             if self.is_bad(kxu, kyu) {
@@ -168,7 +189,7 @@ impl BadPixelProcessor {
                 }
             };
 
-            let idx = bp.y * width + bp.x;
+            let idx = adj_y * width + adj_x;
             corrections.push((idx, value));
         }
 
@@ -190,8 +211,21 @@ impl NDPluginProcess for BadPixelProcessor {
             return ProcessResult::arrays(vec![Arc::new(array.clone())]);
         }
 
+        let offset_x = array.dims.first().map_or(0, |d| d.offset as i64);
+        let offset_y = array.dims.get(1).map_or(0, |d| d.offset as i64);
+        let binning_x = array.dims.first().map_or(1, |d| d.binning.max(1) as i64);
+        let binning_y = array.dims.get(1).map_or(1, |d| d.binning.max(1) as i64);
+
         let mut out = array.clone();
-        self.apply_corrections(&mut out.data, self.width, height);
+        self.apply_corrections(
+            &mut out.data,
+            self.width,
+            height,
+            offset_x,
+            offset_y,
+            binning_x,
+            binning_y,
+        );
         ProcessResult::arrays(vec![Arc::new(out)])
     }
 
@@ -199,10 +233,49 @@ impl NDPluginProcess for BadPixelProcessor {
         "NDPluginBadPixel"
     }
 
-    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
         use asyn_rs::param::ParamType;
         base.create_param("BAD_PIXEL_FILE_NAME", ParamType::Octet)?;
+        self.file_name_idx = base.find_param("BAD_PIXEL_FILE_NAME");
         Ok(())
+    }
+
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        params: &ad_core_rs::plugin::runtime::PluginParamSnapshot,
+    ) -> ad_core_rs::plugin::runtime::ParamChangeResult {
+        use ad_core_rs::plugin::runtime::ParamChangeValue;
+
+        if Some(reason) == self.file_name_idx {
+            if let ParamChangeValue::Octet(path) = &params.value {
+                if !path.is_empty() {
+                    match std::fs::read_to_string(path) {
+                        Ok(json_str) => match Self::load_from_json(&json_str) {
+                            Ok(pixels) => {
+                                self.set_pixels(pixels);
+                                tracing::info!(
+                                    "BadPixel: loaded {} pixels from {}",
+                                    self.pixels.len(),
+                                    path
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("BadPixel: failed to parse {}: {}", path, e);
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("BadPixel: failed to read {}: {}", path, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        ad_core_rs::plugin::runtime::ParamChangeResult::updates(vec![])
     }
 }
 
@@ -234,8 +307,16 @@ mod tests {
     fn test_set_mode() {
         let arr = make_2d_array(4, 4, |_, _| 100.0);
         let pixels = vec![
-            BadPixel { x: 1, y: 1, mode: BadPixelMode::Set { value: 0.0 } },
-            BadPixel { x: 3, y: 2, mode: BadPixelMode::Set { value: 42.0 } },
+            BadPixel {
+                x: 1,
+                y: 1,
+                mode: BadPixelMode::Set { value: 0.0 },
+            },
+            BadPixel {
+                x: 3,
+                y: 2,
+                mode: BadPixelMode::Set { value: 42.0 },
+            },
         ];
 
         let mut proc = BadPixelProcessor::new(pixels);
@@ -254,9 +335,11 @@ mod tests {
     fn test_replace_mode() {
         let arr = make_2d_array(4, 4, |x, y| (x + y * 4) as f64);
         // Replace pixel (2,2) with value from (3,2)
-        let pixels = vec![
-            BadPixel { x: 2, y: 2, mode: BadPixelMode::Replace { dx: 1, dy: 0 } },
-        ];
+        let pixels = vec![BadPixel {
+            x: 2,
+            y: 2,
+            mode: BadPixelMode::Replace { dx: 1, dy: 0 },
+        }];
 
         let mut proc = BadPixelProcessor::new(pixels);
         let pool = NDArrayPool::new(1_000_000);
@@ -272,8 +355,16 @@ mod tests {
         let arr = make_2d_array(4, 4, |_, _| 50.0);
         // Both (1,1) and (2,1) are bad. (1,1) tries to replace from (2,1), which is also bad.
         let pixels = vec![
-            BadPixel { x: 1, y: 1, mode: BadPixelMode::Replace { dx: 1, dy: 0 } },
-            BadPixel { x: 2, y: 1, mode: BadPixelMode::Set { value: 0.0 } },
+            BadPixel {
+                x: 1,
+                y: 1,
+                mode: BadPixelMode::Replace { dx: 1, dy: 0 },
+            },
+            BadPixel {
+                x: 2,
+                y: 1,
+                mode: BadPixelMode::Set { value: 0.0 },
+            },
         ];
 
         let mut proc = BadPixelProcessor::new(pixels);
@@ -290,13 +381,16 @@ mod tests {
     #[test]
     fn test_median_mode() {
         // 5x5 image with one hot pixel at center
-        let arr = make_2d_array(5, 5, |x, y| {
-            if x == 2 && y == 2 { 1000.0 } else { 10.0 }
-        });
+        let arr = make_2d_array(5, 5, |x, y| if x == 2 && y == 2 { 1000.0 } else { 10.0 });
 
-        let pixels = vec![
-            BadPixel { x: 2, y: 2, mode: BadPixelMode::Median { kernel_x: 3, kernel_y: 3 } },
-        ];
+        let pixels = vec![BadPixel {
+            x: 2,
+            y: 2,
+            mode: BadPixelMode::Median {
+                kernel_x: 3,
+                kernel_y: 3,
+            },
+        }];
 
         let mut proc = BadPixelProcessor::new(pixels);
         let pool = NDArrayPool::new(1_000_000);
@@ -312,8 +406,19 @@ mod tests {
         let arr = make_2d_array(5, 5, |_, _| 10.0);
         // Center and one neighbor are both bad
         let pixels = vec![
-            BadPixel { x: 2, y: 2, mode: BadPixelMode::Median { kernel_x: 3, kernel_y: 3 } },
-            BadPixel { x: 1, y: 2, mode: BadPixelMode::Set { value: 999.0 } },
+            BadPixel {
+                x: 2,
+                y: 2,
+                mode: BadPixelMode::Median {
+                    kernel_x: 3,
+                    kernel_y: 3,
+                },
+            },
+            BadPixel {
+                x: 1,
+                y: 2,
+                mode: BadPixelMode::Set { value: 999.0 },
+            },
         ];
 
         let mut proc = BadPixelProcessor::new(pixels);
@@ -329,9 +434,14 @@ mod tests {
     fn test_boundary_pixel() {
         let arr = make_2d_array(4, 4, |_, _| 20.0);
         // Corner pixel with median filter
-        let pixels = vec![
-            BadPixel { x: 0, y: 0, mode: BadPixelMode::Median { kernel_x: 3, kernel_y: 3 } },
-        ];
+        let pixels = vec![BadPixel {
+            x: 0,
+            y: 0,
+            mode: BadPixelMode::Median {
+                kernel_x: 3,
+                kernel_y: 3,
+            },
+        }];
 
         let mut proc = BadPixelProcessor::new(pixels);
         let pool = NDArrayPool::new(1_000_000);
@@ -346,9 +456,11 @@ mod tests {
     fn test_replace_out_of_bounds() {
         let arr = make_2d_array(4, 4, |_, _| 50.0);
         // Try to replace (0,0) from (-1, 0) - out of bounds
-        let pixels = vec![
-            BadPixel { x: 0, y: 0, mode: BadPixelMode::Replace { dx: -1, dy: 0 } },
-        ];
+        let pixels = vec![BadPixel {
+            x: 0,
+            y: 0,
+            mode: BadPixelMode::Replace { dx: -1, dy: 0 },
+        }];
 
         let mut proc = BadPixelProcessor::new(pixels);
         let pool = NDArrayPool::new(1_000_000);
@@ -412,9 +524,11 @@ mod tests {
     #[test]
     fn test_bad_pixel_outside_image() {
         let arr = make_2d_array(4, 4, |_, _| 10.0);
-        let pixels = vec![
-            BadPixel { x: 100, y: 100, mode: BadPixelMode::Set { value: 999.0 } },
-        ];
+        let pixels = vec![BadPixel {
+            x: 100,
+            y: 100,
+            mode: BadPixelMode::Set { value: 999.0 },
+        }];
 
         let mut proc = BadPixelProcessor::new(pixels);
         let pool = NDArrayPool::new(1_000_000);
@@ -437,9 +551,11 @@ mod tests {
             }
         }
 
-        let pixels = vec![
-            BadPixel { x: 1, y: 1, mode: BadPixelMode::Set { value: 0.0 } },
-        ];
+        let pixels = vec![BadPixel {
+            x: 1,
+            y: 1,
+            mode: BadPixelMode::Set { value: 0.0 },
+        }];
 
         let mut proc = BadPixelProcessor::new(pixels);
         let pool = NDArrayPool::new(1_000_000);
@@ -455,9 +571,11 @@ mod tests {
         let mut proc = BadPixelProcessor::new(vec![]);
         assert!(proc.pixels().is_empty());
 
-        let new_pixels = vec![
-            BadPixel { x: 0, y: 0, mode: BadPixelMode::Set { value: 0.0 } },
-        ];
+        let new_pixels = vec![BadPixel {
+            x: 0,
+            y: 0,
+            mode: BadPixelMode::Set { value: 0.0 },
+        }];
         proc.set_pixels(new_pixels);
         assert_eq!(proc.pixels().len(), 1);
     }

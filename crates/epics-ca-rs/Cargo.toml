@@ -3,7 +3,7 @@ name = "epics-ca-rs"
 version.workspace = true
 edition.workspace = true
 description = "EPICS Channel Access protocol client and server"
-license.workspace = true
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 

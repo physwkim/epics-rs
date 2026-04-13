@@ -170,7 +170,9 @@ fn cmd_dbpf() -> CommandDef {
             let put_result: CaResult<()> = ctx.block_on(async {
                 let db = ctx.db();
                 if db.get_record(base).await.is_some() {
-                    db.put_record_field_from_ca(base, &field, value).await.map(|_| ())
+                    db.put_record_field_from_ca(base, &field, value)
+                        .await
+                        .map(|_| ())
                 } else {
                     db.put_pv(name, value).await
                 }
@@ -302,8 +304,15 @@ fn cmd_dbsr() -> CommandDef {
         }],
         "dbsr [pattern] — Search records by name pattern (glob)",
         |args: &[ArgValue], ctx: &CommandContext| {
-            let pattern = args.first()
-                .and_then(|a| if let ArgValue::String(s) = a { Some(s.as_str()) } else { None })
+            let pattern = args
+                .first()
+                .and_then(|a| {
+                    if let ArgValue::String(s) = a {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("*");
 
             let mut names = ctx.block_on(ctx.db().all_record_names());
@@ -330,9 +339,15 @@ fn cmd_scanppl() -> CommandDef {
         |_args: &[ArgValue], ctx: &CommandContext| {
             use crate::server::record::ScanType;
             let scan_types = [
-                ScanType::Sec01, ScanType::Sec02, ScanType::Sec05,
-                ScanType::Sec1, ScanType::Sec2, ScanType::Sec5, ScanType::Sec10,
-                ScanType::Event, ScanType::Passive,
+                ScanType::Sec01,
+                ScanType::Sec02,
+                ScanType::Sec05,
+                ScanType::Sec1,
+                ScanType::Sec2,
+                ScanType::Sec5,
+                ScanType::Sec10,
+                ScanType::Event,
+                ScanType::Passive,
             ];
 
             for st in &scan_types {
@@ -345,7 +360,9 @@ fn cmd_scanppl() -> CommandDef {
                 }
             }
 
-            let io_count = ctx.block_on(ctx.db().records_for_scan(ScanType::IoIntr)).len();
+            let io_count = ctx
+                .block_on(ctx.db().records_for_scan(ScanType::IoIntr))
+                .len();
             if io_count > 0 {
                 ctx.println(&format!("I/O Intr: {io_count} records"));
             }
@@ -455,14 +472,21 @@ fn cmd_ioc_stats() -> CommandDef {
             // Scan types summary
             use crate::server::record::ScanType;
             let scan_types = [
-                ScanType::Sec01, ScanType::Sec02, ScanType::Sec05,
-                ScanType::Sec1, ScanType::Sec2, ScanType::Sec5, ScanType::Sec10,
+                ScanType::Sec01,
+                ScanType::Sec02,
+                ScanType::Sec05,
+                ScanType::Sec1,
+                ScanType::Sec2,
+                ScanType::Sec5,
+                ScanType::Sec10,
             ];
             let mut total_scanned = 0;
             for st in &scan_types {
                 total_scanned += ctx.block_on(ctx.db().records_for_scan(*st)).len();
             }
-            let io_intr = ctx.block_on(ctx.db().records_for_scan(ScanType::IoIntr)).len();
+            let io_intr = ctx
+                .block_on(ctx.db().records_for_scan(ScanType::IoIntr))
+                .len();
             ctx.println(&format!("Periodic:   {total_scanned} records"));
             ctx.println(&format!("I/O Intr:   {io_intr} records"));
 
@@ -543,8 +567,8 @@ fn cmd_db_load_records() -> CommandDef {
             let count = defs.len();
 
             for def in defs {
-                let mut record = db_loader::create_record(&def.record_type)
-                    .map_err(|e| format!("{e}"))?;
+                let mut record =
+                    db_loader::create_record(&def.record_type).map_err(|e| format!("{e}"))?;
                 let mut common_fields = Vec::new();
                 db_loader::apply_fields(&mut record, &def.fields, &mut common_fields)
                     .map_err(|e| format!("{e}"))?;
@@ -557,19 +581,38 @@ fn cmd_db_load_records() -> CommandDef {
                         for (name, value) in common_fields {
                             use crate::server::record::CommonFieldPutResult;
                             match instance.put_common_field(&name, value) {
-                                Ok(CommonFieldPutResult::ScanChanged { old_scan, new_scan, phas }) => {
+                                Ok(CommonFieldPutResult::ScanChanged {
+                                    old_scan,
+                                    new_scan,
+                                    phas,
+                                }) => {
                                     drop(instance);
-                                    ctx.db().update_scan_index(&def.name, old_scan, new_scan, phas, phas).await;
+                                    ctx.db()
+                                        .update_scan_index(
+                                            &def.name, old_scan, new_scan, phas, phas,
+                                        )
+                                        .await;
                                     instance = rec_arc.write().await;
                                 }
-                                Ok(CommonFieldPutResult::PhasChanged { scan, old_phas, new_phas }) => {
+                                Ok(CommonFieldPutResult::PhasChanged {
+                                    scan,
+                                    old_phas,
+                                    new_phas,
+                                }) => {
                                     drop(instance);
-                                    ctx.db().update_scan_index(&def.name, scan, scan, old_phas, new_phas).await;
+                                    ctx.db()
+                                        .update_scan_index(
+                                            &def.name, scan, scan, old_phas, new_phas,
+                                        )
+                                        .await;
                                     instance = rec_arc.write().await;
                                 }
                                 Ok(CommonFieldPutResult::NoChange) => {}
                                 Err(e) => {
-                                    eprintln!("put_common_field({name}) failed for {}: {e}", def.name);
+                                    eprintln!(
+                                        "put_common_field({name}) failed for {}: {e}",
+                                        def.name
+                                    );
                                 }
                             }
                         }
@@ -653,12 +696,14 @@ fn parse_macro_string(s: &str) -> HashMap<String, String> {
     }
     for pair in s.split(',') {
         if let Some((k, v)) = pair.split_once('=') {
-            macros.insert(k.trim().to_string(), super::registry::substitute_env_vars(v.trim()));
+            macros.insert(
+                k.trim().to_string(),
+                super::registry::substitute_env_vars(v.trim()),
+            );
         }
     }
     macros
 }
-
 
 /// Get a display name for the DBF type of a value.
 fn dbf_type_name(val: &EpicsValue) -> &'static str {
@@ -806,7 +851,11 @@ mod tests {
         let (db, ctx) = make_ctx();
         ctx.block_on(async {
             db.add_record("AI_REC", Box::new(AiRecord::new(1.0))).await;
-            db.add_record("BO_REC", Box::new(crate::server::records::bo::BoRecord::new(0))).await;
+            db.add_record(
+                "BO_REC",
+                Box::new(crate::server::records::bo::BoRecord::new(0)),
+            )
+            .await;
         });
 
         let mut registry = CommandRegistry::new();

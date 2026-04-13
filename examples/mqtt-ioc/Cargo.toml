@@ -1,0 +1,20 @@
+[package]
+name = "mqtt-ioc"
+version.workspace = true
+edition.workspace = true
+description = "MQTT IOC example — demonstrates mqtt-rs driver with EPICS records"
+publish = false
+
+[features]
+ioc = ["dep:epics-ca-rs", "asyn-rs/epics", "mqtt-rs/ioc"]
+
+[dependencies]
+asyn-rs = { workspace = true }
+epics-base-rs = { workspace = true }
+epics-ca-rs = { workspace = true, optional = true }
+mqtt-rs = { workspace = true }
+
+[[bin]]
+name = "mqtt_ioc"
+path = "src/bin/mqtt_ioc.rs"
+required-features = ["ioc"]

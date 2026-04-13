@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::physics::{self, BeamCurrentConfig};
@@ -53,7 +53,9 @@ pub fn start_beam_current_thread(
 pub mod ioc_support {
     use super::*;
     use epics_base_rs::error::CaResult;
-    use epics_base_rs::server::device_support::{DeviceReadOutcome, DeviceSupport, WriteCompletion};
+    use epics_base_rs::server::device_support::{
+        DeviceReadOutcome, DeviceSupport, WriteCompletion,
+    };
     use epics_base_rs::server::record::{Record, ScanType};
 
     /// Device support for the beam current AI record.
@@ -103,7 +105,8 @@ pub mod ioc_support {
         fn read(&mut self, record: &mut dyn Record) -> CaResult<DeviceReadOutcome> {
             let val = self.value.get();
             record.put_field("VAL", epics_base_rs::types::EpicsValue::Double(val))?;
-            Ok(DeviceReadOutcome::ok())
+            // Return computed() to skip ai's RVAL->VAL conversion
+            Ok(DeviceReadOutcome::computed())
         }
 
         fn write(&mut self, _record: &mut dyn Record) -> CaResult<()> {

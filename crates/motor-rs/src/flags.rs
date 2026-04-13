@@ -25,20 +25,24 @@ bitflags! {
 
 bitflags! {
     /// Motor status flags (MSTA field).
+    /// Bit positions match C motorRecord msta_field for wire compatibility.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub struct MstaFlags: u32 {
-        const DIRECTION       = 0x0001;
-        const DONE            = 0x0002;
-        const PLUS_LS         = 0x0004;
-        const HOME_LS         = 0x0008;
-        const POSITION        = 0x0020;
-        const ENCODER_PRESENT = 0x0040;
-        const PROBLEM         = 0x0080;
-        const MOVING          = 0x0100;
-        const GAIN_SUPPORT    = 0x0200;
-        const COMM_ERR        = 0x0400;
-        const MINUS_LS        = 0x0800;
-        const HOMED           = 0x1000;
+        const DIRECTION       = 0x0001; // bit 0: RA_DIRECTION
+        const DONE            = 0x0002; // bit 1: RA_DONE
+        const PLUS_LS         = 0x0004; // bit 2: RA_PLUS_LS
+        const HOME_LS         = 0x0008; // bit 3: RA_HOME
+        const SLIP            = 0x0010; // bit 4: EA_SLIP
+        const POSITION        = 0x0020; // bit 5: EA_POSITION
+        const SLIP_STALL      = 0x0040; // bit 6: EA_SLIP_STALL
+        const EA_HOME         = 0x0080; // bit 7: EA_HOME
+        const ENCODER_PRESENT = 0x0100; // bit 8: EA_PRESENT
+        const PROBLEM         = 0x0200; // bit 9: RA_PROBLEM
+        const MOVING          = 0x0400; // bit 10: RA_MOVING
+        const GAIN_SUPPORT    = 0x0800; // bit 11: GAIN_SUPPORT
+        const COMM_ERR        = 0x1000; // bit 12: CNTRL_COMM_ERR
+        const MINUS_LS        = 0x2000; // bit 13: RA_MINUS_LS
+        const HOMED           = 0x4000; // bit 14: RA_HOMED
     }
 }
 
@@ -177,6 +181,11 @@ pub enum MotorCommand {
         velocity: f64,
         acceleration: f64,
     },
+    MoveRelative {
+        distance: f64,
+        velocity: f64,
+        acceleration: f64,
+    },
     MoveVelocity {
         direction: bool,
         velocity: f64,
@@ -196,7 +205,17 @@ pub enum MotorCommand {
     SetClosedLoop {
         enable: bool,
     },
+    DeferMoves {
+        defer: bool,
+    },
     Poll,
+    ProfileInitialize {
+        max_points: usize,
+    },
+    ProfileBuild,
+    ProfileExecute,
+    ProfileAbort,
+    ProfileReadback,
 }
 
 /// Effects returned by process logic.

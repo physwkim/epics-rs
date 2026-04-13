@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use epics_base_rs::runtime::sync::mpsc;
@@ -12,15 +13,18 @@ use super::types::TransportCommand;
 pub(crate) struct SubscriptionRecord {
     pub subid: u32,
     pub cid: u32,
-    pub data_type: u16,
-    pub count: u32,
+    pub data_type: Option<u16>,
+    pub count: Option<u32>,
     pub mask: u16,
+    pub server_addr: SocketAddr,
     pub callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
     pub needs_restore: bool,
     /// Client-side deadband: suppress callback if |new - old| < deadband.
     pub deadband: f64,
     /// Last delivered scalar value (for deadband filtering).
     pub last_value: Option<f64>,
+    /// Number of monitor updates queued to the application but not yet consumed.
+    pub pending_deliveries: usize,
 }
 
 pub(crate) struct SubscriptionRegistry {
@@ -42,24 +46,45 @@ impl SubscriptionRegistry {
         self.subscriptions.remove(&subid)
     }
 
-    pub fn on_monitor_data(&mut self, subid: u32, data_type: u16, count: u32, data: &[u8]) {
+    pub fn on_monitor_data(
+        &mut self,
+        subid: u32,
+        data_type: u16,
+        count: u32,
+        data: &[u8],
+    ) -> Option<SocketAddr> {
         if let Some(rec) = self.subscriptions.get_mut(&subid) {
             let snapshot = if data_type <= 6 {
                 let dbr_type = match DbFieldType::from_u16(data_type) {
                     Ok(t) => t,
                     Err(e) => {
-                        let _ = rec.callback_tx.send(Err(e));
-                        return;
+                        if rec.callback_tx.send(Err(e)).is_ok() {
+                            rec.pending_deliveries += 1;
+                            return Some(rec.server_addr);
+                        }
+                        return None;
                     }
                 };
                 match EpicsValue::from_bytes_array(dbr_type, data, count as usize) {
                     Ok(value) => Snapshot::new(value, 0, 0, SystemTime::now()),
-                    Err(e) => { let _ = rec.callback_tx.send(Err(e)); return; }
+                    Err(e) => {
+                        if rec.callback_tx.send(Err(e)).is_ok() {
+                            rec.pending_deliveries += 1;
+                            return Some(rec.server_addr);
+                        }
+                        return None;
+                    }
                 }
             } else {
                 match decode_dbr(data_type, data, count as usize) {
                     Ok(s) => s,
-                    Err(e) => { let _ = rec.callback_tx.send(Err(e)); return; }
+                    Err(e) => {
+                        if rec.callback_tx.send(Err(e)).is_ok() {
+                            rec.pending_deliveries += 1;
+                            return Some(rec.server_addr);
+                        }
+                        return None;
+                    }
                 }
             };
 
@@ -68,25 +93,35 @@ impl SubscriptionRegistry {
                 if let Some(new_val) = snapshot.value.to_f64() {
                     if let Some(old_val) = rec.last_value {
                         if (new_val - old_val).abs() < rec.deadband {
-                            return; // Suppress — within deadband
+                            return None; // Suppress — within deadband
                         }
                     }
                     rec.last_value = Some(new_val);
                 }
             }
 
-            let _ = rec.callback_tx.send(Ok(snapshot));
+            if rec.callback_tx.send(Ok(snapshot)).is_ok() {
+                rec.pending_deliveries += 1;
+                return Some(rec.server_addr);
+            }
         }
+        None
     }
 
     /// Mark all subscriptions for a given server's channels as needing restore.
     /// Returns the cids that were affected.
-    pub fn mark_disconnected(&mut self, cids: &[u32]) {
+    pub fn mark_disconnected(&mut self, cids: &[u32]) -> HashMap<SocketAddr, usize> {
+        let mut cleared = HashMap::new();
         for rec in self.subscriptions.values_mut() {
             if cids.contains(&rec.cid) {
                 rec.needs_restore = true;
+                if rec.pending_deliveries > 0 {
+                    *cleared.entry(rec.server_addr).or_insert(0) += rec.pending_deliveries;
+                }
+                rec.pending_deliveries = 0;
             }
         }
+        cleared
     }
 
     /// Generate restore commands for subscriptions tied to the given cid,
@@ -96,13 +131,17 @@ impl SubscriptionRegistry {
         &mut self,
         cid: u32,
         new_sid: u32,
+        native_type: u16,
+        element_count: u32,
         server_addr: std::net::SocketAddr,
         transport_tx: &mpsc::UnboundedSender<TransportCommand>,
     ) -> (u32, u32) {
         let mut restored = 0u32;
         let mut failed = 0u32;
         // Collect stale subids first (callback receiver dropped)
-        let stale: Vec<u32> = self.subscriptions.values()
+        let stale: Vec<u32> = self
+            .subscriptions
+            .values()
             .filter(|rec| rec.cid == cid && rec.needs_restore && rec.callback_tx.is_closed())
             .map(|rec| rec.subid)
             .collect();
@@ -113,10 +152,13 @@ impl SubscriptionRegistry {
         for rec in self.subscriptions.values_mut() {
             if rec.cid == cid && rec.needs_restore {
                 rec.needs_restore = false;
+                rec.server_addr = server_addr;
+                let data_type = *rec.data_type.get_or_insert(native_type + 14);
+                let count = *rec.count.get_or_insert(element_count);
                 let _ = transport_tx.send(TransportCommand::Subscribe {
                     sid: new_sid,
-                    data_type: rec.data_type,
-                    count: rec.count,
+                    data_type,
+                    count,
                     subid: rec.subid,
                     mask: rec.mask,
                     server_addr,
@@ -155,6 +197,15 @@ impl SubscriptionRegistry {
     /// Get subscription info for generating CANCEL commands
     pub fn get(&self, subid: u32) -> Option<&SubscriptionRecord> {
         self.subscriptions.get(&subid)
+    }
+
+    pub fn mark_consumed(&mut self, subid: u32) -> Option<SocketAddr> {
+        let rec = self.subscriptions.get_mut(&subid)?;
+        if rec.pending_deliveries == 0 {
+            return None;
+        }
+        rec.pending_deliveries -= 1;
+        Some(rec.server_addr)
     }
 
     /// Get all subscriptions for a given cid

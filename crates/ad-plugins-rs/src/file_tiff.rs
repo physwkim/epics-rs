@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
-use ad_core_rs::color::{convert_rgb_layout, NDColorMode};
+use ad_core_rs::color::{NDColorMode, convert_rgb_layout};
 use ad_core_rs::error::{ADError, ADResult};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
@@ -11,10 +11,11 @@ use ad_core_rs::plugin::runtime::{
     NDPluginProcess, ParamChangeResult, PluginParamSnapshot, ProcessResult,
 };
 
-use tiff::decoder::Decoder;
-use tiff::encoder::colortype;
-use tiff::encoder::TiffEncoder;
 use tiff::ColorType;
+use tiff::decoder::Decoder;
+use tiff::encoder::TiffEncoder;
+use tiff::encoder::colortype;
+use tiff::tags::Tag;
 
 /// TIFF file writer using the `tiff` crate for proper encoding/decoding.
 pub struct TiffWriter {
@@ -59,7 +60,9 @@ impl TiffWriter {
                 let color_mode = Self::array_color_mode(array);
                 let rgb1 = match color_mode {
                     NDColorMode::RGB1 => array.clone(),
-                    NDColorMode::RGB2 | NDColorMode::RGB3 => convert_rgb_layout(array, color_mode, NDColorMode::RGB1)?,
+                    NDColorMode::RGB2 | NDColorMode::RGB3 => {
+                        convert_rgb_layout(array, color_mode, NDColorMode::RGB1)?
+                    }
                     other => {
                         return Err(ADError::UnsupportedConversion(format!(
                             "unsupported TIFF color mode: {:?}",
@@ -67,9 +70,16 @@ impl TiffWriter {
                         )));
                     }
                 };
-                Ok((rgb1.clone(), rgb1.dims[1].size as u32, rgb1.dims[2].size as u32, true))
+                Ok((
+                    rgb1.clone(),
+                    rgb1.dims[1].size as u32,
+                    rgb1.dims[2].size as u32,
+                    true,
+                ))
             }
-            _ => Err(ADError::InvalidDimensions("unsupported TIFF array dimensions".into())),
+            _ => Err(ADError::InvalidDimensions(
+                "unsupported TIFF array dimensions".into(),
+            )),
         }
     }
 
@@ -90,7 +100,9 @@ impl NDFileWriter for TiffWriter {
     }
 
     fn write_file(&mut self, array: &NDArray) -> ADResult<()> {
-        let path = self.current_path.as_ref()
+        let path = self
+            .current_path
+            .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
         let (array, width, height, is_rgb) = Self::normalize_for_write(array)?;
 
@@ -98,12 +110,72 @@ impl NDFileWriter for TiffWriter {
         let mut encoder = TiffEncoder::new(file)
             .map_err(|e| ADError::UnsupportedConversion(format!("TIFF encoder error: {}", e)))?;
 
+        // Collect attribute tag data before borrowing encoder mutably.
+        // C++ writes NDArray attributes as custom TIFF tags starting at tag 65010.
+        // Each attribute is written as a string tag: "name=value".
+        let attr_tags: Vec<(u16, String)> = array
+            .attributes
+            .iter()
+            .enumerate()
+            .map(|(i, attr)| {
+                let tag_num = 65010u16.saturating_add(i as u16);
+                let tag_val = format!("{}={}", attr.name, attr.value.as_string());
+                (tag_num, tag_val)
+            })
+            .collect();
+
+        // Macro to reduce repetition: create image encoder, write custom tags, write data.
+        macro_rules! write_with_tags {
+            ($ct:ty, $data:expr) => {{
+                let mut image = encoder.new_image::<$ct>(width, height).map_err(|e| {
+                    ADError::UnsupportedConversion(format!("TIFF encoder error: {}", e))
+                })?;
+
+                // Write uniqueId and timestamp as the first custom tags
+                image
+                    .encoder()
+                    .write_tag(
+                        Tag::Unknown(65000),
+                        &*format!("uniqueId={}", array.unique_id),
+                    )
+                    .map_err(|e| {
+                        ADError::UnsupportedConversion(format!("TIFF tag write error: {}", e))
+                    })?;
+                image
+                    .encoder()
+                    .write_tag(
+                        Tag::Unknown(65001),
+                        &*format!("timestamp={}", array.timestamp.as_f64()),
+                    )
+                    .map_err(|e| {
+                        ADError::UnsupportedConversion(format!("TIFF tag write error: {}", e))
+                    })?;
+
+                // Write NDArray attributes as custom tags starting at 65010
+                for (tag_num, tag_val) in &attr_tags {
+                    image
+                        .encoder()
+                        .write_tag(Tag::Unknown(*tag_num), &**tag_val)
+                        .map_err(|e| {
+                            ADError::UnsupportedConversion(format!(
+                                "TIFF attribute tag write error: {}",
+                                e
+                            ))
+                        })?;
+                }
+
+                image
+                    .write_data($data)
+                    .map_err(|e| ADError::UnsupportedConversion(format!("TIFF write error: {}", e)))
+            }};
+        }
+
         match &array.data {
             NDDataBuffer::U8(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB8>(width, height, v)
+                    write_with_tags!(colortype::RGB8, v)
                 } else {
-                    encoder.write_image::<colortype::Gray8>(width, height, v)
+                    write_with_tags!(colortype::Gray8, v)
                 }
             }
             NDDataBuffer::I8(v) => {
@@ -112,13 +184,13 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB8".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI8>(width, height, v)
+                write_with_tags!(colortype::GrayI8, v)
             }
             NDDataBuffer::U16(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB16>(width, height, v)
+                    write_with_tags!(colortype::RGB16, v)
                 } else {
-                    encoder.write_image::<colortype::Gray16>(width, height, v)
+                    write_with_tags!(colortype::Gray16, v)
                 }
             }
             NDDataBuffer::I16(v) => {
@@ -127,13 +199,13 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB16".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI16>(width, height, v)
+                write_with_tags!(colortype::GrayI16, v)
             }
             NDDataBuffer::U32(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB32>(width, height, v)
+                    write_with_tags!(colortype::RGB32, v)
                 } else {
-                    encoder.write_image::<colortype::Gray32>(width, height, v)
+                    write_with_tags!(colortype::Gray32, v)
                 }
             }
             NDDataBuffer::I32(v) => {
@@ -142,7 +214,7 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB32".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI32>(width, height, v)
+                write_with_tags!(colortype::GrayI32, v)
             }
             NDDataBuffer::I64(v) => {
                 if is_rgb {
@@ -150,54 +222,61 @@ impl NDFileWriter for TiffWriter {
                         "TIFF crate does not support signed RGB64".into(),
                     ));
                 }
-                encoder.write_image::<colortype::GrayI64>(width, height, v)
+                write_with_tags!(colortype::GrayI64, v)
             }
             NDDataBuffer::U64(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB64>(width, height, v)
+                    write_with_tags!(colortype::RGB64, v)
                 } else {
-                    encoder.write_image::<colortype::Gray64>(width, height, v)
+                    write_with_tags!(colortype::Gray64, v)
                 }
             }
             NDDataBuffer::F32(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB32Float>(width, height, v)
+                    write_with_tags!(colortype::RGB32Float, v)
                 } else {
-                    encoder.write_image::<colortype::Gray32Float>(width, height, v)
+                    write_with_tags!(colortype::Gray32Float, v)
                 }
             }
             NDDataBuffer::F64(v) => {
                 if is_rgb {
-                    encoder.write_image::<colortype::RGB64Float>(width, height, v)
+                    write_with_tags!(colortype::RGB64Float, v)
                 } else {
-                    encoder.write_image::<colortype::Gray64Float>(width, height, v)
+                    write_with_tags!(colortype::Gray64Float, v)
                 }
             }
-        }
-        .map_err(|e| ADError::UnsupportedConversion(format!("TIFF write error: {}", e)))?;
+        }?;
 
         Ok(())
     }
 
     fn read_file(&mut self) -> ADResult<NDArray> {
-        let path = self.current_path.as_ref()
+        let path = self
+            .current_path
+            .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
         let file = std::fs::File::open(path)?;
         let mut decoder = Decoder::new(file)
             .map_err(|e| ADError::UnsupportedConversion(format!("TIFF decode error: {}", e)))?;
 
-        let (width, height) = decoder.dimensions()
+        let (width, height) = decoder
+            .dimensions()
             .map_err(|e| ADError::UnsupportedConversion(format!("TIFF dimensions error: {}", e)))?;
-        let color_type = decoder.colortype()
+        let color_type = decoder
+            .colortype()
             .map_err(|e| ADError::UnsupportedConversion(format!("TIFF colortype error: {}", e)))?;
 
-        let result = decoder.read_image()
+        let result = decoder
+            .read_image()
             .map_err(|e| ADError::UnsupportedConversion(format!("TIFF read error: {}", e)))?;
 
         let (dims, color_mode) = match color_type {
             ColorType::Gray(_) => (
-                vec![NDDimension::new(width as usize), NDDimension::new(height as usize)],
+                vec![
+                    NDDimension::new(width as usize),
+                    NDDimension::new(height as usize),
+                ],
                 NDColorMode::Mono,
             ),
             ColorType::RGB(_) => (
@@ -310,11 +389,18 @@ impl NDPluginProcess for TiffFileProcessor {
         "NDFileTIFF"
     }
 
-    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
         self.ctrl.register_params(base)
     }
 
-    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        params: &PluginParamSnapshot,
+    ) -> ParamChangeResult {
         self.ctrl.on_param_change(reason, params)
     }
 }
@@ -322,9 +408,9 @@ impl NDPluginProcess for TiffFileProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ad_core_rs::ndarray::NDDataBuffer;
     use ad_core_rs::params::ndarray_driver::NDArrayDriverParams;
     use ad_core_rs::plugin::runtime::{ParamChangeValue, ParamUpdate, PluginParamSnapshot};
-    use ad_core_rs::ndarray::NDDataBuffer;
     use asyn_rs::port::{PortDriverBase, PortFlags};
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -345,7 +431,9 @@ mod tests {
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(v) = &mut arr.data {
-            for i in 0..16 { v[i] = i as u8; }
+            for i in 0..16 {
+                v[i] = i as u8;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -392,7 +480,9 @@ mod tests {
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(v) = &mut arr.data {
-            for i in 0..16 { v[i] = (i * 10) as u8; }
+            for i in 0..16 {
+                v[i] = (i * 10) as u8;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -419,7 +509,9 @@ mod tests {
             NDDataType::UInt16,
         );
         if let NDDataBuffer::U16(v) = &mut arr.data {
-            for i in 0..16 { v[i] = (i * 1000) as u16; }
+            for i in 0..16 {
+                v[i] = (i * 1000) as u16;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -467,31 +559,47 @@ mod tests {
         let reason_template = base.find_param("FILE_TEMPLATE").unwrap();
         let reason_read = base.find_param("READ_FILE").unwrap();
 
-        let _ = proc.on_param_change(reason_path, &PluginParamSnapshot {
-            enable_callbacks: true,
-            reason: reason_path,
-            addr: 0,
-            value: ParamChangeValue::Octet(path.parent().unwrap().to_str().unwrap().to_string()),
-        });
-        let _ = proc.on_param_change(reason_name, &PluginParamSnapshot {
-            enable_callbacks: true,
-            reason: reason_name,
-            addr: 0,
-            value: ParamChangeValue::Octet(path.file_name().unwrap().to_str().unwrap().to_string()),
-        });
-        let _ = proc.on_param_change(reason_template, &PluginParamSnapshot {
-            enable_callbacks: true,
-            reason: reason_template,
-            addr: 0,
-            value: ParamChangeValue::Octet("%s%s".into()),
-        });
+        let _ = proc.on_param_change(
+            reason_path,
+            &PluginParamSnapshot {
+                enable_callbacks: true,
+                reason: reason_path,
+                addr: 0,
+                value: ParamChangeValue::Octet(
+                    path.parent().unwrap().to_str().unwrap().to_string(),
+                ),
+            },
+        );
+        let _ = proc.on_param_change(
+            reason_name,
+            &PluginParamSnapshot {
+                enable_callbacks: true,
+                reason: reason_name,
+                addr: 0,
+                value: ParamChangeValue::Octet(
+                    path.file_name().unwrap().to_str().unwrap().to_string(),
+                ),
+            },
+        );
+        let _ = proc.on_param_change(
+            reason_template,
+            &PluginParamSnapshot {
+                enable_callbacks: true,
+                reason: reason_template,
+                addr: 0,
+                value: ParamChangeValue::Octet("%s%s".into()),
+            },
+        );
 
-        let result = proc.on_param_change(reason_read, &PluginParamSnapshot {
-            enable_callbacks: true,
-            reason: reason_read,
-            addr: 0,
-            value: ParamChangeValue::Int32(1),
-        });
+        let result = proc.on_param_change(
+            reason_read,
+            &PluginParamSnapshot {
+                enable_callbacks: true,
+                reason: reason_read,
+                addr: 0,
+                value: ParamChangeValue::Int32(1),
+            },
+        );
 
         assert_eq!(result.output_arrays.len(), 1);
         assert!(result.param_updates.iter().any(|u| matches!(

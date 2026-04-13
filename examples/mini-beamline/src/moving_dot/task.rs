@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use asyn_rs::port_handle::PortHandle;
 
@@ -42,10 +42,26 @@ impl AcquisitionContext {
         if wait_for_plugins {
             self.queued_counter.wait_until_zero(Duration::from_secs(5));
         }
-        self.port_handle.write_int32_no_wait(self.ad.acquire_busy, 0, 0);
-        self.port_handle.write_int32_no_wait(self.ad.status, 0, ADStatus::Idle as i32);
-        self.port_handle.write_int32_no_wait(self.ad.acquire, 0, 0);
-        self.port_handle.call_param_callbacks_no_wait(0);
+        self.port_handle.set_params_and_notify(
+            0,
+            vec![
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.acquire_busy,
+                    addr: 0,
+                    value: 0,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.status,
+                    addr: 0,
+                    value: ADStatus::Idle as i32,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: self.ad.acquire,
+                    addr: 0,
+                    value: 0,
+                },
+            ],
+        );
     }
 }
 
@@ -96,18 +112,39 @@ fn acquisition_loop(ctx: AcquisitionContext) {
         }
 
         // Initialize counters
-        ctx.port_handle.write_int32_no_wait(ctx.ad.num_images_counter, 0, 0);
-        ctx.port_handle.write_int32_no_wait(ctx.ad.status, 0, ADStatus::Acquire as i32);
-        ctx.port_handle.write_int32_no_wait(ctx.ad.acquire_busy, 0, 1);
+        ctx.port_handle.set_params_and_notify(
+            0,
+            vec![
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.num_images_counter,
+                    addr: 0,
+                    value: 0,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.status,
+                    addr: 0,
+                    value: ADStatus::Acquire as i32,
+                },
+                asyn_rs::request::ParamSetValue::Int32 {
+                    reason: ctx.ad.acquire_busy,
+                    addr: 0,
+                    value: 1,
+                },
+            ],
+        );
 
         let mut num_counter = 0;
-        let mut array_counter = ctx.port_handle.read_int32_blocking(ctx.ad.base.array_counter, 0).unwrap_or(0);
+        let mut array_counter = ctx
+            .port_handle
+            .read_int32_blocking(ctx.ad.base.array_counter, 0)
+            .unwrap_or(0);
 
         // Read initial config
-        let mut config = match MovingDotConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.dot) {
-            Ok(cfg) => cfg,
-            Err(_) => continue,
-        };
+        let mut config =
+            match MovingDotConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.dot) {
+                Ok(cfg) => cfg,
+                Err(_) => continue,
+            };
 
         loop {
             let start_time = Instant::now();
@@ -119,7 +156,9 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             if reset {
                 // If the read fails (e.g. port busy with CP link writes during motor move),
                 // keep the previous config rather than aborting acquisition.
-                if let Ok(cfg) = MovingDotConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.dot) {
+                if let Ok(cfg) =
+                    MovingDotConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.dot)
+                {
                     config = cfg;
                 }
             }
@@ -176,17 +215,16 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             };
 
             // Convert f64 photon counts to u16 (clamp to 0..65535)
-            let u16_data: Vec<u16> = out_data.iter()
+            let u16_data: Vec<u16> = out_data
+                .iter()
                 .map(|&v| v.round().clamp(0.0, 65535.0) as u16)
                 .collect();
 
-            let dims = vec![
-                NDDimension::new(out_w),
-                NDDimension::new(out_h),
-            ];
+            let dims = vec![NDDimension::new(out_w), NDDimension::new(out_h)];
             let mut frame = NDArray {
                 unique_id: 0,
                 timestamp: ad_core_rs::timestamp::EpicsTimestamp::default(),
+                time_stamp: 0.0,
                 dims,
                 data: NDDataBuffer::U16(u16_data),
                 attributes: ad_core_rs::attributes::NDAttributeList::new(),
@@ -208,12 +246,56 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             frame.unique_id = array_counter;
             frame.timestamp = ad_core_rs::timestamp::EpicsTimestamp::now();
 
-            ctx.port_handle.write_int32_no_wait(ctx.ad.base.array_counter, 0, array_counter);
-            ctx.port_handle.write_int32_no_wait(ctx.ad.num_images_counter, 0, num_counter);
-            ctx.port_handle.write_float64_no_wait(ctx.ad.base.timestamp_rbv, 0, frame.timestamp.as_f64());
-            ctx.port_handle.write_int32_no_wait(ctx.ad.base.epics_ts_sec, 0, frame.timestamp.sec as i32);
-            ctx.port_handle.write_int32_no_wait(ctx.ad.base.epics_ts_nsec, 0, frame.timestamp.nsec as i32);
-            ctx.port_handle.call_param_callbacks_no_wait(0);
+            // Update parameters and fire callbacks in one atomic operation.
+            // Using set_params_and_notify instead of write_int32_no_wait avoids
+            // going through the driver's writeInt32 (which is for external writes)
+            // and directly sets params + fires interrupts for I/O Intr records.
+            let info = frame.info();
+            ctx.port_handle.set_params_and_notify(
+                0,
+                vec![
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.array_counter,
+                        addr: 0,
+                        value: array_counter,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.num_images_counter,
+                        addr: 0,
+                        value: num_counter,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.array_size_x,
+                        addr: 0,
+                        value: info.x_size as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.array_size_y,
+                        addr: 0,
+                        value: info.y_size as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.array_size,
+                        addr: 0,
+                        value: info.total_bytes as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Float64 {
+                        reason: ctx.ad.base.timestamp_rbv,
+                        addr: 0,
+                        value: frame.timestamp.as_f64(),
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.epics_ts_sec,
+                        addr: 0,
+                        value: frame.timestamp.sec as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.base.epics_ts_nsec,
+                        addr: 0,
+                        value: frame.timestamp.nsec as i32,
+                    },
+                ],
+            );
 
             if config.array_callbacks {
                 ctx.array_output.lock().publish(Arc::new(frame));

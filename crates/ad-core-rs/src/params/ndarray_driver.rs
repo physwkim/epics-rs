@@ -38,8 +38,8 @@ pub struct NDArrayDriverParams {
     pub ndarray_data: usize,
 
     // Pool stats
-    pub pool_max_memory: usize,   // Float64 (MB)
-    pub pool_used_memory: usize,  // Float64 (MB)
+    pub pool_max_memory: usize,  // Float64 (MB)
+    pub pool_used_memory: usize, // Float64 (MB)
     pub pool_alloc_buffers: usize,
     pub pool_free_buffers: usize,
     pub pool_max_buffers: usize,
@@ -84,6 +84,10 @@ pub struct NDArrayDriverParams {
 
     // WaitForPlugins
     pub wait_for_plugins: usize,
+
+    // Acquire (needed by plugins that use NDArrayDriverParams directly)
+    pub acquire: usize,
+    pub acquire_busy: usize,
 }
 
 impl NDArrayDriverParams {
@@ -130,7 +134,8 @@ impl NDArrayDriverParams {
             pool_pre_alloc: base.create_param("POOL_PRE_ALLOC_BUFFERS", ParamType::Int32)?,
             pool_empty_free_list: base.create_param("POOL_EMPTY_FREELIST", ParamType::Int32)?,
             pool_poll_stats: base.create_param("POOL_POLL_STATS", ParamType::Int32)?,
-            pool_num_pre_alloc_buffers: base.create_param("POOL_NUM_PRE_ALLOC_BUFFERS", ParamType::Int32)?,
+            pool_num_pre_alloc_buffers: base
+                .create_param("POOL_NUM_PRE_ALLOC_BUFFERS", ParamType::Int32)?,
 
             // File I/O extras
             auto_save: base.create_param("AUTO_SAVE", ParamType::Int32)?,
@@ -168,6 +173,10 @@ impl NDArrayDriverParams {
 
             // WaitForPlugins
             wait_for_plugins: base.create_param("WAIT_FOR_PLUGINS", ParamType::Int32)?,
+
+            // Acquire (needed by plugins that use NDArrayDriverParams directly)
+            acquire: base.create_param("ACQUIRE", ParamType::Int32)?,
+            acquire_busy: base.create_param("ACQUIRE_BUSY", ParamType::Int32)?,
         })
     }
 }
@@ -186,7 +195,10 @@ mod tests {
         assert!(base.find_param("POOL_MAX_MEMORY").is_some());
         assert!(base.find_param("ARRAY_DATA").is_some());
         assert!(base.find_param("ND_ATTRIBUTES_FILE").is_some());
-        assert_eq!(params.array_counter, base.find_param("ARRAY_COUNTER").unwrap());
+        assert_eq!(
+            params.array_counter,
+            base.find_param("ARRAY_COUNTER").unwrap()
+        );
     }
 
     #[test]

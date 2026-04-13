@@ -1,0 +1,16 @@
+# Pre-subscribe list for ca-gateway-rs.
+# One upstream PV name per line. Blank lines and lines starting with #
+# are ignored.
+#
+# These names are looked up in the .pvlist for alias/access decisions
+# and then subscribed to upstream IOCs at gateway startup. This is the
+# current alternative to lazy on-demand resolution.
+
+Beam:current
+Beam:energy
+Beam:lifetime
+DET:image
+DET:counter
+ps0
+ps1
+ps2

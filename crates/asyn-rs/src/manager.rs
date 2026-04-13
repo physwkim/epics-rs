@@ -51,12 +51,13 @@ impl PortManager {
 
         let (handle, _jh) = create_port_runtime(driver, config);
 
-        self.port_handles
-            .lock()
-            .insert(name.clone(), handle.port_handle().clone());
-        self.runtime_handles
-            .lock()
-            .insert(name, handle.clone());
+        // Acquire both locks together to avoid inconsistent state between maps
+        let mut ph = self.port_handles.lock();
+        let mut rh = self.runtime_handles.lock();
+        ph.insert(name.clone(), handle.port_handle().clone());
+        rh.insert(name, handle.clone());
+        drop(rh);
+        drop(ph);
 
         handle
     }
@@ -81,9 +82,13 @@ impl PortManager {
 
     /// Unregister a port. Shuts down its runtime.
     pub fn unregister_port(&self, name: &str) {
-        self.port_handles.lock().remove(name);
-
-        if let Some(runtime_handle) = self.runtime_handles.lock().remove(name) {
+        let mut ph = self.port_handles.lock();
+        let mut rh = self.runtime_handles.lock();
+        ph.remove(name);
+        let runtime = rh.remove(name);
+        drop(rh);
+        drop(ph);
+        if let Some(runtime_handle) = runtime {
             runtime_handle.shutdown();
         }
     }
@@ -218,7 +223,10 @@ mod tests {
         drv.base.create_param("TEMP", ParamType::Float64).unwrap();
         let handle = mgr.register_port(drv);
 
-        handle.port_handle().write_float64_blocking(0, 0, 98.6).unwrap();
+        handle
+            .port_handle()
+            .write_float64_blocking(0, 0, 98.6)
+            .unwrap();
         assert!((handle.port_handle().read_float64_blocking(0, 0).unwrap() - 98.6).abs() < 1e-10);
     }
 

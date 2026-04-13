@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use epics_ca_rs::protocol::*;
 
 fn bench_header_encode(c: &mut Criterion) {
@@ -63,12 +63,13 @@ fn bench_search_payload(c: &mut Criterion) {
 }
 
 fn bench_dbr_encode_decode(c: &mut Criterion) {
-    use epics_base_rs::types::{EpicsValue, encode_dbr, decode_dbr};
     use epics_base_rs::server::snapshot::Snapshot;
+    use epics_base_rs::types::{EpicsValue, decode_dbr, encode_dbr};
 
     let snap = Snapshot::new(
         EpicsValue::Double(std::f64::consts::PI),
-        0, 0,
+        0,
+        0,
         std::time::SystemTime::now(),
     );
 
@@ -84,7 +85,8 @@ fn bench_dbr_encode_decode(c: &mut Criterion) {
     // Array encode/decode
     let array_snap = Snapshot::new(
         EpicsValue::DoubleArray(vec![1.0; 1024]),
-        0, 0,
+        0,
+        0,
         std::time::SystemTime::now(),
     );
 

@@ -48,14 +48,23 @@ impl AxisHandle {
     /// Send device actions to the axis and wait for execution.
     pub async fn execute(&self, actions: DeviceActions) {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self.tx.send(AxisCommand::Execute { actions, reply: reply_tx }).await;
+        let _ = self
+            .tx
+            .send(AxisCommand::Execute {
+                actions,
+                reply: reply_tx,
+            })
+            .await;
         let _ = reply_rx.await;
     }
 
     /// Get the latest motor status.
     pub async fn get_status(&self) -> Option<MotorStatus> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self.tx.send(AxisCommand::GetStatus { reply: reply_tx }).await;
+        let _ = self
+            .tx
+            .send(AxisCommand::GetStatus { reply: reply_tx })
+            .await;
         reply_rx.await.ok().flatten()
     }
 
@@ -90,16 +99,62 @@ pub struct AxisRuntime {
     motor: Box<dyn AsynMotor>,
     cmd_rx: mpsc::Receiver<AxisCommand>,
     io_intr_tx: mpsc::Sender<()>,
-    poll_interval: Duration,
+    moving_poll_interval: Duration,
+    idle_poll_interval: Duration,
+    forced_fast_polls_config: u32,
+    forced_fast_polls_remaining: u32,
     latest_status: Option<MotorStatus>,
     active_polling: bool,
     status_seq: u64,
+    // Auto power on/off (C: motorPowerAutoOnOff)
+    auto_power: bool,
+    power_on_delay: Duration,
+    power_off_delay: Duration,
+    was_moving: bool,
+    power_off_time: Option<tokio::time::Instant>,
+}
+
+/// Configuration for AxisRuntime auto power on/off.
+#[derive(Debug, Clone)]
+pub struct AutoPowerConfig {
+    pub enabled: bool,
+    pub on_delay: Duration,
+    pub off_delay: Duration,
+}
+
+impl Default for AutoPowerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            on_delay: Duration::ZERO,
+            off_delay: Duration::ZERO,
+        }
+    }
 }
 
 /// Create an AxisRuntime and its handle.
 pub fn create_axis_runtime(
     motor: Box<dyn AsynMotor>,
-    poll_interval: Duration,
+    moving_poll_interval: Duration,
+    idle_poll_interval: Duration,
+    forced_fast_polls: u32,
+) -> (AxisRuntime, AxisHandle) {
+    create_axis_runtime_with_auto_power(
+        motor,
+        moving_poll_interval,
+        idle_poll_interval,
+        forced_fast_polls,
+        AutoPowerConfig::default(),
+    )
+}
+
+/// Create an AxisRuntime and its handle with auto power configuration.
+pub fn create_axis_runtime_with_auto_power(
+    motor: Box<dyn AsynMotor>,
+    moving_poll_interval: Duration,
+    idle_poll_interval: Duration,
+    forced_fast_polls: u32,
+    auto_power: AutoPowerConfig,
 ) -> (AxisRuntime, AxisHandle) {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (io_intr_tx, io_intr_rx) = mpsc::channel(16);
@@ -108,10 +163,18 @@ pub fn create_axis_runtime(
         motor,
         cmd_rx,
         io_intr_tx,
-        poll_interval,
+        moving_poll_interval,
+        idle_poll_interval,
+        forced_fast_polls_config: forced_fast_polls,
+        forced_fast_polls_remaining: 0,
         latest_status: None,
         active_polling: false,
         status_seq: 0,
+        auto_power: auto_power.enabled,
+        power_on_delay: auto_power.on_delay,
+        power_off_delay: auto_power.off_delay,
+        was_moving: false,
+        power_off_time: None,
     };
 
     let handle = AxisHandle {
@@ -130,6 +193,7 @@ impl AxisRuntime {
 
         loop {
             if self.active_polling {
+                let interval = self.effective_poll_interval();
                 tokio::select! {
                     cmd = self.cmd_rx.recv() => {
                         match cmd {
@@ -141,7 +205,7 @@ impl AxisRuntime {
                             None => return,
                         }
                     }
-                    _ = tokio::time::sleep(self.poll_interval) => {
+                    _ = tokio::time::sleep(interval) => {
                         self.poll_motor().await;
                     }
                 }
@@ -162,8 +226,20 @@ impl AxisRuntime {
     async fn handle_command(&mut self, cmd: AxisCommand) -> bool {
         match cmd {
             AxisCommand::Execute { actions, reply } => {
+                let has_move = actions.commands.iter().any(|c| {
+                    matches!(
+                        c,
+                        MotorCommand::MoveAbsolute { .. }
+                            | MotorCommand::MoveRelative { .. }
+                            | MotorCommand::MoveVelocity { .. }
+                            | MotorCommand::Home { .. }
+                    )
+                });
                 self.execute_actions(&actions);
                 self.apply_poll_directive(&actions);
+                if has_move {
+                    self.forced_fast_polls_remaining = self.forced_fast_polls_config;
+                }
                 if let Some(ref delay) = actions.schedule_delay {
                     let dur = delay.duration;
                     let tx = self.io_intr_tx.clone();
@@ -182,6 +258,7 @@ impl AxisRuntime {
             }
             AxisCommand::StartPolling => {
                 self.active_polling = true;
+                self.forced_fast_polls_remaining = self.forced_fast_polls_config;
                 false
             }
             AxisCommand::StopPolling => {
@@ -201,29 +278,81 @@ impl AxisRuntime {
         }
     }
 
+    fn effective_poll_interval(&mut self) -> Duration {
+        if self.forced_fast_polls_remaining > 0 {
+            self.forced_fast_polls_remaining -= 1;
+            self.moving_poll_interval
+        } else if self.latest_status.as_ref().is_some_and(|s| s.moving) {
+            self.moving_poll_interval
+        } else {
+            self.idle_poll_interval
+        }
+    }
+
     fn execute_actions(&mut self, actions: &DeviceActions) {
         let user = AsynUser::new(0);
+
+        // Auto power on: enable closed loop before move commands
+        if self.auto_power {
+            let has_move = actions.commands.iter().any(|c| {
+                matches!(
+                    c,
+                    MotorCommand::MoveAbsolute { .. }
+                        | MotorCommand::MoveRelative { .. }
+                        | MotorCommand::MoveVelocity { .. }
+                        | MotorCommand::Home { .. }
+                )
+            });
+            if has_move {
+                let _ = self.motor.set_closed_loop(&user, true);
+                if !self.power_on_delay.is_zero() {
+                    std::thread::sleep(self.power_on_delay);
+                }
+            }
+        }
+
         for cmd in &actions.commands {
             let result = match cmd {
-                MotorCommand::MoveAbsolute { position, velocity, acceleration } => {
-                    self.motor.move_absolute(&user, *position, *velocity, *acceleration)
+                MotorCommand::MoveAbsolute {
+                    position,
+                    velocity,
+                    acceleration,
+                } => self
+                    .motor
+                    .move_absolute(&user, *position, *velocity, *acceleration),
+                MotorCommand::MoveRelative {
+                    distance,
+                    velocity,
+                    acceleration,
+                } => self
+                    .motor
+                    .move_relative(&user, *distance, *velocity, *acceleration),
+                MotorCommand::MoveVelocity {
+                    direction,
+                    velocity,
+                    acceleration,
+                } => {
+                    let signed_vel = if *direction { *velocity } else { -*velocity };
+                    self.motor.move_velocity(&user, signed_vel, *acceleration)
                 }
-                MotorCommand::MoveVelocity { direction, velocity, acceleration } => {
-                    let target = if *direction { 1e9 } else { -1e9 };
-                    self.motor.move_absolute(&user, target, *velocity, *acceleration)
-                }
-                MotorCommand::Home { forward, velocity, acceleration: _ } => {
-                    self.motor.home(&user, *velocity, *forward)
-                }
-                MotorCommand::Stop { acceleration } => {
-                    self.motor.stop(&user, *acceleration)
-                }
-                MotorCommand::SetPosition { position } => {
-                    self.motor.set_position(&user, *position)
-                }
+                MotorCommand::Home {
+                    forward,
+                    velocity,
+                    acceleration: _,
+                } => self.motor.home(&user, *velocity, *forward),
+                MotorCommand::Stop { acceleration } => self.motor.stop(&user, *acceleration),
+                MotorCommand::SetPosition { position } => self.motor.set_position(&user, *position),
                 MotorCommand::SetClosedLoop { enable } => {
                     self.motor.set_closed_loop(&user, *enable)
                 }
+                MotorCommand::DeferMoves { defer } => self.motor.set_deferred_moves(&user, *defer),
+                MotorCommand::ProfileInitialize { max_points } => {
+                    self.motor.initialize_profile(&user, *max_points)
+                }
+                MotorCommand::ProfileBuild => self.motor.build_profile(&user),
+                MotorCommand::ProfileExecute => self.motor.execute_profile(&user),
+                MotorCommand::ProfileAbort => self.motor.abort_profile(&user),
+                MotorCommand::ProfileReadback => self.motor.readback_profile(&user).map(|_| ()),
                 MotorCommand::Poll => Ok(()),
             };
             if let Err(e) = result {
@@ -244,6 +373,28 @@ impl AxisRuntime {
         let user = AsynUser::new(0);
         match self.motor.poll(&user) {
             Ok(status) => {
+                // Auto power off tracking
+                if self.auto_power {
+                    if status.moving {
+                        self.was_moving = true;
+                        self.power_off_time = None;
+                    } else if self.was_moving {
+                        self.was_moving = false;
+                        if self.power_off_delay.is_zero() {
+                            let _ = self.motor.set_closed_loop(&user, false);
+                        } else {
+                            self.power_off_time =
+                                Some(tokio::time::Instant::now() + self.power_off_delay);
+                        }
+                    }
+                    if let Some(off_time) = self.power_off_time {
+                        if tokio::time::Instant::now() >= off_time && !status.moving {
+                            let _ = self.motor.set_closed_loop(&user, false);
+                            self.power_off_time = None;
+                        }
+                    }
+                }
+
                 self.status_seq += 1;
                 self.latest_status = Some(status);
                 let _ = self.io_intr_tx.send(()).await;
@@ -277,7 +428,13 @@ mod tests {
     }
 
     impl AsynMotor for SimMotor {
-        fn move_absolute(&mut self, _user: &AsynUser, pos: f64, _vel: f64, _acc: f64) -> AsynResult<()> {
+        fn move_absolute(
+            &mut self,
+            _user: &AsynUser,
+            pos: f64,
+            _vel: f64,
+            _acc: f64,
+        ) -> AsynResult<()> {
             self.target = pos;
             self.moving = true;
             Ok(())
@@ -322,6 +479,8 @@ mod tests {
         let (runtime, handle) = create_axis_runtime(
             Box::new(SimMotor::new()),
             Duration::from_millis(50),
+            Duration::from_millis(50),
+            0,
         );
 
         let runtime_handle = tokio::spawn(runtime.run());
@@ -360,6 +519,8 @@ mod tests {
         let (runtime, handle) = create_axis_runtime(
             Box::new(SimMotor::new()),
             Duration::from_millis(20),
+            Duration::from_millis(20),
+            0,
         );
 
         let runtime_handle = tokio::spawn(runtime.run());
@@ -377,6 +538,8 @@ mod tests {
         let (runtime, handle) = create_axis_runtime(
             Box::new(SimMotor::new()),
             Duration::from_millis(50),
+            Duration::from_millis(50),
+            0,
         );
 
         let runtime_handle = tokio::spawn(runtime.run());
@@ -404,6 +567,8 @@ mod tests {
         let (runtime, handle) = create_axis_runtime(
             Box::new(SimMotor::new()),
             Duration::from_millis(50),
+            Duration::from_millis(50),
+            0,
         );
 
         let mut io_intr_rx = handle.take_io_intr_receiver().unwrap();
@@ -423,6 +588,8 @@ mod tests {
         let (runtime, handle) = create_axis_runtime(
             Box::new(SimMotor::new()),
             Duration::from_millis(50),
+            Duration::from_millis(50),
+            0,
         );
 
         let handle2 = handle.clone();

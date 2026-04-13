@@ -16,8 +16,8 @@ use asyn_rs::port::{PortDriverBase, PortFlags};
 use asyn_rs::user::AsynUser;
 
 use crate::snl::qxbpm::{
-    compute_currents, compute_position, default_calibration, total_current, CalibrationData,
-    DiodeCurrents, RawDiodeData, DEFAULT_GX, DEFAULT_GY, DEFAULT_LOW_CURRENT_RAW,
+    CalibrationData, DEFAULT_GX, DEFAULT_GY, DEFAULT_LOW_CURRENT_RAW, DiodeCurrents, RawDiodeData,
+    compute_currents, compute_position, default_calibration, total_current,
 };
 
 // ---------------------------------------------------------------------------
@@ -223,13 +223,20 @@ impl QxbpmDriver {
             sim.read()
         };
 
-        self.base.set_float64_param(self.params.current_a, 0, reading.currents.a)?;
-        self.base.set_float64_param(self.params.current_b, 0, reading.currents.b)?;
-        self.base.set_float64_param(self.params.current_c, 0, reading.currents.c)?;
-        self.base.set_float64_param(self.params.current_d, 0, reading.currents.d)?;
-        self.base.set_float64_param(self.params.total_current, 0, reading.total)?;
-        self.base.set_float64_param(self.params.x_pos, 0, reading.x_pos)?;
-        self.base.set_float64_param(self.params.y_pos, 0, reading.y_pos)?;
+        self.base
+            .set_float64_param(self.params.current_a, 0, reading.currents.a)?;
+        self.base
+            .set_float64_param(self.params.current_b, 0, reading.currents.b)?;
+        self.base
+            .set_float64_param(self.params.current_c, 0, reading.currents.c)?;
+        self.base
+            .set_float64_param(self.params.current_d, 0, reading.currents.d)?;
+        self.base
+            .set_float64_param(self.params.total_current, 0, reading.total)?;
+        self.base
+            .set_float64_param(self.params.x_pos, 0, reading.x_pos)?;
+        self.base
+            .set_float64_param(self.params.y_pos, 0, reading.y_pos)?;
         self.base.set_int32_param(
             self.params.low_current,
             0,
@@ -274,6 +281,7 @@ impl asyn_rs::port::PortDriver for QxbpmDriver {
 /// Commands sent to the QXBPM poll loop.
 #[derive(Debug)]
 pub enum QxbpmPollCommand {
+    StartPolling,
     Shutdown,
 }
 
@@ -298,11 +306,23 @@ impl QxbpmPollLoop {
     }
 
     /// Run the poll loop. Call from a spawned task.
+    ///
+    /// Starts idle — waits for `StartPolling` before entering the periodic
+    /// poll cycle. This avoids CPU load during st.cmd and autosave restore,
+    /// matching C EPICS where pollers start after iocInit.
     pub async fn run(mut self) {
+        // Wait for StartPolling before entering the active loop.
+        match self.cmd_rx.recv().await {
+            Some(QxbpmPollCommand::StartPolling) => {}
+            Some(QxbpmPollCommand::Shutdown) | None => return,
+        }
+
+        // Active polling loop
         loop {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
+                        Some(QxbpmPollCommand::StartPolling) => {}
                         Some(QxbpmPollCommand::Shutdown) | None => return,
                     }
                 }
@@ -323,13 +343,23 @@ impl QxbpmPollLoop {
 /// Holds QXBPM driver instances created by startup commands.
 pub struct QxbpmHolder {
     drivers: Mutex<HashMap<String, Arc<Mutex<QxbpmDriver>>>>,
+    poll_senders: Mutex<Vec<tokio::sync::mpsc::Sender<QxbpmPollCommand>>>,
 }
 
 impl QxbpmHolder {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             drivers: Mutex::new(HashMap::new()),
+            poll_senders: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Start polling on all registered QXBPM drivers.
+    /// Call after iocInit to match C EPICS behavior.
+    pub fn start_all_polling(&self) {
+        for tx in self.poll_senders.lock().unwrap().iter() {
+            let _ = tx.try_send(QxbpmPollCommand::StartPolling);
+        }
     }
 
     /// Register a `simQxbpmCreate` iocsh command.
@@ -338,17 +368,35 @@ impl QxbpmHolder {
     ///
     /// Creates a SimQxbpm-backed QxbpmDriver with the given port name,
     /// initial beam position, and poll interval.
-    pub fn sim_qxbpm_create_command(self: &Arc<Self>) -> epics_base_rs::server::iocsh::registry::CommandDef {
+    pub fn sim_qxbpm_create_command(
+        self: &Arc<Self>,
+    ) -> epics_base_rs::server::iocsh::registry::CommandDef {
         use epics_base_rs::server::iocsh::registry::*;
 
         let holder = self.clone();
         CommandDef::new(
             "simQxbpmCreate",
             vec![
-                ArgDesc { name: "port", arg_type: ArgType::String, optional: false },
-                ArgDesc { name: "xPos", arg_type: ArgType::Double, optional: true },
-                ArgDesc { name: "yPos", arg_type: ArgType::Double, optional: true },
-                ArgDesc { name: "pollMs", arg_type: ArgType::Int, optional: true },
+                ArgDesc {
+                    name: "port",
+                    arg_type: ArgType::String,
+                    optional: false,
+                },
+                ArgDesc {
+                    name: "xPos",
+                    arg_type: ArgType::Double,
+                    optional: true,
+                },
+                ArgDesc {
+                    name: "yPos",
+                    arg_type: ArgType::Double,
+                    optional: true,
+                },
+                ArgDesc {
+                    name: "pollMs",
+                    arg_type: ArgType::Int,
+                    optional: true,
+                },
             ],
             "simQxbpmCreate(port, [xPos], [yPos], [pollMs]) - Create a simulated QXBPM",
             move |args: &[ArgValue], ctx: &CommandContext| {
@@ -379,15 +427,12 @@ impl QxbpmHolder {
                 };
 
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(16);
-                let poll_loop = QxbpmPollLoop::new(
-                    cmd_rx,
-                    driver.clone(),
-                    Duration::from_millis(poll_ms),
-                );
+                let poll_loop =
+                    QxbpmPollLoop::new(cmd_rx, driver.clone(), Duration::from_millis(poll_ms));
 
                 ctx.runtime_handle().spawn(poll_loop.run());
-                let _ = cmd_tx; // kept alive by poll loop's cmd_rx
 
+                holder.poll_senders.lock().unwrap().push(cmd_tx);
                 holder.drivers.lock().unwrap().insert(port.clone(), driver);
                 println!("simQxbpmCreate: port={port} x={x_pos} y={y_pos} poll={poll_ms}ms");
                 Ok(CommandOutcome::Continue)
@@ -405,6 +450,7 @@ impl Default for QxbpmHolder {
     fn default() -> Self {
         Self {
             drivers: Mutex::new(HashMap::new()),
+            poll_senders: Mutex::new(Vec::new()),
         }
     }
 }
@@ -433,8 +479,16 @@ mod tests {
         let sim = SimQxbpm::new(1.0, -0.5);
         let reading = sim.read();
         // Position should reflect the configured beam position (within rounding)
-        assert!(reading.x_pos > 0.0, "x should be positive, got {}", reading.x_pos);
-        assert!(reading.y_pos < 0.0, "y should be negative, got {}", reading.y_pos);
+        assert!(
+            reading.x_pos > 0.0,
+            "x should be positive, got {}",
+            reading.x_pos
+        );
+        assert!(
+            reading.y_pos < 0.0,
+            "y should be negative, got {}",
+            reading.y_pos
+        );
     }
 
     #[test]

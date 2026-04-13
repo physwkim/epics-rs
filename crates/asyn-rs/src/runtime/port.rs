@@ -166,19 +166,10 @@ mod tests {
 
     #[test]
     fn port_runtime_int32_roundtrip() {
-        let (handle, _jh) = create_port_runtime(
-            TestPort::new("rt_test"),
-            RuntimeConfig::default(),
-        );
+        let (handle, _jh) = create_port_runtime(TestPort::new("rt_test"), RuntimeConfig::default());
 
-        handle
-            .port_handle()
-            .write_int32_blocking(0, 0, 42)
-            .unwrap();
-        assert_eq!(
-            handle.port_handle().read_int32_blocking(0, 0).unwrap(),
-            42
-        );
+        handle.port_handle().write_int32_blocking(0, 0, 42).unwrap();
+        assert_eq!(handle.port_handle().read_int32_blocking(0, 0).unwrap(), 42);
     }
 
     #[test]
@@ -189,10 +180,8 @@ mod tests {
         use crate::protocol::value::ParamValue;
         use crate::transport::RuntimeClient;
 
-        let (handle, _jh) = create_port_runtime(
-            TestPort::new("rt_client"),
-            RuntimeConfig::default(),
-        );
+        let (handle, _jh) =
+            create_port_runtime(TestPort::new("rt_client"), RuntimeConfig::default());
 
         let client = handle.client();
 
@@ -234,10 +223,8 @@ mod tests {
 
     #[test]
     fn port_runtime_shutdown() {
-        let (handle, jh) = create_port_runtime(
-            TestPort::new("rt_shutdown"),
-            RuntimeConfig::default(),
-        );
+        let (handle, jh) =
+            create_port_runtime(TestPort::new("rt_shutdown"), RuntimeConfig::default());
 
         // Dropping the handle should cause the actor to stop
         drop(handle);
@@ -253,10 +240,7 @@ mod tests {
         );
 
         // Write a value first
-        handle
-            .port_handle()
-            .write_int32_blocking(0, 0, 42)
-            .unwrap();
+        handle.port_handle().write_int32_blocking(0, 0, 42).unwrap();
 
         // Explicit shutdown should cause the actor to stop
         handle.shutdown_and_wait();
@@ -282,10 +266,8 @@ mod tests {
 
     #[test]
     fn port_runtime_event_subscription() {
-        let (handle, _jh) = create_port_runtime(
-            TestPort::new("rt_events"),
-            RuntimeConfig::default(),
-        );
+        let (handle, _jh) =
+            create_port_runtime(TestPort::new("rt_events"), RuntimeConfig::default());
 
         let mut rx = handle.subscribe_events();
 
@@ -303,10 +285,8 @@ mod tests {
 
     #[test]
     fn port_runtime_port_name() {
-        let (handle, _jh) = create_port_runtime(
-            TestPort::new("named_port"),
-            RuntimeConfig::default(),
-        );
+        let (handle, _jh) =
+            create_port_runtime(TestPort::new("named_port"), RuntimeConfig::default());
         assert_eq!(handle.port_name(), "named_port");
     }
 }

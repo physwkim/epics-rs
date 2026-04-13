@@ -11,6 +11,28 @@ pub struct LonginRecord {
     pub hopr: i32,
     #[field(type = "Long")]
     pub lopr: i32,
+    // Alarm thresholds
+    #[field(type = "Long")]
+    pub hihi: i32,
+    #[field(type = "Long")]
+    pub high: i32,
+    #[field(type = "Long")]
+    pub low: i32,
+    #[field(type = "Long")]
+    pub lolo: i32,
+    #[field(type = "Short")]
+    pub hhsv: i16,
+    #[field(type = "Short")]
+    pub hsv: i16,
+    #[field(type = "Short")]
+    pub lsv: i16,
+    #[field(type = "Short")]
+    pub llsv: i16,
+    #[field(type = "Double")]
+    pub hyst: f64,
+    #[field(type = "Double")]
+    pub lalm: f64,
+    // Deadband
     #[field(type = "Double")]
     pub adel: f64,
     #[field(type = "Double")]
@@ -36,6 +58,16 @@ impl Default for LonginRecord {
             egu: String::new(),
             hopr: 0,
             lopr: 0,
+            hihi: 0,
+            high: 0,
+            low: 0,
+            lolo: 0,
+            hhsv: 0,
+            hsv: 0,
+            lsv: 0,
+            llsv: 0,
+            hyst: 0.0,
+            lalm: 0.0,
             adel: 0.0,
             mdel: 0.0,
             alst: 0.0,

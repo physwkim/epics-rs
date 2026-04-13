@@ -137,8 +137,7 @@ NDStdArraysConfigure("IMAGE1", 5, "SIM1")
 
 ```bash
 cargo build -p ad-plugins                    # plugins only
-cargo build -p ad-plugins --features ioc     # with IOC commands
-cargo build -p ad-plugins --features hdf5    # with HDF5 support
+cargo build -p ad-plugins     # with IOC commands
 cargo test -p ad-plugins                     # 205 tests
 ```
 

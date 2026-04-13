@@ -57,7 +57,7 @@ impl DeviceSupport for TimeOfDayStringDeviceSupport {
         };
 
         record.put_field("VAL", EpicsValue::String(formatted))?;
-        Ok(DeviceReadOutcome::ok())
+        Ok(DeviceReadOutcome::computed())
     }
 
     fn write(&mut self, _record: &mut dyn Record) -> CaResult<()> {
@@ -112,7 +112,7 @@ impl DeviceSupport for SecPastEpochDeviceSupport {
         };
 
         record.put_field("VAL", EpicsValue::Double(val))?;
-        Ok(DeviceReadOutcome::ok())
+        Ok(DeviceReadOutcome::computed())
     }
 
     fn write(&mut self, _record: &mut dyn Record) -> CaResult<()> {

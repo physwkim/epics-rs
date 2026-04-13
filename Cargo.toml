@@ -8,36 +8,40 @@ default-members = [
     "crates/epics-ca-rs",
     "crates/epics-macros-rs",
     "crates/epics-pva-rs",
+    "crates/epics-bridge-rs",
     "crates/epics-rs",
     "crates/motor-rs",
     "crates/std-rs",
     "crates/scaler-rs",
     "crates/optics-rs",
+    "crates/mqtt-rs",
 ]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.7.12"
+version = "0.9.0"
 authors = ["Sang Woo Kim <sngwkim915@gmail.com>"]
-license = "EPICS Open License"
+license = "EPICS"
 repository = "https://github.com/epics-rs/epics-rs"
 
 [workspace.dependencies]
-ad-core-rs = { path = "crates/ad-core-rs", version = "0.7.12" }
-ad-plugins-rs = { path = "crates/ad-plugins-rs", version = "0.7.12" }
-asyn-rs = { path = "crates/asyn-rs", version = "0.7.12" }
-epics-base-rs = { path = "crates/epics-base-rs", version = "0.7.12" }
-epics-ca-rs = { path = "crates/epics-ca-rs", version = "0.7.12" }
-epics-macros-rs = { path = "crates/epics-macros-rs", version = "0.7.12" }
-epics-pva-rs = { path = "crates/epics-pva-rs", version = "0.7.12" }
-motor-rs = { path = "crates/motor-rs", version = "0.7.12" }
-std-rs = { path = "crates/std-rs", version = "0.7.12" }
-scaler-rs = { path = "crates/scaler-rs", version = "0.7.12" }
-optics-rs = { path = "crates/optics-rs", version = "0.7.12" }
+ad-core-rs = { path = "crates/ad-core-rs", version = "0.9.0" }
+ad-plugins-rs = { path = "crates/ad-plugins-rs", version = "0.9.0" }
+asyn-rs = { path = "crates/asyn-rs", version = "0.9.0" }
+epics-base-rs = { path = "crates/epics-base-rs", version = "0.9.0" }
+epics-ca-rs = { path = "crates/epics-ca-rs", version = "0.9.0" }
+epics-macros-rs = { path = "crates/epics-macros-rs", version = "0.9.0" }
+epics-pva-rs = { path = "crates/epics-pva-rs", version = "0.9.0" }
+epics-bridge-rs = { path = "crates/epics-bridge-rs", version = "0.9.0" }
+motor-rs = { path = "crates/motor-rs", version = "0.9.0" }
+std-rs = { path = "crates/std-rs", version = "0.9.0" }
+scaler-rs = { path = "crates/scaler-rs", version = "0.9.0" }
+optics-rs = { path = "crates/optics-rs", version = "0.9.0" }
+mqtt-rs = { path = "crates/mqtt-rs", version = "0.9.0" }
 
 [patch.crates-io]
-spvirit-client = { path = "../spvirit/spvirit-client" , version ="0.1.6" }
-spvirit-codec = { path = "../spvirit/spvirit-codec", version ="0.1.6"  }
-spvirit-server = { path = "../spvirit/spvirit-server", version ="0.1.6"  }
-spvirit-types = { path = "../spvirit/spvirit-types", version ="0.1.6"  }
+spvirit-client = { path = "../spvirit/spvirit-client", version = "0.1.6" }
+spvirit-codec = { path = "../spvirit/spvirit-codec", version = "0.1.6" }
+spvirit-server = { path = "../spvirit/spvirit-server", version = "0.1.6" }
+spvirit-types = { path = "../spvirit/spvirit-types", version = "0.1.6" }

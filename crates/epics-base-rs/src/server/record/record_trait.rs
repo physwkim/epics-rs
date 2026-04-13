@@ -97,17 +97,29 @@ pub struct ProcessOutcome {
 impl ProcessOutcome {
     /// Shorthand for a simple Complete with no actions.
     pub fn complete() -> Self {
-        Self { result: RecordProcessResult::Complete, actions: Vec::new(), device_did_compute: false }
+        Self {
+            result: RecordProcessResult::Complete,
+            actions: Vec::new(),
+            device_did_compute: false,
+        }
     }
 
     /// Shorthand for Complete with actions.
     pub fn complete_with(actions: Vec<ProcessAction>) -> Self {
-        Self { result: RecordProcessResult::Complete, actions, device_did_compute: false }
+        Self {
+            result: RecordProcessResult::Complete,
+            actions,
+            device_did_compute: false,
+        }
     }
 
     /// Shorthand for AsyncPending with no actions.
     pub fn async_pending() -> Self {
-        Self { result: RecordProcessResult::AsyncPending, actions: Vec::new(), device_did_compute: false }
+        Self {
+            result: RecordProcessResult::AsyncPending,
+            actions: Vec::new(),
+            device_did_compute: false,
+        }
     }
 }
 
@@ -121,8 +133,16 @@ impl Default for ProcessOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommonFieldPutResult {
     NoChange,
-    ScanChanged { old_scan: ScanType, new_scan: ScanType, phas: i16 },
-    PhasChanged { scan: ScanType, old_phas: i16, new_phas: i16 },
+    ScanChanged {
+        old_scan: ScanType,
+        new_scan: ScanType,
+        phas: i16,
+    },
+    PhasChanged {
+        scan: ScanType,
+        old_phas: i16,
+        new_phas: i16,
+    },
 }
 
 /// Snapshot of changes from a process cycle, used for notify outside lock.
@@ -143,6 +163,25 @@ pub trait Record: Send + Sync + 'static {
     /// side-effect actions for the framework to execute.
     fn process(&mut self) -> CaResult<ProcessOutcome> {
         Ok(ProcessOutcome::complete())
+    }
+
+    /// Optional: report whether this record's last `process()` call
+    /// mutated a metadata-class field (EGU/PREC/HOPR/LOPR/HLM/LLM/
+    /// alarm limits / DRVH/DRVL / state strings).
+    ///
+    /// The framework checks this after every `process()` call and, if
+    /// true, invalidates the record's metadata cache so the next
+    /// snapshot rebuilds from the new values.
+    ///
+    /// Default: `false` — most records never touch metadata fields
+    /// during processing. Override only when your record dynamically
+    /// adjusts limits or unit strings (e.g., a motor that recomputes
+    /// HLM/LLM after a hardware homing operation).
+    ///
+    /// Implementations should reset their internal flag after returning
+    /// `true` so the next cycle starts clean.
+    fn took_metadata_change(&mut self) -> bool {
+        false
     }
 
     /// Get a field value by name.
@@ -173,13 +212,34 @@ pub trait Record: Send + Sync + 'static {
     }
 
     /// Set the primary value.
+    ///
+    /// Matches C EPICS `dbPut` behavior: if the value type doesn't match
+    /// the field type, it is automatically coerced (e.g., Long→Double for
+    /// ai, Long→Enum for bi/mbbi). This prevents silent failures when
+    /// asyn device support provides Int32 values to Enum-typed records.
     fn set_val(&mut self, value: EpicsValue) -> CaResult<()> {
-        self.put_field(self.primary_field(), value)
+        let field = self.primary_field();
+        match self.put_field(field, value.clone()) {
+            Ok(()) => Ok(()),
+            Err(crate::error::CaError::TypeMismatch(_)) => {
+                // Auto-coerce: determine target type from current VAL
+                let target_type = self
+                    .get_field(field)
+                    .map(|v| v.db_field_type())
+                    .unwrap_or(DbFieldType::Double);
+                let coerced = value.convert_to(target_type);
+                self.put_field(field, coerced)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Whether this record type supports device write (output records only).
     fn can_device_write(&self) -> bool {
-        matches!(self.record_type(), "ao" | "bo" | "longout" | "mbbo" | "stringout")
+        matches!(
+            self.record_type(),
+            "ao" | "bo" | "longout" | "mbbo" | "stringout"
+        )
     }
 
     /// Whether async processing has completed and put_notify can respond.
@@ -198,6 +258,14 @@ pub trait Record: Send + Sync + 'static {
     /// Whether this record's OUT link should be written after processing.
     /// Defaults to true. Override in calcout to implement OOPT conditional output.
     fn should_output(&self) -> bool {
+        true
+    }
+
+    /// Whether this record uses MDEL/ADEL deadband for monitor posting.
+    /// Binary records (bi, bo, busy, mbbi, mbbo) return false because
+    /// C EPICS always posts monitors for these record types regardless
+    /// of whether the value changed.
+    fn uses_monitor_deadband(&self) -> bool {
         true
     }
 

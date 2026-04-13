@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod ao;
+pub mod asub_record;
 pub mod asyn_record;
 pub mod bi;
 pub mod bo;
@@ -21,6 +22,5 @@ pub mod sseq;
 pub mod stringin;
 pub mod stringout;
 pub mod sub_record;
-pub mod asub_record;
 pub mod transform;
 pub mod waveform;

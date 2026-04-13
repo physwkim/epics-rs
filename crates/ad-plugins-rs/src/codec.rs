@@ -4,9 +4,12 @@ use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
 use ad_core_rs::codec::{Codec, CodecName};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
-use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
+use ad_core_rs::plugin::runtime::{NDPluginProcess, ParamUpdate, ProcessResult};
 
-use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+use lz4_flex::block::{compress, decompress};
+use rust_hdf5::format::messages::filter::{
+    FILTER_BLOSC, Filter, FilterPipeline, apply_filters, reverse_filters,
+};
 
 /// Attribute name used to store the original NDDataType ordinal before compression.
 const ATTR_ORIGINAL_DATA_TYPE: &str = "CODEC_ORIGINAL_DATA_TYPE";
@@ -136,7 +139,8 @@ pub fn compress_lz4(src: &NDArray) -> NDArray {
     let raw = src.data.as_u8_slice();
     let original_data_type = src.data.data_type();
     let original_size = raw.len();
-    let compressed = compress_prepend_size(raw);
+    // C++ uses raw LZ4_compress_default (no size header)
+    let compressed = compress(raw);
     let compressed_size = compressed.len();
 
     let mut arr = src.clone();
@@ -144,6 +148,9 @@ pub fn compress_lz4(src: &NDArray) -> NDArray {
     arr.codec = Some(Codec {
         name: CodecName::LZ4,
         compressed_size,
+        level: 0,
+        shuffle: 0,
+        compressor: 0,
     });
 
     // Store original data type so decompression can reconstruct the buffer.
@@ -173,15 +180,17 @@ pub fn decompress_lz4(src: &NDArray) -> Option<NDArray> {
         return None;
     }
     let compressed = src.data.as_u8_slice();
-    let decompressed = decompress_size_prepended(compressed).ok()?;
-
-    // Recover original data type from attribute.
+    // C++ uses LZ4_decompress_fast with known uncompressed size
+    // We need the original size from the codec's compressed_size or data type info
     let original_type = src
         .attributes
         .get(ATTR_ORIGINAL_DATA_TYPE)
         .and_then(|a| a.value.as_i64())
         .and_then(|ord| NDDataType::from_ordinal(ord as u8))
         .unwrap_or(NDDataType::UInt8);
+    let num_elements: usize = src.dims.iter().map(|d| d.size).product();
+    let uncompressed_size = num_elements * original_type.element_size();
+    let decompressed = decompress(compressed, uncompressed_size).ok()?;
 
     let buffer = buffer_from_bytes(&decompressed, original_type)?;
 
@@ -207,6 +216,11 @@ pub fn compress_jpeg(src: &NDArray, quality: u8) -> Option<NDArray> {
 
     let raw = src.data.as_u8_slice();
     let info = src.info();
+
+    // JPEG dimensions must fit in u16
+    if info.x_size > u16::MAX as usize || info.y_size > u16::MAX as usize {
+        return None;
+    }
 
     let (width, height, color_type) = match src.dims.len() {
         2 => {
@@ -242,6 +256,9 @@ pub fn compress_jpeg(src: &NDArray, quality: u8) -> Option<NDArray> {
     arr.codec = Some(Codec {
         name: CodecName::JPEG,
         compressed_size,
+        level: 0,
+        shuffle: 0,
+        compressor: 0,
     });
 
     tracing::debug!(
@@ -298,6 +315,107 @@ pub fn decompress_jpeg(src: &NDArray) -> Option<NDArray> {
     Some(arr)
 }
 
+/// Blosc compression settings.
+#[derive(Debug, Clone, Copy)]
+pub struct BloscConfig {
+    /// Sub-compressor: 0=BloscLZ, 1=LZ4, 2=LZ4HC, 3=Snappy, 4=Zlib, 5=Zstd
+    pub compressor: u32,
+    /// Compression level (0-9).
+    pub clevel: u32,
+    /// Shuffle mode: 0=None, 1=ByteShuffle, 2=BitShuffle.
+    pub shuffle: u32,
+}
+
+impl Default for BloscConfig {
+    fn default() -> Self {
+        Self {
+            compressor: 0,
+            clevel: 3,
+            shuffle: 0,
+        }
+    }
+}
+
+/// Compress an NDArray using Blosc via rust-hdf5's filter pipeline.
+pub fn compress_blosc(src: &NDArray, config: &BloscConfig) -> NDArray {
+    let raw = src.data.as_u8_slice();
+    let element_size = src.data.data_type().element_size();
+
+    let pipeline = FilterPipeline {
+        filters: vec![Filter {
+            id: FILTER_BLOSC,
+            flags: 0,
+            cd_values: vec![
+                2,                   // filter version
+                2,                   // blosc version
+                element_size as u32, // type size
+                raw.len() as u32,    // chunk size
+                config.shuffle,      // shuffle
+                config.compressor,   // compressor
+                config.clevel,       // level
+            ],
+        }],
+    };
+
+    let compressed = match apply_filters(&pipeline, raw) {
+        Ok(data) => data,
+        Err(_) => return src.clone(),
+    };
+
+    let compressed_size = compressed.len();
+    let mut arr = src.clone();
+    arr.attributes.add(NDAttribute {
+        name: ATTR_ORIGINAL_DATA_TYPE.to_string(),
+        description: String::new(),
+        source: NDAttrSource::Driver,
+        value: NDAttrValue::Int64(src.data.data_type() as u8 as i64),
+    });
+    arr.data = NDDataBuffer::U8(compressed);
+    arr.codec = Some(Codec {
+        name: CodecName::Blosc,
+        compressed_size,
+        level: 0,
+        shuffle: 0,
+        compressor: 0,
+    });
+    arr
+}
+
+/// Decompress a Blosc-compressed NDArray via rust-hdf5's filter pipeline.
+pub fn decompress_blosc(src: &NDArray) -> Option<NDArray> {
+    if src.codec.as_ref().map(|c| c.name) != Some(CodecName::Blosc) {
+        return None;
+    }
+
+    let compressed = src.data.as_u8_slice();
+
+    // Blosc header contains enough info for decompression
+    let pipeline = FilterPipeline {
+        filters: vec![Filter {
+            id: FILTER_BLOSC,
+            flags: 0,
+            cd_values: vec![],
+        }],
+    };
+
+    let decompressed = reverse_filters(&pipeline, compressed).ok()?;
+
+    let original_type = src
+        .attributes
+        .get(ATTR_ORIGINAL_DATA_TYPE)
+        .and_then(|a| a.value.as_i64())
+        .and_then(|ord| NDDataType::from_ordinal(ord as u8))
+        .unwrap_or(NDDataType::UInt8);
+
+    let buffer = buffer_from_bytes(&decompressed, original_type)?;
+
+    let mut arr = src.clone();
+    arr.data = buffer;
+    arr.codec = None;
+    arr.attributes.remove(ATTR_ORIGINAL_DATA_TYPE);
+    Some(arr)
+}
+
 /// Codec operation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecMode {
@@ -310,16 +428,40 @@ pub enum CodecMode {
 /// Pure codec processing logic.
 ///
 /// Reports compression ratio after each operation via `compression_ratio()`.
+#[derive(Default)]
+struct CodecParamIndices {
+    mode: Option<usize>,
+    compressor: Option<usize>,
+    comp_factor: Option<usize>,
+    jpeg_quality: Option<usize>,
+    blosc_compressor: Option<usize>,
+    blosc_clevel: Option<usize>,
+    blosc_shuffle: Option<usize>,
+    blosc_numthreads: Option<usize>,
+    codec_status: Option<usize>,
+    codec_error: Option<usize>,
+}
+
 pub struct CodecProcessor {
     mode: CodecMode,
     compression_ratio: f64,
+    jpeg_quality: u8,
+    blosc_config: BloscConfig,
+    params: CodecParamIndices,
 }
 
 impl CodecProcessor {
     pub fn new(mode: CodecMode) -> Self {
+        let quality = match mode {
+            CodecMode::Compress { quality, .. } => quality,
+            _ => 85,
+        };
         Self {
             mode,
             compression_ratio: 1.0,
+            jpeg_quality: quality,
+            blosc_config: BloscConfig::default(),
+            params: CodecParamIndices::default(),
         }
     }
 
@@ -335,41 +477,80 @@ impl NDPluginProcess for CodecProcessor {
         let original_bytes = array.data.as_u8_slice().len();
 
         let result = match self.mode {
-            CodecMode::Compress { codec: CodecName::LZ4, .. } => Some(compress_lz4(array)),
-            CodecMode::Compress { codec: CodecName::JPEG, quality } => {
-                compress_jpeg(array, quality)
+            CodecMode::Compress { .. } if array.codec.is_some() => {
+                // Already compressed — pass through unchanged
+                Some(array.clone())
             }
+            CodecMode::Compress {
+                codec: CodecName::LZ4,
+                ..
+            } => Some(compress_lz4(array)),
+            CodecMode::Compress {
+                codec: CodecName::JPEG,
+                ..
+            } => compress_jpeg(array, self.jpeg_quality),
+            CodecMode::Compress {
+                codec: CodecName::Blosc,
+                ..
+            } => Some(compress_blosc(array, &self.blosc_config)),
             CodecMode::Compress { .. } => None,
-            CodecMode::Decompress => {
-                // Auto-detect codec from the array
-                match array.codec.as_ref().map(|c| c.name) {
-                    Some(CodecName::LZ4) => decompress_lz4(array),
-                    Some(CodecName::JPEG) => decompress_jpeg(array),
-                    _ => None,
-                }
-            }
+            CodecMode::Decompress => match array.codec.as_ref().map(|c| c.name) {
+                Some(CodecName::LZ4) => decompress_lz4(array),
+                Some(CodecName::JPEG) => decompress_jpeg(array),
+                Some(CodecName::Blosc) => decompress_blosc(array),
+                _ => None,
+            },
         };
+
+        let mut updates = Vec::new();
 
         match result {
             Some(ref out) => {
                 let output_bytes = out.data.as_u8_slice().len();
                 match self.mode {
                     CodecMode::Compress { .. } => {
-                        // ratio = original / compressed
-                        self.compression_ratio =
-                            original_bytes as f64 / output_bytes.max(1) as f64;
+                        self.compression_ratio = original_bytes as f64 / output_bytes.max(1) as f64;
                     }
                     CodecMode::Decompress => {
-                        // ratio = decompressed / compressed
-                        self.compression_ratio =
-                            output_bytes as f64 / original_bytes.max(1) as f64;
+                        self.compression_ratio = output_bytes as f64 / original_bytes.max(1) as f64;
                     }
                 }
-                ProcessResult::arrays(vec![Arc::new(out.clone())])
+                if let Some(idx) = self.params.comp_factor {
+                    updates.push(ParamUpdate::float64(idx, self.compression_ratio));
+                }
+                if let Some(idx) = self.params.codec_status {
+                    updates.push(ParamUpdate::int32(idx, 0)); // Success
+                }
+                if let Some(idx) = self.params.codec_error {
+                    updates.push(ParamUpdate::Octet {
+                        reason: idx,
+                        addr: 0,
+                        value: String::new(),
+                    });
+                }
+                let mut r = ProcessResult::arrays(vec![Arc::new(out.clone())]);
+                r.param_updates = updates;
+                r
             }
             None => {
+                // C++: on failure, pass through the original array unchanged
                 self.compression_ratio = 1.0;
-                ProcessResult::empty()
+                if let Some(idx) = self.params.comp_factor {
+                    updates.push(ParamUpdate::float64(idx, 1.0));
+                }
+                if let Some(idx) = self.params.codec_status {
+                    updates.push(ParamUpdate::int32(idx, 1)); // Error
+                }
+                if let Some(idx) = self.params.codec_error {
+                    updates.push(ParamUpdate::Octet {
+                        reason: idx,
+                        addr: 0,
+                        value: "codec operation failed or unsupported".to_string(),
+                    });
+                }
+                let mut r = ProcessResult::arrays(vec![Arc::new(array.clone())]);
+                r.param_updates = updates;
+                r
             }
         }
     }
@@ -378,7 +559,10 @@ impl NDPluginProcess for CodecProcessor {
         "NDPluginCodec"
     }
 
-    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
         use asyn_rs::param::ParamType;
         base.create_param("MODE", ParamType::Int32)?;
         base.create_param("COMPRESSOR", ParamType::Int32)?;
@@ -390,7 +574,71 @@ impl NDPluginProcess for CodecProcessor {
         base.create_param("BLOSC_NUMTHREADS", ParamType::Int32)?;
         base.create_param("CODEC_STATUS", ParamType::Int32)?;
         base.create_param("CODEC_ERROR", ParamType::Octet)?;
+
+        self.params.mode = base.find_param("MODE");
+        self.params.compressor = base.find_param("COMPRESSOR");
+        self.params.comp_factor = base.find_param("COMP_FACTOR");
+        self.params.jpeg_quality = base.find_param("JPEG_QUALITY");
+        self.params.blosc_compressor = base.find_param("BLOSC_COMPRESSOR");
+        self.params.blosc_clevel = base.find_param("BLOSC_CLEVEL");
+        self.params.blosc_shuffle = base.find_param("BLOSC_SHUFFLE");
+        self.params.blosc_numthreads = base.find_param("BLOSC_NUMTHREADS");
+        self.params.codec_status = base.find_param("CODEC_STATUS");
+        self.params.codec_error = base.find_param("CODEC_ERROR");
         Ok(())
+    }
+
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        params: &ad_core_rs::plugin::runtime::PluginParamSnapshot,
+    ) -> ad_core_rs::plugin::runtime::ParamChangeResult {
+        if Some(reason) == self.params.mode {
+            let v = params.value.as_i32();
+            if v == 0 {
+                // Compress — keep current codec
+                let codec = match self.mode {
+                    CodecMode::Compress { codec, .. } => codec,
+                    _ => CodecName::LZ4,
+                };
+                self.mode = CodecMode::Compress {
+                    codec,
+                    quality: self.jpeg_quality,
+                };
+            } else {
+                self.mode = CodecMode::Decompress;
+            }
+        } else if Some(reason) == self.params.compressor {
+            // C++: 0=None, 1=JPEG, 2=Blosc, 3=LZ4, 4=BSLZ4
+            let codec = match params.value.as_i32() {
+                1 => CodecName::JPEG,
+                2 => CodecName::Blosc,
+                3 => CodecName::LZ4,
+                _ => CodecName::LZ4,
+            };
+            if let CodecMode::Compress { .. } = self.mode {
+                self.mode = CodecMode::Compress {
+                    codec,
+                    quality: self.jpeg_quality,
+                };
+            }
+        } else if Some(reason) == self.params.jpeg_quality {
+            self.jpeg_quality = params.value.as_i32().clamp(1, 100) as u8;
+            if let CodecMode::Compress { codec, .. } = self.mode {
+                self.mode = CodecMode::Compress {
+                    codec,
+                    quality: self.jpeg_quality,
+                };
+            }
+        } else if Some(reason) == self.params.blosc_compressor {
+            self.blosc_config.compressor = params.value.as_i32().max(0) as u32;
+        } else if Some(reason) == self.params.blosc_clevel {
+            self.blosc_config.clevel = params.value.as_i32().clamp(0, 9) as u32;
+        } else if Some(reason) == self.params.blosc_shuffle {
+            self.blosc_config.shuffle = params.value.as_i32().max(0) as u32;
+        }
+
+        ad_core_rs::plugin::runtime::ParamChangeResult::updates(vec![])
     }
 }
 
@@ -412,6 +660,7 @@ mod tests {
     }
 
     fn make_rgb_array(width: usize, height: usize) -> NDArray {
+        use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
         let mut arr = NDArray::new(
             vec![
                 NDDimension::new(3),
@@ -420,6 +669,13 @@ mod tests {
             ],
             NDDataType::UInt8,
         );
+        // info() reads ColorMode for 3D arrays
+        arr.attributes.add(NDAttribute {
+            name: "ColorMode".into(),
+            description: "Color Mode".into(),
+            source: NDAttrSource::Driver,
+            value: NDAttrValue::Int32(2), // RGB1
+        });
         if let NDDataBuffer::U8(ref mut v) = arr.data {
             for i in 0..v.len() {
                 v[i] = (i % 256) as u8;
@@ -470,15 +726,17 @@ mod tests {
         assert_eq!(decompressed.data.data_type(), NDDataType::UInt16);
         assert_eq!(decompressed.data.as_u8_slice(), original_bytes.as_slice());
         // Attribute should be cleaned up
-        assert!(decompressed.attributes.get(ATTR_ORIGINAL_DATA_TYPE).is_none());
+        assert!(
+            decompressed
+                .attributes
+                .get(ATTR_ORIGINAL_DATA_TYPE)
+                .is_none()
+        );
     }
 
     #[test]
     fn test_lz4_roundtrip_f64() {
-        let mut arr = NDArray::new(
-            vec![NDDimension::new(16)],
-            NDDataType::Float64,
-        );
+        let mut arr = NDArray::new(vec![NDDimension::new(16)], NDDataType::Float64);
         if let NDDataBuffer::F64(ref mut v) = arr.data {
             for i in 0..v.len() {
                 v[i] = i as f64 * 1.5;
@@ -571,7 +829,7 @@ mod tests {
         let decompressed = decompress_jpeg(&compressed).unwrap();
         assert!(decompressed.codec.is_none());
         assert_eq!(decompressed.dims.len(), 3);
-        assert_eq!(decompressed.dims[0].size, 3);  // color
+        assert_eq!(decompressed.dims[0].size, 3); // color
         assert_eq!(decompressed.dims[1].size, 16); // width
         assert_eq!(decompressed.dims[2].size, 16); // height
         assert_eq!(decompressed.data.len(), 3 * 16 * 16);
@@ -686,7 +944,8 @@ mod tests {
         let arr = make_u8_array(8, 8);
         let mut proc = CodecProcessor::new(CodecMode::Decompress);
         let result = proc.process_array(&arr, &pool);
-        assert!(result.output_arrays.is_empty());
+        // C++: on failure, pass through original array unchanged
+        assert_eq!(result.output_arrays.len(), 1);
         assert_eq!(proc.compression_ratio(), 1.0);
     }
 
@@ -737,10 +996,7 @@ mod tests {
     #[test]
     fn test_buffer_from_bytes_u16() {
         let original = vec![1000u16, 2000, 3000];
-        let bytes: Vec<u8> = original
-            .iter()
-            .flat_map(|v| v.to_ne_bytes())
-            .collect();
+        let bytes: Vec<u8> = original.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let buf = buffer_from_bytes(&bytes, NDDataType::UInt16).unwrap();
         assert_eq!(buf.data_type(), NDDataType::UInt16);
         assert_eq!(buf.len(), 3);
@@ -761,10 +1017,7 @@ mod tests {
     #[test]
     fn test_buffer_from_bytes_f64_roundtrip() {
         let original = vec![1.5f64, -2.7, 3.14159];
-        let bytes: Vec<u8> = original
-            .iter()
-            .flat_map(|v| v.to_ne_bytes())
-            .collect();
+        let bytes: Vec<u8> = original.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let buf = buffer_from_bytes(&bytes, NDDataType::Float64).unwrap();
         if let NDDataBuffer::F64(v) = buf {
             assert_eq!(v, original);

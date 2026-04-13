@@ -22,9 +22,13 @@ pub struct MotorBuilder {
     motor: Arc<Mutex<dyn AsynMotor>>,
     addr: i32,
     timeout: Duration,
-    poll_interval: Duration,
+    moving_poll_interval: Duration,
+    idle_poll_interval: Duration,
+    forced_fast_polls: u32,
     poll_channel_capacity: usize,
     configure_record: Option<Box<dyn FnOnce(&mut MotorRecord)>>,
+    auto_power_on_delay: Option<Duration>,
+    auto_power_off_delay: Option<Duration>,
 }
 
 impl MotorBuilder {
@@ -33,9 +37,13 @@ impl MotorBuilder {
             motor,
             addr: 0,
             timeout: Duration::from_secs(1),
-            poll_interval: Duration::from_millis(100),
+            moving_poll_interval: Duration::from_millis(100),
+            idle_poll_interval: Duration::from_secs(1),
+            forced_fast_polls: 10,
             poll_channel_capacity: 16,
             configure_record: None,
+            auto_power_on_delay: None,
+            auto_power_off_delay: None,
         }
     }
 
@@ -50,7 +58,23 @@ impl MotorBuilder {
     }
 
     pub fn poll_interval(mut self, interval: Duration) -> Self {
-        self.poll_interval = interval;
+        self.moving_poll_interval = interval;
+        self.idle_poll_interval = interval;
+        self
+    }
+
+    pub fn moving_poll_interval(mut self, interval: Duration) -> Self {
+        self.moving_poll_interval = interval;
+        self
+    }
+
+    pub fn idle_poll_interval(mut self, interval: Duration) -> Self {
+        self.idle_poll_interval = interval;
+        self
+    }
+
+    pub fn forced_fast_polls(mut self, count: u32) -> Self {
+        self.forced_fast_polls = count;
         self
     }
 
@@ -61,6 +85,12 @@ impl MotorBuilder {
 
     pub fn configure_record(mut self, f: impl FnOnce(&mut MotorRecord) + 'static) -> Self {
         self.configure_record = Some(Box::new(f));
+        self
+    }
+
+    pub fn auto_power(mut self, on_delay: Duration, off_delay: Duration) -> Self {
+        self.auto_power_on_delay = Some(on_delay);
+        self.auto_power_off_delay = Some(off_delay);
         self
     }
 
@@ -87,7 +117,9 @@ impl MotorBuilder {
             io_intr_tx,
             self.motor,
             device_state,
-            self.poll_interval,
+            self.moving_poll_interval,
+            self.idle_poll_interval,
+            self.forced_fast_polls,
         );
 
         MotorSetup {

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ad_core_rs::color::{convert_rgb_layout, NDColorMode};
+use ad_core_rs::color::{NDColorMode, convert_rgb_layout};
 use ad_core_rs::error::{ADError, ADResult};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDataType, NDDimension};
 use ad_core_rs::ndarray_pool::NDArrayPool;
@@ -59,7 +59,10 @@ impl MagickWriter {
         let width = info.x_size as u32;
         let height = info.y_size as u32;
         let color = Self::color_mode(array);
-        let is_rgb = matches!(color, NDColorMode::RGB1 | NDColorMode::RGB2 | NDColorMode::RGB3);
+        let is_rgb = matches!(
+            color,
+            NDColorMode::RGB1 | NDColorMode::RGB2 | NDColorMode::RGB3
+        );
 
         // Convert to RGB1 layout if needed (image crate expects interleaved RGB)
         let src = if is_rgb && color != NDColorMode::RGB1 {
@@ -73,26 +76,101 @@ impl MagickWriter {
                 if is_rgb {
                     image::RgbImage::from_raw(width, height, v.clone())
                         .map(DynamicImage::ImageRgb8)
-                        .ok_or_else(|| ADError::UnsupportedConversion("RGB8 buffer size mismatch".into()))
+                        .ok_or_else(|| {
+                            ADError::UnsupportedConversion("RGB8 buffer size mismatch".into())
+                        })
                 } else {
                     image::GrayImage::from_raw(width, height, v.clone())
                         .map(DynamicImage::ImageLuma8)
-                        .ok_or_else(|| ADError::UnsupportedConversion("Gray8 buffer size mismatch".into()))
+                        .ok_or_else(|| {
+                            ADError::UnsupportedConversion("Gray8 buffer size mismatch".into())
+                        })
+                }
+            }
+            NDDataBuffer::I8(v) => {
+                let u8_data: Vec<u8> = v.iter().map(|&b| b as u8).collect();
+                if is_rgb {
+                    image::RgbImage::from_raw(width, height, u8_data)
+                        .map(DynamicImage::ImageRgb8)
+                        .ok_or_else(|| {
+                            ADError::UnsupportedConversion("RGB8 buffer size mismatch".into())
+                        })
+                } else {
+                    image::GrayImage::from_raw(width, height, u8_data)
+                        .map(DynamicImage::ImageLuma8)
+                        .ok_or_else(|| {
+                            ADError::UnsupportedConversion("Gray8 buffer size mismatch".into())
+                        })
                 }
             }
             NDDataBuffer::U16(v) => {
                 if is_rgb {
-                    image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(width, height, v.clone())
-                        .map(DynamicImage::ImageRgb16)
-                        .ok_or_else(|| ADError::UnsupportedConversion("RGB16 buffer size mismatch".into()))
+                    image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(
+                        width,
+                        height,
+                        v.clone(),
+                    )
+                    .map(DynamicImage::ImageRgb16)
+                    .ok_or_else(|| {
+                        ADError::UnsupportedConversion("RGB16 buffer size mismatch".into())
+                    })
                 } else {
-                    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(width, height, v.clone())
-                        .map(DynamicImage::ImageLuma16)
-                        .ok_or_else(|| ADError::UnsupportedConversion("Gray16 buffer size mismatch".into()))
+                    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(
+                        width,
+                        height,
+                        v.clone(),
+                    )
+                    .map(DynamicImage::ImageLuma16)
+                    .ok_or_else(|| {
+                        ADError::UnsupportedConversion("Gray16 buffer size mismatch".into())
+                    })
+                }
+            }
+            NDDataBuffer::I16(v) => {
+                let u16_data: Vec<u16> = v.iter().map(|&b| b as u16).collect();
+                if is_rgb {
+                    image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(
+                        width, height, u16_data,
+                    )
+                    .map(DynamicImage::ImageRgb16)
+                    .ok_or_else(|| {
+                        ADError::UnsupportedConversion("RGB16 buffer size mismatch".into())
+                    })
+                } else {
+                    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(
+                        width, height, u16_data,
+                    )
+                    .map(DynamicImage::ImageLuma16)
+                    .ok_or_else(|| {
+                        ADError::UnsupportedConversion("Gray16 buffer size mismatch".into())
+                    })
+                }
+            }
+            NDDataBuffer::F32(v) => {
+                let u16_data: Vec<u16> = v
+                    .iter()
+                    .map(|&f| (f.clamp(0.0, 1.0) * 65535.0) as u16)
+                    .collect();
+                if is_rgb {
+                    image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(
+                        width, height, u16_data,
+                    )
+                    .map(DynamicImage::ImageRgb16)
+                    .ok_or_else(|| {
+                        ADError::UnsupportedConversion("RGB16 buffer size mismatch".into())
+                    })
+                } else {
+                    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(
+                        width, height, u16_data,
+                    )
+                    .map(DynamicImage::ImageLuma16)
+                    .ok_or_else(|| {
+                        ADError::UnsupportedConversion("Gray16 buffer size mismatch".into())
+                    })
                 }
             }
             _ => Err(ADError::UnsupportedConversion(format!(
-                "NDFileMagick: unsupported data type {:?}, use UInt8 or UInt16",
+                "NDFileMagick: unsupported data type {:?}, use UInt8, Int8, UInt16, Int16, or Float32",
                 src.data.data_type()
             ))),
         }
@@ -106,7 +184,9 @@ impl NDFileWriter for MagickWriter {
     }
 
     fn write_file(&mut self, array: &NDArray) -> ADResult<()> {
-        let path = self.current_path.as_ref()
+        let path = self
+            .current_path
+            .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
         let img = Self::array_to_image(array)?;
@@ -117,9 +197,8 @@ impl NDFileWriter for MagickWriter {
         // For JPEG, use quality setting
         if format == ImageFormat::Jpeg {
             let mut buf = Vec::new();
-            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                &mut buf, self.quality,
-            );
+            let encoder =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, self.quality);
             img.write_with_encoder(encoder)
                 .map_err(|e| ADError::UnsupportedConversion(format!("Magick encode error: {e}")))?;
             std::fs::write(path, &buf)?;
@@ -132,7 +211,9 @@ impl NDFileWriter for MagickWriter {
     }
 
     fn read_file(&mut self) -> ADResult<NDArray> {
-        let path = self.current_path.as_ref()
+        let path = self
+            .current_path
+            .as_ref()
             .ok_or_else(|| ADError::UnsupportedConversion("no file open".into()))?;
 
         let img = image::open(path)
@@ -237,7 +318,10 @@ impl NDPluginProcess for MagickFileProcessor {
         "NDFileMagick"
     }
 
-    fn register_params(&mut self, base: &mut asyn_rs::port::PortDriverBase) -> asyn_rs::error::AsynResult<()> {
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
         self.ctrl.register_params(base)?;
         use asyn_rs::param::ParamType;
         self.quality_idx = Some(base.create_param("MAGICK_QUALITY", ParamType::Int32)?);
@@ -250,7 +334,11 @@ impl NDPluginProcess for MagickFileProcessor {
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, params: &PluginParamSnapshot) -> ParamChangeResult {
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        params: &PluginParamSnapshot,
+    ) -> ParamChangeResult {
         if Some(reason) == self.quality_idx {
             let q = params.value.as_i32().clamp(1, 100) as u8;
             self.ctrl.writer.set_quality(q);
@@ -292,7 +380,9 @@ mod tests {
             NDDataType::UInt8,
         );
         if let NDDataBuffer::U8(ref mut v) = arr.data {
-            for i in 0..64 { v[i] = (i * 4) as u8; }
+            for i in 0..64 {
+                v[i] = (i * 4) as u8;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -318,7 +408,9 @@ mod tests {
             NDDataType::UInt16,
         );
         if let NDDataBuffer::U16(ref mut v) = arr.data {
-            for i in 0..64 { v[i] = (i * 1000) as u16; }
+            for i in 0..64 {
+                v[i] = (i * 1000) as u16;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -336,15 +428,29 @@ mod tests {
 
     #[test]
     fn test_write_read_bmp_rgb() {
+        use ad_core_rs::attributes::{NDAttrSource, NDAttrValue, NDAttribute};
+
         let path = temp_path("bmp");
         let mut writer = MagickWriter::new();
 
         let mut arr = NDArray::new(
-            vec![NDDimension::new(3), NDDimension::new(4), NDDimension::new(4)],
+            vec![
+                NDDimension::new(3),
+                NDDimension::new(4),
+                NDDimension::new(4),
+            ],
             NDDataType::UInt8,
         );
+        arr.attributes.add(NDAttribute {
+            name: "ColorMode".into(),
+            description: "Color Mode".into(),
+            source: NDAttrSource::Driver,
+            value: NDAttrValue::Int32(2), // RGB1
+        });
         if let NDDataBuffer::U8(ref mut v) = arr.data {
-            for i in 0..48 { v[i] = (i * 5) as u8; }
+            for i in 0..48 {
+                v[i] = (i * 5) as u8;
+            }
         }
 
         writer.open_file(&path, NDFileMode::Single, &arr).unwrap();
@@ -360,9 +466,10 @@ mod tests {
 
     #[test]
     fn test_rejects_unsupported_type() {
+        // F32 is now supported (normalized to U16). Use Float64 as unsupported.
         let arr = NDArray::new(
             vec![NDDimension::new(4), NDDimension::new(4)],
-            NDDataType::Float32,
+            NDDataType::Float64,
         );
         assert!(MagickWriter::array_to_image(&arr).is_err());
     }

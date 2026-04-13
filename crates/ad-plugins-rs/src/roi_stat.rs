@@ -17,10 +17,10 @@ use asyn_rs::port::PortDriverBase;
 use parking_lot::Mutex;
 
 #[cfg(feature = "parallel")]
-use rayon::prelude::*;
-#[cfg(feature = "parallel")]
 use crate::par_util;
 use crate::time_series::{TimeSeriesData, TimeSeriesSender};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Configuration for a single ROI region.
 #[derive(Debug, Clone)]
@@ -108,6 +108,13 @@ pub struct ROIStatParams {
     pub mean_value: usize,
     pub total: usize,
     pub net: usize,
+    // Time series waveform arrays (per-ROI, differentiated by addr)
+    pub ts_total: usize,
+    pub ts_net: usize,
+    pub ts_mean_value: usize,
+    pub ts_min_value: usize,
+    pub ts_max_value: usize,
+    pub ts_timestamp: usize,
 }
 
 /// Processor that computes ROI statistics on 2D arrays.
@@ -223,8 +230,12 @@ impl ROIStatProcessor {
             for ix in roi_x..(roi_x + roi_w) {
                 let idx = iy * x_size + ix;
                 if let Some(val) = data.get_as_f64(idx) {
-                    if val < min { min = val; }
-                    if val > max { max = val; }
+                    if val < min {
+                        min = val;
+                    }
+                    if val > max {
+                        max = val;
+                    }
                     total += val;
                     count += 1;
                 }
@@ -245,7 +256,13 @@ impl ROIStatProcessor {
             total
         };
 
-        ROIStatResult { min, max, mean, total, net }
+        ROIStatResult {
+            min,
+            max,
+            mean,
+            total,
+            net,
+        }
     }
 
     /// Compute average background from the border of the ROI.
@@ -291,7 +308,11 @@ impl ROIStatProcessor {
             }
         }
 
-        if bgd_count == 0 { 0.0 } else { bgd_total / bgd_count as f64 }
+        if bgd_count == 0 {
+            0.0
+        } else {
+            bgd_total / bgd_count as f64
+        }
     }
 }
 
@@ -302,11 +323,14 @@ impl NDPluginProcess for ROIStatProcessor {
         let y_size = info.y_size;
 
         // Ensure results vec matches rois
-        self.results.resize(self.rois.len(), ROIStatResult::default());
+        self.results
+            .resize(self.rois.len(), ROIStatResult::default());
 
         #[cfg(feature = "parallel")]
         {
-            let total_elements: usize = self.rois.iter()
+            let total_elements: usize = self
+                .rois
+                .iter()
                 .filter(|r| r.enabled)
                 .map(|r| r.size[0] * r.size[1])
                 .sum();
@@ -346,30 +370,35 @@ impl NDPluginProcess for ROIStatProcessor {
             self.results[i] = Self::compute_roi_stats(&array.data, x_size, y_size, roi);
         }
 
-        // Accumulate time series
+        // Accumulate time series (fixed-length: stop when full)
         if self.ts_mode == TSMode::Acquiring {
-            // Ensure ts_buffers match roi count
-            while self.ts_buffers.len() < self.rois.len() {
-                self.ts_buffers.push(vec![Vec::new(); NUM_STATS]);
-            }
+            if self.ts_num_points > 0 && self.ts_current >= self.ts_num_points {
+                // Buffer full — stop acquiring
+                self.ts_mode = TSMode::Idle;
+            } else {
+                // Ensure ts_buffers match roi count
+                while self.ts_buffers.len() < self.rois.len() {
+                    self.ts_buffers.push(vec![Vec::new(); NUM_STATS]);
+                }
 
-            for (i, result) in self.results.iter().enumerate() {
-                if i >= self.ts_buffers.len() { break; }
-                let stats = [result.min, result.max, result.mean, result.total, result.net];
-                for (s, &val) in stats.iter().enumerate() {
-                    let buf = &mut self.ts_buffers[i][s];
-                    if buf.len() >= self.ts_num_points && self.ts_num_points > 0 {
-                        // Circular: overwrite oldest
-                        let idx = self.ts_current % self.ts_num_points;
-                        if idx < buf.len() {
-                            buf[idx] = val;
-                        }
-                    } else {
+                for (i, result) in self.results.iter().enumerate() {
+                    if i >= self.ts_buffers.len() {
+                        break;
+                    }
+                    let stats = [
+                        result.min,
+                        result.max,
+                        result.mean,
+                        result.total,
+                        result.net,
+                    ];
+                    for (s, &val) in stats.iter().enumerate() {
+                        let buf = &mut self.ts_buffers[i][s];
                         buf.push(val);
                     }
                 }
+                self.ts_current += 1;
             }
-            self.ts_current += 1;
         }
 
         // Send flattened stats to TimeSeriesPortDriver if connected
@@ -385,21 +414,88 @@ impl NDPluginProcess for ROIStatProcessor {
             let _ = sender.try_send(TimeSeriesData { values });
         }
 
-        // Build per-ROI param updates
+        // Build per-ROI param updates (only for enabled ROIs)
         let p = &self.params;
         let mut updates = Vec::new();
-        for (i, result) in self.results.iter().enumerate() {
+        for (i, roi) in self.rois.iter().enumerate() {
+            if !roi.enabled {
+                continue;
+            }
+            let result = &self.results[i];
             let addr = i as i32;
             updates.push(ParamUpdate::float64_addr(p.min_value, addr, result.min));
             updates.push(ParamUpdate::float64_addr(p.max_value, addr, result.max));
             updates.push(ParamUpdate::float64_addr(p.mean_value, addr, result.mean));
             updates.push(ParamUpdate::float64_addr(p.total, addr, result.total));
             updates.push(ParamUpdate::float64_addr(p.net, addr, result.net));
-            updates.push(ParamUpdate::int32_addr(p.dim0_max_size, addr, x_size as i32));
-            updates.push(ParamUpdate::int32_addr(p.dim1_max_size, addr, y_size as i32));
+            updates.push(ParamUpdate::int32_addr(
+                p.dim0_max_size,
+                addr,
+                x_size as i32,
+            ));
+            updates.push(ParamUpdate::int32_addr(
+                p.dim1_max_size,
+                addr,
+                y_size as i32,
+            ));
         }
-        updates.push(ParamUpdate::int32(p.ts_current_point, self.ts_current as i32));
-        updates.push(ParamUpdate::int32(p.ts_acquiring, if self.ts_mode == TSMode::Acquiring { 1 } else { 0 }));
+        updates.push(ParamUpdate::int32(
+            p.ts_current_point,
+            self.ts_current as i32,
+        ));
+        updates.push(ParamUpdate::int32(
+            p.ts_acquiring,
+            if self.ts_mode == TSMode::Acquiring {
+                1
+            } else {
+                0
+            },
+        ));
+
+        // Write time series buffers to params for waveform readback
+        for (i, roi) in self.rois.iter().enumerate() {
+            if !roi.enabled || i >= self.ts_buffers.len() {
+                continue;
+            }
+            let addr = i as i32;
+            let bufs = &self.ts_buffers[i];
+            // stat order: min=0, max=1, mean=2, total=3, net=4
+            if !bufs.is_empty() {
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_min_value,
+                    addr,
+                    bufs[0].clone(),
+                ));
+            }
+            if bufs.len() > 1 {
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_max_value,
+                    addr,
+                    bufs[1].clone(),
+                ));
+            }
+            if bufs.len() > 2 {
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_mean_value,
+                    addr,
+                    bufs[2].clone(),
+                ));
+            }
+            if bufs.len() > 3 {
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_total,
+                    addr,
+                    bufs[3].clone(),
+                ));
+            }
+            if bufs.len() > 4 {
+                updates.push(ParamUpdate::float64_array_addr(
+                    p.ts_net,
+                    addr,
+                    bufs[4].clone(),
+                ));
+            }
+        }
 
         ProcessResult::sink(updates)
     }
@@ -408,13 +504,17 @@ impl NDPluginProcess for ROIStatProcessor {
         "NDPluginROIStat"
     }
 
-    fn register_params(&mut self, base: &mut PortDriverBase) -> Result<(), asyn_rs::error::AsynError> {
+    fn register_params(
+        &mut self,
+        base: &mut PortDriverBase,
+    ) -> Result<(), asyn_rs::error::AsynError> {
         // Global params
         self.params.reset_all = base.create_param("ROISTAT_RESETALL", ParamType::Int32)?;
         self.params.ts_control = base.create_param("ROISTAT_TS_CONTROL", ParamType::Int32)?;
         self.params.ts_num_points = base.create_param("ROISTAT_TS_NUM_POINTS", ParamType::Int32)?;
         base.set_int32_param(self.params.ts_num_points, 0, self.ts_num_points as i32)?;
-        self.params.ts_current_point = base.create_param("ROISTAT_TS_CURRENT_POINT", ParamType::Int32)?;
+        self.params.ts_current_point =
+            base.create_param("ROISTAT_TS_CURRENT_POINT", ParamType::Int32)?;
         self.params.ts_acquiring = base.create_param("ROISTAT_TS_ACQUIRING", ParamType::Int32)?;
 
         // Per-ROI params (single index, differentiated by addr)
@@ -434,6 +534,18 @@ impl NDPluginProcess for ROIStatProcessor {
         self.params.total = base.create_param("ROISTAT_TOTAL", ParamType::Float64)?;
         self.params.net = base.create_param("ROISTAT_NET", ParamType::Float64)?;
 
+        // Time series waveform arrays (per-ROI)
+        self.params.ts_total = base.create_param("ROISTAT_TS_TOTAL", ParamType::Float64Array)?;
+        self.params.ts_net = base.create_param("ROISTAT_TS_NET", ParamType::Float64Array)?;
+        self.params.ts_mean_value =
+            base.create_param("ROISTAT_TS_MEAN_VALUE", ParamType::Float64Array)?;
+        self.params.ts_min_value =
+            base.create_param("ROISTAT_TS_MIN_VALUE", ParamType::Float64Array)?;
+        self.params.ts_max_value =
+            base.create_param("ROISTAT_TS_MAX_VALUE", ParamType::Float64Array)?;
+        self.params.ts_timestamp =
+            base.create_param("ROISTAT_TS_TIMESTAMP", ParamType::Float64Array)?;
+
         // Set initial per-ROI values
         for (i, roi) in self.rois.iter().enumerate() {
             let addr = i as i32;
@@ -451,7 +563,11 @@ impl NDPluginProcess for ROIStatProcessor {
         Ok(())
     }
 
-    fn on_param_change(&mut self, reason: usize, snapshot: &PluginParamSnapshot) -> ad_core_rs::plugin::runtime::ParamChangeResult {
+    fn on_param_change(
+        &mut self,
+        reason: usize,
+        snapshot: &PluginParamSnapshot,
+    ) -> ad_core_rs::plugin::runtime::ParamChangeResult {
         let addr = snapshot.addr as usize;
         let p = &self.params;
 
@@ -474,21 +590,49 @@ impl NDPluginProcess for ROIStatProcessor {
                 *r = ROIStatResult::default();
             }
         } else if reason == p.ts_control {
-            let mode = if snapshot.value.as_i32() != 0 { TSMode::Acquiring } else { TSMode::Idle };
-            self.set_ts_mode(mode);
+            // 0=EraseStart (clear+start), 1=Start (resume), 2=Stop, 3=Read, 4=Erase
+            match snapshot.value.as_i32() {
+                0 => {
+                    // EraseStart: clear buffers then start
+                    for roi_bufs in &mut self.ts_buffers {
+                        for stat_buf in roi_bufs.iter_mut() {
+                            stat_buf.clear();
+                        }
+                    }
+                    self.ts_current = 0;
+                    self.ts_mode = TSMode::Acquiring;
+                }
+                1 => {
+                    // Start: resume without clearing
+                    self.ts_mode = TSMode::Acquiring;
+                }
+                2 => {
+                    // Stop
+                    self.ts_mode = TSMode::Idle;
+                }
+                3 => {
+                    // Read: callback without stopping (no-op here, param update triggers read)
+                }
+                4 => {
+                    // Erase: clear buffers
+                    for roi_bufs in &mut self.ts_buffers {
+                        for stat_buf in roi_bufs.iter_mut() {
+                            stat_buf.clear();
+                        }
+                    }
+                    self.ts_current = 0;
+                }
+                _ => {}
+            }
         } else if reason == p.ts_num_points {
             self.ts_num_points = snapshot.value.as_i32().max(0) as usize;
         }
-            ad_core_rs::plugin::runtime::ParamChangeResult::empty()
+        ad_core_rs::plugin::runtime::ParamChangeResult::empty()
     }
 }
 
-/// Create a ROIStat plugin runtime with multi-addr support.
-///
-/// Returns:
-/// - Plugin runtime handle
-/// - ROIStatParams (for building registry)
-/// - Thread join handle
+/// Create a ROIStat plugin runtime. The TS receiver is stored in the registry
+/// for later pickup by `NDTimeSeriesConfigure`.
 pub fn create_roi_stat_runtime(
     port_name: &str,
     pool: Arc<NDArrayPool>,
@@ -496,12 +640,20 @@ pub fn create_roi_stat_runtime(
     ndarray_port: &str,
     wiring: Arc<WiringRegistry>,
     num_rois: usize,
-) -> (PluginRuntimeHandle, ROIStatParams, std::thread::JoinHandle<()>) {
+    ts_registry: &crate::time_series::TsReceiverRegistry,
+) -> (
+    PluginRuntimeHandle,
+    ROIStatParams,
+    std::thread::JoinHandle<()>,
+) {
+    let (ts_tx, ts_rx) = tokio::sync::mpsc::channel(256);
+
     let rois: Vec<ROIStatROI> = (0..num_rois).map(|_| ROIStatROI::default()).collect();
-    let processor = ROIStatProcessor::new(rois, 2048);
+    let mut processor = ROIStatProcessor::new(rois, 2048);
+    processor.set_ts_sender(ts_tx);
     let params_handle = processor.params_handle();
 
-    let (handle, jh) = ad_core_rs::plugin::runtime::create_plugin_runtime_multi_addr(
+    let (handle, data_jh) = ad_core_rs::plugin::runtime::create_plugin_runtime_multi_addr(
         port_name,
         processor,
         pool,
@@ -511,10 +663,13 @@ pub fn create_roi_stat_runtime(
         num_rois,
     );
 
-    // Params were populated by register_params and exported via the shared handle.
     let roi_stat_params = *params_handle.lock();
 
-    (handle, roi_stat_params, jh)
+    // Store the TS receiver for NDTimeSeriesConfigure to pick up
+    let channel_names = roi_stat_ts_channel_names(num_rois);
+    ts_registry.store(port_name, ts_rx, channel_names);
+
+    (handle, roi_stat_params, data_jh)
 }
 
 #[cfg(test)]
@@ -642,7 +797,10 @@ mod tests {
         // bgd average = (12*10 + ... well, border includes some 100s)
         // Actually border pixels at bgd_width=1: the outer ring of the 4x4 ROI
         // That outer ring occupies 12 of 16 pixels
-        assert!(r.net < r.total, "net should be less than total with bgd subtraction");
+        assert!(
+            r.net < r.total,
+            "net should be less than total with bgd subtraction"
+        );
     }
 
     #[test]
@@ -678,7 +836,10 @@ mod tests {
         proc.process_array(&arr, &pool);
 
         let r = &proc.results()[0];
-        assert!((r.total - 0.0).abs() < 1e-10, "disabled ROI should have zero stats");
+        assert!(
+            (r.total - 0.0).abs() < 1e-10,
+            "disabled ROI should have zero stats"
+        );
     }
 
     #[test]
@@ -696,7 +857,10 @@ mod tests {
         proc.process_array(&arr, &pool);
 
         let r = &proc.results()[0];
-        assert!((r.total - 0.0).abs() < 1e-10, "out-of-bounds ROI should produce zero stats");
+        assert!(
+            (r.total - 0.0).abs() < 1e-10,
+            "out-of-bounds ROI should produce zero stats"
+        );
     }
 
     #[test]
@@ -705,7 +869,7 @@ mod tests {
         let rois = vec![ROIStatROI {
             enabled: true,
             offset: [2, 2],
-            size: [10, 10],  // extends beyond image
+            size: [10, 10], // extends beyond image
             bgd_width: 0,
         }];
 
@@ -788,8 +952,18 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<TimeSeriesData>(16);
 
         let rois = vec![
-            ROIStatROI { enabled: true, offset: [0, 0], size: [4, 4], bgd_width: 0 },
-            ROIStatROI { enabled: true, offset: [0, 0], size: [2, 2], bgd_width: 0 },
+            ROIStatROI {
+                enabled: true,
+                offset: [0, 0],
+                size: [4, 4],
+                bgd_width: 0,
+            },
+            ROIStatROI {
+                enabled: true,
+                offset: [0, 0],
+                size: [2, 2],
+                bgd_width: 0,
+            },
         ];
 
         let mut proc = ROIStatProcessor::new(rois, 0);

@@ -70,7 +70,6 @@ Default prefix: `SCOPE:scopeSim:`
 ```bash
 # Release build
 cargo build --release -p scope-ioc --features ioc
-
 # Run
 ./target/release/scope_ioc examples/scope-ioc/ioc/st.cmd
 ```

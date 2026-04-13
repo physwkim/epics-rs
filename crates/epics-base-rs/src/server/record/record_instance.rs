@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicBool;
 
 use crate::runtime::sync::mpsc;
 
 use crate::error::{CaError, CaResult};
 use crate::server::pv::{MonitorEvent, Subscriber};
+use crate::server::snapshot::{ControlInfo, DisplayInfo, EnumInfo};
 use crate::types::{DbFieldType, EpicsValue};
 
 use super::alarm::{AlarmSeverity, AnalogAlarmConfig};
@@ -15,6 +17,53 @@ use super::record_trait::{
     CommonFieldPutResult, ProcessSnapshot, Record, RecordProcessResult, SubroutineFn,
 };
 use super::scan::ScanType;
+
+/// Cached metadata for a record.
+///
+/// Stores the result of `populate_display_info` / `populate_control_info` /
+/// `populate_enum_info` so subsequent `snapshot_for_field` /
+/// `make_monitor_snapshot` calls can skip rebuilding the metadata. The
+/// cache is invalidated whenever a metadata-class field is written
+/// (EGU, PREC, HOPR, LOPR, alarm limits, DRVH/DRVL, state strings).
+///
+/// In a CA-only IOC this is a CPU win; in a hybrid CA + PVA IOC where
+/// every snapshot needs full metadata for NTScalar serialization, the
+/// cache eliminates redundant per-event populate work.
+#[derive(Clone, Default)]
+pub(crate) struct MetadataSnapshot {
+    pub display: Option<DisplayInfo>,
+    pub control: Option<ControlInfo>,
+    pub enums: Option<EnumInfo>,
+}
+
+/// Returns true if writing to this field should invalidate the metadata
+/// cache. Field name is expected uppercase.
+///
+/// **MUST be kept in sync with `populate_display_info`,
+/// `populate_control_info`, and `populate_enum_info`.** If you add a
+/// new source field there, add it here too — otherwise the cache will
+/// serve stale metadata until some other tracked field is written.
+///
+/// Currently uncovered (because they are not yet populated by any
+/// `populate_*` function): `DESC` (would map to `display.description`
+/// — populate hook missing), `Q:form` info tag (would map to
+/// `display.form`). Add to this set if/when those are wired up.
+fn is_metadata_field(name: &str) -> bool {
+    matches!(
+        name,
+        // Display info (analog + integer + motor)
+        "EGU" | "PREC" | "HOPR" | "LOPR" | "HLM" | "LLM"
+        // Alarm limits (used by both display and the analog_alarm config)
+        | "HIHI" | "HIGH" | "LOW" | "LOLO"
+        // Output ctrl limits
+        | "DRVH" | "DRVL"
+        // bi/bo/busy enum strings
+        | "ZNAM" | "ONAM"
+        // mbbi/mbbo state strings (16 levels)
+        | "ZRST" | "ONST" | "TWST" | "THST" | "FRST" | "FVST" | "SXST" | "SVST"
+        | "EIST" | "NIST" | "TEST" | "ELST" | "TVST" | "TTST" | "FTST" | "FFST"
+    )
+}
 
 /// A type-erased record instance stored in the database.
 pub struct RecordInstance {
@@ -42,6 +91,49 @@ pub struct RecordInstance {
     /// Bumped each process cycle. Spawned timers check this to avoid
     /// stale re-processes from accumulated timers.
     pub reprocess_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Cached metadata (display/control/enums) — `None` means stale or
+    /// not yet built. Populated lazily by `snapshot_for_field` /
+    /// `make_monitor_snapshot` and invalidated by `invalidate_metadata_cache`
+    /// whenever a metadata-class field (EGU/PREC/HOPR/LOPR/limit/state)
+    /// is written.
+    ///
+    /// Wrapped in `std::sync::Mutex` for interior mutability — the
+    /// containing `RecordInstance` is shared via `Arc<RwLock<...>>` from
+    /// `PvDatabase`, and snapshot construction holds a read lock; the
+    /// inner Mutex lets us still mutate the cache from a `&self` method.
+    ///
+    /// # Cache invariant (CONTRACT)
+    ///
+    /// The cache is **only correct under the following contract**: every
+    /// code path that mutates a metadata-class field (the set defined in
+    /// the file-private `is_metadata_field` predicate) MUST call
+    /// [`RecordInstance::notify_field_written`] (or
+    /// [`RecordInstance::invalidate_metadata_cache`] directly) afterward.
+    ///
+    /// All current write paths in `field_io.rs` already do this. If you
+    /// add a new code path that:
+    ///
+    /// - calls `instance.record.put_field(...)` directly, OR
+    /// - mutates record fields from inside `Record::process()`,
+    ///   `Record::on_put`, or `Record::special` and that mutation could
+    ///   touch a metadata-class field, OR
+    /// - lets a `Box<dyn Record>` implementation expose its own
+    ///   mutation methods that change metadata fields,
+    ///
+    /// then call `instance.notify_field_written(field_name)` to keep the
+    /// cache consistent. Forgetting will produce a stale snapshot —
+    /// monitors will continue to see the old EGU/PREC/limits until the
+    /// next legitimate metadata-field write triggers invalidation.
+    ///
+    /// # Symmetric note for `populate_*` extensions
+    ///
+    /// If a future change adds a new field to `populate_display_info`,
+    /// `populate_control_info`, or `populate_enum_info` (e.g. populating
+    /// `display.form` from a record's `Q:form` info tag, or
+    /// `display.description` from DESC), the new source field name MUST
+    /// also be added to `is_metadata_field` so writes to it invalidate
+    /// the cache.
+    pub(crate) metadata_cache: StdMutex<Option<MetadataSnapshot>>,
 }
 
 impl RecordInstance {
@@ -74,7 +166,66 @@ impl RecordInstance {
             put_notify_tx: None,
             last_posted: HashMap::new(),
             reprocess_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            metadata_cache: StdMutex::new(None),
         }
+    }
+
+    /// Invalidate the metadata cache. Called after writing any
+    /// metadata-class field (EGU, PREC, HOPR/LOPR, alarm limits,
+    /// DRVH/DRVL, enum strings). The next snapshot will rebuild the
+    /// cache from the new values.
+    pub fn invalidate_metadata_cache(&self) {
+        if let Ok(mut guard) = self.metadata_cache.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Hook called by the database after a field is written. If the
+    /// field is in the metadata-class set, the cache is invalidated so
+    /// the next snapshot picks up the new value.
+    ///
+    /// Field name is automatically uppercased.
+    pub fn notify_field_written(&self, field: &str) {
+        let upper = field.to_ascii_uppercase();
+        if is_metadata_field(&upper) {
+            self.invalidate_metadata_cache();
+        }
+    }
+
+    /// Returns the cached MetadataSnapshot, building and storing it on
+    /// the first call (or after invalidation). Used by both
+    /// `snapshot_for_field` and `make_monitor_snapshot` so the populate
+    /// cost is paid at most once per metadata-stable interval.
+    fn cached_metadata(&self) -> MetadataSnapshot {
+        // Fast path: cache hit
+        if let Ok(guard) = self.metadata_cache.lock()
+            && let Some(cached) = guard.as_ref()
+        {
+            return cached.clone();
+        }
+
+        // Cache miss: build a fresh metadata snapshot
+        let mut tmp = super::super::snapshot::Snapshot::new(
+            EpicsValue::Double(0.0),
+            0,
+            0,
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        self.populate_display_info(&mut tmp);
+        self.populate_control_info(&mut tmp);
+        self.populate_enum_info(&mut tmp);
+
+        let meta = MetadataSnapshot {
+            display: tmp.display,
+            control: tmp.control,
+            enums: tmp.enums,
+        };
+
+        // Store back; ignore poisoning (cache is best-effort).
+        if let Ok(mut guard) = self.metadata_cache.lock() {
+            *guard = Some(meta.clone());
+        }
+        meta
     }
 
     /// Check if the record is currently processing (PACT equivalent).
@@ -100,9 +251,17 @@ impl RecordInstance {
             self.common.sevr as u16,
             self.common.time,
         );
-        self.populate_display_info(&mut snap);
-        self.populate_control_info(&mut snap);
-        self.populate_enum_info(&mut snap);
+
+        // Pull display/control/enums from the metadata cache (build on
+        // first call, hit thereafter until invalidated by a metadata-class
+        // field write).
+        let meta = self.cached_metadata();
+        snap.display = meta.display;
+        snap.control = meta.control;
+        snap.enums = meta.enums;
+
+        // Common-field enum mapping (e.g. .SCAN choices) is field-specific
+        // and not part of the per-record cache.
         self.populate_common_enum_info(field, &mut snap);
         Some(snap)
     }
@@ -112,16 +271,30 @@ impl RecordInstance {
         let rtype = self.record.record_type();
         match rtype {
             "ai" | "ao" | "calc" | "calcout" => {
-                let egu = self.record.get_field("EGU")
-                    .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                let egu = self
+                    .record
+                    .get_field("EGU")
+                    .and_then(|v| {
+                        if let EpicsValue::String(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
-                let prec = self.record.get_field("PREC")
+                let prec = self
+                    .record
+                    .get_field("PREC")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0) as i16;
-                let hopr = self.record.get_field("HOPR")
+                let hopr = self
+                    .record
+                    .get_field("HOPR")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0);
-                let lopr = self.record.get_field("LOPR")
+                let lopr = self
+                    .record
+                    .get_field("LOPR")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0);
                 let (hihi, high, low, lolo) = self.alarm_limits();
@@ -134,16 +307,29 @@ impl RecordInstance {
                     upper_warning_limit: high,
                     lower_warning_limit: low,
                     lower_alarm_limit: lolo,
+                    ..Default::default()
                 });
             }
             "longin" | "longout" => {
-                let egu = self.record.get_field("EGU")
-                    .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                let egu = self
+                    .record
+                    .get_field("EGU")
+                    .and_then(|v| {
+                        if let EpicsValue::String(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
-                let hopr = self.record.get_field("HOPR")
+                let hopr = self
+                    .record
+                    .get_field("HOPR")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0);
-                let lopr = self.record.get_field("LOPR")
+                let lopr = self
+                    .record
+                    .get_field("LOPR")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0);
                 let (hihi, high, low, lolo) = self.alarm_limits();
@@ -156,19 +342,34 @@ impl RecordInstance {
                     upper_warning_limit: high,
                     lower_warning_limit: low,
                     lower_alarm_limit: lolo,
+                    ..Default::default()
                 });
             }
             "motor" => {
-                let egu = self.record.get_field("EGU")
-                    .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                let egu = self
+                    .record
+                    .get_field("EGU")
+                    .and_then(|v| {
+                        if let EpicsValue::String(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
-                let prec = self.record.get_field("PREC")
+                let prec = self
+                    .record
+                    .get_field("PREC")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0) as i16;
-                let hlm = self.record.get_field("HLM")
+                let hlm = self
+                    .record
+                    .get_field("HLM")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0);
-                let llm = self.record.get_field("LLM")
+                let llm = self
+                    .record
+                    .get_field("LLM")
                     .and_then(|v| v.to_f64())
                     .unwrap_or(0.0);
                 snap.display = Some(super::super::snapshot::DisplayInfo {
@@ -180,6 +381,7 @@ impl RecordInstance {
                     upper_warning_limit: 0.0,
                     lower_warning_limit: 0.0,
                     lower_alarm_limit: 0.0,
+                    ..Default::default()
                 });
             }
             _ => {}
@@ -194,8 +396,16 @@ impl RecordInstance {
                 // Output records use DRVH/DRVL, fallback to HOPR/LOPR
                 let drvh = self.record.get_field("DRVH").and_then(|v| v.to_f64());
                 let drvl = self.record.get_field("DRVL").and_then(|v| v.to_f64());
-                let hopr = self.record.get_field("HOPR").and_then(|v| v.to_f64()).unwrap_or(0.0);
-                let lopr = self.record.get_field("LOPR").and_then(|v| v.to_f64()).unwrap_or(0.0);
+                let hopr = self
+                    .record
+                    .get_field("HOPR")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
+                let lopr = self
+                    .record
+                    .get_field("LOPR")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
                 snap.control = Some(super::super::snapshot::ControlInfo {
                     upper_ctrl_limit: drvh.unwrap_or(hopr),
                     lower_ctrl_limit: drvl.unwrap_or(lopr),
@@ -203,8 +413,16 @@ impl RecordInstance {
             }
             "motor" => {
                 // Motor records use HLM/LLM as control limits
-                let hlm = self.record.get_field("HLM").and_then(|v| v.to_f64()).unwrap_or(0.0);
-                let llm = self.record.get_field("LLM").and_then(|v| v.to_f64()).unwrap_or(0.0);
+                let hlm = self
+                    .record
+                    .get_field("HLM")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
+                let llm = self
+                    .record
+                    .get_field("LLM")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
                 snap.control = Some(super::super::snapshot::ControlInfo {
                     upper_ctrl_limit: hlm,
                     lower_ctrl_limit: llm,
@@ -212,8 +430,16 @@ impl RecordInstance {
             }
             "ai" | "longin" | "calc" | "calcout" => {
                 // Input records use HOPR/LOPR as control limits
-                let hopr = self.record.get_field("HOPR").and_then(|v| v.to_f64()).unwrap_or(0.0);
-                let lopr = self.record.get_field("LOPR").and_then(|v| v.to_f64()).unwrap_or(0.0);
+                let hopr = self
+                    .record
+                    .get_field("HOPR")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
+                let lopr = self
+                    .record
+                    .get_field("LOPR")
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0);
                 snap.control = Some(super::super::snapshot::ControlInfo {
                     upper_ctrl_limit: hopr,
                     lower_ctrl_limit: lopr,
@@ -228,11 +454,27 @@ impl RecordInstance {
         let rtype = self.record.record_type();
         match rtype {
             "bi" | "bo" | "busy" => {
-                let znam = self.record.get_field("ZNAM")
-                    .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                let znam = self
+                    .record
+                    .get_field("ZNAM")
+                    .and_then(|v| {
+                        if let EpicsValue::String(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
-                let onam = self.record.get_field("ONAM")
-                    .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                let onam = self
+                    .record
+                    .get_field("ONAM")
+                    .and_then(|v| {
+                        if let EpicsValue::String(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
                 snap.enums = Some(super::super::snapshot::EnumInfo {
                     strings: vec![znam, onam],
@@ -240,14 +482,21 @@ impl RecordInstance {
             }
             "mbbi" | "mbbo" => {
                 let state_fields = [
-                    "ZRST", "ONST", "TWST", "THST", "FRST", "FVST", "SXST", "SVST",
-                    "EIST", "NIST", "TEST", "ELST", "TVST", "TTST", "FTST", "FFST",
+                    "ZRST", "ONST", "TWST", "THST", "FRST", "FVST", "SXST", "SVST", "EIST", "NIST",
+                    "TEST", "ELST", "TVST", "TTST", "FTST", "FFST",
                 ];
                 let strings: Vec<String> = state_fields
                     .iter()
                     .map(|f| {
-                        self.record.get_field(f)
-                            .and_then(|v| if let EpicsValue::String(s) = v { Some(s) } else { None })
+                        self.record
+                            .get_field(f)
+                            .and_then(|v| {
+                                if let EpicsValue::String(s) = v {
+                                    Some(s)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_default()
                     })
                     .collect();
@@ -326,24 +575,64 @@ impl RecordInstance {
             "PUTF" => Some(EpicsValue::Char(if self.common.putf { 1 } else { 0 })),
             "RPRO" => Some(EpicsValue::Char(if self.common.rpro { 1 } else { 0 })),
             "PACT" => Some(EpicsValue::Char(
-                if self.processing.load(std::sync::atomic::Ordering::Acquire) { 1 } else { 0 }
+                if self.processing.load(std::sync::atomic::Ordering::Acquire) {
+                    1
+                } else {
+                    0
+                },
             )),
             "PROC" => Some(EpicsValue::Char(0)), // Always 0 (trigger-only)
             // Analog alarm fields
-            "HIHI" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Double(a.hihi)),
-            "HIGH" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Double(a.high)),
-            "LOW" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Double(a.low)),
-            "LOLO" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Double(a.lolo)),
-            "HHSV" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Short(a.hhsv as i16)),
-            "HSV" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Short(a.hsv as i16)),
-            "LSV" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Short(a.lsv as i16)),
-            "LLSV" => self.common.analog_alarm.as_ref().map(|a| EpicsValue::Short(a.llsv as i16)),
+            "HIHI" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Double(a.hihi)),
+            "HIGH" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Double(a.high)),
+            "LOW" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Double(a.low)),
+            "LOLO" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Double(a.lolo)),
+            "HHSV" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Short(a.hhsv as i16)),
+            "HSV" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Short(a.hsv as i16)),
+            "LSV" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Short(a.lsv as i16)),
+            "LLSV" => self
+                .common
+                .analog_alarm
+                .as_ref()
+                .map(|a| EpicsValue::Short(a.llsv as i16)),
             _ => None,
         }
     }
 
     /// Set a common field value. Returns what scan index changes are needed.
-    pub fn put_common_field(&mut self, name: &str, value: EpicsValue) -> CaResult<CommonFieldPutResult> {
+    pub fn put_common_field(
+        &mut self,
+        name: &str,
+        value: EpicsValue,
+    ) -> CaResult<CommonFieldPutResult> {
         let name = name.to_ascii_uppercase();
         self.record.validate_put(&name, &value)?;
         self.record.special(&name, false)?;
@@ -377,13 +666,11 @@ impl RecordInstance {
                     }
                 }
             }
-            "ACKT" => {
-                match value {
-                    EpicsValue::Char(v) => self.common.ackt = v != 0,
-                    EpicsValue::Short(v) => self.common.ackt = v != 0,
-                    _ => {}
-                }
-            }
+            "ACKT" => match value {
+                EpicsValue::Char(v) => self.common.ackt = v != 0,
+                EpicsValue::Short(v) => self.common.ackt = v != 0,
+                _ => {}
+            },
             "UDF" => {
                 if let EpicsValue::Char(v) = value {
                     self.common.udf = v != 0;
@@ -407,7 +694,11 @@ impl RecordInstance {
                     let phas = self.common.phas;
                     self.record.on_put(&name);
                     let _ = self.record.special(&name, true);
-                    return Ok(CommonFieldPutResult::ScanChanged { old_scan, new_scan, phas });
+                    return Ok(CommonFieldPutResult::ScanChanged {
+                        old_scan,
+                        new_scan,
+                        phas,
+                    });
                 }
             }
             "SSCN" => {
@@ -488,7 +779,11 @@ impl RecordInstance {
                         let scan = self.common.scan;
                         self.record.on_put(&name);
                         let _ = self.record.special(&name, true);
-                        return Ok(CommonFieldPutResult::PhasChanged { scan, old_phas, new_phas: v });
+                        return Ok(CommonFieldPutResult::PhasChanged {
+                            scan,
+                            old_phas,
+                            new_phas: v,
+                        });
                     }
                 }
             }
@@ -529,15 +824,15 @@ impl RecordInstance {
                 }
             }
             "LCNT" => {
-                if let EpicsValue::Short(v) = value { self.common.lcnt = v; }
-            }
-            "DISP" => {
-                match value {
-                    EpicsValue::Char(v) => self.common.disp = v != 0,
-                    EpicsValue::Short(v) => self.common.disp = v != 0,
-                    _ => {}
+                if let EpicsValue::Short(v) = value {
+                    self.common.lcnt = v;
                 }
             }
+            "DISP" => match value {
+                EpicsValue::Char(v) => self.common.disp = v != 0,
+                EpicsValue::Short(v) => self.common.disp = v != 0,
+                _ => {}
+            },
             "PUTF" => return Err(CaError::ReadOnlyField("PUTF".into())),
             "RPRO" => {
                 if let EpicsValue::Char(v) = value {
@@ -611,7 +906,19 @@ impl RecordInstance {
         // Check UDF first
         recgbl::rec_gbl_check_udf(&mut self.common);
 
+        // Check CALC_ALARM for calc/calcout records
         let rtype = self.record.record_type();
+        if rtype == "calc" || rtype == "calcout" || rtype == "scalcout" {
+            // calc_alarm is exposed as a boolean field - check it
+            if let Some(EpicsValue::Char(1)) = self.record.get_field("CALC_ALARM") {
+                recgbl::rec_gbl_set_sevr(
+                    &mut self.common,
+                    alarm_status::CALC_ALARM,
+                    crate::server::record::AlarmSeverity::Invalid,
+                );
+            }
+        }
+
         match rtype {
             "ai" | "ao" | "longin" | "longout" => {
                 if let Some(ref alarm_cfg) = self.common.analog_alarm.clone() {
@@ -628,17 +935,73 @@ impl RecordInstance {
                     Some(EpicsValue::Enum(v)) => v,
                     _ => return,
                 };
-                let zsv = self.record.get_field("ZSV").and_then(|v| if let EpicsValue::Short(s) = v { Some(s) } else { None }).unwrap_or(0);
-                let osv = self.record.get_field("OSV").and_then(|v| if let EpicsValue::Short(s) = v { Some(s) } else { None }).unwrap_or(0);
-                let cosv = self.record.get_field("COSV").and_then(|v| if let EpicsValue::Short(s) = v { Some(s) } else { None }).unwrap_or(0);
+                let zsv = self
+                    .record
+                    .get_field("ZSV")
+                    .and_then(|v| {
+                        if let EpicsValue::Short(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                let osv = self
+                    .record
+                    .get_field("OSV")
+                    .and_then(|v| {
+                        if let EpicsValue::Short(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                let cosv = self
+                    .record
+                    .get_field("COSV")
+                    .and_then(|v| {
+                        if let EpicsValue::Short(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
 
-                let state_sev = if val == 0 { zsv } else { osv };
-                let sev = AlarmSeverity::from_u16(state_sev as u16);
-                let cos_sev = AlarmSeverity::from_u16(cosv as u16);
-                let final_sev = if cos_sev as u16 > sev as u16 { cos_sev } else { sev };
+                // Guard: val > 1 means no alarm check (like C)
+                if val <= 1 {
+                    // State alarm: ZSV for val==0, OSV for val==1
+                    let state_sev = if val == 0 { zsv } else { osv };
+                    let sev = AlarmSeverity::from_u16(state_sev as u16);
+                    if sev != AlarmSeverity::NoAlarm {
+                        recgbl::rec_gbl_set_sevr(&mut self.common, alarm_status::STATE_ALARM, sev);
+                    }
 
-                if final_sev != AlarmSeverity::NoAlarm {
-                    recgbl::rec_gbl_set_sevr(&mut self.common, alarm_status::STATE_ALARM, final_sev);
+                    // COS alarm: only fires when val changed from LALM
+                    let lalm = self
+                        .record
+                        .get_field("LALM")
+                        .and_then(|v| {
+                            if let EpicsValue::Enum(s) = v {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(val);
+
+                    if val != lalm {
+                        let cos_sev = AlarmSeverity::from_u16(cosv as u16);
+                        if cos_sev != AlarmSeverity::NoAlarm {
+                            recgbl::rec_gbl_set_sevr(
+                                &mut self.common,
+                                alarm_status::COS_ALARM,
+                                cos_sev,
+                            );
+                        }
+                        let _ = self.record.put_field("LALM", EpicsValue::Enum(val));
+                    }
                 }
             }
             "mbbi" | "mbbo" => {
@@ -646,26 +1009,77 @@ impl RecordInstance {
                     Some(EpicsValue::Enum(v)) => v as usize,
                     _ => return,
                 };
-                let sv_fields = ["ZRSV", "ONSV", "TWSV", "THSV", "FRSV", "FVSV",
-                    "SXSV", "SVSV", "EISV", "NISV", "TESV", "ELSV",
-                    "TVSV", "TTSV", "FTSV", "FFSV"];
-                let unsv = self.record.get_field("UNSV").and_then(|v| if let EpicsValue::Short(s) = v { Some(s) } else { None }).unwrap_or(0);
-                let cosv = self.record.get_field("COSV").and_then(|v| if let EpicsValue::Short(s) = v { Some(s) } else { None }).unwrap_or(0);
+                let sv_fields = [
+                    "ZRSV", "ONSV", "TWSV", "THSV", "FRSV", "FVSV", "SXSV", "SVSV", "EISV", "NISV",
+                    "TESV", "ELSV", "TVSV", "TTSV", "FTSV", "FFSV",
+                ];
+                let unsv = self
+                    .record
+                    .get_field("UNSV")
+                    .and_then(|v| {
+                        if let EpicsValue::Short(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                let cosv = self
+                    .record
+                    .get_field("COSV")
+                    .and_then(|v| {
+                        if let EpicsValue::Short(s) = v {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
 
+                // State alarm: per-state severity or UNSV for unknown states
                 let state_sev = if val < 16 {
-                    self.record.get_field(sv_fields[val])
-                        .and_then(|v| if let EpicsValue::Short(s) = v { Some(s) } else { None })
-                        .unwrap_or(unsv)
+                    self.record
+                        .get_field(sv_fields[val])
+                        .and_then(|v| {
+                            if let EpicsValue::Short(s) = v {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0)
                 } else {
                     unsv
                 };
 
                 let sev = AlarmSeverity::from_u16(state_sev as u16);
-                let cos_sev = AlarmSeverity::from_u16(cosv as u16);
-                let final_sev = if cos_sev as u16 > sev as u16 { cos_sev } else { sev };
+                if sev != AlarmSeverity::NoAlarm {
+                    recgbl::rec_gbl_set_sevr(&mut self.common, alarm_status::STATE_ALARM, sev);
+                }
 
-                if final_sev != AlarmSeverity::NoAlarm {
-                    recgbl::rec_gbl_set_sevr(&mut self.common, alarm_status::STATE_ALARM, final_sev);
+                // COS alarm: only when val changed from LALM (like bi/bo)
+                let lalm = self
+                    .record
+                    .get_field("LALM")
+                    .and_then(|v| {
+                        if let EpicsValue::Enum(s) = v {
+                            Some(s as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(val);
+
+                if val != lalm {
+                    let cos_sev = AlarmSeverity::from_u16(cosv as u16);
+                    if cos_sev != AlarmSeverity::NoAlarm {
+                        recgbl::rec_gbl_set_sevr(
+                            &mut self.common,
+                            alarm_status::COS_ALARM,
+                            cos_sev,
+                        );
+                    }
+                    let _ = self.record.put_field("LALM", EpicsValue::Enum(val as u16));
                 }
             }
             _ => {} // no-op for other types
@@ -676,36 +1090,41 @@ impl RecordInstance {
         use crate::server::recgbl::{self, alarm_status};
 
         let hyst = self.common.hyst;
-        let lalm = self.record.get_field("LALM")
+        let lalm = self
+            .record
+            .get_field("LALM")
             .and_then(|v| v.to_f64())
             .unwrap_or(val);
 
-        let (new_sevr, new_stat) = if cfg.hhsv != AlarmSeverity::NoAlarm && val >= cfg.hihi && cfg.hihi != 0.0 {
-            (cfg.hhsv, alarm_status::HIHI_ALARM)
-        } else if cfg.llsv != AlarmSeverity::NoAlarm && val <= cfg.lolo && cfg.lolo != 0.0 {
-            (cfg.llsv, alarm_status::LOLO_ALARM)
-        } else if cfg.hsv != AlarmSeverity::NoAlarm && val >= cfg.high && cfg.high != 0.0 {
-            (cfg.hsv, alarm_status::HIGH_ALARM)
-        } else if cfg.lsv != AlarmSeverity::NoAlarm && val <= cfg.low && cfg.low != 0.0 {
-            (cfg.lsv, alarm_status::LOW_ALARM)
+        // C-style per-level hysteresis: alarm fires if val passes the level,
+        // OR if we were already at that alarm level (lalm == alev) and val
+        // hasn't retreated past the hysteresis margin.
+        let (new_sevr, new_stat, alev) = if cfg.hhsv != AlarmSeverity::NoAlarm
+            && (val >= cfg.hihi || (lalm == cfg.hihi && val >= cfg.hihi - hyst))
+        {
+            (cfg.hhsv, alarm_status::HIHI_ALARM, cfg.hihi)
+        } else if cfg.llsv != AlarmSeverity::NoAlarm
+            && (val <= cfg.lolo || (lalm == cfg.lolo && val <= cfg.lolo + hyst))
+        {
+            (cfg.llsv, alarm_status::LOLO_ALARM, cfg.lolo)
+        } else if cfg.hsv != AlarmSeverity::NoAlarm
+            && (val >= cfg.high || (lalm == cfg.high && val >= cfg.high - hyst))
+        {
+            (cfg.hsv, alarm_status::HIGH_ALARM, cfg.high)
+        } else if cfg.lsv != AlarmSeverity::NoAlarm
+            && (val <= cfg.low || (lalm == cfg.low && val <= cfg.low + hyst))
+        {
+            (cfg.lsv, alarm_status::LOW_ALARM, cfg.low)
         } else {
-            (AlarmSeverity::NoAlarm, alarm_status::NO_ALARM)
+            (AlarmSeverity::NoAlarm, alarm_status::NO_ALARM, 0.0)
         };
-
-        // Apply hysteresis: only change alarm if value moved enough from LALM
-        if hyst > 0.0 && self.common.sevr != AlarmSeverity::NoAlarm {
-            if new_sevr == AlarmSeverity::NoAlarm && (val - lalm).abs() < hyst {
-                // Stay in current alarm (hysteresis prevents clearing)
-                // Re-raise the current alarm into nsta/nsev
-                let cur_stat = self.common.stat;
-                let cur_sevr = self.common.sevr;
-                recgbl::rec_gbl_set_sevr(&mut self.common, cur_stat, cur_sevr);
-                return;
-            }
-        }
 
         if new_sevr != AlarmSeverity::NoAlarm {
             recgbl::rec_gbl_set_sevr(&mut self.common, new_stat, new_sevr);
+            // C sets LALM to the alarm threshold level, not the current value
+            let _ = self.record.put_field("LALM", EpicsValue::Double(alev));
+        } else {
+            // No alarm condition: reset LALM to current value (like C)
             let _ = self.record.put_field("LALM", EpicsValue::Double(val));
         }
     }
@@ -716,7 +1135,10 @@ impl RecordInstance {
         use crate::server::recgbl::{self, EventMask};
         const LCNT_ALARM_THRESHOLD: i16 = 10;
 
-        if self.processing.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if self
+            .processing
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
             self.common.lcnt = self.common.lcnt.saturating_add(1);
             if self.common.lcnt >= LCNT_ALARM_THRESHOLD {
                 self.common.sevr = AlarmSeverity::Invalid;
@@ -746,6 +1168,14 @@ impl RecordInstance {
         // Note: process_local() does not execute ProcessActions — those are
         // handled by the full process_record_with_links() path in processing.rs.
 
+        // If the record reports it modified a metadata-class field during
+        // process(), invalidate the metadata cache so the next snapshot
+        // rebuilds from the new values. Default impl returns false, so
+        // most records pay zero cost here.
+        if self.record.took_metadata_change() {
+            self.invalidate_metadata_cache();
+        }
+
         if process_result == RecordProcessResult::AsyncPending {
             // Async: PACT stays set, no further processing this cycle
             // Don't clear processing flag (guard won't run — we leak it intentionally)
@@ -771,9 +1201,8 @@ impl RecordInstance {
                 if changed {
                     if name == "VAL" {
                         if let Some(f) = val.to_f64() {
-                            if self.record.put_field("MLST", EpicsValue::Double(f)).is_err() {
-                                self.common.mlst = Some(f);
-                            }
+                            self.put_coerced("MLST", f);
+                            self.common.mlst = Some(f);
                         }
                     }
                     self.last_posted.insert(name.clone(), val.clone());
@@ -826,8 +1255,14 @@ impl RecordInstance {
             }
         }
         if alarm_result.alarm_changed {
-            changed_fields.push(("SEVR".to_string(), EpicsValue::Short(self.common.sevr as i16)));
-            changed_fields.push(("STAT".to_string(), EpicsValue::Short(self.common.stat as i16)));
+            changed_fields.push((
+                "SEVR".to_string(),
+                EpicsValue::Short(self.common.sevr as i16),
+            ));
+            changed_fields.push((
+                "STAT".to_string(),
+                EpicsValue::Short(self.common.stat as i16),
+            ));
         }
 
         // Add subscribed fields that actually changed since last notification.
@@ -853,7 +1288,10 @@ impl RecordInstance {
             event_mask |= EventMask::VALUE;
         }
 
-        Ok(ProcessSnapshot { changed_fields, event_mask })
+        Ok(ProcessSnapshot {
+            changed_fields,
+            event_mask,
+        })
     }
 
     /// Check deadband (MDEL/ADEL) for VAL monitor/archive filtering.
@@ -861,20 +1299,46 @@ impl RecordInstance {
     /// Updates ALST/MLST in the record when triggered.
     /// For records without MDEL/ADEL fields (e.g. motor), defaults to MDEL=0
     /// (trigger on any actual change) and uses CommonFields.mlst/alst as fallback.
+    /// Put a f64 value into a record field, coercing to the field's native type.
+    pub(crate) fn put_coerced(&mut self, field: &str, val: f64) {
+        use crate::types::EpicsValue;
+        let target_type = self
+            .record
+            .get_field(field)
+            .map(|v| v.db_field_type())
+            .unwrap_or(crate::types::DbFieldType::Double);
+        let coerced = EpicsValue::Double(val).convert_to(target_type);
+        let _ = self.record.put_field(field, coerced);
+    }
+
     pub fn check_deadband_ext(&mut self) -> (bool, bool) {
         let val = match self.record.val().and_then(|v| v.to_f64()) {
             Some(v) => v,
             None => return (true, true),
         };
 
-        let mdel = self.record.get_field("MDEL").and_then(|v| v.to_f64()).unwrap_or(0.0);
-        let adel = self.record.get_field("ADEL").and_then(|v| v.to_f64()).unwrap_or(0.0);
+        let mdel = self
+            .record
+            .get_field("MDEL")
+            .and_then(|v| v.to_f64())
+            .unwrap_or(0.0);
+        let adel = self
+            .record
+            .get_field("ADEL")
+            .and_then(|v| v.to_f64())
+            .unwrap_or(0.0);
 
         // Use record's MLST/ALST fields if available, otherwise fall back to CommonFields
-        let mlst = self.record.get_field("MLST").and_then(|v| v.to_f64())
+        let mlst = self
+            .record
+            .get_field("MLST")
+            .and_then(|v| v.to_f64())
             .or(self.common.mlst)
             .unwrap_or(f64::NAN);
-        let alst = self.record.get_field("ALST").and_then(|v| v.to_f64())
+        let alst = self
+            .record
+            .get_field("ALST")
+            .and_then(|v| v.to_f64())
             .or(self.common.alst)
             .unwrap_or(f64::NAN);
 
@@ -882,20 +1346,20 @@ impl RecordInstance {
         let archive_trigger = adel < 0.0 || alst.is_nan() || (val - alst).abs() > adel;
 
         if archive_trigger {
-            if self.record.put_field("ALST", EpicsValue::Double(val)).is_err() {
-                self.common.alst = Some(val);
-            }
+            self.put_coerced("ALST", val);
+            self.common.alst = Some(val);
         }
         if monitor_trigger {
-            if self.record.put_field("MLST", EpicsValue::Double(val)).is_err() {
-                self.common.mlst = Some(val);
-            }
+            self.put_coerced("MLST", val);
+            self.common.mlst = Some(val);
         }
 
         (monitor_trigger, archive_trigger)
     }
 
     /// Build a Snapshot for a given value, populated with the record's display metadata.
+    /// Uses the metadata cache so the populate cost is paid at most once
+    /// per metadata-stable interval (cf. `cached_metadata`).
     fn make_monitor_snapshot(&self, value: EpicsValue) -> super::super::snapshot::Snapshot {
         let mut snap = super::super::snapshot::Snapshot::new(
             value,
@@ -903,9 +1367,10 @@ impl RecordInstance {
             self.common.sevr as u16,
             self.common.time,
         );
-        self.populate_display_info(&mut snap);
-        self.populate_control_info(&mut snap);
-        self.populate_enum_info(&mut snap);
+        let meta = self.cached_metadata();
+        snap.display = meta.display;
+        snap.control = meta.control;
+        snap.enums = meta.enums;
         snap
     }
 
@@ -940,7 +1405,12 @@ impl RecordInstance {
     }
 
     /// Notify subscribers with an origin tag for self-write filtering.
-    pub fn notify_field_with_origin(&self, field: &str, mask: crate::server::recgbl::EventMask, origin: u64) {
+    pub fn notify_field_with_origin(
+        &self,
+        field: &str,
+        mask: crate::server::recgbl::EventMask,
+        origin: u64,
+    ) {
         if let Some(subs) = self.subscribers.get(field) {
             if let Some(value) = self.resolve_field(field) {
                 let mon_snap = self.make_monitor_snapshot(value);
@@ -1000,5 +1470,294 @@ impl RecordInstance {
         for subs in self.subscribers.values_mut() {
             subs.retain(|s| !s.tx.is_closed());
         }
+    }
+}
+
+#[cfg(test)]
+mod metadata_cache_tests {
+    use super::*;
+    use crate::server::records::ai::AiRecord;
+
+    /// Helper: build an AiRecord wrapped in a RecordInstance with EGU/PREC/HOPR/LOPR set.
+    fn ai_instance() -> RecordInstance {
+        let mut rec = AiRecord::default();
+        let _ = rec.put_field("EGU", EpicsValue::String("degC".into()));
+        let _ = rec.put_field("PREC", EpicsValue::Short(2));
+        let _ = rec.put_field("HOPR", EpicsValue::Double(100.0));
+        let _ = rec.put_field("LOPR", EpicsValue::Double(0.0));
+        let _ = rec.put_field("VAL", EpicsValue::Double(25.0));
+        RecordInstance::new("TEMP".to_string(), rec)
+    }
+
+    #[test]
+    fn metadata_field_set_check() {
+        // Sanity check that the metadata field set is recognized.
+        assert!(is_metadata_field("EGU"));
+        assert!(is_metadata_field("PREC"));
+        assert!(is_metadata_field("HOPR"));
+        assert!(is_metadata_field("LOPR"));
+        assert!(is_metadata_field("HIHI"));
+        assert!(is_metadata_field("DRVH"));
+        assert!(is_metadata_field("ZNAM"));
+        assert!(is_metadata_field("ZRST"));
+        assert!(is_metadata_field("FFST"));
+
+        // Non-metadata fields should NOT invalidate the cache
+        assert!(!is_metadata_field("VAL"));
+        assert!(!is_metadata_field("DESC"));
+        assert!(!is_metadata_field("SCAN"));
+        assert!(!is_metadata_field("PHAS"));
+    }
+
+    #[test]
+    fn cache_starts_empty_then_populates_on_first_snapshot() {
+        let inst = ai_instance();
+
+        // Cache starts empty
+        assert!(inst.metadata_cache.lock().unwrap().is_none());
+
+        // First snapshot triggers populate + cache store
+        let snap = inst.snapshot_for_field("VAL").unwrap();
+        let display = snap.display.expect("ai snapshot must have display");
+        assert_eq!(display.units, "degC");
+        assert_eq!(display.precision, 2);
+        assert_eq!(display.upper_disp_limit, 100.0);
+        assert_eq!(display.lower_disp_limit, 0.0);
+
+        // Cache is now populated
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn cache_hit_returns_same_metadata() {
+        let inst = ai_instance();
+
+        // Prime the cache
+        let snap1 = inst.snapshot_for_field("VAL").unwrap();
+        let display1 = snap1.display.unwrap();
+
+        // Subsequent snapshots return the same cached metadata
+        let snap2 = inst.snapshot_for_field("VAL").unwrap();
+        let display2 = snap2.display.unwrap();
+
+        assert_eq!(display1.units, display2.units);
+        assert_eq!(display1.precision, display2.precision);
+        assert_eq!(display1.upper_disp_limit, display2.upper_disp_limit);
+        assert_eq!(display1.lower_disp_limit, display2.lower_disp_limit);
+    }
+
+    #[test]
+    fn invalidate_clears_cache() {
+        let inst = ai_instance();
+        let _ = inst.snapshot_for_field("VAL");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        inst.invalidate_metadata_cache();
+        assert!(inst.metadata_cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn notify_field_written_invalidates_for_metadata_field() {
+        let inst = ai_instance();
+        let _ = inst.snapshot_for_field("VAL");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        // Writing a metadata field should invalidate
+        inst.notify_field_written("EGU");
+        assert!(inst.metadata_cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn notify_field_written_skips_non_metadata_field() {
+        let inst = ai_instance();
+        let _ = inst.snapshot_for_field("VAL");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        // Writing a value field should NOT invalidate the cache
+        inst.notify_field_written("VAL");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        // Same for DESC
+        inst.notify_field_written("DESC");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn notify_field_written_is_case_insensitive() {
+        let inst = ai_instance();
+        let _ = inst.snapshot_for_field("VAL");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        // Lowercase metadata field name should still trigger invalidation
+        inst.notify_field_written("egu");
+        assert!(inst.metadata_cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cache_picks_up_new_value_after_invalidation() {
+        let mut inst = ai_instance();
+
+        // First snapshot: degC
+        let snap1 = inst.snapshot_for_field("VAL").unwrap();
+        assert_eq!(snap1.display.unwrap().units, "degC");
+
+        // Mutate EGU and invalidate
+        let _ = inst
+            .record
+            .put_field("EGU", EpicsValue::String("mV".into()));
+        inst.notify_field_written("EGU");
+
+        // Second snapshot: mV (rebuilt)
+        let snap2 = inst.snapshot_for_field("VAL").unwrap();
+        assert_eq!(snap2.display.unwrap().units, "mV");
+    }
+
+    #[test]
+    fn make_monitor_snapshot_uses_cache() {
+        let inst = ai_instance();
+        assert!(inst.metadata_cache.lock().unwrap().is_none());
+
+        // make_monitor_snapshot should also populate the cache
+        let snap = inst.make_monitor_snapshot(EpicsValue::Double(42.0));
+        assert!(snap.display.is_some());
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        // Subsequent call hits cache
+        let snap2 = inst.make_monitor_snapshot(EpicsValue::Double(43.0));
+        let d1 = snap.display.unwrap();
+        let d2 = snap2.display.unwrap();
+        assert_eq!(d1.units, d2.units);
+        assert_eq!(d1.precision, d2.precision);
+    }
+
+    /// Stub record that simulates a record whose process() mutates an
+    /// internal metadata field. Used to verify that the
+    /// `Record::took_metadata_change()` hook actually triggers cache
+    /// invalidation in `process_local()`.
+    struct MutatingMetaRecord {
+        val: f64,
+        egu: String,
+        took_change: bool,
+    }
+
+    impl Record for MutatingMetaRecord {
+        fn record_type(&self) -> &'static str {
+            "ai" // pretend to be ai so populate_display_info populates EGU
+        }
+        fn process(&mut self) -> CaResult<crate::server::record::ProcessOutcome> {
+            // Simulate dynamic metadata change inside processing
+            self.egu = "kV".to_string();
+            self.took_change = true;
+            Ok(crate::server::record::ProcessOutcome::complete())
+        }
+        fn get_field(&self, name: &str) -> Option<EpicsValue> {
+            match name {
+                "VAL" => Some(EpicsValue::Double(self.val)),
+                "EGU" => Some(EpicsValue::String(self.egu.clone())),
+                "PREC" => Some(EpicsValue::Short(0)),
+                "HOPR" => Some(EpicsValue::Double(0.0)),
+                "LOPR" => Some(EpicsValue::Double(0.0)),
+                _ => None,
+            }
+        }
+        fn put_field(&mut self, name: &str, value: EpicsValue) -> CaResult<()> {
+            match (name, value) {
+                ("VAL", EpicsValue::Double(v)) => {
+                    self.val = v;
+                    Ok(())
+                }
+                ("EGU", EpicsValue::String(s)) => {
+                    self.egu = s;
+                    Ok(())
+                }
+                _ => Err(CaError::FieldNotFound(name.to_string())),
+            }
+        }
+        fn field_list(&self) -> &'static [crate::server::record::FieldDesc] {
+            &[]
+        }
+        fn took_metadata_change(&mut self) -> bool {
+            let was = self.took_change;
+            self.took_change = false; // reset after reporting
+            was
+        }
+    }
+
+    #[test]
+    fn process_local_invalidates_cache_on_took_metadata_change() {
+        let mut inst = RecordInstance::new(
+            "MUT".to_string(),
+            MutatingMetaRecord {
+                val: 1.0,
+                egu: "V".to_string(),
+                took_change: false,
+            },
+        );
+
+        // Build the cache once with the original EGU
+        let snap1 = inst.snapshot_for_field("VAL").unwrap();
+        assert_eq!(snap1.display.unwrap().units, "V");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        // Run process_local — the stub record sets took_change inside process()
+        let _ = inst.process_local();
+
+        // Cache should now be invalidated (took_metadata_change returned true)
+        assert!(
+            inst.metadata_cache.lock().unwrap().is_none(),
+            "process_local should invalidate cache when took_metadata_change is true"
+        );
+
+        // Next snapshot picks up the new EGU
+        let snap2 = inst.snapshot_for_field("VAL").unwrap();
+        assert_eq!(snap2.display.unwrap().units, "kV");
+    }
+
+    /// Stub record that does NOT mutate metadata fields. Verifies the
+    /// default `took_metadata_change` returns false and the cache stays.
+    struct StableMetaRecord {
+        val: f64,
+    }
+    impl Record for StableMetaRecord {
+        fn record_type(&self) -> &'static str {
+            "ai"
+        }
+        fn process(&mut self) -> CaResult<crate::server::record::ProcessOutcome> {
+            self.val += 1.0;
+            Ok(crate::server::record::ProcessOutcome::complete())
+        }
+        fn get_field(&self, name: &str) -> Option<EpicsValue> {
+            match name {
+                "VAL" => Some(EpicsValue::Double(self.val)),
+                "EGU" => Some(EpicsValue::String("V".into())),
+                "PREC" => Some(EpicsValue::Short(0)),
+                "HOPR" => Some(EpicsValue::Double(0.0)),
+                "LOPR" => Some(EpicsValue::Double(0.0)),
+                _ => None,
+            }
+        }
+        fn put_field(&mut self, _: &str, _: EpicsValue) -> CaResult<()> {
+            Ok(())
+        }
+        fn field_list(&self) -> &'static [crate::server::record::FieldDesc] {
+            &[]
+        }
+        // took_metadata_change uses default impl (returns false)
+    }
+
+    #[test]
+    fn process_local_keeps_cache_when_no_metadata_change() {
+        let mut inst = RecordInstance::new("STABLE".to_string(), StableMetaRecord { val: 0.0 });
+
+        let _ = inst.snapshot_for_field("VAL");
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+
+        // Run process_local several times — cache should remain intact
+        let _ = inst.process_local();
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+        let _ = inst.process_local();
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
+        let _ = inst.process_local();
+        assert!(inst.metadata_cache.lock().unwrap().is_some());
     }
 }

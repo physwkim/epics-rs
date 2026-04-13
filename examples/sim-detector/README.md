@@ -69,7 +69,7 @@ The driver uses a dirty flag system to avoid recomputing caches unnecessarily. C
 
 ```bash
 # Library only
-cargo build -p sim-detector
+cargo build -p sim-detector --features ioc
 
 # Full IOC with plugins
 cargo build --release -p sim-detector --features ioc --bin sim_ioc

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 use asyn_rs::error::AsynResult;
 use asyn_rs::interfaces::motor::{AsynMotor, MotorStatus};
@@ -26,7 +26,13 @@ impl BenchMotor {
 }
 
 impl AsynMotor for BenchMotor {
-    fn move_absolute(&mut self, _user: &AsynUser, pos: f64, _vel: f64, _acc: f64) -> AsynResult<()> {
+    fn move_absolute(
+        &mut self,
+        _user: &AsynUser,
+        pos: f64,
+        _vel: f64,
+        _acc: f64,
+    ) -> AsynResult<()> {
         self.target = pos;
         self.moving = true;
         Ok(())
@@ -78,6 +84,8 @@ fn bench_motor_move_to_done(c: &mut Criterion) {
                 let (runtime, handle) = create_axis_runtime(
                     Box::new(BenchMotor::new()),
                     Duration::from_millis(10),
+                    Duration::from_millis(10),
+                    0,
                 );
                 let rt_handle = tokio::spawn(runtime.run());
 
