@@ -315,14 +315,33 @@ async fn dispatch_message(
                         // Use resolve_field for 3-level priority
                         let value = instance.resolve_field(&field);
                         match value {
-                            Some(v) => (
-                                v.dbr_type(),
-                                v.count() as u32,
-                                ChannelTarget::RecordField {
-                                    record: rec.clone(),
-                                    field: field.clone(),
-                                },
-                            ),
+                            Some(v) => {
+                                // For waveform records, get_field("VAL") returns
+                                // NORD elements (valid data) but the channel's
+                                // native count must be NELM (max capacity) so
+                                // clients allocate the right buffer.
+                                let element_count =
+                                    if field == "VAL" && instance.record.record_type() == "waveform"
+                                    {
+                                        instance
+                                            .resolve_field("NELM")
+                                            .and_then(|n| match n {
+                                                EpicsValue::Long(n) => Some(n.max(0) as u32),
+                                                _ => None,
+                                            })
+                                            .unwrap_or(v.count() as u32)
+                                    } else {
+                                        v.count() as u32
+                                    };
+                                (
+                                    v.dbr_type(),
+                                    element_count,
+                                    ChannelTarget::RecordField {
+                                        record: rec.clone(),
+                                        field: field.clone(),
+                                    },
+                                )
+                            }
                             None => {
                                 // Field not found — send CREATE_CH_FAIL
                                 let mut fail = CaHeader::new(CA_PROTO_CREATE_CH_FAIL);

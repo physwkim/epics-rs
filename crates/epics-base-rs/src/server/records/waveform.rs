@@ -200,7 +200,14 @@ impl Record for WaveformRecord {
 
     fn get_field(&self, name: &str) -> Option<EpicsValue> {
         match name {
-            "VAL" => Some(self.val.clone()),
+            "VAL" => {
+                // Return only NORD valid elements, not the full NELM buffer.
+                // CA clients use the returned element count to interpret the
+                // data (e.g. PyDMImageView computes height = count / width).
+                let mut val = self.val.clone();
+                val.truncate(self.nord.max(0) as usize);
+                Some(val)
+            }
             "NELM" => Some(EpicsValue::Long(self.nelm)),
             "NORD" => Some(EpicsValue::Long(self.nord)),
             "FTVL" => Some(EpicsValue::Short(self.ftvl)),
@@ -254,6 +261,11 @@ impl Record for WaveformRecord {
             }
             "NELM" => {
                 if let EpicsValue::Long(n) = value {
+                    if n <= 0 {
+                        return Err(CaError::InvalidValue(format!(
+                            "NELM must be positive, got {n}"
+                        )));
+                    }
                     self.nelm = n;
                     self.reallocate_val();
                     Ok(())
