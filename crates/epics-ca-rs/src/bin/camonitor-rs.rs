@@ -86,41 +86,18 @@ async fn monitor_pv(
         }
     });
 
-    // Subscribe — auto-restores on reconnection
-    loop {
-        match channel.subscribe().await {
-            Ok(mut monitor) => {
-                while let Some(result) = monitor.recv().await {
-                    match result {
-                        Ok(snap) => {
-                            let ts = format_server_timestamp(snap.timestamp);
-                            println!("{pv_name} {ts} {}", snap.value);
-                        }
-                        Err(e) => {
-                            eprintln!("{pv_name}: {e}");
-                        }
-                    }
-                }
-                // Monitor ended (disconnect) — wait for reconnection
-                let mut conn_rx = channel.connection_events();
-                loop {
-                    match conn_rx.recv().await {
-                        Ok(ConnectionEvent::Connected) => break,
-                        Ok(_) => continue,
-                        Err(_) => return,
-                    }
-                }
+    let Ok(mut monitor) = channel.subscribe().await else {
+        return;
+    };
+
+    while let Some(result) = monitor.recv().await {
+        match result {
+            Ok(snap) => {
+                let ts = format_server_timestamp(snap.timestamp);
+                println!("{pv_name} {ts} {}", snap.value);
             }
-            Err(_) => {
-                // Not connected yet, wait for connection
-                let mut conn_rx = channel.connection_events();
-                loop {
-                    match conn_rx.recv().await {
-                        Ok(ConnectionEvent::Connected) => break,
-                        Ok(_) => continue,
-                        Err(_) => return,
-                    }
-                }
+            Err(e) => {
+                eprintln!("{pv_name}: {e}");
             }
         }
     }

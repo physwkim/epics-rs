@@ -399,7 +399,8 @@ impl CaClient {
         timeout_secs: f64,
     ) -> CaResult<()> {
         let ch = self.create_channel(pv_name);
-        ch.wait_connected(Duration::from_secs(3)).await?;
+        let timeout = Duration::from_secs_f64(timeout_secs);
+        ch.wait_connected(timeout).await?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self.coord_tx.send(CoordRequest::GetChannelInfo {
@@ -412,8 +413,7 @@ impl CaClient {
             .ok_or(CaError::Disconnected)?;
 
         let value = EpicsValue::parse(snap.native_type, value_str)?;
-        ch.put_with_timeout(&value, Duration::from_secs_f64(timeout_secs))
-            .await?;
+        ch.put_with_timeout(&value, timeout).await?;
         let _ = self
             .coord_tx
             .send(CoordRequest::DropChannel { cid: ch.cid });
@@ -514,6 +514,10 @@ impl CaChannel {
     }
 
     pub async fn get(&self) -> CaResult<(DbFieldType, EpicsValue)> {
+        self.get_with_timeout(Duration::from_secs(30)).await
+    }
+
+    pub async fn get_with_timeout(&self, timeout: Duration) -> CaResult<(DbFieldType, EpicsValue)> {
         let (info_tx, info_rx) = oneshot::channel();
         let _ = self.coord_tx.send(CoordRequest::GetChannelInfo {
             cid: self.cid,
@@ -544,7 +548,7 @@ impl CaChannel {
             server_addr: snap.server_addr,
         });
 
-        let (data_type, count, data) = tokio::time::timeout(Duration::from_secs(30), reply_rx)
+        let (data_type, count, data) = tokio::time::timeout(timeout, reply_rx)
             .await
             .map_err(|_| CaError::Timeout)?
             .map_err(|_| CaError::Shutdown)??;
@@ -742,9 +746,6 @@ impl CaChannel {
     /// Subscribe with client-side deadband filtering.
     /// Events where |new - old| < deadband are suppressed (scalar values only).
     pub async fn subscribe_with_deadband(&self, deadband: f64) -> CaResult<MonitorHandle> {
-        // Wait for connection first
-        self.wait_connected(Duration::from_secs(30)).await?;
-
         let subid = alloc_subid();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
@@ -943,34 +944,38 @@ async fn run_coordinator(
                     }
                     CoordRequest::Subscribe { cid, subid, mask, deadband, callback_tx, reply } => {
                         if let Some(ch) = channels.get(&cid) {
-                            if ch.state == ChannelState::Connected {
-                                let native_type = ch.native_type.unwrap() as u16;
-                                // Request DBR_TIME to get EPICS timestamp + alarm
-                                let time_type = native_type + 14;
-                                let count = ch.element_count;
-                                let sid = ch.sid;
-                                let server_addr = ch.server_addr.unwrap();
+                            let server_addr = ch.server_addr.unwrap_or_else(|| {
+                                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+                            });
+                            let connected = ch.state == ChannelState::Connected;
+                            let data_type = ch.native_type.map(|t| t as u16 + 14);
+                            let count = ch.native_type.map(|_| ch.element_count);
 
-                                subscriptions.add(subscription::SubscriptionRecord {
-                                    subid, cid, data_type: time_type, count, mask,
-                                    server_addr,
-                                    deadband, callback_tx, needs_restore: false,
-                                    last_value: None,
-                                    pending_deliveries: 0,
-                                });
+                            subscriptions.add(subscription::SubscriptionRecord {
+                                subid,
+                                cid,
+                                data_type,
+                                count,
+                                mask,
+                                server_addr,
+                                deadband,
+                                callback_tx,
+                                needs_restore: !connected,
+                                last_value: None,
+                                pending_deliveries: 0,
+                            });
 
+                            if connected {
                                 let _ = transport_tx.send(TransportCommand::Subscribe {
-                                    sid,
-                                    data_type: time_type,
-                                    count,
+                                    sid: ch.sid,
+                                    data_type: data_type.expect("connected channel has native type"),
+                                    count: count.expect("connected channel has element count"),
                                     subid,
                                     mask,
                                     server_addr,
                                 });
-                                let _ = reply.send(Ok(()));
-                            } else {
-                                let _ = reply.send(Err(CaError::Disconnected));
                             }
+                            let _ = reply.send(Ok(()));
                         } else {
                             let _ = reply.send(Err(CaError::Disconnected));
                         }
@@ -980,12 +985,14 @@ async fn run_coordinator(
                             let cid = rec.cid;
                             if let Some(ch) = channels.get(&cid) {
                                 if ch.state == ChannelState::Connected {
-                                    let _ = transport_tx.send(TransportCommand::Unsubscribe {
-                                        sid: ch.sid,
-                                        subid,
-                                        data_type: rec.data_type,
-                                        server_addr: ch.server_addr.unwrap(),
-                                    });
+                                    if let Some(data_type) = rec.data_type {
+                                        let _ = transport_tx.send(TransportCommand::Unsubscribe {
+                                            sid: ch.sid,
+                                            subid,
+                                            data_type,
+                                            server_addr: ch.server_addr.unwrap(),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1015,12 +1022,14 @@ async fn run_coordinator(
                             if let Some(rec) = subscriptions.get(subid) {
                                 if let Some(ch) = channels.get(&cid) {
                                     if ch.state == ChannelState::Connected {
-                                        let _ = transport_tx.send(TransportCommand::Unsubscribe {
-                                            sid: ch.sid,
-                                            subid,
-                                            data_type: rec.data_type,
-                                            server_addr: ch.server_addr.unwrap(),
-                                        });
+                                        if let Some(data_type) = rec.data_type {
+                                            let _ = transport_tx.send(TransportCommand::Unsubscribe {
+                                                sid: ch.sid,
+                                                subid,
+                                                data_type,
+                                                server_addr: ch.server_addr.unwrap(),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -1169,7 +1178,14 @@ async fn run_coordinator(
                             });
 
                             // Restore subscriptions
-                            let (restored, stale) = subscriptions.restore_for_channel(cid, sid, server_addr, &transport_tx);
+                            let (restored, stale) = subscriptions.restore_for_channel(
+                                cid,
+                                sid,
+                                data_type,
+                                element_count,
+                                server_addr,
+                                &transport_tx,
+                            );
                             diag.connections.fetch_add(1, Ordering::Relaxed);
                             diag.record(DiagEvent::Connected { pv: ch.pv_name.clone(), server: server_addr });
                             if restored > 0 || stale > 0 {

@@ -13,8 +13,8 @@ use super::types::TransportCommand;
 pub(crate) struct SubscriptionRecord {
     pub subid: u32,
     pub cid: u32,
-    pub data_type: u16,
-    pub count: u32,
+    pub data_type: Option<u16>,
+    pub count: Option<u32>,
     pub mask: u16,
     pub server_addr: SocketAddr,
     pub callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
@@ -131,6 +131,8 @@ impl SubscriptionRegistry {
         &mut self,
         cid: u32,
         new_sid: u32,
+        native_type: u16,
+        element_count: u32,
         server_addr: std::net::SocketAddr,
         transport_tx: &mpsc::UnboundedSender<TransportCommand>,
     ) -> (u32, u32) {
@@ -151,10 +153,12 @@ impl SubscriptionRegistry {
             if rec.cid == cid && rec.needs_restore {
                 rec.needs_restore = false;
                 rec.server_addr = server_addr;
+                let data_type = *rec.data_type.get_or_insert(native_type + 14);
+                let count = *rec.count.get_or_insert(element_count);
                 let _ = transport_tx.send(TransportCommand::Subscribe {
                     sid: new_sid,
-                    data_type: rec.data_type,
-                    count: rec.count,
+                    data_type,
+                    count,
                     subid: rec.subid,
                     mask: rec.mask,
                     server_addr,

@@ -1,5 +1,6 @@
 use clap::Parser;
 use epics_ca_rs::client::CaClient;
+use epics_ca_rs::CaError;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -34,14 +35,14 @@ async fn main() {
     }
 
     // Read old value with timeout
-    let (native_type, old_value) = match tokio::time::timeout(timeout, ch.get()).await {
-        Ok(Ok((t, val))) => (t, val.to_string()),
-        Ok(Err(e)) => {
-            eprintln!("error: {e}");
+    let (native_type, old_value) = match ch.get_with_timeout(timeout).await {
+        Ok((t, val)) => (t, val.to_string()),
+        Err(CaError::Timeout) => {
+            eprintln!("Read operation timed out: PV data was not read.");
             std::process::exit(1);
         }
-        Err(_) => {
-            eprintln!("error: read operation timed out");
+        Err(e) => {
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     };
@@ -67,8 +68,8 @@ async fn main() {
     }
 
     // Re-read new value from server with timeout (C: caget after put)
-    let new_value = match tokio::time::timeout(timeout, ch.get()).await {
-        Ok(Ok((_, val))) => val.to_string(),
+    let new_value = match ch.get_with_timeout(timeout).await {
+        Ok((_, val)) => val.to_string(),
         _ => args.value.clone(),
     };
 

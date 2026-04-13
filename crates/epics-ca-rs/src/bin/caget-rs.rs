@@ -1,5 +1,6 @@
 use clap::Parser;
 use epics_ca_rs::client::CaClient;
+use epics_ca_rs::CaError;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -39,10 +40,10 @@ async fn main() {
             if connect.is_err() {
                 return (name, Err("not connected".to_string()));
             }
-            match tokio::time::timeout(t, ch.get()).await {
-                Ok(Ok((_dbr, value))) => (name, Ok(value.to_string())),
-                Ok(Err(e)) => (name, Err(format!("{e}"))),
-                Err(_) => (name, Err("timeout".to_string())),
+            match ch.get_with_timeout(t).await {
+                Ok((_dbr, value)) => (name, Ok(value.to_string())),
+                Err(CaError::Timeout) => (name, Err("timeout".to_string())),
+                Err(e) => (name, Err(format!("{e}"))),
             }
         }));
     }
