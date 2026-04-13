@@ -299,4 +299,7 @@ pub struct InternalFields {
     pub pending_retarget: Option<f64>,
     /// Remember jog direction for backlash (cleared by stop_jog)
     pub jog_was_forward: bool,
+    /// True after the initial DMOV 1→0 notification has been sent.
+    /// Reset when DMOV returns to 1.
+    pub dmov_notified: bool,
 }

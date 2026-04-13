@@ -148,10 +148,10 @@ impl Record for MotorRecord {
             }
         }
 
-        if move_started {
-            // Flush DMOV=0 immediately so monitors see the 1->0 transition
-            // before the move completes. The next I/O Intr cycle will
-            // process again and eventually notify DMOV=1.
+        if move_started && !self.internal.dmov_notified {
+            // First DMOV 1→0 transition: flush immediately so monitors see
+            // the transition before the move completes.
+            self.internal.dmov_notified = true;
             use epics_base_rs::types::EpicsValue;
             let fields = vec![
                 ("DMOV".to_string(), EpicsValue::Short(0)),
@@ -159,6 +159,8 @@ impl Record for MotorRecord {
                 ("VAL".to_string(), EpicsValue::Double(self.pos.val)),
                 ("DVAL".to_string(), EpicsValue::Double(self.pos.dval)),
                 ("RVAL".to_string(), EpicsValue::Long(self.pos.rval)),
+                ("RBV".to_string(), EpicsValue::Double(self.pos.rbv)),
+                ("DRBV".to_string(), EpicsValue::Double(self.pos.drbv)),
             ];
             Ok(ProcessOutcome {
                 result: RecordProcessResult::AsyncPendingNotify(fields),
@@ -166,6 +168,11 @@ impl Record for MotorRecord {
                 device_did_compute: false,
             })
         } else {
+            // Ongoing motion or idle: full snapshot so all changed fields
+            // (RBV, DRBV, MSTA, limits, etc.) get posted as monitors.
+            if !move_started {
+                self.internal.dmov_notified = false;
+            }
             Ok(ProcessOutcome::complete())
         }
     }
