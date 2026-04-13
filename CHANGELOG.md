@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.9.1 — 2026-04-13
+
+### motor-rs
+
+- **Fix RBV monitor updates during motion**: `process()` was returning
+  `AsyncPendingNotify` on every poll cycle with only DMOV/VAL/DVAL/RVAL
+  fields — RBV and DRBV were missing. Now uses `AsyncPendingNotify` only
+  for the initial DMOV 1→0 transition; subsequent polls return `Complete`
+  which posts monitors for all changed fields including RBV.
+- **Fix missing DMOV monitor on back-to-back motions**: When a new put
+  arrives while the previous motion's done status is consumed in the same
+  process cycle, `dmov_notified` was not reset. Fixed by resetting the
+  flag in `plan_motion()`.
+- **Fix same-direction NTM retarget**: `ExtendMove` accepted the new
+  DVAL but never re-dispatched a `MoveAbsolute` to the driver. On
+  completion, `evaluate_position_error()` only retried under retry
+  conditions (RTRY>0, RDBD>0). Now sets `verify_retarget_on_completion`
+  so the completion path replans if DVAL ≠ DRBV regardless of retry
+  settings.
+
+### epics-ca-rs
+
+- **CA repeater**: Rewrite to use per-client connected UDP sockets
+  matching C EPICS architecture. Fixes compatibility with C CA clients
+  (camonitor, caget) that could not register with the Rust repeater.
+- **Pre-connection subscription**: `subscribe()` now registers
+  subscriptions even when disconnected. On connect, the coordinator
+  fills in native type and element count and issues `CA_PROTO_EVENT_ADD`.
+  Eliminates the need for application-level resubscribe loops.
+- **Add `get_with_timeout()`** for explicit timeout control on reads.
+- **Monitor flow control**: Client-side backlog tracking replaces TCP
+  read count heuristic. Server-side `FlowControlGate` with
+  `coalesce_while_paused()` matching C EPICS `dbEvent.c` behavior.
+- **Add `ioc` feature** to umbrella crate for IOC builds.
+- **Fix proc macro path resolution**: `epics_main`/`epics_test` now
+  resolve `epics_base_rs` path for umbrella crate users via
+  `proc-macro-crate`.
+
+### CA tools (C parity)
+
+- **camonitor-rs**: Use server timestamp, print disconnect to stdout
+  as `*** disconnected`, add `-w` initial connection timeout. Subscribe
+  once and rely on library auto-restore (no resubscribe loop).
+- **caput-rs**: Re-read value from server for `New` line. Apply `-w`
+  timeout to all reads. Fix `-c` description.
+- **caget-rs**: Parallel PV connect+read via `tokio::spawn`. Add `-w`
+  timeout. Distinguish "Not connected" from "timeout" errors.
+- **cainfo-rs**: Add `-w` timeout, use explicit channel connect.
+- All tools: Rename help text from `rcaXXX` to `caXXX`.
+
 ## v0.9.0
 
 ### motor-rs — Complete C parity (~95 fixes across 12 review rounds)

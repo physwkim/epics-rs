@@ -302,4 +302,9 @@ pub struct InternalFields {
     /// True after the initial DMOV 1→0 notification has been sent.
     /// Reset when DMOV returns to 1.
     pub dmov_notified: bool,
+    /// Set when a same-direction retarget (ExtendMove) occurred during a
+    /// motion. On completion, evaluate_position_error verifies that the
+    /// driver actually followed the retarget and, if not, replans once
+    /// independent of retry settings. Cleared after the check.
+    pub verify_retarget_on_completion: bool,
 }

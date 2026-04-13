@@ -38,6 +38,10 @@ impl MotorRecord {
                             // Cancel any pending backlash/retry state
                             self.internal.backlash_pending = false;
                             self.retry.rcnt = 0;
+                            // A new explicit command path owns completion now;
+                            // disarm any safety-net verify flag armed by a
+                            // prior ExtendMove in this motion.
+                            self.internal.verify_retarget_on_completion = false;
                             self.internal.pending_retarget = Some(self.pos.dval);
                             self.stat.mip.insert(MipFlags::STOP);
                             effects.commands.push(MotorCommand::Stop {
@@ -48,15 +52,21 @@ impl MotorRecord {
                             return effects;
                         }
                         RetargetAction::ExtendMove => {
-                            // C: same-direction target changes are simply accepted.
-                            // The new DVAL is stored and the motor continues to the
-                            // current target; backlash/retry will be re-evaluated
-                            // when the current move completes.
-                            // NOTE: do NOT update ldvl here -- ldvl must remain the
-                            // original target so is_preferred_direction works correctly
-                            // when the move completes.
-                            self.internal.backlash_pending =
-                                self.needs_backlash_for_move(self.pos.dval, self.pos.drbv);
+                            // C parity (motorRecord.cc:2241, 2532-2535): same-
+                            // direction retarget while moving re-enters do_work
+                            // and dispatches a new MOVE_ABS/MOVE_REL in-flight.
+                            // plan_absolute_move emits the new move and also
+                            // updates ldvl/lval/lrvl per C load_pos semantics.
+                            //
+                            // Rust-only defensive layer: arm a completion-time
+                            // verification so that, if a driver silently ignores
+                            // the in-flight retarget and stops at the old target,
+                            // we replan once before finalizing — independent of
+                            // RTRY/RDBD. Not in C (C assumes driver supports
+                            // in-flight target updates); kept here as robustness
+                            // against drivers that don't.
+                            self.plan_absolute_move(&mut effects);
+                            self.internal.verify_retarget_on_completion = true;
                             effects.suppress_forward_link = true;
                             return effects;
                         }
@@ -268,8 +278,18 @@ impl MotorRecord {
 
         let use_rel = self.use_relative_moves();
         let frac = self.retry.frac;
+        // preferred_dir uses the OLD ldvl (the previous dispatched target),
+        // so is_preferred_direction must run before we update ldvl below.
         let preferred = self.is_preferred_direction(self.pos.dval, self.pos.drbv);
         let position_error = self.pos.dval - self.pos.drbv;
+
+        // C parity (motorRecord.cc:2469 load_pos): ldvl/lval/lrvl reflect
+        // the target being dispatched. For in-flight same-direction retarget,
+        // this keeps (dval - ldvl) in the next is_preferred_direction call
+        // tracking each successive target, not only the original one.
+        self.internal.ldvl = self.pos.dval;
+        self.internal.lval = self.pos.val;
+        self.internal.lrvl = self.pos.rval;
 
         // C has 3 cases (do_work lines 2479-2524):
         // Case 1: No backlash OR (preferred + same vel/accel): slew vel, FRAC

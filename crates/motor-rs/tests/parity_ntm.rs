@@ -61,16 +61,39 @@ fn val_during_motion_same_direction_accepted() {
     // Motor moving at 25
     motor_moving(&mut rec, 25.0);
 
-    // New target: 80 (same direction, farther) → ExtendMove
-    // C: same-direction change is simply accepted without issuing new command;
-    // the new target will be picked up when the current move completes.
+    // New target: 80 (same direction, farther) → ExtendMove.
+    // Must re-emit a move command so the driver actually retargets.
+    // Without this, the driver keeps the old target and motor stops
+    // at the original target (RTRY=0 won't save us).
     rec.put_field("VAL", EpicsValue::Double(80.0)).unwrap();
     let effects = rec.plan_motion(CommandSource::Val);
 
-    // No new command issued (C behavior)
-    assert!(effects.commands.is_empty());
-    // ldvl stays at original target (not updated on ExtendMove)
-    assert_eq!(rec.internal.ldvl, 50.0);
+    // A new MoveAbsolute (or MoveRelative with equivalent target)
+    // must be emitted to the driver at the new target.
+    assert_eq!(effects.commands.len(), 1, "expected one move command");
+    match &effects.commands[0] {
+        MotorCommand::MoveAbsolute { position, .. } => {
+            assert!(
+                (*position - 80.0).abs() < 1e-6,
+                "abs target should be 80, got {position}"
+            );
+        }
+        MotorCommand::MoveRelative { distance, .. } => {
+            // Relative move: current drbv is 25, so distance should be 55.
+            assert!(
+                (*distance - 55.0).abs() < 1e-6,
+                "rel distance should be 55, got {distance}"
+            );
+        }
+        other => panic!("expected Move command, got {other:?}"),
+    }
+    // C parity: ldvl is updated to the newly dispatched target
+    // (motorRecord.cc:2469 load_pos on re-emitted move). This keeps
+    // is_preferred_direction comparing against the most recent target
+    // across successive in-flight retargets.
+    assert_eq!(rec.internal.ldvl, 80.0);
+    // FLNK must still be suppressed since motion continues.
+    assert!(effects.suppress_forward_link);
     assert!(!rec.stat.dmov);
 }
 
@@ -251,4 +274,115 @@ fn spmg_pause_stops_and_syncs_after_completion() {
     rec.internal.lspg = SpmgMode::Pause;
     let effects = rec.plan_motion(CommandSource::Spmg);
     assert!(effects.commands.is_empty()); // no move, already at target
+}
+
+#[test]
+fn same_direction_retarget_reaches_new_target_without_retry() {
+    // Regression: caput 25 then (mid-motion) caput 45 on same direction must
+    // cause the motor to actually reach 45, not stop at 25. Previously the
+    // ExtendMove branch updated DVAL silently and the driver kept going to
+    // 25, so with RTRY=0 (no retry to save us) the motor stopped at 25.
+    let mut rec = make_record();
+    rec.retry.rtry = 0; // disable retry to prove we don't depend on it
+
+    // Move from 0 to 25
+    rec.put_field("VAL", EpicsValue::Double(25.0)).unwrap();
+    let effects = rec.plan_motion(CommandSource::Val);
+    assert_eq!(effects.commands.len(), 1);
+    rec.internal.ldvl = 25.0;
+
+    // Motor moving at 15 (mid-flight)
+    motor_moving(&mut rec, 15.0);
+    assert!(!rec.stat.dmov);
+
+    // User retargets to 45 (same direction, further)
+    rec.put_field("VAL", EpicsValue::Double(45.0)).unwrap();
+    let effects = rec.plan_motion(CommandSource::Val);
+
+    // Must issue a new move command to the new target.
+    assert_eq!(
+        effects.commands.len(),
+        1,
+        "retarget must emit a new move command"
+    );
+    let new_target = match &effects.commands[0] {
+        MotorCommand::MoveAbsolute { position, .. } => *position,
+        MotorCommand::MoveRelative { distance, .. } => 15.0 + distance,
+        other => panic!("expected Move command, got {other:?}"),
+    };
+    assert!(
+        (new_target - 45.0).abs() < 1e-6,
+        "new target should be 45, got {new_target}"
+    );
+
+    // Simulate driver accepting the retarget and reaching 45.
+    complete_move(&mut rec, 45.0);
+    let _effects = rec.check_completion();
+
+    assert!(rec.stat.dmov, "motor should be done after reaching 45");
+    assert!(
+        (rec.pos.drbv - 45.0).abs() < 1e-6,
+        "DRBV should be 45, got {}",
+        rec.pos.drbv
+    );
+}
+
+#[test]
+fn same_direction_retarget_safety_net_replans_if_driver_ignores_inflight() {
+    // Safety net: even if the driver silently ignores the in-flight retarget
+    // and stops at the OLD target, completion-time verification must replan
+    // to the new target (without depending on RTRY/RDBD).
+    let mut rec = make_record();
+    rec.retry.rtry = 0; // no retries available
+    rec.retry.rdbd = 0.0; // retry gating disabled
+
+    // Start move to 25
+    rec.put_field("VAL", EpicsValue::Double(25.0)).unwrap();
+    rec.plan_motion(CommandSource::Val);
+    rec.internal.ldvl = 25.0;
+
+    motor_moving(&mut rec, 15.0);
+
+    // Mid-motion retarget to 45 (same direction) → ExtendMove arms safety net
+    rec.put_field("VAL", EpicsValue::Double(45.0)).unwrap();
+    let effects = rec.plan_motion(CommandSource::Val);
+    assert_eq!(effects.commands.len(), 1, "ExtendMove must emit move");
+    assert!(
+        rec.internal.verify_retarget_on_completion,
+        "verify flag must be armed"
+    );
+
+    // Simulate driver IGNORING the in-flight retarget and stopping at 25.
+    complete_move(&mut rec, 25.0);
+    let effects = rec.check_completion();
+
+    // Safety net must have replanned to 45.
+    assert!(
+        !rec.internal.verify_retarget_on_completion,
+        "verify flag must be cleared after check"
+    );
+    assert!(
+        !rec.stat.dmov,
+        "motor must NOT be marked done — replan issued"
+    );
+    assert_eq!(
+        effects.commands.len(),
+        1,
+        "safety-net replan must emit a move command"
+    );
+    let new_target = match &effects.commands[0] {
+        MotorCommand::MoveAbsolute { position, .. } => *position,
+        MotorCommand::MoveRelative { distance, .. } => 25.0 + distance,
+        other => panic!("expected Move command, got {other:?}"),
+    };
+    assert!(
+        (new_target - 45.0).abs() < 1e-6,
+        "safety-net target should be 45, got {new_target}"
+    );
+
+    // Driver reaches 45 on second attempt.
+    complete_move(&mut rec, 45.0);
+    let _effects = rec.check_completion();
+    assert!(rec.stat.dmov);
+    assert!((rec.pos.drbv - 45.0).abs() < 1e-6);
 }

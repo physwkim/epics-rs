@@ -73,7 +73,8 @@ pub fn spawn_monitor_sender(
     epics_base_rs::runtime::task::spawn(async move {
         while let Some(mut event) = rx.recv().await {
             if flow_control.is_paused() {
-                let Some(coalesced) = flow_control.coalesce_while_paused(&mut rx, event).await else {
+                let Some(coalesced) = flow_control.coalesce_while_paused(&mut rx, event).await
+                else {
                     break;
                 };
                 event = coalesced;
