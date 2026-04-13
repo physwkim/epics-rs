@@ -322,19 +322,19 @@ async fn dispatch_message(
                                 // NORD elements (valid data) but the channel's
                                 // native count must be NELM (max capacity) so
                                 // clients allocate the right buffer.
-                                let element_count =
-                                    if field == "VAL" && instance.record.record_type() == "waveform"
-                                    {
-                                        instance
-                                            .resolve_field("NELM")
-                                            .and_then(|n| match n {
-                                                EpicsValue::Long(n) => Some(n.max(0) as u32),
-                                                _ => None,
-                                            })
-                                            .unwrap_or(v.count() as u32)
-                                    } else {
-                                        v.count() as u32
-                                    };
+                                let element_count = if field == "VAL"
+                                    && instance.record.record_type() == "waveform"
+                                {
+                                    instance
+                                        .resolve_field("NELM")
+                                        .and_then(|n| match n {
+                                            EpicsValue::Long(n) => Some(n.max(0) as u32),
+                                            _ => None,
+                                        })
+                                        .unwrap_or(v.count() as u32)
+                                } else {
+                                    v.count() as u32
+                                };
                                 (
                                     v.dbr_type(),
                                     element_count,

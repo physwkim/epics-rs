@@ -1,6 +1,6 @@
 use clap::Parser;
-use epics_ca_rs::client::CaClient;
 use epics_ca_rs::CaError;
+use epics_ca_rs::client::CaClient;
 use std::time::Duration;
 
 #[derive(Parser)]

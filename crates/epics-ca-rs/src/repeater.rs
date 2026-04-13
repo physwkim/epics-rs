@@ -50,9 +50,9 @@ impl RepeaterClient {
             _ => return false,
         };
         match StdUdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)) {
-            Ok(_) => false,                                    // port free → client gone
+            Ok(_) => false,                                         // port free → client gone
             Err(e) if e.kind() == io::ErrorKind::AddrInUse => true, // port in use → alive
-            Err(_) => true,                                    // other error → assume alive
+            Err(_) => true,                                         // other error → assume alive
         }
     }
 }
@@ -103,8 +103,7 @@ pub async fn run_repeater() -> io::Result<()> {
                     ]);
                     if avail == 0 {
                         if let SocketAddr::V4(v4) = src {
-                            data[avail_offset..avail_offset + 4]
-                                .copy_from_slice(&v4.ip().octets());
+                            data[avail_offset..avail_offset + 4].copy_from_slice(&v4.ip().octets());
                         }
                     }
                 }
