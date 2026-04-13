@@ -54,7 +54,7 @@ All crates are published on [crates.io](https://crates.io/crates/epics-rs). Add 
 
 ```toml
 [dependencies]
-epics-rs = { version = "0.8", features = ["ad"] }
+epics-rs = { version = "0.9", features = ["ad"] }
 ```
 
 This single dependency pulls in everything needed. In your code:
@@ -87,10 +87,10 @@ use epics_rs::asyn;        // port driver framework
 
 ```toml
 # Motor + areaDetector
-epics-rs = { version = "0.8", features = ["motor", "ad"] }
+epics-rs = { version = "0.9", features = ["motor", "ad"] }
 
 # Everything
-epics-rs = { version = "0.8", features = ["full"] }
+epics-rs = { version = "0.9", features = ["full"] }
 ```
 
 ### Individual Crates
@@ -99,8 +99,8 @@ You can also depend on sub-crates directly if you only need specific functionali
 
 ```toml
 [dependencies]
-ad-plugins-rs = "0.8"   # just the areaDetector plugins
-epics-base-rs = "0.8"   # just the IOC runtime
+ad-plugins-rs = "0.9"   # just the areaDetector plugins
+epics-base-rs = "0.9"   # just the IOC runtime
 ```
 
 ## Workspace Structure
