@@ -13,7 +13,8 @@ use epics_base_rs::types::EpicsValue;
 use spvirit_server::monitor::MonitorRegistry;
 use spvirit_server::{PvaServerConfig, run_pva_server_with_registry};
 
-use super::bridge::{PvDatabaseStore, start_monitor_bridge};
+use super::bridge::{PvDatabaseStore, start_monitor_bridge, start_store_monitor_bridge};
+use spvirit_server::PvStore;
 
 // ── Builder ──────────────────────────────────────────────────────────────
 
@@ -193,10 +194,40 @@ impl PvaServer {
 
     /// Run the PVA server (UDP search + TCP handler + beacon + scan
     /// scheduler + monitor bridge). Runs indefinitely.
+    ///
+    /// Uses the default [`PvDatabaseStore`] backend, wiring single-record
+    /// snapshots + simple PVs onto the PVA wire. For richer routing — qsrv
+    /// group PVs, access control, pvRequest field filtering — construct a
+    /// `QsrvPvStore` and call [`Self::run_with_store`] instead.
     pub async fn run(&self) -> CaResult<()> {
         let store = Arc::new(PvDatabaseStore::new(self.db.clone()));
         let registry = Arc::new(MonitorRegistry::new());
 
+        // PvDatabase has a specialized bridge (subscribes to record events
+        // directly). Use it, not the generic store bridge, to avoid the
+        // extra channel hop for the default path.
+        start_monitor_bridge(self.db.clone(), registry.clone()).await;
+
+        self.run_with_store_and_registry(store, registry).await
+    }
+
+    /// Run the PVA server with a caller-supplied [`PvStore`] implementation.
+    ///
+    /// This is the entry point used by the qsrv daemon (`qsrv-rs`) and by
+    /// IOCs that want to expose group PVs or custom access control. The
+    /// generic monitor bridge forwards each PV's `store.subscribe(...)`
+    /// stream to the spvirit monitor registry.
+    pub async fn run_with_store<S: PvStore + 'static>(&self, store: Arc<S>) -> CaResult<()> {
+        let registry = Arc::new(MonitorRegistry::new());
+        start_store_monitor_bridge(store.clone(), registry.clone()).await;
+        self.run_with_store_and_registry(store, registry).await
+    }
+
+    async fn run_with_store_and_registry<S: PvStore + 'static>(
+        &self,
+        store: Arc<S>,
+        registry: Arc<MonitorRegistry>,
+    ) -> CaResult<()> {
         let mut config = PvaServerConfig::default();
         config.tcp_port = self.port;
         config.udp_port = self.port + 1;
@@ -204,10 +235,6 @@ impl PvaServer {
         let db_scan = self.db.clone();
         let scanner = ScanScheduler::new(db_scan);
 
-        // Start the monitor bridge (EPICS record changes → PVA monitors)
-        start_monitor_bridge(self.db.clone(), registry.clone()).await;
-
-        // Spawn autosave
         let autosave_handle = if let Some(ref mgr) = self.autosave_manager {
             let mgr = mgr.clone();
             let db_save = self.db.clone();

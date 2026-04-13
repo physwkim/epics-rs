@@ -1,0 +1,13 @@
+[package]
+name = "qsrv-ioc"
+version.workspace = true
+edition.workspace = true
+description = "Demo IOC: ai/ao records served via qsrv → spvirit PvAccess"
+publish = false
+
+[dependencies]
+epics-base-rs = { workspace = true }
+epics-pva-rs = { workspace = true }
+epics-bridge-rs = { workspace = true, features = ["qsrv"] }
+spvirit-server = "0.1.7"
+tokio = { version = "1", features = ["full"] }

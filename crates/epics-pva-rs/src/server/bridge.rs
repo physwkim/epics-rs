@@ -429,6 +429,33 @@ async fn subscribe_to_pv(db: &PvDatabase, name: &str) -> Option<mpsc::Receiver<N
 
 // ── Monitor bridge ───────────────────────────────────────────────────────
 
+/// Generic monitor bridge: for every PV the store exposes, spawn a task that
+/// forwards [`PvStore::subscribe`] updates into the spvirit [`MonitorRegistry`].
+///
+/// This replaces the PvDatabase-specific bridge for custom stores such as
+/// `QsrvPvStore`. The specialized [`start_monitor_bridge`] below remains for
+/// the default [`PvDatabaseStore`] path — it is slightly cheaper because it
+/// avoids the channel creation roundtrip inside `QsrvPvStore::subscribe`.
+pub async fn start_store_monitor_bridge<S: PvStore + 'static>(
+    store: Arc<S>,
+    registry: Arc<MonitorRegistry>,
+) {
+    let pvs = store.list_pvs().await;
+    for pv in pvs {
+        let store = store.clone();
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            let Some(mut rx) = store.subscribe(&pv).await else {
+                warn!("store monitor bridge: subscribe('{}') returned None", pv);
+                return;
+            };
+            while let Some(payload) = rx.recv().await {
+                registry.notify_monitors(&pv, &payload).await;
+            }
+        });
+    }
+}
+
 /// Start background tasks that bridge PvDatabase record change events to the
 /// PVA [`MonitorRegistry`].
 ///

@@ -19,9 +19,10 @@
 //! - [`GroupChannel`] serves multi-record composite PVs from JSON config.
 //! - [`BridgeMonitor`] / [`GroupMonitor`] bridge `DbSubscription` events to PVA monitor updates.
 //!
-//! The `ChannelProvider`, `Channel`, and `PvaMonitor` traits are defined here
-//! temporarily. They will move to `epics-pva-rs` once the PVA server is
-//! implemented by the spvirit maintainer.
+//! The `ChannelProvider`, `Channel`, and `PvaMonitor` traits are defined in
+//! this module. [`spvirit_adapter::QsrvPvStore`] bridges them to the
+//! [`spvirit_server::PvStore`] trait so that the spvirit PVA server can
+//! serve qsrv channels directly.
 
 pub mod channel;
 pub mod convert;
@@ -30,6 +31,8 @@ pub mod group_config;
 pub mod monitor;
 pub mod provider;
 pub mod pvif;
+#[cfg(feature = "qsrv")]
+pub mod spvirit_adapter;
 
 pub use channel::{BridgeChannel, ProcessMode, PutOptions};
 pub use group::{AnyMonitor, GroupChannel, GroupMonitor};
@@ -40,3 +43,5 @@ pub use provider::{
     ChannelProvider, PvaMonitor,
 };
 pub use pvif::{FieldMapping, NtType};
+#[cfg(feature = "qsrv")]
+pub use spvirit_adapter::QsrvPvStore;
