@@ -154,6 +154,7 @@ impl MotorRecord {
         self.retry.rcnt = 0;
         self.internal.backlash_pending = false;
         self.internal.pending_retarget = None;
+        self.internal.verify_retarget_on_completion = false;
         // Sync last values
         self.internal.lval = self.pos.val;
         self.internal.ldvl = self.pos.dval;
@@ -165,6 +166,35 @@ impl MotorRecord {
         }
     }
 
+    /// If a same-direction retarget was armed during motion, verify on
+    /// completion that the driver actually reached the new target. If it
+    /// did not (off by more than one motor step), replan once — bypassing
+    /// RTRY/RDBD retry gating. Returns true if a replan was emitted and
+    /// the caller should stop further evaluation for this cycle.
+    fn check_retarget_verification(&mut self, effects: &mut ProcessEffects) -> bool {
+        if !self.internal.verify_retarget_on_completion {
+            return false;
+        }
+        // One-shot: clear the flag before any early return so we never
+        // replan twice from the same arm.
+        self.internal.verify_retarget_on_completion = false;
+        if self.conv.mres == 0.0 {
+            return false;
+        }
+        // Step-based diff: matches plan_absolute_move's too_small check.
+        // Round each position to its motor step first, then compare —
+        // not round(diff) — so rounding boundaries are consistent with
+        // the move-planning gate.
+        let npos = (self.pos.dval / self.conv.mres).round() as i64;
+        let rpos = (self.pos.drbv / self.conv.mres).round() as i64;
+        if (npos - rpos).abs() < 1 {
+            return false;
+        }
+        self.plan_absolute_move(effects);
+        effects.suppress_forward_link = true;
+        true
+    }
+
     /// Set motion phase with tracing.
     pub(crate) fn set_phase(&mut self, new_phase: MotionPhase) {
         tracing::debug!("phase transition: {:?} -> {:?}", self.stat.phase, new_phase);
@@ -174,6 +204,10 @@ impl MotorRecord {
     /// Evaluate position error after DLY expires (C: maybeRetry after delay).
     /// Same as evaluate_position_error but finalizes directly (no re-delay).
     fn evaluate_position_error_after_delay(&mut self, effects: &mut ProcessEffects) {
+        if self.check_retarget_verification(effects) {
+            return;
+        }
+
         let diff = (self.pos.dval - self.pos.drbv).abs();
 
         // C: compute user_cdir for retry direction check with mapped limit switches
@@ -234,6 +268,14 @@ impl MotorRecord {
     /// Evaluate position error after motion completes.
     fn evaluate_position_error(&mut self, effects: &mut ProcessEffects) {
         let diff = (self.pos.dval - self.pos.drbv).abs();
+
+        // Safety net: if a same-direction retarget happened during this
+        // motion, verify the driver reached the new target. If not, replan
+        // once — independent of retry settings. Keeps retarget correctness
+        // from depending on driver-specific in-flight retarget support.
+        if self.check_retarget_verification(effects) {
+            return;
+        }
 
         // C: compute user_cdir for retry direction check with mapped limit switches
         let same_polarity = (self.conv.dir == MotorDir::Pos) == (self.conv.mres >= 0.0);
