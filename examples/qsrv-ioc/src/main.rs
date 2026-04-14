@@ -113,6 +113,8 @@ async fn main() -> CaResult<()> {
 /// Parse a simplified st.cmd — returns shared PvDatabase + optional group file.
 async fn parse_and_build(script: &str) -> CaResult<(Arc<PvDatabase>, Option<String>)> {
     let mut macros: HashMap<String, String> = HashMap::new();
+    // Seed QSRV_IOC so $(QSRV_IOC) expands in st.cmd
+    macros.insert("QSRV_IOC".into(), env!("CARGO_MANIFEST_DIR").into());
     let mut ioc = IocBuilder::new();
     let mut group_file: Option<String> = None;
 
