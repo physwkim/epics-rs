@@ -23,7 +23,7 @@ pub async fn mqtt_event_loop(
     topics: Vec<String>,
     topic_map: HashMap<String, Vec<(usize, TopicAddress)>>,
     port_handle: PortHandle,
-    mut publish_rx: mpsc::UnboundedReceiver<PublishRequest>,
+    publish_rx: mpsc::UnboundedReceiver<PublishRequest>,
     connected_param: usize,
 ) {
     let mut mqttoptions =
@@ -33,44 +33,75 @@ pub async fn mqtt_event_loop(
 
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 256);
 
-    // Initial subscription
-    subscribe_all(&client, &topics, config.qos).await;
+    // `EventLoop::poll()` is not cancel-safe (rumqttc internal iterators can be
+    // left half-advanced if the future is dropped mid-poll), so we must never
+    // drive it inside a `tokio::select!`. Instead, outbound publishes are
+    // forwarded on a dedicated task, and the main loop only awaits `poll()`.
+    tokio::spawn(publish_task(client.clone(), publish_rx));
 
+    // Subscriptions are driven exclusively on ConnAck (covers both the first
+    // connect and every reconnect), so no pre-loop subscribe is needed.
     loop {
-        tokio::select! {
-            event = eventloop.poll() => {
-                match event {
-                    Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                        handle_incoming_message(
-                            &publish.topic,
-                            &publish.payload,
-                            &topic_map,
-                            &port_handle,
-                        );
-                    }
-                    Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                        tracing::info!("MQTT connected, subscribing to {} topics", topics.len());
-                        port_handle.set_params_and_notify(0, vec![
-                            ParamSetValue::Int32 { reason: connected_param, addr: 0, value: 1 },
-                        ]);
-                        subscribe_all(&client, &topics, config.qos).await;
-                    }
-                    Err(e) => {
-                        tracing::error!("MQTT connection error: {e}");
-                        port_handle.set_params_and_notify(0, vec![
-                            ParamSetValue::Int32 { reason: connected_param, addr: 0, value: 0 },
-                        ]);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    _ => {}
-                }
+        match eventloop.poll().await {
+            Ok(Event::Incoming(Incoming::Publish(publish))) => {
+                handle_incoming_message(
+                    &publish.topic,
+                    &publish.payload,
+                    &topic_map,
+                    &port_handle,
+                );
             }
-            Some(req) = publish_rx.recv() => {
-                let qos: rumqttc::QoS = req.qos.into();
-                if let Err(e) = client.publish(&req.topic, qos, req.retained, req.payload.as_bytes()).await {
-                    tracing::warn!("MQTT publish to '{}' failed: {e}", req.topic);
-                }
+            Ok(Event::Incoming(Incoming::ConnAck(_))) => {
+                tracing::info!("MQTT connected, subscribing to {} topics", topics.len());
+                port_handle.set_params_and_notify(
+                    0,
+                    vec![ParamSetValue::Int32 {
+                        reason: connected_param,
+                        addr: 0,
+                        value: 1,
+                    }],
+                );
+                // Spawn subscribe so we return to `poll()` immediately — the
+                // event loop is the only thing that drains rumqttc's command
+                // channel, so awaiting subscribe inline risks stalling.
+                let sub_client = client.clone();
+                let sub_topics = topics.clone();
+                let sub_qos = config.qos;
+                tokio::spawn(async move {
+                    subscribe_all(&sub_client, &sub_topics, sub_qos).await;
+                });
             }
+            Err(e) => {
+                tracing::error!("MQTT connection error: {e}");
+                port_handle.set_params_and_notify(
+                    0,
+                    vec![ParamSetValue::Int32 {
+                        reason: connected_param,
+                        addr: 0,
+                        value: 0,
+                    }],
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Forward publish requests from EPICS writes into rumqttc's command channel.
+/// Runs on its own task so the main event-loop task can own `poll()`
+/// exclusively without cancel-safety hazards.
+async fn publish_task(
+    client: AsyncClient,
+    mut publish_rx: mpsc::UnboundedReceiver<PublishRequest>,
+) {
+    while let Some(req) = publish_rx.recv().await {
+        let qos: rumqttc::QoS = req.qos.into();
+        if let Err(e) = client
+            .publish(&req.topic, qos, req.retained, req.payload.as_bytes())
+            .await
+        {
+            tracing::warn!("MQTT publish to '{}' failed: {e}", req.topic);
         }
     }
 }

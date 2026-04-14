@@ -1104,18 +1104,22 @@ impl PvDatabase {
                     changed_fields.push(("VAL".to_string(), val));
                 }
             }
-            changed_fields.push((
-                "SEVR".to_string(),
-                EpicsValue::Short(instance.common.sevr as i16),
-            ));
-            changed_fields.push((
-                "STAT".to_string(),
-                EpicsValue::Short(instance.common.stat as i16),
-            ));
-            changed_fields.push((
-                "UDF".to_string(),
-                EpicsValue::Char(if instance.common.udf { 1 } else { 0 }),
-            ));
+            if alarm_result.alarm_changed {
+                changed_fields.push((
+                    "SEVR".to_string(),
+                    EpicsValue::Short(instance.common.sevr as i16),
+                ));
+                changed_fields.push((
+                    "STAT".to_string(),
+                    EpicsValue::Short(instance.common.stat as i16),
+                ));
+            }
+            if !event_mask.is_empty() {
+                changed_fields.push((
+                    "UDF".to_string(),
+                    EpicsValue::Char(if instance.common.udf { 1 } else { 0 }),
+                ));
+            }
             for (field, subs) in &instance.subscribers {
                 if !subs.is_empty()
                     && field != "VAL"
@@ -1151,7 +1155,12 @@ impl PvDatabase {
                     1 => true,
                     2 => {
                         if let Some(ivov) = instance.record.get_field("IVOV") {
-                            let _ = instance.record.set_val(ivov);
+                            let rtype = instance.record.record_type();
+                            if rtype == "calcout" {
+                                let _ = instance.record.put_field("OVAL", ivov);
+                            } else {
+                                let _ = instance.record.set_val(ivov);
+                            }
                         }
                         false
                     }

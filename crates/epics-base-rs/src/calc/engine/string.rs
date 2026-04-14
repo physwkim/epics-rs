@@ -201,27 +201,31 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut StringInputs) -> Result<StackValue
                 // Bitwise
                 CoreOp::BitAnd => {
                     let (a, b) = pop2_f64(&mut stack)?;
-                    stack.push(StackValue::Double(((a as i64) & (b as i64)) as f64));
+                    stack.push(StackValue::Double(((a as i32) & (b as i32)) as f64));
                 }
                 CoreOp::BitOr => {
                     let (a, b) = pop2_f64(&mut stack)?;
-                    stack.push(StackValue::Double(((a as i64) | (b as i64)) as f64));
+                    stack.push(StackValue::Double(((a as i32) | (b as i32)) as f64));
                 }
                 CoreOp::BitXor => {
                     let (a, b) = pop2_f64(&mut stack)?;
-                    stack.push(StackValue::Double(((a as i64) ^ (b as i64)) as f64));
+                    stack.push(StackValue::Double(((a as i32) ^ (b as i32)) as f64));
                 }
                 CoreOp::BitNot => {
                     let a = pop1_f64(&mut stack)?;
-                    stack.push(StackValue::Double(!(a as i64) as f64));
+                    stack.push(StackValue::Double(!(a as i32) as f64));
                 }
                 CoreOp::Shl => {
                     let (a, b) = pop2_f64(&mut stack)?;
-                    stack.push(StackValue::Double(((a as i64) << (b as i64)) as f64));
+                    stack.push(StackValue::Double(((a as i32) << ((b as i32) & 31)) as f64));
                 }
-                CoreOp::Shr | CoreOp::ShrLogical => {
+                CoreOp::Shr => {
                     let (a, b) = pop2_f64(&mut stack)?;
-                    stack.push(StackValue::Double(((a as i64) >> (b as i64)) as f64));
+                    stack.push(StackValue::Double(((a as i32) >> ((b as i32) & 31)) as f64));
+                }
+                CoreOp::ShrLogical => {
+                    let (a, b) = pop2_f64(&mut stack)?;
+                    stack.push(StackValue::Double(((a as u32) >> ((b as u32) & 31)) as f64));
                 }
 
                 // Conditional
@@ -342,9 +346,13 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut StringInputs) -> Result<StackValue
                     }
                     stack.push(StackValue::Double(if result { 1.0 } else { 0.0 }));
                 }
-                CoreOp::Atan2 | CoreOp::Fmod => {
+                CoreOp::Atan2 => {
                     let (a, b) = pop2_f64(&mut stack)?;
                     stack.push(StackValue::Double(b.atan2(a)));
+                }
+                CoreOp::Fmod => {
+                    let (a, b) = pop2_f64(&mut stack)?;
+                    stack.push(StackValue::Double(a % b));
                 }
 
                 // Vararg min/max — type-aware

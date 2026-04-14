@@ -173,31 +173,36 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut ArrayInputs) -> Result<ArrayStackV
                 CoreOp::BitAnd => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as i64) & (y as i64)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| ((x as i32) & (y as i32)) as f64)?);
                 }
                 CoreOp::BitOr => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as i64) | (y as i64)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| ((x as i32) | (y as i32)) as f64)?);
                 }
                 CoreOp::BitXor => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as i64) ^ (y as i64)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| ((x as i32) ^ (y as i32)) as f64)?);
                 }
                 CoreOp::BitNot => {
                     let a = pop1(&mut stack)?;
-                    stack.push(a.map(|x| !(x as i64) as f64));
+                    stack.push(a.map(|x| !(x as i32) as f64));
                 }
                 CoreOp::Shl => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as i64) << (y as i64)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| ((x as i32) << ((y as i32) & 31)) as f64)?);
                 }
-                CoreOp::Shr | CoreOp::ShrLogical => {
+                CoreOp::Shr => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as i64) >> (y as i64)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| ((x as i32) >> ((y as i32) & 31)) as f64)?);
+                }
+                CoreOp::ShrLogical => {
+                    let b = pop1(&mut stack)?;
+                    let a = pop1(&mut stack)?;
+                    stack.push(zip_map(a, b, |x, y| ((x as u32) >> ((y as u32) & 31)) as f64)?);
                 }
 
                 // Conditional
@@ -326,10 +331,15 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut ArrayInputs) -> Result<ArrayStackV
                     stack.push(ArrayStackValue::Double(if result { 1.0 } else { 0.0 }));
                 }
 
-                CoreOp::Atan2 | CoreOp::Fmod => {
+                CoreOp::Atan2 => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
                     stack.push(zip_map(a, b, |x, y| y.atan2(x))?);
+                }
+                CoreOp::Fmod => {
+                    let b = pop1(&mut stack)?;
+                    let a = pop1(&mut stack)?;
+                    stack.push(zip_map(a, b, |x, y| x % y)?);
                 }
 
                 CoreOp::Max(nargs) => {

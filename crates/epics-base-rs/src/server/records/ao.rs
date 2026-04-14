@@ -406,7 +406,7 @@ impl Record for AoRecord {
             } else {
                 self.rval = (value + 0.5) as i32;
             }
-        } else if value > (0.5 - i32::MIN as f64) {
+        } else if value > (i32::MIN as f64 - 0.5) {
             self.rval = (value - 0.5) as i32;
         } else {
             self.rval = i32::MIN;

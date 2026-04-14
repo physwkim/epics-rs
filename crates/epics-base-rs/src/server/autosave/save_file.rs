@@ -48,6 +48,12 @@ pub async fn write_save_file(path: &Path, entries: &[SaveEntry]) -> AutosaveResu
     file.sync_all().await?;
     drop(file);
     tokio::fs::rename(&tmp_path, path).await?;
+    // Sync parent directory to make the rename durable across power loss
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = tokio::fs::File::open(parent).await {
+            let _ = dir.sync_all().await;
+        }
+    }
 
     Ok(())
 }
