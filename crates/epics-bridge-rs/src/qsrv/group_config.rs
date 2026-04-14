@@ -109,7 +109,11 @@ pub fn parse_info_group(record_name: &str, json: &str) -> BridgeResult<Vec<Group
         let mut def = raw_to_group_def(name, raw)?;
         // Apply channel prefix: bare field names get record_name prefix
         for member in &mut def.members {
-            if !member.channel.contains(':') && !member.channel.contains('.') {
+            // Structure/Const have empty channels — skip prefix.
+            if !member.channel.is_empty()
+                && !member.channel.contains(':')
+                && !member.channel.contains('.')
+            {
                 member.channel = format!("{}.{}", record_name, member.channel);
             }
         }
@@ -186,6 +190,12 @@ fn raw_to_group_def(name: String, raw: RawGroupDef) -> BridgeResult<GroupPvDef> 
     // C++ QSRV does this in pdb.cpp:510-533 (trigger resolution phase).
     let member_names: std::collections::HashSet<&str> =
         members.iter().map(|m| m.field_name.as_str()).collect();
+    // Members with channels (can actually be triggered at runtime).
+    let channeled_names: std::collections::HashSet<&str> = members
+        .iter()
+        .filter(|m| !m.channel.is_empty())
+        .map(|m| m.field_name.as_str())
+        .collect();
 
     for member in &members {
         if let TriggerDef::Fields(targets) = &member.triggers {
@@ -195,6 +205,14 @@ fn raw_to_group_def(name: String, raw: RawGroupDef) -> BridgeResult<GroupPvDef> 
                         "group '{}': member '{}' has trigger '{}' which is not a member of this group",
                         name, member.field_name, target
                     )));
+                }
+                // Warn if trigger target has no channel (Structure/Const) —
+                // pvxs silently ignores these (groupconfigprocessor.cpp:405-407).
+                if !channeled_names.contains(target.as_str()) {
+                    eprintln!(
+                        "warning: group '{}': trigger '{}' on member '{}' targets a field without a channel (ignored)",
+                        name, target, member.field_name
+                    );
                 }
             }
         }
@@ -512,6 +530,32 @@ mod tests {
         let groups = parse_info_group("TEMP:sensor", json).unwrap();
         // Absolute channel (contains ':') should be kept as-is
         assert_eq!(groups[0].members[0].channel, "PRESS:ai");
+    }
+
+    #[test]
+    fn parse_info_group_structure_keeps_empty_channel() {
+        let json = r#"{
+            "TEMP:group": {
+                "container": { "+type": "structure" },
+                "val": { "+channel": "VAL", "+type": "plain" }
+            }
+        }"#;
+
+        let groups = parse_info_group("TEMP:sensor", json).unwrap();
+        let container = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "container")
+            .unwrap();
+        // Structure has no channel — must stay empty, not become "TEMP:sensor."
+        assert!(container.channel.is_empty());
+        // Normal member gets prefix
+        let val = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "val")
+            .unwrap();
+        assert_eq!(val.channel, "TEMP:sensor.VAL");
     }
 
     #[test]
