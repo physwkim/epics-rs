@@ -51,11 +51,11 @@ async fn list_pvs_empty_db() {
 
 #[tokio::test]
 async fn get_snapshot_double() {
-    let (_db, store) = db_with_pvs(&[("SIG:A", EpicsValue::Double(3.14))]).await;
+    let (_db, store) = db_with_pvs(&[("SIG:A", EpicsValue::Double(3.125))]).await;
     let payload = store.get_snapshot("SIG:A").await.unwrap();
     match payload {
         NtPayload::Scalar(nt) => match nt.value {
-            ScalarValue::F64(v) => assert!((v - 3.14).abs() < 1e-10),
+            ScalarValue::F64(v) => assert!((v - 3.125).abs() < 1e-10),
             other => panic!("expected F64, got {other:?}"),
         },
         other => panic!("expected Scalar, got {other:?}"),
@@ -306,11 +306,11 @@ async fn subscribe_nonexistent_returns_none() {
 fn snapshot_double_to_nt_scalar() {
     use epics_base_rs::server::snapshot::Snapshot;
     use std::time::SystemTime;
-    let snap = Snapshot::new(EpicsValue::Double(2.718), 0, 0, SystemTime::now());
+    let snap = Snapshot::new(EpicsValue::Double(2.75), 0, 0, SystemTime::now());
     let payload = snapshot_to_nt_payload(&snap);
     match payload {
         NtPayload::Scalar(nt) => {
-            assert!(matches!(nt.value, ScalarValue::F64(v) if (v - 2.718).abs() < 1e-10));
+            assert!(matches!(nt.value, ScalarValue::F64(v) if (v - 2.75).abs() < 1e-10));
         }
         other => panic!("expected Scalar, got {other:?}"),
     }

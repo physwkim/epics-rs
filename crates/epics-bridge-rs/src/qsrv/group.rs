@@ -75,17 +75,14 @@ pub fn get_nested_field<'a>(pv: &'a PvStructure, path: &str) -> Option<&'a PvFie
 
         // Handle array index: field must be a ScalarArray, index into it
         if let Some(idx) = comp.index {
-            if let PvField::ScalarArray(arr) = field {
-                if i == components.len() - 1 {
-                    return arr.get(idx as usize).map(|sv| {
-                        // We need to return a &PvField but we only have a &ScalarValue.
-                        // Array indexing into ScalarArray can't return &PvField without
-                        // an owned wrapper. Skip — array index on leaf returns None for now,
-                        // as the primary use case is structure arrays (pvxs StructA).
-                        let _ = sv;
-                        field // return the whole array
-                    });
-                }
+            if let PvField::ScalarArray(arr) = field
+                && i == components.len() - 1
+            {
+                return arr.get(idx as usize).map(|_sv| {
+                    // Array indexing into ScalarArray can't return &PvField
+                    // without an owned wrapper — return the whole array.
+                    field
+                });
             }
             // For Structure arrays (future): would index into a Vec<PvStructure>
             return None;
@@ -718,9 +715,9 @@ impl super::provider::Channel for GroupChannel {
                 self.def.name, self.access.user, self.access.host
             )));
         }
-        Ok(AnyMonitor::Group(
+        Ok(AnyMonitor::Group(Box::new(
             GroupMonitor::new(self.db.clone(), self.def.clone()).with_access(self.access.clone()),
-        ))
+        )))
     }
 }
 
@@ -1065,7 +1062,7 @@ impl super::provider::PvaMonitor for GroupMonitor {
 /// Enum dispatch for monitor types (single record vs group).
 pub enum AnyMonitor {
     Single(BridgeMonitor),
-    Group(GroupMonitor),
+    Group(Box<GroupMonitor>),
 }
 
 impl super::provider::PvaMonitor for AnyMonitor {

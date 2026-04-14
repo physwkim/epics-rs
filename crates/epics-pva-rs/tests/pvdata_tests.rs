@@ -146,12 +146,13 @@ fn pvd_decode_int32() {
 #[test]
 fn pvd_decode_float64() {
     let decoder = PvdDecoder::new(false);
-    let data: [u8; 8] = 3.14f64.to_le_bytes();
+    let test_val = 3.125_f64; // exact in binary, avoids clippy approx_constant
+    let data: [u8; 8] = test_val.to_le_bytes();
     let ft = FieldType::Scalar(TypeCode::Float64);
     let (val, consumed) = decoder.decode_value(&data, &ft).unwrap();
     assert_eq!(consumed, 8);
     match val {
-        DecodedValue::Float64(v) => assert!((v - 3.14).abs() < 1e-10),
+        DecodedValue::Float64(v) => assert!((v - test_val).abs() < 1e-10),
         other => panic!("expected Float64, got {other:?}"),
     }
 }

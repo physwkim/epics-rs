@@ -38,7 +38,7 @@ where
 
 #[tokio::test]
 async fn get_snapshot_nt_scalar_double() {
-    let store = store_with_record("TEST:AI", AiRecord::new(3.14)).await;
+    let store = store_with_record("TEST:AI", AiRecord::new(3.125)).await;
 
     let payload = store.get_snapshot("TEST:AI").await.expect("snapshot");
     let s = structure_payload(&payload);
@@ -46,7 +46,7 @@ async fn get_snapshot_nt_scalar_double() {
 
     let value_field = s.field("value").expect("value field");
     match value_field {
-        NtField::Scalar(ScalarValue::F64(v)) => assert!((v - 3.14).abs() < 1e-10),
+        NtField::Scalar(ScalarValue::F64(v)) => assert!((v - 3.125).abs() < 1e-10),
         other => panic!("expected F64 scalar, got {other:?}"),
     }
 

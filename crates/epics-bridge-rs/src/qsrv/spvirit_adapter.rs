@@ -488,14 +488,14 @@ mod tests {
         let mut pv = PvStructure::new("epics:nt/NTScalar:1.0");
         pv.fields.push((
             "value".into(),
-            PvField::Scalar(PvaScalarValue::Double(3.14)),
+            PvField::Scalar(PvaScalarValue::Double(3.125)),
         ));
 
         let nt = pv_structure_to_nt_structure(&pv);
         assert_eq!(nt.struct_id.as_deref(), Some("epics:nt/NTScalar:1.0"));
         assert_eq!(nt.fields.len(), 1);
         match &nt.fields[0].1 {
-            NtField::Scalar(ScalarValue::F64(v)) => assert_eq!(*v, 3.14),
+            NtField::Scalar(ScalarValue::F64(v)) => assert_eq!(*v, 3.125),
             other => panic!("expected scalar F64, got {other:?}"),
         }
     }

@@ -48,9 +48,7 @@ impl PvaCodec {
     ) -> Vec<u8> {
         let be = self.big_endian;
         let flags: u8 = if unicast { 0x80 } else { 0x00 };
-        let addr: [u8; 16] = ip_to_bytes(IpAddr::V4(Ipv4Addr::from(response_addr)))
-            .try_into()
-            .expect("ip_to_bytes returns 16 bytes");
+        let addr: [u8; 16] = ip_to_bytes(IpAddr::V4(Ipv4Addr::from(response_addr)));
         encode_search_request(
             sequence_id,
             flags,

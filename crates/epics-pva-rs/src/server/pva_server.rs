@@ -221,9 +221,11 @@ impl PvaServer {
         store: Arc<S>,
         registry: Arc<MonitorRegistry>,
     ) -> CaResult<()> {
-        let mut config = PvaServerConfig::default();
-        config.tcp_port = self.port;
-        config.udp_port = self.port + 1;
+        let config = PvaServerConfig {
+            tcp_port: self.port,
+            udp_port: self.port + 1,
+            ..Default::default()
+        };
 
         let db_scan = self.db.clone();
         let scanner = ScanScheduler::new(db_scan);
