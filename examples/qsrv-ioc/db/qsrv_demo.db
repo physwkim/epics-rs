@@ -1,0 +1,36 @@
+###################################################################
+#  qsrv demo database                                            #
+#  Provides ai, ao, bi records for PVA group PV demonstration.   #
+###################################################################
+
+record(ai, "$(P)AI") {
+    field(DESC, "Simulated temperature")
+    field(EGU,  "degC")
+    field(HOPR, "100")
+    field(LOPR, "0")
+    field(HIHI, "90")
+    field(HIGH, "80")
+    field(LOW,  "10")
+    field(LOLO, "5")
+    field(PREC, "2")
+    field(SCAN, ".5 second")
+    field(PINI, "YES")
+}
+
+record(ao, "$(P)AO") {
+    field(DESC, "Temperature setpoint")
+    field(EGU,  "degC")
+    field(HOPR, "100")
+    field(LOPR, "0")
+    field(PREC, "2")
+    field(VAL,  "25.0")
+    field(PINI, "YES")
+}
+
+record(bi, "$(P)BI") {
+    field(DESC, "Beam status")
+    field(ZNAM, "Off")
+    field(ONAM, "On")
+    field(VAL,  "0")
+    field(PINI, "YES")
+}
