@@ -216,6 +216,61 @@ impl PvaServer {
         self.run_with_store_and_registry(store, registry).await
     }
 
+    /// Run server with a custom [`PvStore`] + interactive iocsh.
+    /// Combines [`Self::run_with_store`] and [`Self::run_with_shell`].
+    /// Shell exit stops the server.
+    pub async fn run_with_store_and_shell<S, F>(self, store: Arc<S>, register_fn: F) -> CaResult<()>
+    where
+        S: PvStore + 'static,
+        F: FnOnce(&iocsh::IocShell) + Send + 'static,
+    {
+        let db = self.db.clone();
+        let handle = tokio::runtime::Handle::current();
+
+        let autosave_cmds = self
+            .autosave_manager
+            .as_ref()
+            .map(|mgr| autosave::iocsh::autosave_commands(mgr.clone()));
+
+        let server = Arc::new(self);
+
+        let server_clone = server.clone();
+        let server_handle =
+            epics_base_rs::runtime::task::spawn(
+                async move { server_clone.run_with_store(store).await },
+            );
+
+        let (tx, rx) = epics_base_rs::runtime::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let shell = iocsh::IocShell::new(db, handle);
+            register_fn(&shell);
+            if let Some(cmds) = autosave_cmds {
+                for cmd in cmds {
+                    shell.register(cmd);
+                }
+            }
+            let result = shell.run_repl();
+            let _ = tx.send(result);
+        });
+
+        let shell_result = rx.await;
+
+        server_handle.abort();
+        let _ = server_handle.await;
+
+        match shell_result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                eprintln!("shell error: {e}");
+                Err(CaError::InvalidValue(e))
+            }
+            Err(_) => {
+                eprintln!("shell thread dropped unexpectedly");
+                Err(CaError::InvalidValue("shell thread dropped".to_string()))
+            }
+        }
+    }
+
     async fn run_with_store_and_registry<S: PvStore + 'static>(
         &self,
         store: Arc<S>,

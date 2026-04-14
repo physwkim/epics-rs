@@ -94,20 +94,17 @@ async fn main() -> CaResult<()> {
     let ca_server = CaServer::from_parts(db.clone(), ca_port, None, None, None);
     let pva_server = PvaServer::from_parts(db, pva_port, None, None, None);
 
-    // Run CA + PVA concurrently
+    // CA runs in background, PVA runs with iocsh (shell exit stops everything)
     let ca_handle = tokio::spawn(async move { ca_server.run().await });
-    let pva_handle = tokio::spawn(async move { pva_server.run_with_store(store).await });
 
-    tokio::select! {
-        res = ca_handle => {
-            eprintln!("CA server exited: {res:?}");
-        }
-        res = pva_handle => {
-            eprintln!("PVA server exited: {res:?}");
-        }
-    }
+    let result = pva_server
+        .run_with_store_and_shell(store, |_shell| {
+            // iocsh commands (dbl, dbgf, dbpf, etc.) are built-in
+        })
+        .await;
 
-    Ok(())
+    ca_handle.abort();
+    result
 }
 
 /// Parse a simplified st.cmd — returns shared PvDatabase + optional group file.
