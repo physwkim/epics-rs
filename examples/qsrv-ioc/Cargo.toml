@@ -2,15 +2,16 @@
 name = "qsrv-ioc"
 version.workspace = true
 edition.workspace = true
-description = "Demo IOC: ai/ao/bi records + group PV served via qsrv → spvirit PvAccess"
+description = "Demo IOC: CA + PVA dual-protocol server with group PV support"
 publish = false
 
 [features]
-ioc = ["dep:epics-base-rs", "dep:epics-pva-rs", "dep:epics-bridge-rs", "epics-bridge-rs/qsrv"]
+ioc = ["dep:epics-base-rs", "dep:epics-pva-rs", "dep:epics-ca-rs", "dep:epics-bridge-rs", "epics-bridge-rs/qsrv"]
 
 [dependencies]
 epics-base-rs = { workspace = true, optional = true }
 epics-pva-rs = { workspace = true, optional = true }
+epics-ca-rs = { workspace = true, optional = true }
 epics-bridge-rs = { workspace = true, optional = true }
 spvirit-server = "0.2.0"
 tokio = { version = "1", features = ["full"] }
