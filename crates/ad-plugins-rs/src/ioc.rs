@@ -541,13 +541,14 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
         ));
     }
 
-    // --- NDPvaConfigure (stub — requires PVAccess server from epics-pva-rs) ---
+    // --- NDPvaConfigure ---
     {
         let m = mgr.clone();
         app = app.register_startup_command(CommandDef::new(
             "NDPvaConfigure",
             plugin_arg_defs(),
-            "NDPvaConfigure portName [queueSize] ... (stub)".to_string(),
+            "NDPvaConfigure portName [queueSize] [NDArrayPort] — serve NDArray as NTNDArray over PVA"
+                .to_string(),
             move |args: &[ArgValue], _ctx: &CommandContext| {
                 let (port_name, queue_size, ndarray_port) = extract_plugin_args(args)?;
                 let dtyp = dtyp_from_port(&port_name);
@@ -557,10 +558,15 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
                 }
                 let drv = m.driver()?;
                 let pool = drv.pool();
-                use crate::passthrough::PassthroughProcessor;
+
+                #[cfg(feature = "pva")]
+                let processor = crate::pva::PvaProcessor::new();
+                #[cfg(not(feature = "pva"))]
+                let processor = crate::passthrough::PassthroughProcessor::new("NDPvaConfigure");
+
                 let (handle, _jh) = create_plugin_runtime(
                     &port_name,
-                    PassthroughProcessor::new("NDPvaConfigure"),
+                    processor,
                     pool,
                     queue_size,
                     &ndarray_port,
@@ -570,7 +576,10 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
                 if let Err(e) = m.wiring().rewire(handle.array_sender(), "", &ndarray_port) {
                     eprintln!("NDPvaConfigure: wiring failed: {e}");
                 }
-                println!("NDPvaConfigure: port={port_name} (stub)");
+                #[cfg(feature = "pva")]
+                println!("NDPvaConfigure: port={port_name} (PVA enabled)");
+                #[cfg(not(feature = "pva"))]
+                println!("NDPvaConfigure: port={port_name} (stub — enable 'pva' feature)");
                 Ok(CommandOutcome::Continue)
             },
         ));

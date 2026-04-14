@@ -26,8 +26,11 @@ netcdf3 = "0.6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "tiff"] }
 rayon = { version = "1", optional = true }
 rust-hdf5 = { version = "0.2", features = ["threadsafe", "all_filters"] }
+spvirit-types = { version = "0.2.0", optional = true }
+spvirit-server = { version = "0.2.0", optional = true }
 
 [features]
 default = ["parallel"]
 ioc = ["ad-core-rs/ioc"]
+pva = ["dep:spvirit-types", "dep:spvirit-server"]
 parallel = ["rayon"]
