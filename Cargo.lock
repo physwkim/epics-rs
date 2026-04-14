@@ -34,6 +34,8 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "spvirit-server",
+ "spvirit-types",
  "tiff 0.9.1",
  "tokio",
  "tracing",
@@ -1372,7 +1374,6 @@ dependencies = [
  "epics-ca-rs",
  "epics-pva-rs",
  "spvirit-server",
- "tokio",
 ]
 
 [[package]]
