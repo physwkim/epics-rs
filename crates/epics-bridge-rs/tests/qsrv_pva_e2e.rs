@@ -12,17 +12,35 @@ use std::sync::Arc;
 
 use spvirit_codec::spvd_decode::{DecodedValue, FieldType, TypeCode};
 use spvirit_server::PvStore;
-use spvirit_types::{NtField, NtPayload, ScalarValue};
+use spvirit_types::{NtPayload, PvValue, ScalarValue};
 use tokio::time::{Duration, timeout};
 
 use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::server::records::{ai::AiRecord, ao::AoRecord, bi::BiRecord};
 use epics_bridge_rs::qsrv::{BridgeProvider, QsrvPvStore};
 
-fn structure_payload(payload: &NtPayload) -> &spvirit_types::NtStructure {
+struct GenericView<'a> {
+    struct_id: &'a str,
+    fields: &'a [(String, PvValue)],
+}
+
+impl<'a> GenericView<'a> {
+    fn field(&self, name: &str) -> Option<&'a PvValue> {
+        self.fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+}
+
+fn structure_payload(payload: &NtPayload) -> GenericView<'_> {
     match payload {
-        NtPayload::Structure(s) => s,
-        other => panic!("expected NtPayload::Structure, got {other:?}"),
+        NtPayload::Generic { struct_id, fields } => GenericView { struct_id, fields },
+        other => panic!("expected NtPayload::Generic, got {other:?}"),
+    }
+}
+
+fn view_inner<'a>(pv: &'a PvValue) -> GenericView<'a> {
+    match pv {
+        PvValue::Structure { struct_id, fields } => GenericView { struct_id, fields },
+        other => panic!("expected nested PvValue::Structure, got {other:?}"),
     }
 }
 
@@ -42,16 +60,19 @@ async fn get_snapshot_nt_scalar_double() {
 
     let payload = store.get_snapshot("TEST:AI").await.expect("snapshot");
     let s = structure_payload(&payload);
-    assert_eq!(s.struct_id.as_deref(), Some("epics:nt/NTScalar:1.0"));
+    assert_eq!(s.struct_id, "epics:nt/NTScalar:1.0");
 
     let value_field = s.field("value").expect("value field");
     match value_field {
-        NtField::Scalar(ScalarValue::F64(v)) => assert!((v - 3.125).abs() < 1e-10),
+        PvValue::Scalar(ScalarValue::F64(v)) => assert!((v - 3.125).abs() < 1e-10),
         other => panic!("expected F64 scalar, got {other:?}"),
     }
 
-    assert!(matches!(s.field("alarm"), Some(NtField::Structure(_))));
-    assert!(matches!(s.field("timeStamp"), Some(NtField::Structure(_))));
+    assert!(matches!(s.field("alarm"), Some(PvValue::Structure { .. })));
+    assert!(matches!(
+        s.field("timeStamp"),
+        Some(PvValue::Structure { .. })
+    ));
 }
 
 #[tokio::test]
@@ -60,19 +81,16 @@ async fn get_snapshot_nt_enum_for_bi_record() {
 
     let payload = store.get_snapshot("TEST:BI").await.expect("snapshot");
     let s = structure_payload(&payload);
-    assert_eq!(s.struct_id.as_deref(), Some("epics:nt/NTEnum:1.0"));
+    assert_eq!(s.struct_id, "epics:nt/NTEnum:1.0");
 
     // NTEnum value is itself a structure { index, choices }.
-    match s.field("value").expect("value") {
-        NtField::Structure(inner) => {
-            assert!(inner.field("index").is_some(), "expected enum index field");
-            assert!(
-                inner.field("choices").is_some(),
-                "expected enum choices field"
-            );
-        }
-        other => panic!("expected nested structure for NTEnum value, got {other:?}"),
-    }
+    let value = s.field("value").expect("value");
+    let inner = view_inner(value);
+    assert!(inner.field("index").is_some(), "expected enum index field");
+    assert!(
+        inner.field("choices").is_some(),
+        "expected enum choices field"
+    );
 }
 
 #[tokio::test]
@@ -117,7 +135,7 @@ async fn put_value_scalar_updates_the_record() {
     let payload = store.get_snapshot("TEST:AO").await.expect("readback");
     let s = structure_payload(&payload);
     match s.field("value").expect("value") {
-        NtField::Scalar(ScalarValue::F64(v)) => assert!((v - 99.5).abs() < 1e-10),
+        PvValue::Scalar(ScalarValue::F64(v)) => assert!((v - 99.5).abs() < 1e-10),
         other => panic!("expected F64 value, got {other:?}"),
     }
 }
@@ -131,7 +149,7 @@ async fn put_value_bare_scalar_also_works() {
     let payload = store.get_snapshot("TEST:AO").await.expect("readback");
     let s = structure_payload(&payload);
     match s.field("value").expect("value") {
-        NtField::Scalar(ScalarValue::F64(v)) => assert!((v - 7.5).abs() < 1e-10),
+        PvValue::Scalar(ScalarValue::F64(v)) => assert!((v - 7.5).abs() < 1e-10),
         other => panic!("expected F64 value, got {other:?}"),
     }
 }
@@ -159,7 +177,7 @@ async fn subscribe_delivers_post_put_update() {
             continue;
         };
         let s = structure_payload(&payload);
-        if let Some(NtField::Scalar(ScalarValue::F64(v))) = s.field("value") {
+        if let Some(PvValue::Scalar(ScalarValue::F64(v))) = s.field("value") {
             last_value = Some(*v);
             if (*v - 123.0).abs() < 1e-10 {
                 return;

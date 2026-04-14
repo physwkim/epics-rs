@@ -4,8 +4,8 @@
 //!
 //! Bridging is done in two directions:
 //!   - **Read path**: qsrv produces `epics_pva_rs::pvdata::PvStructure`; the
-//!     adapter converts it to `spvirit_types::NtPayload::Structure` using
-//!     `NtStructure` / `NtField`, preserving `struct_id` and field names so
+//!     adapter converts it to `spvirit_types::NtPayload::Generic` carrying a
+//!     recursive `PvValue` tree, preserving `struct_id` and field names so
 //!     that NTScalar / NTEnum / NTScalarArray responses stay wire-compatible.
 //!   - **Write path**: the protocol handler decodes incoming PUT bytes into
 //!     `spvirit_codec::spvd_decode::DecodedValue`; the adapter rewraps it as
@@ -18,7 +18,7 @@ use spvirit_codec::spvd_decode::{
     DecodedValue, FieldDesc as SpvdFieldDesc, FieldType, StructureDesc, TypeCode,
 };
 use spvirit_server::PvStore;
-use spvirit_types::{NtField, NtPayload, NtStructure, ScalarArrayValue, ScalarValue};
+use spvirit_types::{NtPayload, PvValue, ScalarArrayValue, ScalarValue};
 use tokio::sync::{RwLock, mpsc};
 
 use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarType, ScalarValue as PvaScalarValue};
@@ -64,7 +64,7 @@ pub fn take_registered_pva_pvs() -> std::collections::HashMap<String, PvaPvHandl
 ///
 /// Handles single-record PVs, group composite PVs, and PVA plugin PVs
 /// (NTNDArray from areaDetector). Group PVs ride on the
-/// `NtPayload::Structure` variant introduced in spvirit-types 0.1.7.
+/// `NtPayload::Generic` variant with a recursive `PvValue` tree.
 pub struct QsrvPvStore {
     provider: Arc<BridgeProvider>,
     /// Per-PV cache of opened channels.
@@ -265,31 +265,30 @@ async fn monitor_bridge_loop(mut monitor: AnyMonitor, tx: mpsc::Sender<NtPayload
     monitor.stop().await;
 }
 
-// ── PvStructure → NtPayload / NtStructure / StructureDesc ────────────────
+// ── PvStructure → NtPayload / PvValue / StructureDesc ────────────────────
 
 fn pv_structure_to_nt_payload(pv: &PvStructure) -> NtPayload {
-    NtPayload::Structure(pv_structure_to_nt_structure(pv))
+    let (struct_id, fields) = pv_structure_to_generic_parts(pv);
+    NtPayload::Generic { struct_id, fields }
 }
 
-fn pv_structure_to_nt_structure(pv: &PvStructure) -> NtStructure {
-    let struct_id = if pv.struct_id.is_empty() {
-        None
-    } else {
-        Some(pv.struct_id.clone())
-    };
+fn pv_structure_to_generic_parts(pv: &PvStructure) -> (String, Vec<(String, PvValue)>) {
     let fields = pv
         .fields
         .iter()
-        .map(|(name, field)| (name.clone(), pv_field_to_nt_field(field)))
+        .map(|(name, field)| (name.clone(), pv_field_to_pv_value(field)))
         .collect();
-    NtStructure { struct_id, fields }
+    (pv.struct_id.clone(), fields)
 }
 
-fn pv_field_to_nt_field(field: &PvField) -> NtField {
+fn pv_field_to_pv_value(field: &PvField) -> PvValue {
     match field {
-        PvField::Scalar(sv) => NtField::Scalar(pva_scalar_to_spvirit(sv)),
-        PvField::ScalarArray(items) => NtField::ScalarArray(pva_array_to_spvirit(items)),
-        PvField::Structure(nested) => NtField::Structure(pv_structure_to_nt_structure(nested)),
+        PvField::Scalar(sv) => PvValue::Scalar(pva_scalar_to_spvirit(sv)),
+        PvField::ScalarArray(items) => PvValue::ScalarArray(pva_array_to_spvirit(items)),
+        PvField::Structure(nested) => {
+            let (struct_id, fields) = pv_structure_to_generic_parts(nested);
+            PvValue::Structure { struct_id, fields }
+        }
     }
 }
 
@@ -657,18 +656,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pv_scalar_struct_to_nt_structure_preserves_struct_id() {
+    fn pv_scalar_struct_to_generic_preserves_struct_id() {
         let mut pv = PvStructure::new("epics:nt/NTScalar:1.0");
         pv.fields.push((
             "value".into(),
             PvField::Scalar(PvaScalarValue::Double(3.125)),
         ));
 
-        let nt = pv_structure_to_nt_structure(&pv);
-        assert_eq!(nt.struct_id.as_deref(), Some("epics:nt/NTScalar:1.0"));
-        assert_eq!(nt.fields.len(), 1);
-        match &nt.fields[0].1 {
-            NtField::Scalar(ScalarValue::F64(v)) => assert_eq!(*v, 3.125),
+        let (struct_id, fields) = pv_structure_to_generic_parts(&pv);
+        assert_eq!(struct_id, "epics:nt/NTScalar:1.0");
+        assert_eq!(fields.len(), 1);
+        match &fields[0].1 {
+            PvValue::Scalar(ScalarValue::F64(v)) => assert_eq!(*v, 3.125),
             other => panic!("expected scalar F64, got {other:?}"),
         }
     }
@@ -688,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_pv_structure_nests_nt_structure() {
+    fn nested_pv_structure_nests_generic() {
         let mut alarm = PvStructure::new("alarm_t");
         alarm
             .fields
@@ -702,11 +701,11 @@ mod tests {
             .fields
             .push(("alarm".into(), PvField::Structure(alarm)));
 
-        let nt = pv_structure_to_nt_structure(&outer);
-        match &nt.fields[1].1 {
-            NtField::Structure(inner) => {
-                assert_eq!(inner.struct_id.as_deref(), Some("alarm_t"));
-                assert_eq!(inner.fields.len(), 1);
+        let (_, fields) = pv_structure_to_generic_parts(&outer);
+        match &fields[1].1 {
+            PvValue::Structure { struct_id, fields } => {
+                assert_eq!(struct_id, "alarm_t");
+                assert_eq!(fields.len(), 1);
             }
             other => panic!("expected nested structure, got {other:?}"),
         }

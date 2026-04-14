@@ -41,7 +41,7 @@ optics-rs = { path = "crates/optics-rs", version = "0.9.1" }
 mqtt-rs = { path = "crates/mqtt-rs", version = "0.9.1" }
 
 [patch.crates-io]
-spvirit-client = { path = "../spvirit/spvirit-client", version = "0.2.0" }
-spvirit-codec = { path = "../spvirit/spvirit-codec", version = "0.2.0" }
-spvirit-server = { path = "../spvirit/spvirit-server", version = "0.2.0" }
-spvirit-types = { path = "../spvirit/spvirit-types", version = "0.2.0" }
+spvirit-client = { path = "../epics-rs-mat/spvirit/spvirit-client", version = "0.1.8" }
+spvirit-codec = { path = "../epics-rs-mat/spvirit/spvirit-codec", version = "0.1.8" }
+spvirit-server = { path = "../epics-rs-mat/spvirit/spvirit-server", version = "0.1.8" }
+spvirit-types = { path = "../epics-rs-mat/spvirit/spvirit-types", version = "0.1.8" }

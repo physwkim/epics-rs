@@ -14,4 +14,4 @@ epics-base-rs = { workspace = true, optional = true }
 epics-pva-rs = { workspace = true, optional = true }
 epics-ca-rs = { workspace = true, optional = true }
 epics-bridge-rs = { workspace = true, optional = true }
-spvirit-server = "0.2.0"
+spvirit-server = "0.1.8"
