@@ -166,7 +166,8 @@ fn spawn_simulator(db: Arc<PvDatabase>) {
             let _ = db
                 .put_record_field_from_ca("DEMO:AI", "VAL", EpicsValue::Double(temp))
                 .await;
-            let bi_val = if (tick as u64) % 10 < 5 { 0 } else { 1 };
+            // Toggle every 5 seconds (tick += 0.1 per 500ms → 0.2/sec)
+            let bi_val = if (tick as u64) % 2 == 0 { 0 } else { 1 };
             let _ = db
                 .put_record_field_from_ca("DEMO:BI", "VAL", EpicsValue::Enum(bi_val))
                 .await;
