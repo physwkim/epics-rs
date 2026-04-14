@@ -542,12 +542,27 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
     }
 
     // --- NDPvaConfigure ---
+    // C++ signature: NDPvaConfigure(portName, queueSize, blockingCallbacks,
+    //   NDArrayPort, NDArrayAddr, pvName, maxBuffers, maxMemory, priority, stackSize)
+    // args[5] = pvName is a STRING, unlike standard plugin_arg_defs which has Int there.
     {
         let m = mgr.clone();
+        let pva_arg_defs = {
+            let mut defs = plugin_arg_defs();
+            // Replace args[5] (maxBuffers/Int) with pvName/String
+            if defs.len() > 5 {
+                defs[5] = ArgDesc {
+                    name: "pvName",
+                    arg_type: ArgType::String,
+                    optional: true,
+                };
+            }
+            defs
+        };
         app = app.register_startup_command(CommandDef::new(
             "NDPvaConfigure",
-            plugin_arg_defs(),
-            "NDPvaConfigure portName [queueSize] [NDArrayPort] — serve NDArray as NTNDArray over PVA"
+            pva_arg_defs,
+            "NDPvaConfigure portName queueSize blockingCallbacks NDArrayPort NDArrayAddr pvName"
                 .to_string(),
             move |args: &[ArgValue], _ctx: &CommandContext| {
                 let (port_name, queue_size, ndarray_port) = extract_plugin_args(args)?;
