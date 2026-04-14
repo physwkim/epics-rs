@@ -559,24 +559,26 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
                 let drv = m.driver()?;
                 let pool = drv.pool();
 
+                // C++ NDPvaConfigure args[5] is pvName (6th argument).
+                // If not provided, fall back to "{portName}:Image".
+                let pva_pv_name = match args.get(5) {
+                    Some(ArgValue::String(s)) if !s.is_empty() => s.clone(),
+                    _ => format!("{port_name}:Image"),
+                };
+
                 #[cfg(feature = "pva")]
-                let (processor, pva_pv_name) = {
+                let processor = {
                     let proc = crate::pva::PvaProcessor::new();
-                    // Capture handles before the processor is consumed
                     let latest = proc.latest_handle();
                     let subscribers = proc.subscribers_handle();
-                    // Register the PVA PV so the CA+PVA runner can wire it
-                    // into QsrvPvStore. PV name follows C++ convention:
-                    // $(PREFIX)Pva1:Image for port PVA1.
-                    let pv_name = format!("{port_name}:Image");
                     epics_bridge_rs::qsrv::register_pva_pv_global(
-                        &pv_name,
+                        &pva_pv_name,
                         epics_bridge_rs::qsrv::PvaPvHandle {
                             latest,
                             subscribers,
                         },
                     );
-                    (proc, pv_name)
+                    proc
                 };
                 #[cfg(not(feature = "pva"))]
                 let processor = crate::passthrough::PassthroughProcessor::new("NDPvaConfigure");
