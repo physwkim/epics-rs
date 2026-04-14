@@ -42,6 +42,7 @@ struct ChannelEntry {
 
 struct SubscriptionEntry {
     target: ChannelTarget,
+    channel_sid: u32,
     sub_id: u32,
     data_type: u16,
     task: tokio::task::JoinHandle<()>,
@@ -590,7 +591,7 @@ async fn dispatch_message(
                     // Synchronous completion — respond immediately
                     let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
                     resp.data_type = write_type as u16;
-                    resp.count = 1;
+                    resp.count = write_count;
                     resp.cid = eca_status;
                     resp.available = ioid;
 
@@ -664,6 +665,7 @@ async fn dispatch_message(
                             sub_id,
                             SubscriptionEntry {
                                 target: ChannelTarget::SimplePv(pv.clone()),
+                                channel_sid: sid,
                                 sub_id,
                                 data_type: requested_type,
                                 task,
@@ -727,6 +729,7 @@ async fn dispatch_message(
                                     record: record.clone(),
                                     field: field.clone(),
                                 },
+                                channel_sid: sid,
                                 sub_id,
                                 data_type: requested_type,
                                 task,
@@ -818,6 +821,29 @@ async fn dispatch_message(
             let sid = hdr.cid;
             let cid = hdr.available;
             if let Some(_entry) = state.channels.remove(&sid) {
+                state.channel_access.remove(&sid);
+
+                // Clean up subscriptions that belong to this channel
+                let sub_ids: Vec<u32> = state
+                    .subscriptions
+                    .iter()
+                    .filter(|(_, sub)| sub.channel_sid == sid)
+                    .map(|(&id, _)| id)
+                    .collect();
+                for sub_id in sub_ids {
+                    if let Some(sub) = state.subscriptions.remove(&sub_id) {
+                        sub.task.abort();
+                        match &sub.target {
+                            ChannelTarget::SimplePv(pv) => {
+                                pv.remove_subscriber(sub.sub_id).await;
+                            }
+                            ChannelTarget::RecordField { record, .. } => {
+                                record.write().await.remove_subscriber(sub.sub_id);
+                            }
+                        }
+                    }
+                }
+
                 let mut resp = CaHeader::new(CA_PROTO_CLEAR_CHANNEL);
                 resp.data_type = hdr.data_type;
                 resp.count = hdr.count;

@@ -69,6 +69,9 @@ impl CompressRecord {
                     let idx = self.off as usize % self.nsam as usize;
                     self.val[idx] = compressed;
                     self.off += 1;
+                    if (self.nuse as usize) < self.nsam as usize {
+                        self.nuse += 1;
+                    }
                     self.accum.clear();
                 }
             }
@@ -101,6 +104,21 @@ static COMPRESS_FIELDS: &[FieldDesc] = &[
         name: "OFF",
         dbf_type: DbFieldType::Long,
         read_only: true,
+    },
+    FieldDesc {
+        name: "NUSE",
+        dbf_type: DbFieldType::Long,
+        read_only: true,
+    },
+    FieldDesc {
+        name: "RES",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
+    },
+    FieldDesc {
+        name: "BALG",
+        dbf_type: DbFieldType::Short,
+        read_only: false,
     },
 ];
 
@@ -163,7 +181,21 @@ impl Record for CompressRecord {
                 }
                 _ => Err(CaError::TypeMismatch("N".into())),
             },
-            "NSAM" | "OFF" => Err(CaError::ReadOnlyField(name.to_string())),
+            "RES" => match value {
+                EpicsValue::Short(v) => {
+                    self.res = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("RES".into())),
+            },
+            "BALG" => match value {
+                EpicsValue::Short(v) => {
+                    self.balg = v;
+                    Ok(())
+                }
+                _ => Err(CaError::TypeMismatch("BALG".into())),
+            },
+            "NSAM" | "OFF" | "NUSE" => Err(CaError::ReadOnlyField(name.to_string())),
             _ => Err(CaError::FieldNotFound(name.to_string())),
         }
     }

@@ -34,6 +34,9 @@ pub fn fwhm(data: &[f64]) -> f64 {
     }
 
     let min_val = data.iter().cloned().fold(f64::INFINITY, f64::min);
+    if (max_val - min_val).abs() < f64::EPSILON {
+        return 0.0;
+    }
     let half_max = (max_val + min_val) / 2.0;
 
     // Find left half-max crossing

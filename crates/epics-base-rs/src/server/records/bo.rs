@@ -236,7 +236,7 @@ impl Record for BoRecord {
         // DOL/OMSL: constant DOL handling
         if self.omsl == 1 && !self.dol.is_empty() {
             if let Some(v) = dol_as_constant(&self.dol) {
-                self.val = v;
+                self.val = if v != 0 { 1 } else { 0 };
             }
         }
 
