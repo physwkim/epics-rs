@@ -10,4 +10,3 @@ epics-base-rs = { workspace = true }
 epics-ca-rs = { workspace = true }
 epics-pva-rs = { workspace = true }
 rand = { version = "0.9", features = ["small_rng"] }
-tokio = { version = "1", features = ["full"] }

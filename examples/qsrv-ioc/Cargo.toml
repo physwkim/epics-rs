@@ -15,4 +15,3 @@ epics-pva-rs = { workspace = true, optional = true }
 epics-ca-rs = { workspace = true, optional = true }
 epics-bridge-rs = { workspace = true, optional = true }
 spvirit-server = "0.2.0"
-tokio = { version = "1", features = ["full"] }

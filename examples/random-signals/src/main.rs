@@ -33,7 +33,7 @@ const PV_NAMES: [&str; 4] = [
     "BLM:001:SA:D",
 ];
 
-#[tokio::main]
+#[epics_base_rs::epics_main]
 async fn main() -> CaResult<()> {
     let ca_port: u16 = std::env::var("EPICS_CA_SERVER_PORT")
         .ok()
@@ -62,20 +62,19 @@ async fn main() -> CaResult<()> {
     let ca_server = CaServer::from_parts(db.clone(), ca_port, None, None, None);
     let pva_server = PvaServer::from_parts(db, pva_port, None, None, None);
 
-    let ca_handle = tokio::spawn(async move { ca_server.run().await });
-    let pva_handle = tokio::spawn(async move { pva_server.run().await });
+    let ca_handle = epics_base_rs::runtime::task::spawn(async move { ca_server.run().await });
+    let pva_handle = epics_base_rs::runtime::task::spawn(async move { pva_server.run().await });
 
-    tokio::select! {
-        res = ca_handle => { eprintln!("CA server exited: {res:?}"); }
-        res = pva_handle => { eprintln!("PVA server exited: {res:?}"); }
-    }
+    // Wait for either server to exit
+    let _ = ca_handle.await;
+    let _ = pva_handle.await;
 
     Ok(())
 }
 
 fn spawn_updater(db: Arc<PvDatabase>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
+    epics_base_rs::runtime::task::spawn(async move {
+        let mut interval = epics_base_rs::runtime::task::interval(Duration::from_millis(10));
         let mut rng = SmallRng::from_os_rng();
         loop {
             interval.tick().await;

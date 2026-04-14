@@ -38,7 +38,7 @@ use epics_ca_rs::server::CaServer;
 use epics_pva_rs::server::PvaServer;
 use spvirit_server::PvStore;
 
-#[tokio::main]
+#[epics_base_rs::epics_main]
 async fn main() -> CaResult<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -95,7 +95,7 @@ async fn main() -> CaResult<()> {
     let pva_server = PvaServer::from_parts(db, pva_port, None, None, None);
 
     // CA runs in background, PVA runs with iocsh (shell exit stops everything)
-    let ca_handle = tokio::spawn(async move { ca_server.run().await });
+    let ca_handle = epics_base_rs::runtime::task::spawn(async move { ca_server.run().await });
 
     let result = pva_server
         .run_with_store_and_shell(store, |_shell| {
@@ -156,9 +156,9 @@ async fn parse_and_build(script: &str) -> CaResult<(Arc<PvDatabase>, Option<Stri
 }
 
 fn spawn_simulator(db: Arc<PvDatabase>) {
-    tokio::spawn(async move {
+    epics_base_rs::runtime::task::spawn(async move {
         let mut tick = 0.0_f64;
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        let mut interval = epics_base_rs::runtime::task::interval(Duration::from_millis(500));
         loop {
             interval.tick().await;
             tick += 0.1;
