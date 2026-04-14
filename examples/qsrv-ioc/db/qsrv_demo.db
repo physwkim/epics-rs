@@ -13,7 +13,6 @@ record(ai, "$(P)AI") {
     field(LOW,  "10")
     field(LOLO, "5")
     field(PREC, "2")
-    field(SCAN, ".5 second")
     field(PINI, "YES")
 }
 
