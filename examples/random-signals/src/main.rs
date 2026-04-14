@@ -57,7 +57,11 @@ async fn main() -> CaResult<()> {
             .await?;
 
         let db = server.database().clone();
-        eprintln!("Random signals PVA IOC started — {} @ 100 Hz (port {})", PV_NAMES.join(", "), port);
+        eprintln!(
+            "Random signals PVA IOC started — {} @ 100 Hz (port {})",
+            PV_NAMES.join(", "),
+            port
+        );
         spawn_updater(db);
         server.run().await
     } else {
@@ -76,7 +80,11 @@ async fn main() -> CaResult<()> {
             .await?;
 
         let db = server.database().clone();
-        eprintln!("Random signals CA IOC started — {} @ 100 Hz (port {})", PV_NAMES.join(", "), port);
+        eprintln!(
+            "Random signals CA IOC started — {} @ 100 Hz (port {})",
+            PV_NAMES.join(", "),
+            port
+        );
         spawn_updater(db);
         server.run().await
     }

@@ -21,7 +21,11 @@ fn format_field_type(ft: &FieldType) -> String {
         FieldType::Union(fields) => {
             let mut out = String::from("union\n");
             for field in fields {
-                out.push_str(&format!("    {} {}\n", format_field_type(&field.field_type), field.name));
+                out.push_str(&format!(
+                    "    {} {}\n",
+                    format_field_type(&field.field_type),
+                    field.name
+                ));
             }
             out
         }
@@ -35,10 +39,7 @@ fn format_structure(desc: &StructureDesc) -> String {
 
 fn format_structure_indent(desc: &StructureDesc, indent: usize) -> String {
     let mut out = String::new();
-    let id = desc
-        .struct_id
-        .as_deref()
-        .unwrap_or("structure");
+    let id = desc.struct_id.as_deref().unwrap_or("structure");
     out.push_str(id);
     out.push('\n');
     for field in &desc.fields {

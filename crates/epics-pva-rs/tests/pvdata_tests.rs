@@ -250,4 +250,3 @@ fn pva_header_invalid_magic() {
     let hdr = PvaHeader::new(&buf);
     assert!(!hdr.is_valid());
 }
-

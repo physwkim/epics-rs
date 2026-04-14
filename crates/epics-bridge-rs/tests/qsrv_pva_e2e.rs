@@ -66,7 +66,10 @@ async fn get_snapshot_nt_enum_for_bi_record() {
     match s.field("value").expect("value") {
         NtField::Structure(inner) => {
             assert!(inner.field("index").is_some(), "expected enum index field");
-            assert!(inner.field("choices").is_some(), "expected enum choices field");
+            assert!(
+                inner.field("choices").is_some(),
+                "expected enum choices field"
+            );
         }
         other => panic!("expected nested structure for NTEnum value, got {other:?}"),
     }
@@ -78,7 +81,11 @@ async fn get_descriptor_matches_nt_scalar_shape() {
     let desc = store.get_descriptor("TEST:AI").await.expect("descriptor");
     assert_eq!(desc.struct_id.as_deref(), Some("epics:nt/NTScalar:1.0"));
 
-    let value = desc.fields.iter().find(|f| f.name == "value").expect("value field");
+    let value = desc
+        .fields
+        .iter()
+        .find(|f| f.name == "value")
+        .expect("value field");
     match &value.field_type {
         FieldType::Scalar(TypeCode::Float64) => {}
         other => panic!("expected Float64 value field, got {other:?}"),
@@ -104,10 +111,7 @@ async fn has_pv_and_list_pvs_report_record() {
 async fn put_value_scalar_updates_the_record() {
     let store = store_with_record("TEST:AO", AoRecord::default()).await;
 
-    let decoded = DecodedValue::Structure(vec![(
-        "value".to_string(),
-        DecodedValue::Float64(99.5),
-    )]);
+    let decoded = DecodedValue::Structure(vec![("value".to_string(), DecodedValue::Float64(99.5))]);
     store.put_value("TEST:AO", &decoded).await.expect("put");
 
     let payload = store.get_snapshot("TEST:AO").await.expect("readback");

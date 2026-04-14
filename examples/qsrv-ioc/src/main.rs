@@ -36,9 +36,7 @@ async fn main() -> CaResult<()> {
     let store = Arc::new(QsrvPvStore::new(provider));
 
     eprintln!("qsrv-ioc: serving DEMO:AI, DEMO:AO over pvAccess (port 5075)");
-    server
-        .run_with_store(store)
-        .await
+    server.run_with_store(store).await
 }
 
 fn spawn_simulator(db: Arc<PvDatabase>) {
@@ -50,7 +48,11 @@ fn spawn_simulator(db: Arc<PvDatabase>) {
             tick += 0.1;
             let value = 22.0 + (tick * 0.5).sin();
             let _ = db
-                .put_record_field_from_ca("DEMO:AI", "VAL", epics_base_rs::types::EpicsValue::Double(value))
+                .put_record_field_from_ca(
+                    "DEMO:AI",
+                    "VAL",
+                    epics_base_rs::types::EpicsValue::Double(value),
+                )
                 .await;
         }
     });

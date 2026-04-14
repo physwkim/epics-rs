@@ -71,42 +71,60 @@ impl PvaCodec {
     // ─── Create channel ──────────────────────────────────────────────────
 
     pub fn build_create_channel(&self, client_channel_id: u32, channel_name: &str) -> Vec<u8> {
-        encode_create_channel_request(client_channel_id, channel_name, PVA_VERSION, self.big_endian)
+        encode_create_channel_request(
+            client_channel_id,
+            channel_name,
+            PVA_VERSION,
+            self.big_endian,
+        )
     }
 
     // ─── GET ─────────────────────────────────────────────────────────────
 
-    pub fn build_get_init(
-        &self,
-        server_channel_id: u32,
-        ioid: u32,
-        pv_request: &[u8],
-    ) -> Vec<u8> {
-        encode_get_request(server_channel_id, ioid, QOS_INIT, pv_request, PVA_VERSION, self.big_endian)
+    pub fn build_get_init(&self, server_channel_id: u32, ioid: u32, pv_request: &[u8]) -> Vec<u8> {
+        encode_get_request(
+            server_channel_id,
+            ioid,
+            QOS_INIT,
+            pv_request,
+            PVA_VERSION,
+            self.big_endian,
+        )
     }
 
     pub fn build_get(&self, server_channel_id: u32, ioid: u32) -> Vec<u8> {
-        encode_get_request(server_channel_id, ioid, 0x00, &[], PVA_VERSION, self.big_endian)
+        encode_get_request(
+            server_channel_id,
+            ioid,
+            0x00,
+            &[],
+            PVA_VERSION,
+            self.big_endian,
+        )
     }
 
     // ─── PUT ─────────────────────────────────────────────────────────────
 
-    pub fn build_put_init(
-        &self,
-        server_channel_id: u32,
-        ioid: u32,
-        pv_request: &[u8],
-    ) -> Vec<u8> {
-        encode_put_request(server_channel_id, ioid, QOS_INIT, pv_request, PVA_VERSION, self.big_endian)
+    pub fn build_put_init(&self, server_channel_id: u32, ioid: u32, pv_request: &[u8]) -> Vec<u8> {
+        encode_put_request(
+            server_channel_id,
+            ioid,
+            QOS_INIT,
+            pv_request,
+            PVA_VERSION,
+            self.big_endian,
+        )
     }
 
-    pub fn build_put(
-        &self,
-        server_channel_id: u32,
-        ioid: u32,
-        value_data: &[u8],
-    ) -> Vec<u8> {
-        encode_put_request(server_channel_id, ioid, 0x00, value_data, PVA_VERSION, self.big_endian)
+    pub fn build_put(&self, server_channel_id: u32, ioid: u32, value_data: &[u8]) -> Vec<u8> {
+        encode_put_request(
+            server_channel_id,
+            ioid,
+            0x00,
+            value_data,
+            PVA_VERSION,
+            self.big_endian,
+        )
     }
 
     // ─── MONITOR ─────────────────────────────────────────────────────────
@@ -117,7 +135,14 @@ impl PvaCodec {
         ioid: u32,
         pv_request: &[u8],
     ) -> Vec<u8> {
-        encode_monitor_request(server_channel_id, ioid, QOS_INIT, pv_request, PVA_VERSION, self.big_endian)
+        encode_monitor_request(
+            server_channel_id,
+            ioid,
+            QOS_INIT,
+            pv_request,
+            PVA_VERSION,
+            self.big_endian,
+        )
     }
 
     pub fn build_monitor_start(
@@ -137,23 +162,26 @@ impl PvaCodec {
 
     // ─── GET_FIELD (info) ────────────────────────────────────────────────
 
-    pub fn build_get_field(
-        &self,
-        server_channel_id: u32,
-        ioid: u32,
-        subfield: &str,
-    ) -> Vec<u8> {
-        let sub = if subfield.is_empty() { None } else { Some(subfield) };
+    pub fn build_get_field(&self, server_channel_id: u32, ioid: u32, subfield: &str) -> Vec<u8> {
+        let sub = if subfield.is_empty() {
+            None
+        } else {
+            Some(subfield)
+        };
         encode_get_field_request(server_channel_id, ioid, sub, PVA_VERSION, self.big_endian)
     }
 
     // ─── DESTROY_REQUEST ─────────────────────────────────────────────────
 
-    pub fn build_destroy_request(
-        &self,
-        server_channel_id: u32,
-        ioid: u32,
-    ) -> Vec<u8> {
-        encode_op_request(CMD_DESTROY_REQUEST, server_channel_id, ioid, 0x00, &[], PVA_VERSION, self.big_endian)
+    pub fn build_destroy_request(&self, server_channel_id: u32, ioid: u32) -> Vec<u8> {
+        encode_op_request(
+            CMD_DESTROY_REQUEST,
+            server_channel_id,
+            ioid,
+            0x00,
+            &[],
+            PVA_VERSION,
+            self.big_endian,
+        )
     }
 }

@@ -53,21 +53,13 @@ impl PvaServerBuilder {
     }
 
     /// Load records from a `.db` string.
-    pub fn db_string(
-        mut self,
-        content: &str,
-        macros: &HashMap<String, String>,
-    ) -> CaResult<Self> {
+    pub fn db_string(mut self, content: &str, macros: &HashMap<String, String>) -> CaResult<Self> {
         self.ioc = self.ioc.db_string(content, macros)?;
         Ok(self)
     }
 
     /// Load records from a `.db` file.
-    pub fn db_file(
-        mut self,
-        path: &str,
-        macros: &HashMap<String, String>,
-    ) -> CaResult<Self> {
+    pub fn db_file(mut self, path: &str, macros: &HashMap<String, String>) -> CaResult<Self> {
         self.ioc = self.ioc.db_file(path, macros)?;
         Ok(self)
     }
@@ -151,15 +143,16 @@ impl PvaServer {
         let db = self.db.clone();
         let handle = tokio::runtime::Handle::current();
 
-        let autosave_cmds = self.autosave_manager.as_ref()
+        let autosave_cmds = self
+            .autosave_manager
+            .as_ref()
             .map(|mgr| autosave::iocsh::autosave_commands(mgr.clone()));
 
         let server = Arc::new(self);
 
         let server_clone = server.clone();
-        let server_handle = epics_base_rs::runtime::task::spawn(async move {
-            server_clone.run().await
-        });
+        let server_handle =
+            epics_base_rs::runtime::task::spawn(async move { server_clone.run().await });
 
         let (tx, rx) = epics_base_rs::runtime::sync::oneshot::channel();
         std::thread::spawn(move || {

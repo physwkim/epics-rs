@@ -21,9 +21,7 @@ use spvirit_server::PvStore;
 use spvirit_types::{NtField, NtPayload, NtStructure, ScalarArrayValue, ScalarValue};
 use tokio::sync::{RwLock, mpsc};
 
-use epics_pva_rs::pvdata::{
-    PvField, PvStructure, ScalarType, ScalarValue as PvaScalarValue,
-};
+use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarType, ScalarValue as PvaScalarValue};
 
 use super::group::AnyMonitor;
 use super::provider::{AnyChannel, BridgeProvider, Channel, ChannelProvider, PvaMonitor};
@@ -488,8 +486,10 @@ mod tests {
     #[test]
     fn pv_scalar_struct_to_nt_structure_preserves_struct_id() {
         let mut pv = PvStructure::new("epics:nt/NTScalar:1.0");
-        pv.fields
-            .push(("value".into(), PvField::Scalar(PvaScalarValue::Double(3.14))));
+        pv.fields.push((
+            "value".into(),
+            PvField::Scalar(PvaScalarValue::Double(3.14)),
+        ));
 
         let nt = pv_structure_to_nt_structure(&pv);
         assert_eq!(nt.struct_id.as_deref(), Some("epics:nt/NTScalar:1.0"));
@@ -517,10 +517,9 @@ mod tests {
     #[test]
     fn nested_pv_structure_nests_nt_structure() {
         let mut alarm = PvStructure::new("alarm_t");
-        alarm.fields.push((
-            "severity".into(),
-            PvField::Scalar(PvaScalarValue::Int(2)),
-        ));
+        alarm
+            .fields
+            .push(("severity".into(), PvField::Scalar(PvaScalarValue::Int(2))));
 
         let mut outer = PvStructure::new("epics:nt/NTScalar:1.0");
         outer
@@ -542,10 +541,8 @@ mod tests {
 
     #[test]
     fn decoded_structure_to_pv_structure_roundtrip() {
-        let decoded = DecodedValue::Structure(vec![(
-            "value".to_string(),
-            DecodedValue::Float64(42.0),
-        )]);
+        let decoded =
+            DecodedValue::Structure(vec![("value".to_string(), DecodedValue::Float64(42.0))]);
         let pv = decoded_to_pv_structure(&decoded, "TEST");
         assert_eq!(pv.fields.len(), 1);
         match &pv.fields[0].1 {

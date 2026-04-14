@@ -235,12 +235,30 @@ fn nt_scalar_desc(sv: &ScalarValue) -> StructureDesc {
     StructureDesc {
         struct_id: Some("epics:nt/NTScalar:1.0".to_string()),
         fields: vec![
-            FieldDesc { name: "value".to_string(), field_type: FieldType::Scalar(tc) },
-            FieldDesc { name: "alarm".to_string(), field_type: FieldType::Structure(alarm_desc()) },
-            FieldDesc { name: "timeStamp".to_string(), field_type: FieldType::Structure(timestamp_desc()) },
-            FieldDesc { name: "display".to_string(), field_type: FieldType::Structure(display_desc()) },
-            FieldDesc { name: "control".to_string(), field_type: FieldType::Structure(control_desc()) },
-            FieldDesc { name: "valueAlarm".to_string(), field_type: FieldType::Structure(value_alarm_desc()) },
+            FieldDesc {
+                name: "value".to_string(),
+                field_type: FieldType::Scalar(tc),
+            },
+            FieldDesc {
+                name: "alarm".to_string(),
+                field_type: FieldType::Structure(alarm_desc()),
+            },
+            FieldDesc {
+                name: "timeStamp".to_string(),
+                field_type: FieldType::Structure(timestamp_desc()),
+            },
+            FieldDesc {
+                name: "display".to_string(),
+                field_type: FieldType::Structure(display_desc()),
+            },
+            FieldDesc {
+                name: "control".to_string(),
+                field_type: FieldType::Structure(control_desc()),
+            },
+            FieldDesc {
+                name: "valueAlarm".to_string(),
+                field_type: FieldType::Structure(value_alarm_desc()),
+            },
         ],
     }
 }
@@ -250,11 +268,26 @@ fn nt_scalar_array_desc(sav: &ScalarArrayValue) -> StructureDesc {
     StructureDesc {
         struct_id: Some("epics:nt/NTScalarArray:1.0".to_string()),
         fields: vec![
-            FieldDesc { name: "value".to_string(), field_type: FieldType::ScalarArray(tc) },
-            FieldDesc { name: "alarm".to_string(), field_type: FieldType::Structure(alarm_desc()) },
-            FieldDesc { name: "timeStamp".to_string(), field_type: FieldType::Structure(timestamp_desc()) },
-            FieldDesc { name: "display".to_string(), field_type: FieldType::Structure(display_desc()) },
-            FieldDesc { name: "control".to_string(), field_type: FieldType::Structure(control_desc()) },
+            FieldDesc {
+                name: "value".to_string(),
+                field_type: FieldType::ScalarArray(tc),
+            },
+            FieldDesc {
+                name: "alarm".to_string(),
+                field_type: FieldType::Structure(alarm_desc()),
+            },
+            FieldDesc {
+                name: "timeStamp".to_string(),
+                field_type: FieldType::Structure(timestamp_desc()),
+            },
+            FieldDesc {
+                name: "display".to_string(),
+                field_type: FieldType::Structure(display_desc()),
+            },
+            FieldDesc {
+                name: "control".to_string(),
+                field_type: FieldType::Structure(control_desc()),
+            },
         ],
     }
 }
@@ -263,9 +296,18 @@ fn alarm_desc() -> StructureDesc {
     StructureDesc {
         struct_id: Some("alarm_t".to_string()),
         fields: vec![
-            FieldDesc { name: "severity".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-            FieldDesc { name: "status".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-            FieldDesc { name: "message".to_string(), field_type: FieldType::String },
+            FieldDesc {
+                name: "severity".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
+            FieldDesc {
+                name: "status".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
+            FieldDesc {
+                name: "message".to_string(),
+                field_type: FieldType::String,
+            },
         ],
     }
 }
@@ -274,9 +316,18 @@ fn timestamp_desc() -> StructureDesc {
     StructureDesc {
         struct_id: Some("time_t".to_string()),
         fields: vec![
-            FieldDesc { name: "secondsPastEpoch".to_string(), field_type: FieldType::Scalar(TypeCode::Int64) },
-            FieldDesc { name: "nanoseconds".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-            FieldDesc { name: "userTag".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
+            FieldDesc {
+                name: "secondsPastEpoch".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int64),
+            },
+            FieldDesc {
+                name: "nanoseconds".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
+            FieldDesc {
+                name: "userTag".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
         ],
     }
 }
@@ -285,18 +336,39 @@ fn display_desc() -> StructureDesc {
     StructureDesc {
         struct_id: Some("display_t".to_string()),
         fields: vec![
-            FieldDesc { name: "limitLow".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "limitHigh".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "description".to_string(), field_type: FieldType::String },
-            FieldDesc { name: "units".to_string(), field_type: FieldType::String },
-            FieldDesc { name: "precision".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
+            FieldDesc {
+                name: "limitLow".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "limitHigh".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "description".to_string(),
+                field_type: FieldType::String,
+            },
+            FieldDesc {
+                name: "units".to_string(),
+                field_type: FieldType::String,
+            },
+            FieldDesc {
+                name: "precision".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
             FieldDesc {
                 name: "form".to_string(),
                 field_type: FieldType::Structure(StructureDesc {
                     struct_id: Some("enum_t".to_string()),
                     fields: vec![
-                        FieldDesc { name: "index".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-                        FieldDesc { name: "choices".to_string(), field_type: FieldType::StringArray },
+                        FieldDesc {
+                            name: "index".to_string(),
+                            field_type: FieldType::Scalar(TypeCode::Int32),
+                        },
+                        FieldDesc {
+                            name: "choices".to_string(),
+                            field_type: FieldType::StringArray,
+                        },
                     ],
                 }),
             },
@@ -308,9 +380,18 @@ fn control_desc() -> StructureDesc {
     StructureDesc {
         struct_id: Some("control_t".to_string()),
         fields: vec![
-            FieldDesc { name: "limitLow".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "limitHigh".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "minStep".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
+            FieldDesc {
+                name: "limitLow".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "limitHigh".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "minStep".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
         ],
     }
 }
@@ -319,16 +400,46 @@ fn value_alarm_desc() -> StructureDesc {
     StructureDesc {
         struct_id: Some("valueAlarm_t".to_string()),
         fields: vec![
-            FieldDesc { name: "active".to_string(), field_type: FieldType::Scalar(TypeCode::Boolean) },
-            FieldDesc { name: "lowAlarmLimit".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "lowWarningLimit".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "highWarningLimit".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "highAlarmLimit".to_string(), field_type: FieldType::Scalar(TypeCode::Float64) },
-            FieldDesc { name: "lowAlarmSeverity".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-            FieldDesc { name: "lowWarningSeverity".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-            FieldDesc { name: "highWarningSeverity".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-            FieldDesc { name: "highAlarmSeverity".to_string(), field_type: FieldType::Scalar(TypeCode::Int32) },
-            FieldDesc { name: "hysteresis".to_string(), field_type: FieldType::Scalar(TypeCode::UInt8) },
+            FieldDesc {
+                name: "active".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Boolean),
+            },
+            FieldDesc {
+                name: "lowAlarmLimit".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "lowWarningLimit".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "highWarningLimit".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "highAlarmLimit".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Float64),
+            },
+            FieldDesc {
+                name: "lowAlarmSeverity".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
+            FieldDesc {
+                name: "lowWarningSeverity".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
+            FieldDesc {
+                name: "highWarningSeverity".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
+            FieldDesc {
+                name: "highAlarmSeverity".to_string(),
+                field_type: FieldType::Scalar(TypeCode::Int32),
+            },
+            FieldDesc {
+                name: "hysteresis".to_string(),
+                field_type: FieldType::Scalar(TypeCode::UInt8),
+            },
         ],
     }
 }

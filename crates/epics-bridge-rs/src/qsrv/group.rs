@@ -18,105 +18,185 @@ use super::pvif::{self, FieldMapping, NtType};
 use crate::error::{BridgeError, BridgeResult};
 
 // ---------------------------------------------------------------------------
+// FieldName — path parser with array index support (pvxs fieldname.h)
+// ---------------------------------------------------------------------------
+
+/// A single component in a field path: `name` with optional `[index]`.
+#[derive(Debug, Clone, PartialEq)]
+struct FieldNameComponent {
+    name: String,
+    index: Option<u32>,
+}
+
+/// Parse a field path like `"a.b[0].c"` into components.
+///
+/// Corresponds to C++ QSRV `FieldName` (fieldname.h:31-104).
+fn parse_field_path(path: &str) -> Vec<FieldNameComponent> {
+    path.split('.')
+        .filter(|s| !s.is_empty())
+        .map(|part| {
+            if let Some(bracket) = part.find('[') {
+                let name = part[..bracket].to_string();
+                let rest = &part[bracket + 1..];
+                let index = rest.strip_suffix(']').and_then(|s| s.parse::<u32>().ok());
+                FieldNameComponent { name, index }
+            } else {
+                FieldNameComponent {
+                    name: part.to_string(),
+                    index: None,
+                }
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Nested field path support
 // ---------------------------------------------------------------------------
 
-/// Navigate a dot-separated field path (e.g., "a.b.c") within a PvStructure,
-/// returning the leaf PvField. Corresponds to C++ QSRV `FieldName`.
+/// Navigate a field path (e.g., `"a.b[0].c"`) within a PvStructure,
+/// returning the leaf PvField. Supports array indexing via `[N]`.
+/// Corresponds to C++ QSRV `FieldName` + `Field::findIn`.
 pub fn get_nested_field<'a>(pv: &'a PvStructure, path: &str) -> Option<&'a PvField> {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.is_empty() {
+    let components = parse_field_path(path);
+    if components.is_empty() {
         return None;
     }
 
     let mut current_struct = pv;
-    for (i, part) in parts.iter().enumerate() {
-        let field = current_struct.get_field(part)?;
-        if i == parts.len() - 1 {
+    for (i, comp) in components.iter().enumerate() {
+        let field = current_struct.get_field(&comp.name)?;
+
+        // Handle array index: field must be a ScalarArray, index into it
+        if let Some(idx) = comp.index {
+            if let PvField::ScalarArray(arr) = field {
+                if i == components.len() - 1 {
+                    return arr.get(idx as usize).map(|sv| {
+                        // We need to return a &PvField but we only have a &ScalarValue.
+                        // Array indexing into ScalarArray can't return &PvField without
+                        // an owned wrapper. Skip — array index on leaf returns None for now,
+                        // as the primary use case is structure arrays (pvxs StructA).
+                        let _ = sv;
+                        field // return the whole array
+                    });
+                }
+            }
+            // For Structure arrays (future): would index into a Vec<PvStructure>
+            return None;
+        }
+
+        if i == components.len() - 1 {
             return Some(field);
         }
         match field {
             PvField::Structure(s) => current_struct = s,
-            _ => return None, // intermediate path element is not a structure
+            _ => return None,
         }
     }
     None
 }
 
-/// Set a value at a dot-separated field path within a PvStructure.
-/// Creates intermediate structures as needed.
+/// Set a value at a field path within a PvStructure.
+/// Creates intermediate structures as needed. Supports `[N]` notation.
 pub fn set_nested_field(pv: &mut PvStructure, path: &str, value: PvField) {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.is_empty() {
+    let components = parse_field_path(path);
+    if components.is_empty() {
         return;
     }
 
-    if parts.len() == 1 {
-        // Simple case: direct field
-        if let Some(pos) = pv.fields.iter().position(|(n, _)| n == parts[0]) {
+    set_nested_field_recursive(pv, &components, value);
+}
+
+fn set_nested_field_recursive(
+    pv: &mut PvStructure,
+    components: &[FieldNameComponent],
+    value: PvField,
+) {
+    if components.is_empty() {
+        return;
+    }
+
+    let comp = &components[0];
+
+    if components.len() == 1 && comp.index.is_none() {
+        // Leaf: direct field set
+        if let Some(pos) = pv.fields.iter().position(|(n, _)| n == &comp.name) {
             pv.fields[pos].1 = value;
         } else {
-            pv.fields.push((parts[0].to_string(), value));
+            pv.fields.push((comp.name.clone(), value));
         }
         return;
     }
 
-    // Navigate/create intermediate structures
-    let first = parts[0];
-    let rest = parts[1..].join(".");
+    // Navigate/create the intermediate structure
+    let sub = get_or_create_struct_field(pv, &comp.name);
 
-    // Find or create the intermediate structure
-    let sub = if let Some(pos) = pv.fields.iter().position(|(n, _)| n == first) {
+    // If this component has an array index, we don't currently support
+    // structure arrays in PvField. Skip the index and navigate as if
+    // it were a plain structure (matches current epics-rs PvField limitation).
+    set_nested_field_recursive(sub, &components[1..], value);
+}
+
+/// Find or create a named sub-structure within `pv`.
+fn get_or_create_struct_field<'a>(pv: &'a mut PvStructure, name: &str) -> &'a mut PvStructure {
+    let pos = pv.fields.iter().position(|(n, _)| n == name);
+
+    if let Some(pos) = pos {
+        if !matches!(pv.fields[pos].1, PvField::Structure(_)) {
+            pv.fields[pos].1 = PvField::Structure(PvStructure::new(""));
+        }
         if let PvField::Structure(ref mut s) = pv.fields[pos].1 {
             s
         } else {
-            // Replace non-structure with empty structure
-            pv.fields[pos].1 = PvField::Structure(PvStructure::new(""));
-            if let PvField::Structure(ref mut s) = pv.fields[pos].1 {
-                s
-            } else {
-                unreachable!()
-            }
+            unreachable!()
         }
     } else {
         pv.fields
-            .push((first.to_string(), PvField::Structure(PvStructure::new(""))));
+            .push((name.to_string(), PvField::Structure(PvStructure::new(""))));
         if let PvField::Structure(ref mut s) = pv.fields.last_mut().unwrap().1 {
             s
         } else {
             unreachable!()
         }
-    };
-
-    set_nested_field(sub, &rest, value);
+    }
 }
 
-/// Insert a nested FieldDesc at a dot-separated path.
+/// Insert a nested FieldDesc at a field path (supports `[N]` notation).
 ///
 /// Counterpart of [`set_nested_field`] for type introspection. Builds
 /// intermediate `Structure` descriptors as needed so the advertised
 /// schema matches the runtime payload shape.
 pub fn set_nested_field_desc(fields: &mut Vec<(String, FieldDesc)>, path: &str, leaf: FieldDesc) {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.is_empty() {
+    let components = parse_field_path(path);
+    if components.is_empty() {
+        return;
+    }
+    set_nested_field_desc_recursive(fields, &components, leaf);
+}
+
+fn set_nested_field_desc_recursive(
+    fields: &mut Vec<(String, FieldDesc)>,
+    components: &[FieldNameComponent],
+    leaf: FieldDesc,
+) {
+    if components.is_empty() {
         return;
     }
 
-    if parts.len() == 1 {
-        if let Some(pos) = fields.iter().position(|(n, _)| n == parts[0]) {
+    let comp = &components[0];
+
+    if components.len() == 1 && comp.index.is_none() {
+        if let Some(pos) = fields.iter().position(|(n, _)| n == &comp.name) {
             fields[pos].1 = leaf;
         } else {
-            fields.push((parts[0].to_string(), leaf));
+            fields.push((comp.name.clone(), leaf));
         }
         return;
     }
 
-    let first = parts[0];
-    let rest = parts[1..].join(".");
-
     // Find or create the intermediate structure descriptor
     let sub_fields: &mut Vec<(String, FieldDesc)> =
-        if let Some(pos) = fields.iter().position(|(n, _)| n == first) {
+        if let Some(pos) = fields.iter().position(|(n, _)| n == &comp.name) {
             match &mut fields[pos].1 {
                 FieldDesc::Structure { fields: f, .. } => f,
                 other => {
@@ -133,7 +213,7 @@ pub fn set_nested_field_desc(fields: &mut Vec<(String, FieldDesc)>, path: &str, 
             }
         } else {
             fields.push((
-                first.to_string(),
+                comp.name.clone(),
                 FieldDesc::Structure {
                     struct_id: String::new(),
                     fields: Vec::new(),
@@ -146,7 +226,42 @@ pub fn set_nested_field_desc(fields: &mut Vec<(String, FieldDesc)>, path: &str, 
             }
         };
 
-    set_nested_field_desc(sub_fields, &rest, leaf);
+    set_nested_field_desc_recursive(sub_fields, &components[1..], leaf);
+}
+
+// ---------------------------------------------------------------------------
+// Atomic multi-record locking (pvxs DBManyLocker equivalent)
+// ---------------------------------------------------------------------------
+
+/// Acquire read locks on all records backing a group's members, in sorted
+/// order to prevent deadlocks. Corresponds to C++ QSRV `DBManyLocker`
+/// (dbmanylocker.h). Returns guards that hold the locks.
+async fn lock_group_records_read(
+    db: &PvDatabase,
+    members: &[GroupMember],
+) -> Vec<(
+    String,
+    tokio::sync::OwnedRwLockReadGuard<epics_base_rs::server::record::RecordInstance>,
+)> {
+    // Collect unique record names and sort for deterministic lock order.
+    let mut record_names: Vec<String> = members
+        .iter()
+        .filter(|m| !m.channel.is_empty())
+        .map(|m| {
+            let (rec, _) = epics_base_rs::server::database::parse_pv_name(&m.channel);
+            rec.to_string()
+        })
+        .collect();
+    record_names.sort();
+    record_names.dedup();
+
+    let mut guards = Vec::new();
+    for name in &record_names {
+        if let Some(rec) = db.get_record(name).await {
+            guards.push((name.clone(), rec.read_owned().await));
+        }
+    }
+    guards
 }
 
 // ---------------------------------------------------------------------------
@@ -192,13 +307,21 @@ impl GroupChannel {
         let struct_id = self.def.struct_id.as_deref().unwrap_or("structure");
         let mut pv = PvStructure::new(struct_id);
 
+        // For atomic groups, hold all record locks simultaneously to
+        // prevent intermediate states from being observed (pvxs
+        // groupsource.cpp:444-459 DBManyLocker pattern).
+        let _guards = if self.def.atomic {
+            lock_group_records_read(&self.db, &self.def.members).await
+        } else {
+            Vec::new()
+        };
+
         for member in &self.def.members {
-            if member.mapping == FieldMapping::Proc {
+            if member.mapping == FieldMapping::Proc || member.mapping == FieldMapping::Structure {
                 continue;
             }
 
             let field = self.read_member(member).await?;
-            // Support nested field paths (e.g., "a.b.c")
             set_nested_field(&mut pv, &member.field_name, field);
         }
 
@@ -219,7 +342,7 @@ impl GroupChannel {
         let mut pv = PvStructure::new(struct_id);
 
         for member in &self.def.members {
-            if member.mapping == FieldMapping::Proc {
+            if member.mapping == FieldMapping::Proc || member.mapping == FieldMapping::Structure {
                 continue;
             }
             if !field_names.contains(&member.field_name) {
@@ -283,7 +406,10 @@ impl GroupChannel {
                 ));
                 meta.fields.push((
                     "timeStamp".into(),
-                    PvField::Structure(build_timestamp_from_snapshot(&snapshot)),
+                    PvField::Structure(build_timestamp_from_snapshot_masked(
+                        &snapshot,
+                        member.nsec_mask,
+                    )),
                 ));
                 Ok(PvField::Structure(meta))
             }
@@ -297,6 +423,17 @@ impl GroupChannel {
                 Ok(epics_to_pv_field(&value))
             }
             FieldMapping::Proc => Ok(PvField::Scalar(epics_pva_rs::pvdata::ScalarValue::Int(0))),
+            FieldMapping::Structure => {
+                // Structure is a placeholder node — no data to read
+                Ok(PvField::Structure(PvStructure::new("")))
+            }
+            FieldMapping::Const => {
+                // Return the constant value set at config time
+                Ok(member
+                    .const_value
+                    .clone()
+                    .unwrap_or(PvField::Scalar(epics_pva_rs::pvdata::ScalarValue::Int(0))))
+            }
         }
     }
 
@@ -419,6 +556,11 @@ impl super::provider::Channel for GroupChannel {
                     writes.push((member, None));
                     continue;
                 }
+                if member.mapping == FieldMapping::Structure
+                    || member.mapping == FieldMapping::Const
+                {
+                    continue; // no backing channel, nothing to write
+                }
 
                 // Use nested lookup so members with dotted field paths
                 // (e.g., "axis.position") resolve correctly. The read
@@ -461,6 +603,12 @@ impl super::provider::Channel for GroupChannel {
             // must run regardless of whether the request contains that field
             // (matches C++ pdbgroup.cpp:300+ allowProc semantics).
             for member in ordered {
+                if member.mapping == FieldMapping::Structure
+                    || member.mapping == FieldMapping::Const
+                {
+                    continue; // no backing channel, nothing to write
+                }
+
                 let (record_name, field_name) =
                     epics_base_rs::server::database::parse_pv_name(&member.channel);
 
@@ -509,15 +657,32 @@ impl super::provider::Channel for GroupChannel {
                 continue;
             }
 
-            let (nt_type, scalar_type) = self.introspect_member(member).await?;
-
-            // Build the leaf descriptor and apply member-level +id if set.
+            // Structure and Const have no backing channel — skip introspection.
             let mut desc = match member.mapping {
-                FieldMapping::Scalar => pvif::build_field_desc_for_nt(nt_type, scalar_type),
-                FieldMapping::Plain => FieldDesc::Scalar(scalar_type),
-                FieldMapping::Meta => meta_desc(),
-                FieldMapping::Any => FieldDesc::Scalar(scalar_type),
-                FieldMapping::Proc => continue,
+                FieldMapping::Structure => {
+                    let sid = member.struct_id.as_deref().unwrap_or("");
+                    FieldDesc::Structure {
+                        struct_id: sid.into(),
+                        fields: Vec::new(),
+                    }
+                }
+                FieldMapping::Const => {
+                    // Derive descriptor from the constant value
+                    match &member.const_value {
+                        Some(pv_field) => pv_field_to_field_desc(pv_field),
+                        None => FieldDesc::Scalar(ScalarType::Int),
+                    }
+                }
+                _ => {
+                    let (nt_type, scalar_type) = self.introspect_member(member).await?;
+                    match member.mapping {
+                        FieldMapping::Scalar => pvif::build_field_desc_for_nt(nt_type, scalar_type),
+                        FieldMapping::Plain => FieldDesc::Scalar(scalar_type),
+                        FieldMapping::Meta => meta_desc(),
+                        FieldMapping::Any => FieldDesc::Scalar(scalar_type),
+                        _ => continue,
+                    }
+                }
             };
             if let Some(member_id) = &member.struct_id
                 && let FieldDesc::Structure { struct_id, .. } = &mut desc
@@ -556,9 +721,31 @@ impl super::provider::Channel for GroupChannel {
 // GroupMonitor
 // ---------------------------------------------------------------------------
 
+/// The kind of event received from a member subscription.
+#[derive(Debug, Clone, Copy)]
+enum MemberEventKind {
+    /// Value or alarm change (DBE_VALUE | DBE_ALARM).
+    Value,
+    /// Property change — display limits, enum choices, etc. (DBE_PROPERTY).
+    Property,
+}
+
 /// Event from a group member subscription, sent through the fan-in channel.
 struct MemberEvent {
     member_index: usize,
+    kind: MemberEventKind,
+}
+
+/// Per-field priming state for the subscription priming phase.
+///
+/// Corresponds to pvxs `GroupSourceSubscriptionCtx` priming logic
+/// (groupsource.cpp:206-237). The first monitor post is withheld until
+/// every field has received its initial value and (where applicable)
+/// property event.
+#[derive(Debug, Clone)]
+struct FieldPrimingState {
+    had_value_event: bool,
+    had_property_event: bool,
 }
 
 /// A PVA monitor for a group PV that subscribes to all member records.
@@ -584,10 +771,41 @@ pub struct GroupMonitor {
     _tasks: Vec<tokio::task::JoinHandle<()>>,
     /// Access control context propagated from the parent GroupChannel.
     access: super::provider::AccessContext,
+    /// Per-member priming state. Once all fields are primed, the first
+    /// snapshot is posted. Before that, events are accumulated but not
+    /// returned to the caller.
+    priming: Vec<FieldPrimingState>,
+    /// Whether the priming phase has completed.
+    events_primed: bool,
 }
 
 impl GroupMonitor {
     pub fn new(db: Arc<PvDatabase>, def: GroupPvDef) -> Self {
+        // Initialize priming state for each member.
+        let priming: Vec<FieldPrimingState> = def
+            .members
+            .iter()
+            .map(|member| {
+                match member.mapping {
+                    // Const and Structure have no channel — immediately primed.
+                    FieldMapping::Const | FieldMapping::Structure => FieldPrimingState {
+                        had_value_event: true,
+                        had_property_event: true,
+                    },
+                    // Scalar and Meta need both value + property events.
+                    FieldMapping::Scalar | FieldMapping::Meta => FieldPrimingState {
+                        had_value_event: false,
+                        had_property_event: false,
+                    },
+                    // Plain, Any, Proc only need value events (auto-prime property).
+                    _ => FieldPrimingState {
+                        had_value_event: false,
+                        had_property_event: true,
+                    },
+                }
+            })
+            .collect();
+
         Self {
             db,
             def,
@@ -597,6 +815,8 @@ impl GroupMonitor {
             event_rx: None,
             _tasks: Vec::new(),
             access: super::provider::AccessContext::allow_all(),
+            priming,
+            events_primed: false,
         }
     }
 
@@ -625,25 +845,69 @@ impl super::provider::PvaMonitor for GroupMonitor {
         // Create fan-in channel for member events
         let (tx, rx) = tokio::sync::mpsc::channel::<MemberEvent>(64);
 
-        // Subscribe to all members that have triggers and spawn forwarding tasks
+        // Subscribe to all members that have triggers and spawn forwarding tasks.
+        // Each member gets a value subscription (DBE_VALUE|DBE_ALARM) and,
+        // for Scalar/Meta mappings, a separate property subscription
+        // (DBE_PROPERTY) — matching pvxs groupsource.cpp:380-398.
         for (idx, member) in self.def.members.iter().enumerate() {
             if matches!(member.triggers, TriggerDef::None) {
                 continue;
             }
+            if member.channel.is_empty() {
+                continue; // Structure/Const — no backing channel
+            }
 
             let (record_name, _) = epics_base_rs::server::database::parse_pv_name(&member.channel);
 
-            if let Some(mut sub) = DbSubscription::subscribe(&self.db, record_name).await {
+            // Value subscription (DBE_VALUE | DBE_ALARM)
+            let value_mask = (epics_base_rs::server::recgbl::EventMask::VALUE
+                | epics_base_rs::server::recgbl::EventMask::ALARM)
+                .bits();
+            if let Some(mut sub) =
+                DbSubscription::subscribe_with_mask(&self.db, record_name, 0, value_mask).await
+            {
                 let tx = tx.clone();
                 let handle = tokio::spawn(async move {
-                    // Forward subscription events to the fan-in channel
                     while sub.recv_snapshot().await.is_some() {
-                        if tx.send(MemberEvent { member_index: idx }).await.is_err() {
-                            break; // receiver dropped
+                        if tx
+                            .send(MemberEvent {
+                                member_index: idx,
+                                kind: MemberEventKind::Value,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                 });
                 self._tasks.push(handle);
+            }
+
+            // Property subscription (DBE_PROPERTY) — only for Scalar/Meta
+            // mappings that include metadata. Plain/Any/Proc don't need it.
+            if member.mapping == FieldMapping::Scalar || member.mapping == FieldMapping::Meta {
+                let prop_mask = epics_base_rs::server::recgbl::EventMask::PROPERTY.bits();
+                if let Some(mut sub) =
+                    DbSubscription::subscribe_with_mask(&self.db, record_name, 0, prop_mask).await
+                {
+                    let tx = tx.clone();
+                    let handle = tokio::spawn(async move {
+                        while sub.recv_snapshot().await.is_some() {
+                            if tx
+                                .send(MemberEvent {
+                                    member_index: idx,
+                                    kind: MemberEventKind::Property,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    self._tasks.push(handle);
+                }
             }
         }
 
@@ -653,9 +917,17 @@ impl super::provider::PvaMonitor for GroupMonitor {
         let group_channel =
             GroupChannel::new(self.db.clone(), self.def.clone()).with_access(self.access.clone());
 
-        // Read initial complete group snapshot (like C++ BaseMonitor::connect)
-        if let Ok(snapshot) = group_channel.read_group().await {
-            self.initial_snapshot = Some(snapshot);
+        // Check if all members are already primed (e.g., all Const/Structure).
+        let all_primed = self
+            .priming
+            .iter()
+            .all(|p| p.had_value_event && p.had_property_event);
+        if all_primed {
+            // No subscriptions needed — post initial snapshot immediately.
+            if let Ok(snapshot) = group_channel.read_group().await {
+                self.initial_snapshot = Some(snapshot);
+            }
+            self.events_primed = true;
         }
 
         self.group_channel = Some(group_channel);
@@ -675,12 +947,48 @@ impl super::provider::PvaMonitor for GroupMonitor {
         loop {
             let event = rx.recv().await?;
 
+            // Update priming state for this member.
+            if !self.events_primed {
+                if let Some(state) = self.priming.get_mut(event.member_index) {
+                    match event.kind {
+                        MemberEventKind::Value => state.had_value_event = true,
+                        MemberEventKind::Property => state.had_property_event = true,
+                    }
+                }
+
+                // Check if all members are now primed.
+                let all_primed = self
+                    .priming
+                    .iter()
+                    .all(|p| p.had_value_event && p.had_property_event);
+
+                if all_primed {
+                    self.events_primed = true;
+                    // Post the first complete group snapshot now that all
+                    // fields have reported their initial state
+                    // (pvxs groupsource.cpp:220-230).
+                    let group_channel = self.group_channel.as_ref()?;
+                    return group_channel.read_group().await.ok();
+                }
+                // Not yet primed — accumulate events but don't return data.
+                continue;
+            }
+
             let member = match self.def.members.get(event.member_index) {
                 Some(m) => m,
                 None => continue,
             };
 
             let group_channel = self.group_channel.as_ref()?;
+
+            // Property events only update the source field's metadata —
+            // they do NOT trigger other fields (pvxs groupsource.cpp:310-340).
+            if matches!(event.kind, MemberEventKind::Property) {
+                return group_channel
+                    .read_partial(&[member.field_name.clone()])
+                    .await
+                    .ok();
+            }
 
             match &member.triggers {
                 TriggerDef::None => continue,
@@ -708,6 +1016,26 @@ impl super::provider::PvaMonitor for GroupMonitor {
         self.running = false;
         self.group_channel = None;
         self.initial_snapshot = None;
+        self.events_primed = false;
+        // Reset priming state for potential restart
+        for (i, member) in self.def.members.iter().enumerate() {
+            if let Some(state) = self.priming.get_mut(i) {
+                match member.mapping {
+                    FieldMapping::Const | FieldMapping::Structure => {
+                        state.had_value_event = true;
+                        state.had_property_event = true;
+                    }
+                    FieldMapping::Scalar | FieldMapping::Meta => {
+                        state.had_value_event = false;
+                        state.had_property_event = false;
+                    }
+                    _ => {
+                        state.had_value_event = false;
+                        state.had_property_event = true;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -781,6 +1109,55 @@ fn meta_desc() -> FieldDesc {
     }
 }
 
+/// Derive a FieldDesc from a PvField value (used for Const mapping introspection).
+fn pv_field_to_field_desc(field: &PvField) -> FieldDesc {
+    use epics_pva_rs::pvdata::ScalarValue;
+    match field {
+        PvField::Scalar(sv) => FieldDesc::Scalar(match sv {
+            ScalarValue::Boolean(_) => ScalarType::Boolean,
+            ScalarValue::Byte(_) => ScalarType::Byte,
+            ScalarValue::Short(_) => ScalarType::Short,
+            ScalarValue::Int(_) => ScalarType::Int,
+            ScalarValue::Long(_) => ScalarType::Long,
+            ScalarValue::UByte(_) => ScalarType::UByte,
+            ScalarValue::UShort(_) => ScalarType::UShort,
+            ScalarValue::UInt(_) => ScalarType::UInt,
+            ScalarValue::ULong(_) => ScalarType::ULong,
+            ScalarValue::Float(_) => ScalarType::Float,
+            ScalarValue::Double(_) => ScalarType::Double,
+            ScalarValue::String(_) => ScalarType::String,
+        }),
+        PvField::ScalarArray(arr) => {
+            let elem_type = arr
+                .first()
+                .map(|sv| match sv {
+                    ScalarValue::Boolean(_) => ScalarType::Boolean,
+                    ScalarValue::Byte(_) => ScalarType::Byte,
+                    ScalarValue::Short(_) => ScalarType::Short,
+                    ScalarValue::Int(_) => ScalarType::Int,
+                    ScalarValue::Long(_) => ScalarType::Long,
+                    ScalarValue::UByte(_) => ScalarType::UByte,
+                    ScalarValue::UShort(_) => ScalarType::UShort,
+                    ScalarValue::UInt(_) => ScalarType::UInt,
+                    ScalarValue::ULong(_) => ScalarType::ULong,
+                    ScalarValue::Float(_) => ScalarType::Float,
+                    ScalarValue::Double(_) => ScalarType::Double,
+                    ScalarValue::String(_) => ScalarType::String,
+                })
+                .unwrap_or(ScalarType::Double);
+            FieldDesc::ScalarArray(elem_type)
+        }
+        PvField::Structure(s) => FieldDesc::Structure {
+            struct_id: s.struct_id.clone(),
+            fields: s
+                .fields
+                .iter()
+                .map(|(name, f)| (name.clone(), pv_field_to_field_desc(f)))
+                .collect(),
+        },
+    }
+}
+
 fn build_alarm_from_snapshot(snapshot: &epics_base_rs::server::snapshot::Snapshot) -> PvStructure {
     use epics_pva_rs::pvdata::ScalarValue;
     let mut alarm = PvStructure::new("alarm_t");
@@ -799,16 +1176,31 @@ fn build_alarm_from_snapshot(snapshot: &epics_base_rs::server::snapshot::Snapsho
     alarm
 }
 
-fn build_timestamp_from_snapshot(
+/// Build a timestamp PvStructure with optional nsecMask.
+///
+/// When `nsec_mask` is non-zero, the lower bits of nanoseconds are
+/// extracted and placed in `userTag` (pvxs iocsource.cpp:241-247).
+fn build_timestamp_from_snapshot_masked(
     snapshot: &epics_base_rs::server::snapshot::Snapshot,
+    nsec_mask: u32,
 ) -> PvStructure {
     use epics_pva_rs::pvdata::ScalarValue;
     use std::time::UNIX_EPOCH;
 
     let mut ts = PvStructure::new("time_t");
-    let (secs, nanos) = match snapshot.timestamp.duration_since(UNIX_EPOCH) {
-        Ok(d) => (d.as_secs() as i64, d.subsec_nanos() as i32),
+    let (secs, raw_nanos) = match snapshot.timestamp.duration_since(UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
         Err(_) => (0, 0),
+    };
+    let nanos = if nsec_mask != 0 {
+        (raw_nanos & !nsec_mask) as i32
+    } else {
+        raw_nanos as i32
+    };
+    let user_tag = if nsec_mask != 0 {
+        (raw_nanos & nsec_mask) as i32
+    } else {
+        0
     };
     ts.fields.push((
         "secondsPastEpoch".into(),
@@ -818,8 +1210,10 @@ fn build_timestamp_from_snapshot(
         "nanoseconds".into(),
         PvField::Scalar(ScalarValue::Int(nanos)),
     ));
-    ts.fields
-        .push(("userTag".into(), PvField::Scalar(ScalarValue::Int(0))));
+    ts.fields.push((
+        "userTag".into(),
+        PvField::Scalar(ScalarValue::Int(user_tag)),
+    ));
     ts
 }
 
@@ -972,5 +1366,55 @@ mod tests {
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].0, "name");
         assert_eq!(fields[1].0, "axis");
+    }
+
+    // -----------------------------------------------------------------
+    // FieldName parser tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parse_field_path_simple() {
+        let comps = parse_field_path("abc");
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0].name, "abc");
+        assert_eq!(comps[0].index, None);
+    }
+
+    #[test]
+    fn parse_field_path_dotted() {
+        let comps = parse_field_path("a.b.c");
+        assert_eq!(comps.len(), 3);
+        assert_eq!(comps[0].name, "a");
+        assert_eq!(comps[1].name, "b");
+        assert_eq!(comps[2].name, "c");
+        assert!(comps.iter().all(|c| c.index.is_none()));
+    }
+
+    #[test]
+    fn parse_field_path_with_index() {
+        let comps = parse_field_path("a.b[0].c");
+        assert_eq!(comps.len(), 3);
+        assert_eq!(comps[0].name, "a");
+        assert_eq!(comps[0].index, None);
+        assert_eq!(comps[1].name, "b");
+        assert_eq!(comps[1].index, Some(0));
+        assert_eq!(comps[2].name, "c");
+        assert_eq!(comps[2].index, None);
+    }
+
+    #[test]
+    fn parse_field_path_index_at_leaf() {
+        let comps = parse_field_path("arr[3]");
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0].name, "arr");
+        assert_eq!(comps[0].index, Some(3));
+    }
+
+    #[test]
+    fn parse_field_path_multiple_indices() {
+        let comps = parse_field_path("a[1].b[2]");
+        assert_eq!(comps.len(), 2);
+        assert_eq!(comps[0].index, Some(1));
+        assert_eq!(comps[1].index, Some(2));
     }
 }

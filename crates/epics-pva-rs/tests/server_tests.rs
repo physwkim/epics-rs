@@ -195,8 +195,7 @@ async fn get_descriptor_double_has_nt_scalar_id() {
 
 #[tokio::test]
 async fn get_descriptor_double_array_has_nt_scalar_array_id() {
-    let (_db, store) =
-        db_with_pvs(&[("DESC:ARR", EpicsValue::DoubleArray(vec![1.0]))]).await;
+    let (_db, store) = db_with_pvs(&[("DESC:ARR", EpicsValue::DoubleArray(vec![1.0]))]).await;
     let desc = store.get_descriptor("DESC:ARR").await.unwrap();
     assert_eq!(
         desc.struct_id.as_deref(),
@@ -247,9 +246,7 @@ async fn put_value_string() {
 async fn put_value_wrapped_in_structure() {
     // PVA PUT messages wrap the value in Structure { value: <val> }
     let (db, store) = db_with_pvs(&[("PUT:W", EpicsValue::Double(0.0))]).await;
-    let val = DecodedValue::Structure(vec![
-        ("value".to_string(), DecodedValue::Float64(55.5)),
-    ]);
+    let val = DecodedValue::Structure(vec![("value".to_string(), DecodedValue::Float64(55.5))]);
     let result = store.put_value("PUT:W", &val).await;
     assert!(result.is_ok());
     let readback = db.get_pv("PUT:W").await.unwrap();
@@ -307,8 +304,8 @@ async fn subscribe_nonexistent_returns_none() {
 
 #[test]
 fn snapshot_double_to_nt_scalar() {
-    use std::time::SystemTime;
     use epics_base_rs::server::snapshot::Snapshot;
+    use std::time::SystemTime;
     let snap = Snapshot::new(EpicsValue::Double(2.718), 0, 0, SystemTime::now());
     let payload = snapshot_to_nt_payload(&snap);
     match payload {
@@ -321,8 +318,8 @@ fn snapshot_double_to_nt_scalar() {
 
 #[test]
 fn snapshot_string_to_nt_scalar() {
-    use std::time::SystemTime;
     use epics_base_rs::server::snapshot::Snapshot;
+    use std::time::SystemTime;
     let snap = Snapshot::new(EpicsValue::String("test".into()), 0, 0, SystemTime::now());
     let payload = snapshot_to_nt_payload(&snap);
     match payload {
@@ -335,9 +332,14 @@ fn snapshot_string_to_nt_scalar() {
 
 #[test]
 fn snapshot_double_array_to_nt_scalar_array() {
-    use std::time::SystemTime;
     use epics_base_rs::server::snapshot::Snapshot;
-    let snap = Snapshot::new(EpicsValue::DoubleArray(vec![1.0, 2.0]), 0, 0, SystemTime::now());
+    use std::time::SystemTime;
+    let snap = Snapshot::new(
+        EpicsValue::DoubleArray(vec![1.0, 2.0]),
+        0,
+        0,
+        SystemTime::now(),
+    );
     let payload = snapshot_to_nt_payload(&snap);
     match payload {
         NtPayload::ScalarArray(arr) => {
@@ -407,7 +409,9 @@ async fn multiple_pv_types_coexist() {
 
     // Verify values
     match store.get_snapshot("M:D").await.unwrap() {
-        NtPayload::Scalar(nt) => assert!(matches!(nt.value, ScalarValue::F64(v) if (v - 1.1).abs() < 1e-10)),
+        NtPayload::Scalar(nt) => {
+            assert!(matches!(nt.value, ScalarValue::F64(v) if (v - 1.1).abs() < 1e-10))
+        }
         other => panic!("expected Scalar, got {other:?}"),
     }
     match store.get_snapshot("M:L").await.unwrap() {
@@ -433,12 +437,18 @@ async fn pva_server_builder_with_simple_pvs() {
         .await
         .unwrap();
 
-    assert_eq!(server.get("TEST:DOUBLE").await.unwrap(), EpicsValue::Double(3.15));
+    assert_eq!(
+        server.get("TEST:DOUBLE").await.unwrap(),
+        EpicsValue::Double(3.15)
+    );
     assert_eq!(
         server.get("TEST:STRING").await.unwrap(),
         EpicsValue::String("hello".into())
     );
-    assert_eq!(server.get("TEST:SHORT").await.unwrap(), EpicsValue::Short(42));
+    assert_eq!(
+        server.get("TEST:SHORT").await.unwrap(),
+        EpicsValue::Short(42)
+    );
     assert_eq!(server.get("TEST:ENUM").await.unwrap(), EpicsValue::Enum(2));
 }
 
@@ -462,7 +472,10 @@ async fn pva_server_put_and_get_string() {
         .await
         .unwrap();
 
-    server.put("SRV:S", EpicsValue::String("updated".into())).await.unwrap();
+    server
+        .put("SRV:S", EpicsValue::String("updated".into()))
+        .await
+        .unwrap();
     assert_eq!(
         server.get("SRV:S").await.unwrap(),
         EpicsValue::String("updated".into())

@@ -23,6 +23,12 @@ pub enum FieldMapping {
     Any,
     /// Process-only: put triggers record processing, no value transfer
     Proc,
+    /// Nested structure placeholder — no channel, defines an intermediate
+    /// node in the group schema (pvxs `MappingInfo::Structure`).
+    Structure,
+    /// Constant value — no channel, set once at subscription setup and
+    /// never changes (pvxs `MappingInfo::Const`).
+    Const,
 }
 
 /// NormativeType classification derived from record type.
@@ -372,9 +378,10 @@ fn build_timestamp(time: SystemTime, user_tag: i32) -> PvStructure {
         Ok(d) => (d.as_secs() as i64, d.subsec_nanos() as i32),
         Err(_) => (0, 0),
     };
-    // PVA timestamps use EPICS epoch (1990-01-01), but for now use UNIX epoch
-    // to match the Rust SystemTime. Epoch adjustment can be added when
-    // epics-pva-rs server serialization handles it.
+    // PVA Normative Types define secondsPastEpoch as POSIX/UNIX epoch
+    // (pvxs iocsource.cpp:240 adds POSIX_TIME_AT_EPICS_EPOCH to convert
+    // from internal EPICS epoch). Rust SystemTime is already UNIX-based,
+    // so no conversion is needed here.
     ts.fields.push((
         "secondsPastEpoch".into(),
         PvField::Scalar(ScalarValue::Long(secs)),
