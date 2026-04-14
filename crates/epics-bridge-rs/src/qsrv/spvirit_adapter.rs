@@ -26,17 +26,28 @@ use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarType, ScalarValue as PvaS
 use super::group::AnyMonitor;
 use super::provider::{AnyChannel, BridgeProvider, Channel, ChannelProvider, PvaMonitor};
 
+/// Handle for a PVA plugin PV: latest snapshot + subscriber list.
+///
+/// Registered via [`QsrvPvStore::register_pva_pv`] so that the spvirit
+/// PVA server can serve NTNDArray (or any NtPayload) produced by
+/// [`ad_plugins_rs::pva::PvaProcessor`].
+#[derive(Clone)]
+pub struct PvaPvHandle {
+    pub latest: Arc<parking_lot::Mutex<Option<NtPayload>>>,
+    pub subscribers: Arc<parking_lot::Mutex<Vec<mpsc::Sender<NtPayload>>>>,
+}
+
 /// PvStore implementation backed by a qsrv [`BridgeProvider`].
 ///
-/// Handles both single-record PVs and group composite PVs. Group PVs ride
-/// on the `NtPayload::Structure` variant introduced in spvirit-types 0.1.7.
+/// Handles single-record PVs, group composite PVs, and PVA plugin PVs
+/// (NTNDArray from areaDetector). Group PVs ride on the
+/// `NtPayload::Structure` variant introduced in spvirit-types 0.1.7.
 pub struct QsrvPvStore {
     provider: Arc<BridgeProvider>,
-    /// Per-PV cache of opened channels. qsrv channels are stateless enough
-    /// that caching is just an optimization — re-creating on every call
-    /// would work, but would throw away `BridgeProvider`'s metadata cache
-    /// win by re-opening on every get/put.
+    /// Per-PV cache of opened channels.
     channels: RwLock<HashMap<String, Arc<AnyChannel>>>,
+    /// PVA plugin PVs (e.g., NTNDArray from NDPluginPva).
+    pva_pvs: Arc<RwLock<HashMap<String, PvaPvHandle>>>,
 }
 
 impl QsrvPvStore {
@@ -44,11 +55,31 @@ impl QsrvPvStore {
         Self {
             provider,
             channels: RwLock::new(HashMap::new()),
+            pva_pvs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn provider(&self) -> &Arc<BridgeProvider> {
         &self.provider
+    }
+
+    /// Register a PVA plugin PV (e.g., NTNDArray from NDPluginPva).
+    ///
+    /// After registration, the PV is discoverable via `has_pv`, readable
+    /// via `get_snapshot`, and subscribable via `subscribe`.
+    pub async fn register_pva_pv(
+        &self,
+        pv_name: &str,
+        latest: Arc<parking_lot::Mutex<Option<NtPayload>>>,
+        subscribers: Arc<parking_lot::Mutex<Vec<mpsc::Sender<NtPayload>>>>,
+    ) {
+        self.pva_pvs.write().await.insert(
+            pv_name.to_string(),
+            PvaPvHandle {
+                latest,
+                subscribers,
+            },
+        );
     }
 
     async fn channel(&self, name: &str) -> Option<Arc<AnyChannel>> {
@@ -68,13 +99,25 @@ impl QsrvPvStore {
 impl PvStore for QsrvPvStore {
     fn has_pv(&self, name: &str) -> impl Future<Output = bool> + Send {
         let provider = self.provider.clone();
+        let pva_pvs = self.pva_pvs.clone();
         let name = name.to_string();
-        async move { provider.channel_find(&name).await }
+        async move {
+            if pva_pvs.read().await.contains_key(&name) {
+                return true;
+            }
+            provider.channel_find(&name).await
+        }
     }
 
     fn get_snapshot(&self, name: &str) -> impl Future<Output = Option<NtPayload>> + Send {
         let name_owned = name.to_string();
+        let pva_pvs = self.pva_pvs.clone();
         async move {
+            // Check PVA plugin PVs first (NTNDArray etc.)
+            if let Some(handle) = pva_pvs.read().await.get(&name_owned) {
+                return handle.latest.lock().clone();
+            }
+
             let channel = self.channel(&name_owned).await?;
             let empty_request = PvStructure::new("");
             match channel.get(&empty_request).await {
@@ -89,11 +132,16 @@ impl PvStore for QsrvPvStore {
 
     fn get_descriptor(&self, name: &str) -> impl Future<Output = Option<StructureDesc>> + Send {
         let name_owned = name.to_string();
+        let pva_pvs = self.pva_pvs.clone();
         async move {
+            // PVA plugin PVs: derive descriptor from latest snapshot
+            if let Some(handle) = pva_pvs.read().await.get(&name_owned)
+                && let Some(ref payload) = *handle.latest.lock()
+            {
+                return Some(spvirit_codec::spvd_encode::nt_payload_desc(payload));
+            }
+
             let channel = self.channel(&name_owned).await?;
-            // Use get_field() for accurate type introspection (especially
-            // for group PVs where the structure is composite). Falls back
-            // to value-based inference if get_field() fails.
             match channel.get_field().await {
                 Ok(desc) => Some(epics_field_desc_to_structure_desc(&desc)),
                 Err(_) => {
@@ -137,7 +185,17 @@ impl PvStore for QsrvPvStore {
 
     fn list_pvs(&self) -> impl Future<Output = Vec<String>> + Send {
         let provider = self.provider.clone();
-        async move { provider.channel_list().await }
+        let pva_pvs = self.pva_pvs.clone();
+        async move {
+            let mut names = provider.channel_list().await;
+            for key in pva_pvs.read().await.keys() {
+                if !names.contains(key) {
+                    names.push(key.clone());
+                }
+            }
+            names.sort();
+            names
+        }
     }
 
     fn subscribe(
@@ -145,7 +203,15 @@ impl PvStore for QsrvPvStore {
         name: &str,
     ) -> impl Future<Output = Option<mpsc::Receiver<NtPayload>>> + Send {
         let name_owned = name.to_string();
+        let pva_pvs = self.pva_pvs.clone();
         async move {
+            // PVA plugin PVs: register a subscriber channel
+            if let Some(handle) = pva_pvs.read().await.get(&name_owned) {
+                let (tx, rx) = mpsc::channel::<NtPayload>(16);
+                handle.subscribers.lock().push(tx);
+                return Some(rx);
+            }
+
             let channel = self.channel(&name_owned).await?;
             let mut monitor = match channel.create_monitor().await {
                 Ok(m) => m,
