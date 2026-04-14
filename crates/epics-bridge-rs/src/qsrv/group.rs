@@ -362,6 +362,20 @@ impl GroupChannel {
 
     /// Read a single member's value from the database.
     async fn read_member(&self, member: &GroupMember) -> BridgeResult<PvField> {
+        // Const and Structure have no backing channel — return immediately.
+        if member.mapping == FieldMapping::Const {
+            return Ok(member
+                .const_value
+                .clone()
+                .unwrap_or(PvField::Scalar(epics_pva_rs::pvdata::ScalarValue::Int(0))));
+        }
+        if member.mapping == FieldMapping::Structure {
+            return Ok(PvField::Structure(PvStructure::new("")));
+        }
+        if member.mapping == FieldMapping::Proc {
+            return Ok(PvField::Scalar(epics_pva_rs::pvdata::ScalarValue::Int(0)));
+        }
+
         let (record_name, field_name) =
             epics_base_rs::server::database::parse_pv_name(&member.channel);
 
@@ -426,18 +440,8 @@ impl GroupChannel {
                 })?;
                 Ok(epics_to_pv_field(&value))
             }
-            FieldMapping::Proc => Ok(PvField::Scalar(epics_pva_rs::pvdata::ScalarValue::Int(0))),
-            FieldMapping::Structure => {
-                // Structure is a placeholder node — no data to read
-                Ok(PvField::Structure(PvStructure::new("")))
-            }
-            FieldMapping::Const => {
-                // Return the constant value set at config time
-                Ok(member
-                    .const_value
-                    .clone()
-                    .unwrap_or(PvField::Scalar(epics_pva_rs::pvdata::ScalarValue::Int(0))))
-            }
+            // Proc, Structure, Const handled by early return above
+            FieldMapping::Proc | FieldMapping::Structure | FieldMapping::Const => unreachable!(),
         }
     }
 
