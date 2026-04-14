@@ -44,4 +44,6 @@ pub use provider::{
 };
 pub use pvif::{FieldMapping, NtType};
 #[cfg(feature = "qsrv")]
-pub use spvirit_adapter::QsrvPvStore;
+pub use spvirit_adapter::{
+    PvaPvHandle, QsrvPvStore, register_pva_pv_global, run_ca_pva_qsrv_ioc, take_registered_pva_pvs,
+};

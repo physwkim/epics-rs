@@ -30,11 +30,34 @@ use super::provider::{AnyChannel, BridgeProvider, Channel, ChannelProvider, PvaM
 ///
 /// Registered via [`QsrvPvStore::register_pva_pv`] so that the spvirit
 /// PVA server can serve NTNDArray (or any NtPayload) produced by
-/// [`ad_plugins_rs::pva::PvaProcessor`].
+/// areaDetector PVA plugins.
 #[derive(Clone)]
 pub struct PvaPvHandle {
     pub latest: Arc<parking_lot::Mutex<Option<NtPayload>>>,
     pub subscribers: Arc<parking_lot::Mutex<Vec<mpsc::Sender<NtPayload>>>>,
+}
+
+// ---------------------------------------------------------------------------
+// Global PVA PV registry — NDPvaConfigure stores handles here during st.cmd,
+// the CA+PVA runner reads them at server startup.
+// ---------------------------------------------------------------------------
+
+static PVA_PV_REGISTRY: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, PvaPvHandle>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Register a PVA plugin PV. Called from `NDPvaConfigure` during st.cmd.
+pub fn register_pva_pv_global(pv_name: &str, handle: PvaPvHandle) {
+    PVA_PV_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(pv_name.to_string(), handle);
+}
+
+/// Take all registered PVA plugin PVs. Called by [`run_ca_pva_qsrv_ioc`]
+/// to wire them into `QsrvPvStore`.
+pub fn take_registered_pva_pvs() -> std::collections::HashMap<String, PvaPvHandle> {
+    std::mem::take(&mut *PVA_PV_REGISTRY.lock().unwrap())
 }
 
 /// PvStore implementation backed by a qsrv [`BridgeProvider`].
@@ -737,4 +760,82 @@ mod tests {
         assert!(store.has_pv("TEST:X").await);
         assert!(!store.has_pv("NOT:THERE").await);
     }
+}
+
+// ---------------------------------------------------------------------------
+// CA + PVA dual-protocol runner for IocApplication
+// ---------------------------------------------------------------------------
+
+/// Run an IOC with both Channel Access and pvAccess (QSRV bridge).
+///
+/// Designed as a protocol runner for [`IocApplication::run`]. Starts a CA
+/// server in the background, creates a `QsrvPvStore` wrapping the database,
+/// registers any PVA plugin PVs (NTNDArray from NDPluginPva), then runs the
+/// PVA server with an interactive iocsh shell.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// AdIoc::new()
+///     .run_with_script_and_runner("st.cmd", run_ca_pva_qsrv_ioc)
+///     .await
+/// ```
+pub async fn run_ca_pva_qsrv_ioc(
+    config: epics_base_rs::server::ioc_app::IocRunConfig,
+) -> epics_base_rs::error::CaResult<()> {
+    use epics_base_rs::error::CaError;
+
+    let db = config.db.clone();
+    let ca_port = config.port;
+    let pva_port: u16 = std::env::var("EPICS_PVA_SERVER_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5075);
+
+    // ── QSRV bridge ──
+    let provider = Arc::new(BridgeProvider::new(db.clone()));
+    let store = Arc::new(QsrvPvStore::new(provider));
+
+    // Register PVA plugin PVs (NTNDArray from NDPvaConfigure).
+    // Handles were stored in the global registry during st.cmd execution.
+    let pva_pvs = take_registered_pva_pvs();
+    for (pv_name, handle) in pva_pvs {
+        eprintln!("QSRV: registering PVA PV: {pv_name}");
+        store
+            .register_pva_pv(&pv_name, handle.latest, handle.subscribers)
+            .await;
+    }
+
+    // ── CA server (background) ──
+    let ca_server = epics_ca_rs::server::CaServer::from_parts(
+        db.clone(),
+        ca_port,
+        config.acf.clone(),
+        config.autosave_config.clone(),
+        config.autosave_manager.clone(),
+    );
+    epics_base_rs::runtime::task::spawn(async move {
+        if let Err(e) = ca_server.run().await {
+            eprintln!("CA server error: {e}");
+        }
+    });
+
+    // ── PVA server (foreground with iocsh) ──
+    let pva_server = epics_pva_rs::server::PvaServer::from_parts(
+        db,
+        pva_port,
+        config.acf,
+        config.autosave_config,
+        config.autosave_manager,
+    );
+
+    let shell_commands = config.shell_commands;
+    pva_server
+        .run_with_store_and_shell(store, move |shell| {
+            for cmd in shell_commands {
+                shell.register(cmd);
+            }
+        })
+        .await
+        .map_err(|e| CaError::InvalidValue(e.to_string()))
 }

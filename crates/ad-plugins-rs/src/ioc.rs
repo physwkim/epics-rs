@@ -560,7 +560,24 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
                 let pool = drv.pool();
 
                 #[cfg(feature = "pva")]
-                let processor = crate::pva::PvaProcessor::new();
+                let (processor, pva_pv_name) = {
+                    let proc = crate::pva::PvaProcessor::new();
+                    // Capture handles before the processor is consumed
+                    let latest = proc.latest_handle();
+                    let subscribers = proc.subscribers_handle();
+                    // Register the PVA PV so the CA+PVA runner can wire it
+                    // into QsrvPvStore. PV name follows C++ convention:
+                    // $(PREFIX)Pva1:Image for port PVA1.
+                    let pv_name = format!("{port_name}:Image");
+                    epics_bridge_rs::qsrv::register_pva_pv_global(
+                        &pv_name,
+                        epics_bridge_rs::qsrv::PvaPvHandle {
+                            latest,
+                            subscribers,
+                        },
+                    );
+                    (proc, pv_name)
+                };
                 #[cfg(not(feature = "pva"))]
                 let processor = crate::passthrough::PassthroughProcessor::new("NDPvaConfigure");
 
@@ -577,7 +594,7 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
                     eprintln!("NDPvaConfigure: wiring failed: {e}");
                 }
                 #[cfg(feature = "pva")]
-                println!("NDPvaConfigure: port={port_name} (PVA enabled)");
+                println!("NDPvaConfigure: port={port_name}, PV={pva_pv_name}");
                 #[cfg(not(feature = "pva"))]
                 println!("NDPvaConfigure: port={port_name} (stub — enable 'pva' feature)");
                 Ok(CommandOutcome::Continue)
@@ -843,5 +860,56 @@ impl AdIoc {
         app.startup_script(script)
             .run(epics_ca_rs::server::run_ca_ioc)
             .await
+    }
+
+    /// Run the IOC with both CA and PVA protocols (QSRV bridge).
+    ///
+    /// Same as [`Self::run`] but uses [`epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc`]
+    /// as the protocol runner, serving records over CA (default port 5064) and
+    /// pvAccess (default port 5075) simultaneously. PVA plugin PVs (NTNDArray)
+    /// registered during st.cmd are wired into the PVA server automatically.
+    #[cfg(feature = "pva")]
+    pub async fn run_with_pva(self, script: &str) -> CaResult<()> {
+        let mut app = self.app.unwrap();
+
+        app = register_all_plugins(app, &self.mgr);
+        app = register_noop_commands(app);
+
+        let autosave_config = Arc::new(Mutex::new(AutosaveStartupConfig::new()));
+        app = app.autosave_startup(autosave_config);
+        app = asyn_rs::adapter::register_asyn_device_support(app);
+
+        let mgr_r = self.mgr.clone();
+        app = app.register_shell_command(CommandDef::new(
+            "asynReport",
+            vec![ArgDesc {
+                name: "level",
+                arg_type: ArgType::Int,
+                optional: true,
+            }],
+            "asynReport [level] - Report registered ports and plugins",
+            move |_args: &[ArgValue], _ctx: &CommandContext| {
+                mgr_r.report();
+                Ok(CommandOutcome::Continue)
+            },
+        ));
+
+        app.startup_script(script)
+            .run(epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc)
+            .await
+    }
+
+    /// Run the IOC with PVA from command-line args.
+    #[cfg(feature = "pva")]
+    pub async fn run_from_args_with_pva(self) -> CaResult<()> {
+        let args: Vec<String> = std::env::args().collect();
+        let script = if args.len() > 1 && !args[1].starts_with('-') {
+            args[1].clone()
+        } else {
+            let bin = args.first().map(|s| s.as_str()).unwrap_or("ioc");
+            eprintln!("Usage: {bin} <st.cmd>");
+            std::process::exit(1);
+        };
+        self.run_with_pva(&script).await
     }
 }

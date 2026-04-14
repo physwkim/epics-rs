@@ -6,7 +6,7 @@ description = "Simulated areaDetector driver for areadetector-rs"
 publish = false
 
 [features]
-ioc = ["dep:epics-base-rs", "dep:ad-plugins-rs", "ad-plugins-rs/ioc", "ad-core-rs/ioc", "asyn-rs/epics"]
+ioc = ["dep:epics-base-rs", "dep:ad-plugins-rs", "ad-plugins-rs/ioc", "ad-plugins-rs/pva", "ad-core-rs/ioc", "asyn-rs/epics"]
 
 [dependencies]
 ad-core-rs = { workspace = true }
