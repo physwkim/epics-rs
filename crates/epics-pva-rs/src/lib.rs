@@ -17,7 +17,6 @@ pub mod client;
 pub mod codec;
 pub mod error;
 pub mod pv_request;
-pub mod pvdata;
 pub mod server;
 
 pub use error::{PvaError, PvaResult};

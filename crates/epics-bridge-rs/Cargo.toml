@@ -8,9 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
-default = ["qsrv", "ca-gateway", "ca-gateway-bin"]
-# Record ↔ pvAccess channels (C++ QSRV equivalent)
-qsrv = ["dep:epics-pva-rs", "dep:serde", "dep:serde_json"]
+default = ["ca-gateway", "ca-gateway-bin"]
 # CA fan-out gateway (C++ ca-gateway equivalent)
 ca-gateway = ["dep:epics-ca-rs", "dep:regex"]
 # CA gateway daemon binary (ca-gateway-rs)
@@ -20,7 +18,7 @@ pvalink = ["dep:epics-pva-rs"]
 # PVA-to-PVA proxy (planned, requires PVA server)
 pva-gateway = ["dep:epics-pva-rs", "dep:regex"]
 # Convenience: enable all bridges + binaries
-all-bridges = ["qsrv", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway"]
+all-bridges = ["ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway"]
 
 [dependencies]
 epics-base-rs = { workspace = true }
@@ -31,8 +29,6 @@ chrono = "0.4"
 # Feature-gated optional dependencies
 epics-pva-rs = { workspace = true, optional = true }
 epics-ca-rs = { workspace = true, optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
 regex = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 

@@ -10,41 +10,22 @@
 //!
 //! | Module | Feature | Description |
 //! |--------|---------|-------------|
-//! | [`qsrv`] | `qsrv` (default) | Record → pvAccess channels (C++ QSRV equivalent) |
-//! | `ca_gateway` | `ca-gateway` | CA fan-out gateway (C++ ca-gateway equivalent) — *planned* |
+//! | `ca_gateway` | `ca-gateway` | CA fan-out gateway (C++ ca-gateway equivalent) |
 //! | `pvalink` | `pvalink` | PVA links for record INP/OUT — *planned* |
 //! | `pva_gateway` | `pva-gateway` | PVA-to-PVA proxy — *planned* |
 //!
-//! ## QSRV (Record ↔ PVA bridge)
+//! ## Group PVs (QSRV equivalent)
 //!
-//! ```text
-//! PVA Client ←→ [epics-pva-rs server] ←→ BridgeProvider ←→ PvDatabase
-//! ```
-//!
-//! - [`BridgeProvider`] implements [`ChannelProvider`] — the PVA server calls
-//!   into it to resolve channel names and create channels.
-//! - [`BridgeChannel`] serves single-record PVs (NTScalar, NTEnum, NTScalarArray).
-//! - [`GroupChannel`] serves multi-record composite PVs from JSON config.
-//! - [`BridgeMonitor`] / [`GroupMonitor`] bridge `DbSubscription` events to PVA monitor updates.
-//!
-//! The `ChannelProvider`, `Channel`, and `PvaMonitor` traits are defined here
-//! temporarily. They will move to `epics-pva-rs` once the PVA server is
-//! implemented by the spvirit maintainer.
+//! Group PV support (composite PVA channels backed by multiple EPICS records)
+//! is now provided directly by `epics-pva-rs` via `spvirit-server`'s
+//! [`GroupPvStore`](spvirit_server::GroupPvStore). Use
+//! [`PvaServerBuilder::group_json()`](epics_pva_rs::server::PvaServerBuilder::group_json)
+//! or
+//! [`PvaServerBuilder::group_file()`](epics_pva_rs::server::PvaServerBuilder::group_file)
+//! to configure group PVs.
 
 pub mod error;
 pub use error::{BridgeError, BridgeResult};
 
-#[cfg(feature = "qsrv")]
-pub mod qsrv;
-
 #[cfg(feature = "ca-gateway")]
 pub mod ca_gateway;
-
-// Convenience re-exports for the QSRV bridge (default feature).
-// External users can write `epics_bridge_rs::BridgeProvider` directly.
-#[cfg(feature = "qsrv")]
-pub use qsrv::{
-    AccessContext, AccessControl, AllowAllAccess, AnyChannel, AnyMonitor, BridgeChannel,
-    BridgeMonitor, BridgeProvider, Channel, ChannelProvider, FieldMapping, GroupChannel,
-    GroupMonitor, GroupPvDef, NtType, ProcessMode, PutOptions, PvaMonitor,
-};
