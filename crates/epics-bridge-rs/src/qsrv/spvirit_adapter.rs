@@ -91,10 +91,18 @@ impl PvStore for QsrvPvStore {
         let name_owned = name.to_string();
         async move {
             let channel = self.channel(&name_owned).await?;
-            let empty_request = PvStructure::new("");
-            match channel.get(&empty_request).await {
-                Ok(pv) => Some(pv_structure_to_descriptor(&pv)),
-                Err(_) => None,
+            // Use get_field() for accurate type introspection (especially
+            // for group PVs where the structure is composite). Falls back
+            // to value-based inference if get_field() fails.
+            match channel.get_field().await {
+                Ok(desc) => Some(epics_field_desc_to_structure_desc(&desc)),
+                Err(_) => {
+                    let empty_request = PvStructure::new("");
+                    match channel.get(&empty_request).await {
+                        Ok(pv) => Some(pv_structure_to_descriptor(&pv)),
+                        Err(_) => None,
+                    }
+                }
             }
         }
     }
@@ -331,6 +339,82 @@ fn pva_array_to_spvirit(items: &[PvaScalarValue]) -> ScalarArrayValue {
                 .collect(),
         ),
         None => ScalarArrayValue::F64(Vec::new()),
+    }
+}
+
+/// Convert an epics_pva_rs `FieldDesc` (from `Channel::get_field()`) to
+/// spvirit's `StructureDesc`. This produces accurate type descriptors for
+/// group PVs where the structure is composite.
+fn epics_field_desc_to_structure_desc(desc: &epics_pva_rs::pvdata::FieldDesc) -> StructureDesc {
+    match desc {
+        epics_pva_rs::pvdata::FieldDesc::Structure { struct_id, fields } => {
+            let sid = if struct_id.is_empty() {
+                None
+            } else {
+                Some(struct_id.clone())
+            };
+            StructureDesc {
+                struct_id: sid,
+                fields: fields
+                    .iter()
+                    .map(|(name, fd)| SpvdFieldDesc {
+                        name: name.clone(),
+                        field_type: epics_field_desc_to_field_type(fd),
+                    })
+                    .collect(),
+            }
+        }
+        // Top-level descriptor should always be a Structure; fall back to
+        // an empty structure for scalar/array (shouldn't happen in practice).
+        _ => StructureDesc {
+            struct_id: None,
+            fields: Vec::new(),
+        },
+    }
+}
+
+fn epics_field_desc_to_field_type(desc: &epics_pva_rs::pvdata::FieldDesc) -> FieldType {
+    match desc {
+        epics_pva_rs::pvdata::FieldDesc::Scalar(st) => {
+            FieldType::Scalar(scalar_type_to_typecode(*st))
+        }
+        epics_pva_rs::pvdata::FieldDesc::ScalarArray(st) => {
+            FieldType::ScalarArray(scalar_type_to_typecode(*st))
+        }
+        epics_pva_rs::pvdata::FieldDesc::Structure { struct_id, fields } => {
+            let sid = if struct_id.is_empty() {
+                None
+            } else {
+                Some(struct_id.clone())
+            };
+            FieldType::Structure(StructureDesc {
+                struct_id: sid,
+                fields: fields
+                    .iter()
+                    .map(|(name, fd)| SpvdFieldDesc {
+                        name: name.clone(),
+                        field_type: epics_field_desc_to_field_type(fd),
+                    })
+                    .collect(),
+            })
+        }
+    }
+}
+
+fn scalar_type_to_typecode(st: ScalarType) -> TypeCode {
+    match st {
+        ScalarType::Boolean => TypeCode::Boolean,
+        ScalarType::Byte => TypeCode::Int8,
+        ScalarType::Short => TypeCode::Int16,
+        ScalarType::Int => TypeCode::Int32,
+        ScalarType::Long => TypeCode::Int64,
+        ScalarType::UByte => TypeCode::UInt8,
+        ScalarType::UShort => TypeCode::UInt16,
+        ScalarType::UInt => TypeCode::UInt32,
+        ScalarType::ULong => TypeCode::UInt64,
+        ScalarType::Float => TypeCode::Float32,
+        ScalarType::Double => TypeCode::Float64,
+        ScalarType::String => TypeCode::String,
     }
 }
 
