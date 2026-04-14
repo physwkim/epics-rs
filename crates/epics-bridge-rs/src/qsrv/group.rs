@@ -30,8 +30,14 @@ struct FieldNameComponent {
 
 /// Parse a field path like `"a.b[0].c"` into components.
 ///
-/// Corresponds to C++ QSRV `FieldName` (fieldname.h:31-104).
+/// Corresponds to C++ QSRV `FieldName` (fieldname.cpp:30-66).
+/// Empty components from trailing/leading/double dots are filtered out,
+/// matching pvxs validation (fieldname.cpp:35-36).
 fn parse_field_path(path: &str) -> Vec<FieldNameComponent> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+
     path.split('.')
         .filter(|s| !s.is_empty())
         .map(|part| {
@@ -330,6 +336,7 @@ impl GroupChannel {
 
     /// Read only specific members by field name and compose a partial PvStructure.
     /// Same access enforcement as [`read_group`].
+    #[allow(dead_code)]
     async fn read_partial(&self, field_names: &[String]) -> BridgeResult<PvStructure> {
         if !self.access.can_read(&self.def.name) {
             return Err(BridgeError::PutRejected(format!(
@@ -782,22 +789,28 @@ pub struct GroupMonitor {
 impl GroupMonitor {
     pub fn new(db: Arc<PvDatabase>, def: GroupPvDef) -> Self {
         // Initialize priming state for each member.
+        // pvxs subscribes ALL members with channels (regardless of trigger)
+        // and waits for their initial events before posting.
         let priming: Vec<FieldPrimingState> = def
             .members
             .iter()
             .map(|member| {
                 match member.mapping {
-                    // Const and Structure have no channel — immediately primed.
-                    FieldMapping::Const | FieldMapping::Structure => FieldPrimingState {
-                        had_value_event: true,
-                        had_property_event: true,
-                    },
+                    // Const, Structure, and Proc have no data to wait for —
+                    // immediately primed (pvxs groupsource.cpp:369-376).
+                    FieldMapping::Const | FieldMapping::Structure | FieldMapping::Proc => {
+                        FieldPrimingState {
+                            had_value_event: true,
+                            had_property_event: true,
+                        }
+                    }
                     // Scalar and Meta need both value + property events.
                     FieldMapping::Scalar | FieldMapping::Meta => FieldPrimingState {
                         had_value_event: false,
                         had_property_event: false,
                     },
-                    // Plain, Any, Proc only need value events (auto-prime property).
+                    // Plain, Any only need value events (auto-prime property,
+                    // pvxs groupsource.cpp:397).
                     _ => FieldPrimingState {
                         had_value_event: false,
                         had_property_event: true,
@@ -845,16 +858,14 @@ impl super::provider::PvaMonitor for GroupMonitor {
         // Create fan-in channel for member events
         let (tx, rx) = tokio::sync::mpsc::channel::<MemberEvent>(64);
 
-        // Subscribe to all members that have triggers and spawn forwarding tasks.
-        // Each member gets a value subscription (DBE_VALUE|DBE_ALARM) and,
-        // for Scalar/Meta mappings, a separate property subscription
-        // (DBE_PROPERTY) — matching pvxs groupsource.cpp:380-398.
+        // Subscribe to ALL members with channels, regardless of trigger
+        // setting. pvxs subscribes every field with a dbChannel for the
+        // priming phase (groupsource.cpp:375-398). TriggerDef::None only
+        // means "don't update the group when this field changes" — the
+        // subscription still fires for priming.
         for (idx, member) in self.def.members.iter().enumerate() {
-            if matches!(member.triggers, TriggerDef::None) {
-                continue;
-            }
             if member.channel.is_empty() {
-                continue; // Structure/Const — no backing channel
+                continue; // Structure/Const/Proc-without-channel — no backing channel
             }
 
             let (record_name, _) = epics_base_rs::server::database::parse_pv_name(&member.channel);
@@ -882,6 +893,12 @@ impl super::provider::PvaMonitor for GroupMonitor {
                     }
                 });
                 self._tasks.push(handle);
+            } else {
+                // Record not found or subscribe failed — auto-prime this
+                // member so the priming phase doesn't stall forever.
+                if let Some(state) = self.priming.get_mut(idx) {
+                    state.had_value_event = true;
+                }
             }
 
             // Property subscription (DBE_PROPERTY) — only for Scalar/Meta
@@ -907,6 +924,11 @@ impl super::provider::PvaMonitor for GroupMonitor {
                         }
                     });
                     self._tasks.push(handle);
+                } else {
+                    // Property subscribe failed — auto-prime.
+                    if let Some(state) = self.priming.get_mut(idx) {
+                        state.had_property_event = true;
+                    }
                 }
             }
         }
@@ -983,22 +1005,19 @@ impl super::provider::PvaMonitor for GroupMonitor {
 
             // Property events only update the source field's metadata —
             // they do NOT trigger other fields (pvxs groupsource.cpp:310-340).
+            // However, subscriptionPost still posts the FULL group structure.
             if matches!(event.kind, MemberEventKind::Property) {
-                return group_channel
-                    .read_partial(&[member.field_name.clone()])
-                    .await
-                    .ok();
+                return group_channel.read_group().await.ok();
             }
 
             match &member.triggers {
                 TriggerDef::None => continue,
-                TriggerDef::All => {
-                    // Re-read entire group
+                TriggerDef::All | TriggerDef::Fields(_) => {
+                    // pvxs always posts the FULL group structure
+                    // (groupsource.cpp:303 → subscriptionPost posts
+                    // currentValue which contains all fields). We match
+                    // this by re-reading the entire group on every trigger.
                     return group_channel.read_group().await.ok();
-                }
-                TriggerDef::Fields(field_names) => {
-                    // Partial update: only re-read triggered fields
-                    return group_channel.read_partial(field_names).await.ok();
                 }
             }
         }
@@ -1021,7 +1040,7 @@ impl super::provider::PvaMonitor for GroupMonitor {
         for (i, member) in self.def.members.iter().enumerate() {
             if let Some(state) = self.priming.get_mut(i) {
                 match member.mapping {
-                    FieldMapping::Const | FieldMapping::Structure => {
+                    FieldMapping::Const | FieldMapping::Structure | FieldMapping::Proc => {
                         state.had_value_event = true;
                         state.had_property_event = true;
                     }

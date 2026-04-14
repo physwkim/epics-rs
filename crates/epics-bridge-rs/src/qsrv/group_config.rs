@@ -129,12 +129,19 @@ pub fn merge_group_defs(existing: &mut HashMap<String, GroupPvDef>, new_defs: Ve
         if let Some(existing_def) = existing.get_mut(&def.name) {
             // Merge members into existing group
             existing_def.members.extend(def.members);
-            // Update struct_id if newly specified
+            // Update struct_id if newly specified (last wins)
             if def.struct_id.is_some() {
                 existing_def.struct_id = def.struct_id;
             }
-            // atomic: use explicit setting if provided (C++ uses last-wins)
-            // keep existing unless new def explicitly sets it
+            // atomic: last-wins with warning on conflict
+            // (pvxs groupconfigprocessor.cpp:274-288)
+            if existing_def.atomic != def.atomic {
+                eprintln!(
+                    "warning: group '{}' atomic setting inconsistent, using latest ({})",
+                    def.name, def.atomic
+                );
+            }
+            existing_def.atomic = def.atomic;
         } else {
             existing.insert(def.name.clone(), def);
         }
@@ -246,22 +253,30 @@ fn parse_member(field_name: &str, value: &serde_json::Value) -> BridgeResult<Gro
             .to_string(),
     };
 
-    // Parse constant value for Const mapping.
+    // Parse constant value for Const mapping. +value is required.
     let const_value = if mapping == FieldMapping::Const {
-        obj.get("+value")
-            .map(|v| json_to_pv_field(v))
-            .transpose()
-            .map_err(|e| {
-                BridgeError::GroupConfigError(format!("field '{field_name}': invalid +value: {e}"))
-            })?
+        let val = obj.get("+value").ok_or_else(|| {
+            BridgeError::GroupConfigError(format!(
+                "field '{field_name}': +type=const requires +value"
+            ))
+        })?;
+        Some(json_to_pv_field(val).map_err(|e| {
+            BridgeError::GroupConfigError(format!("field '{field_name}': invalid +value: {e}"))
+        })?)
     } else {
         None
     };
 
-    let triggers = match obj.get("+trigger").and_then(|v| v.as_str()) {
-        Some("*") | None => TriggerDef::All,
-        Some("") => TriggerDef::None,
-        Some(s) => TriggerDef::Fields(s.split(',').map(|f| f.trim().to_string()).collect()),
+    // Structure and Const have no channel — they cannot trigger or be
+    // triggered, so force TriggerDef::None (pvxs groupconfigprocessor.cpp:405-407).
+    let triggers = if mapping == FieldMapping::Structure || mapping == FieldMapping::Const {
+        TriggerDef::None
+    } else {
+        match obj.get("+trigger").and_then(|v| v.as_str()) {
+            Some("*") | None => TriggerDef::All,
+            Some("") => TriggerDef::None,
+            Some(s) => TriggerDef::Fields(s.split(',').map(|f| f.trim().to_string()).collect()),
+        }
     };
 
     let put_order = obj.get("+putorder").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -644,6 +659,47 @@ mod tests {
         } else {
             panic!("expected String(\"hello\")");
         }
+    }
+
+    #[test]
+    fn parse_const_missing_value_is_error() {
+        let json = r#"{
+            "GRP:bad": {
+                "label": {
+                    "+type": "const"
+                }
+            }
+        }"#;
+
+        let result = parse_group_config(json);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("+value"), "expected error about +value: {err}");
+    }
+
+    #[test]
+    fn const_and_structure_default_trigger_none() {
+        let json = r#"{
+            "GRP:t": {
+                "node": { "+type": "structure" },
+                "fixed": { "+type": "const", "+value": 1 },
+                "val": { "+channel": "R:val" }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        let node = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "node")
+            .unwrap();
+        let fixed = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "fixed")
+            .unwrap();
+        assert!(matches!(node.triggers, TriggerDef::None));
+        assert!(matches!(fixed.triggers, TriggerDef::None));
     }
 
     #[test]
