@@ -1183,6 +1183,7 @@ version = "0.9.2"
 dependencies = [
  "asyn-rs",
  "epics-base-rs",
+ "epics-bridge-rs",
  "epics-ca-rs",
  "mqtt-rs",
 ]
@@ -1683,16 +1684,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "random-signals"
-version = "0.9.2"
-dependencies = [
- "epics-base-rs",
- "epics-ca-rs",
- "epics-pva-rs",
- "rand 0.9.3",
-]
-
-[[package]]
 name = "rawpointer"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1962,6 +1953,7 @@ version = "0.9.2"
 dependencies = [
  "asyn-rs",
  "epics-base-rs",
+ "epics-bridge-rs",
  "epics-ca-rs",
  "parking_lot",
 ]

@@ -6,12 +6,13 @@ description = "MQTT IOC example — demonstrates mqtt-rs driver with EPICS recor
 publish = false
 
 [features]
-ioc = ["dep:epics-ca-rs", "asyn-rs/epics", "mqtt-rs/ioc"]
+ioc = ["dep:epics-ca-rs", "dep:epics-bridge-rs", "asyn-rs/epics", "mqtt-rs/ioc"]
 
 [dependencies]
 asyn-rs = { workspace = true }
 epics-base-rs = { workspace = true }
 epics-ca-rs = { workspace = true, optional = true }
+epics-bridge-rs = { workspace = true, optional = true }
 mqtt-rs = { workspace = true }
 
 [[bin]]

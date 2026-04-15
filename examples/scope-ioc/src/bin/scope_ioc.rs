@@ -208,6 +208,6 @@ async fn main() -> CaResult<()> {
     ));
 
     app.startup_script(&script)
-        .run(epics_ca_rs::server::run_ca_ioc)
+        .run(epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc)
         .await
 }

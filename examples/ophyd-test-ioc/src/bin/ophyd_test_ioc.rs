@@ -33,5 +33,5 @@ async fn main() -> CaResult<()> {
     ioc.register_startup_command(motor_holder.sim_motor_create_command());
     ioc.register_dynamic_device_support(motor_holder.device_support_factory());
 
-    ioc.run_from_args().await
+    ioc.run_from_args_with_pva().await
 }
