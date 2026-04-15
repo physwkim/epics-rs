@@ -282,7 +282,15 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
             c1.base.clone(),
         );
         xtal1.reflect(&mut beam, &c1);
-        kill_lost_rays(&mut beam);
+        let n1 = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).count();
+        let n3 = (0..beam.nrays()).filter(|&i| beam.state[i] == 3).count();
+        let nm1 = (0..beam.nrays()).filter(|&i| beam.state[i] == -1).count();
+        let nm2 = (0..beam.nrays()).filter(|&i| beam.state[i] == -2).count();
+        let nm3 = (0..beam.nrays()).filter(|&i| beam.state[i] == -3).count();
+        let n0 = (0..beam.nrays()).filter(|&i| beam.state[i] == 0).count();
+        let n2 = (0..beam.nrays()).filter(|&i| beam.state[i] == 2).count();
+        eprintln!("  DCM1: Good={n1} Over={n3} Out={nm1} Absorbed={nm2} Dead={nm3} state0={n0} state2={n2} total={}", beam.nrays());
+        // No kill_lost — keep all rays with amplitude weighting
 
         beam.propagate(dcm_path);
 
@@ -297,7 +305,9 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
             c2.base.clone(),
         );
         xtal2.reflect(&mut beam, &c2);
-        kill_lost_rays(&mut beam);
+        let _n = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).count();
+        eprintln!("  DCM2: good={_n}");
+        // No kill_lost — keep all rays with amplitude weighting
     } else {
     }
 
@@ -317,7 +327,9 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
         let hfm = MaterialOpticalElement::new(
             BentFlatSurface::new(motors.hfm_r_major, 0.0), p, mat.clone());
         hfm.reflect(&mut beam);
-        kill_lost_rays(&mut beam);
+        let _n = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).count();
+        eprintln!("  HFM:  good={_n}");
+        // No kill_lost — keep all rays with amplitude weighting
     }
 
     // HFM → VFM
@@ -351,7 +363,9 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
         let vfm = MaterialOpticalElement::new(
             BentFlatSurface::new(motors.vfm_r_major, 0.0), p, mat.clone());
         vfm.reflect(&mut beam);
-        kill_lost_rays(&mut beam);
+        let _n = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).count();
+        eprintln!("  VFM:  good={_n}");
+        // No kill_lost — keep all rays with amplitude weighting
     }
 
     // VFM → Sample
