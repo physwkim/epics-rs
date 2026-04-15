@@ -337,6 +337,10 @@ struct SharedProcessorInner<P: NDPluginProcess> {
     sort_size: i32,
     /// Sort buffer for reordering output arrays by uniqueId.
     sort_buffer: SortBuffer,
+    /// Rate tracking: counter value at last rate calculation.
+    rate_last_counter: i32,
+    /// Rate tracking: time of last rate calculation.
+    rate_last_time: std::time::Instant,
 }
 
 impl<P: NDPluginProcess> SharedProcessorInner<P> {
@@ -548,6 +552,18 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
 
         self.port_handle
             .write_float64_no_wait(self.plugin_params.execution_time, 0, elapsed_ms);
+
+        // Compute array rate (Hz) based on counter delta over elapsed time.
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.rate_last_time).as_secs_f64();
+        if dt >= 1.0 {
+            let delta = self.array_counter - self.rate_last_counter;
+            let rate = if delta > 0 { delta as f64 / dt } else { 0.0 };
+            self.rate_last_counter = self.array_counter;
+            self.rate_last_time = now;
+            self.port_handle
+                .write_float64_no_wait(self.ndarray_params.array_rate, 0, rate);
+        }
 
         // Set params directly and fire callbacks — no writeInt32/on_param_change re-entrancy.
         // This mirrors C ADCore's setIntegerParam + callParamCallbacks pattern.
@@ -1050,6 +1066,8 @@ pub fn create_plugin_runtime_multi_addr<P: NDPluginProcess>(
         sort_time: 0.0,
         sort_size: 10,
         sort_buffer: SortBuffer::new(),
+        rate_last_counter: 0,
+        rate_last_time: std::time::Instant::now(),
     }));
 
     // Type-erased handle for blocking mode
@@ -1319,6 +1337,8 @@ pub fn create_plugin_runtime_with_output<P: NDPluginProcess>(
         sort_time: 0.0,
         sort_size: 10,
         sort_buffer: SortBuffer::new(),
+        rate_last_counter: 0,
+        rate_last_time: std::time::Instant::now(),
     }));
 
     let bp: Arc<dyn BlockingProcessFn> = Arc::new(BlockingProcessorHandle {

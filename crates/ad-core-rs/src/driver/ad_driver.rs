@@ -18,6 +18,8 @@ pub struct ADDriverBase {
     pub pool: Arc<NDArrayPool>,
     pub array_output: NDArrayOutput,
     pub queued_counter: Arc<QueuedArrayCounter>,
+    rate_last_counter: i32,
+    rate_last_time: std::time::Instant,
 }
 
 impl ADDriverBase {
@@ -93,6 +95,8 @@ impl ADDriverBase {
             pool,
             array_output: NDArrayOutput::new(),
             queued_counter: Arc::new(QueuedArrayCounter::new()),
+            rate_last_counter: 0,
+            rate_last_time: std::time::Instant::now(),
         })
     }
 
@@ -153,6 +157,18 @@ impl ADDriverBase {
             )?;
 
             self.array_output.publish(array);
+        }
+
+        // Compute array rate (Hz) based on counter delta over elapsed time.
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.rate_last_time).as_secs_f64();
+        if dt >= 1.0 {
+            let delta = counter - self.rate_last_counter;
+            let rate = if delta > 0 { delta as f64 / dt } else { 0.0 };
+            self.rate_last_counter = counter;
+            self.rate_last_time = now;
+            self.port_base
+                .set_float64_param(self.params.base.array_rate, 0, rate)?;
         }
 
         self.port_base.call_param_callbacks(0)?;

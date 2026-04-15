@@ -88,6 +88,9 @@ pub struct NDArrayDriverParams {
     // Acquire (needed by plugins that use NDArrayDriverParams directly)
     pub acquire: usize,
     pub acquire_busy: usize,
+
+    // Array rate (computed in Rust, bypasses calc record)
+    pub array_rate: usize,
 }
 
 impl NDArrayDriverParams {
@@ -177,6 +180,9 @@ impl NDArrayDriverParams {
             // Acquire (needed by plugins that use NDArrayDriverParams directly)
             acquire: base.create_param("ACQUIRE", ParamType::Int32)?,
             acquire_busy: base.create_param("ACQUIRE_BUSY", ParamType::Int32)?,
+
+            // Array rate
+            array_rate: base.create_param("ARRAY_RATE", ParamType::Float64)?,
         })
     }
 }

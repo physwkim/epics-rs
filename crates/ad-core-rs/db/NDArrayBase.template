@@ -732,18 +732,14 @@ record(longin, "$(P)$(R)ArrayCounter_RBV")
     field(SCAN, "$(SCANRATE=I/O Intr)")
 }
 
-# Updated rate calculation to use a smoothing factor w/ guard against negative values
-record(calc, "$(P)$(R)ArrayRate_RBV")
+# Array rate computed in Rust and published via I/O Intr
+record(ai, "$(P)$(R)ArrayRate_RBV")
 {
-    field(INPA, "$(P)$(R)ArrayRate_RBV.LB NPP NMS")   # Previous counter value
-    field(INPB, "$(P)$(R)ArrayCounter_RBV NPP NMS")   # Current counter value
-    field(INPC, "1.0")                                # Delta time in seconds
-    field(INPD, "$(P)$(R)ArrayRate_RBV.VAL NPP NMS")  # Previous rate
-    field(INPE, "$(RATE_SMOOTH=0.0)")                 # Smoothing factor
-    field(CALC, "(D*E)/C+MAX(0,B-A)*(1-E)/C")
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))ARRAY_RATE")
     field(PREC, "2" )
     field(EGU,  "Hz" )
-    field(SCAN, "1 second")
+    field(SCAN, "I/O Intr")
 }
 
 ###################################################################
