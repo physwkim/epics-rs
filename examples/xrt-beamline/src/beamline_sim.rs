@@ -187,7 +187,7 @@ pub struct SimConfig {
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
-            nrays: 5000,
+            nrays: 50000,
             geometry: BeamlineGeometry::default(),
             undulator: UndulatorConfig::default(),
             screen_dx: 0.5,    // ±0.5 mm (auto-center tracks beam position)
