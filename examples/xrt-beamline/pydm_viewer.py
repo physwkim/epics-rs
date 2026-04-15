@@ -20,6 +20,7 @@ from pydm.widgets import (
 from qtpy.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QApplication, QSplitter,
+    QSlider, QCheckBox,
 )
 from qtpy.QtCore import Qt
 import sys
@@ -54,7 +55,27 @@ class BeamlineViewer(Display):
         self.image_view.setMinimumSize(512, 512)
         self.image_view.colorMap = self.image_view.Inferno
         self.image_view.readingOrder = self.image_view.Clike
+        self.image_view.setColorMapLimits(0, 65535)
         image_layout.addWidget(self.image_view)
+
+        # Contrast controls
+        contrast_layout = QHBoxLayout()
+        self.auto_cb = QCheckBox("Auto")
+        self.auto_cb.setChecked(True)
+        self.auto_cb.toggled.connect(self._on_auto_toggle)
+        contrast_layout.addWidget(self.auto_cb)
+
+        contrast_layout.addWidget(QLabel("Max:"))
+        self.max_slider = QSlider(Qt.Horizontal)
+        self.max_slider.setRange(1, 65535)
+        self.max_slider.setValue(65535)
+        self.max_slider.valueChanged.connect(self._on_max_changed)
+        contrast_layout.addWidget(self.max_slider)
+
+        self.max_label = QLabel("65535")
+        self.max_label.setFixedWidth(50)
+        contrast_layout.addWidget(self.max_label)
+        image_layout.addLayout(contrast_layout)
 
         # Acquire controls
         acq_layout = QHBoxLayout()
@@ -159,6 +180,20 @@ class BeamlineViewer(Display):
 
         splitter.addWidget(right_widget)
         splitter.setSizes([600, 300])
+
+    def _on_auto_toggle(self, checked):
+        if checked:
+            self.image_view.autoLevels = True
+            self.max_slider.setEnabled(False)
+        else:
+            self.image_view.autoLevels = False
+            self.max_slider.setEnabled(True)
+            self._on_max_changed(self.max_slider.value())
+
+    def _on_max_changed(self, value):
+        self.max_label.setText(str(value))
+        if not self.auto_cb.isChecked():
+            self.image_view.setColorMapLimits(0, value)
 
     def ui_filename(self):
         return None
