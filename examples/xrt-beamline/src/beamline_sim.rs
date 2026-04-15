@@ -8,7 +8,7 @@ use xrt_materials::crystal::CrystalGeometry;
 use xrt_materials::crystal_variants::CrystalSi;
 use xrt_materials::data::ScatteringTable;
 use xrt_materials::material::{Material, MaterialKind};
-use xrt_oes::beamline::{Beamline, BeamlineOutput, OeParamsBuilder};
+use xrt_oes::beamline::{BeamlineOutput, OeParamsBuilder};
 use xrt_oes::crystal_oe::CrystalOpticalElement;
 use xrt_oes::material_oe::MaterialOpticalElement;
 use xrt_oes::screen::{Screen, ScreenCapture};
