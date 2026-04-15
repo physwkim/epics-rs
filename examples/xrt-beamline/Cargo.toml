@@ -18,11 +18,11 @@ epics-base-rs = { workspace = true, optional = true }
 epics-ca-rs = { workspace = true, optional = true }
 epics-bridge-rs = { workspace = true, optional = true }
 
-# xrt-rs crates (path to external workspace)
-xrt-core = { path = "../../../xrt-rs/crates/xrt-core" }
-xrt-sources = { path = "../../../xrt-rs/crates/xrt-sources" }
-xrt-materials = { path = "../../../xrt-rs/crates/xrt-materials" }
-xrt-oes = { path = "../../../xrt-rs/crates/xrt-oes" }
+# xrt-rs crates (from GitHub)
+xrt-core = { git = "https://github.com/physwkim/xrt-rs.git" }
+xrt-sources = { git = "https://github.com/physwkim/xrt-rs.git" }
+xrt-materials = { git = "https://github.com/physwkim/xrt-rs.git" }
+xrt-oes = { git = "https://github.com/physwkim/xrt-rs.git" }
 
 [[bin]]
 name = "xrt_ioc"
