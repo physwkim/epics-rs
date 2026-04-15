@@ -383,12 +383,15 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
             .collect();
         if good.len() > 10 {
             let n = good.len() as f64;
-            [
+            let c = [
                 good.iter().map(|&i| beam.x[i]).sum::<f64>() / n,
                 good.iter().map(|&i| beam.y[i]).sum::<f64>() / n,
                 good.iter().map(|&i| beam.z[i]).sum::<f64>() / n,
-            ]
+            ];
+            eprintln!("  screen auto: ({:.1},{:.1},{:.1}) n_good={}", c[0], c[1], c[2], good.len());
+            c
         } else {
+            eprintln!("  screen fallback: ({x_sample:.1},{y_sample:.1},{z_sample:.1})");
             [x_sample, y_sample, z_sample]
         }
     };
