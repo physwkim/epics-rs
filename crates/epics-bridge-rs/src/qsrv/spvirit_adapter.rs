@@ -652,6 +652,84 @@ fn scalar_type_to_type_code(t: ScalarType) -> TypeCode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CA + PVA dual-protocol runner for IocApplication
+// ---------------------------------------------------------------------------
+
+/// Runs a combined CA + PVA IOC with QSRV bridge.
+///
+/// Designed as a protocol runner for [`IocApplication::run`]. Starts a CA
+/// server in the background, creates a `QsrvPvStore` wrapping the database,
+/// registers any PVA plugin PVs (NTNDArray from NDPluginPva), then runs the
+/// PVA server with an interactive iocsh shell.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// AdIoc::new()
+///     .run_with_script_and_runner("st.cmd", run_ca_pva_qsrv_ioc)
+///     .await
+/// ```
+pub async fn run_ca_pva_qsrv_ioc(
+    config: epics_base_rs::server::ioc_app::IocRunConfig,
+) -> epics_base_rs::error::CaResult<()> {
+    use epics_base_rs::error::CaError;
+
+    let db = config.db.clone();
+    let ca_port = config.port;
+    let pva_port: u16 = std::env::var("EPICS_PVA_SERVER_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5075);
+
+    // ── QSRV bridge ──
+    let provider = Arc::new(BridgeProvider::new(db.clone()));
+    let store = Arc::new(QsrvPvStore::new(provider));
+
+    // Register PVA plugin PVs (NTNDArray from NDPvaConfigure).
+    // Handles were stored in the global registry during st.cmd execution.
+    let pva_pvs = take_registered_pva_pvs();
+    for (pv_name, handle) in pva_pvs {
+        eprintln!("QSRV: registering PVA PV: {pv_name}");
+        store
+            .register_pva_pv(&pv_name, handle.latest, handle.subscribers)
+            .await;
+    }
+
+    // ── CA server (background) ──
+    let ca_server = epics_ca_rs::server::CaServer::from_parts(
+        db.clone(),
+        ca_port,
+        config.acf.clone(),
+        config.autosave_config.clone(),
+        config.autosave_manager.clone(),
+    );
+    epics_base_rs::runtime::task::spawn(async move {
+        if let Err(e) = ca_server.run().await {
+            eprintln!("CA server error: {e}");
+        }
+    });
+
+    // ── PVA server (foreground with iocsh) ──
+    let pva_server = epics_pva_rs::server::PvaServer::from_parts(
+        db,
+        pva_port,
+        config.acf,
+        config.autosave_config,
+        config.autosave_manager,
+    );
+
+    let shell_commands = config.shell_commands;
+    pva_server
+        .run_with_store_and_shell(store, move |shell| {
+            for cmd in shell_commands {
+                shell.register(cmd);
+            }
+        })
+        .await
+        .map_err(|e| CaError::InvalidValue(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,82 +838,4 @@ mod tests {
         assert!(store.has_pv("TEST:X").await);
         assert!(!store.has_pv("NOT:THERE").await);
     }
-}
-
-// ---------------------------------------------------------------------------
-// CA + PVA dual-protocol runner for IocApplication
-// ---------------------------------------------------------------------------
-
-/// Run an IOC with both Channel Access and pvAccess (QSRV bridge).
-///
-/// Designed as a protocol runner for [`IocApplication::run`]. Starts a CA
-/// server in the background, creates a `QsrvPvStore` wrapping the database,
-/// registers any PVA plugin PVs (NTNDArray from NDPluginPva), then runs the
-/// PVA server with an interactive iocsh shell.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// AdIoc::new()
-///     .run_with_script_and_runner("st.cmd", run_ca_pva_qsrv_ioc)
-///     .await
-/// ```
-pub async fn run_ca_pva_qsrv_ioc(
-    config: epics_base_rs::server::ioc_app::IocRunConfig,
-) -> epics_base_rs::error::CaResult<()> {
-    use epics_base_rs::error::CaError;
-
-    let db = config.db.clone();
-    let ca_port = config.port;
-    let pva_port: u16 = std::env::var("EPICS_PVA_SERVER_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5075);
-
-    // ── QSRV bridge ──
-    let provider = Arc::new(BridgeProvider::new(db.clone()));
-    let store = Arc::new(QsrvPvStore::new(provider));
-
-    // Register PVA plugin PVs (NTNDArray from NDPvaConfigure).
-    // Handles were stored in the global registry during st.cmd execution.
-    let pva_pvs = take_registered_pva_pvs();
-    for (pv_name, handle) in pva_pvs {
-        eprintln!("QSRV: registering PVA PV: {pv_name}");
-        store
-            .register_pva_pv(&pv_name, handle.latest, handle.subscribers)
-            .await;
-    }
-
-    // ── CA server (background) ──
-    let ca_server = epics_ca_rs::server::CaServer::from_parts(
-        db.clone(),
-        ca_port,
-        config.acf.clone(),
-        config.autosave_config.clone(),
-        config.autosave_manager.clone(),
-    );
-    epics_base_rs::runtime::task::spawn(async move {
-        if let Err(e) = ca_server.run().await {
-            eprintln!("CA server error: {e}");
-        }
-    });
-
-    // ── PVA server (foreground with iocsh) ──
-    let pva_server = epics_pva_rs::server::PvaServer::from_parts(
-        db,
-        pva_port,
-        config.acf,
-        config.autosave_config,
-        config.autosave_manager,
-    );
-
-    let shell_commands = config.shell_commands;
-    pva_server
-        .run_with_store_and_shell(store, move |shell| {
-            for cmd in shell_commands {
-                shell.register(cmd);
-            }
-        })
-        .await
-        .map_err(|e| CaError::InvalidValue(e.to_string()))
 }
