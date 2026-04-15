@@ -56,6 +56,7 @@ class BeamlineViewer(Display):
         self.image_view.colorMap = self.image_view.Inferno
         self.image_view.readingOrder = self.image_view.Clike
         self.image_view.setColorMapLimits(0, 65535)
+        self.image_view.getView().invertY(False)
         image_layout.addWidget(self.image_view)
 
         # Contrast controls
