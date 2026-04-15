@@ -149,6 +149,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             }
 
             // Accumulate ray tracing over acquire_time
+            let mut stopped = false;
             let nx = ctx.sim_config.screen_nx;
             let nz = ctx.sim_config.screen_nz;
             let mut accum = vec![0.0f64; nx * nz];
@@ -169,11 +170,13 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                 match ctx.acq_rx.try_recv() {
                     Ok(AcqCommand::Stop) => {
                         ctx.end_acquisition(config.wait_for_plugins);
+                        stopped = true;
                         break;
                     }
                     Ok(AcqCommand::Start) => {}
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         ctx.end_acquisition(config.wait_for_plugins);
+                        stopped = true;
                         break;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -220,6 +223,10 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                 if start_time.elapsed().as_secs_f64() >= config.acquire_time {
                     break;
                 }
+            }
+
+            if stopped {
+                break;
             }
 
             let efficiency = if n_iterations > 0 { total_efficiency / n_iterations as f64 } else { 0.0 };
