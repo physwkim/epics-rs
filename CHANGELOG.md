@@ -1,30 +1,92 @@
 # Changelog
 
-## v0.9.3 — 2026-04-15
+## v0.9.3 — 2026-04-15 — First production-ready pvAccess support
 
-### Examples
+`epics-rs` now ships a full pvAccess (PVA) stack — client, server,
+and QSRV-equivalent bridge — powered by
+[spvirit](https://github.com/ISISNeutronMuon/spvirit). PVA was
+introduced experimentally in v0.9.2; v0.9.3 is the release where it
+leaves experimental status and becomes a first-class peer to Channel
+Access across the entire workspace.
 
-- All example IOCs now serve both Channel Access and pvAccess
-  simultaneously:
-  - `ophyd-test-ioc`: switch `AdIoc` to `run_from_args_with_pva`
-    (enable `ad-plugins-rs/pva`)
-  - `scope-ioc`: swap `run_ca_ioc` for
-    `epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc`
-  - `mqtt-ioc`: same protocol-runner swap
-- Remove `random-signals` example — it was a programmatic
-  `IocBuilder` demo rather than a st.cmd-style IOC, and its
-  unused `db/` file made the divergence more confusing than
-  useful. The seven remaining examples are all st.cmd-driven
-  dual-protocol IOCs.
+### What spvirit provides
+
+[spvirit](https://github.com/ISISNeutronMuon/spvirit) is a pure-Rust
+implementation of the pvAccess wire protocol maintained by the ISIS
+Neutron & Muon Source. `epics-pva-rs` wraps `spvirit-server` /
+`spvirit-client` / `spvirit-codec` / `spvirit-types` (v0.1.9 from
+crates.io) and exposes:
+
+- **Client** — `search`, `get`, `put`, `monitor`, `info` over UDP
+  discovery (port 5076) + TCP virtual circuits (port 5075)
+- **Server** — `PvaServer` that hosts a `PvDatabase` and answers the
+  full pvAccess command set
+- **NormativeTypes** — NTScalar, NTEnum, NTScalarArray, NTNDArray,
+  NTTable
+- **BitSet-delta monitors**, segmentation, `SET_BYTE_ORDER`
+  handshake, and connection validation
+
+### epics-bridge-rs — QSRV-equivalent
+
+Pure-Rust analogue of the C++ QSRV (`modules/pva2pva/pdbApp/`):
+translates `epics-base-rs` record state into pvAccess `PvStructure`
+values and vice versa.
+
+- **Single-record channels** — NTScalar, NTEnum (with choices),
+  NTScalarArray with full `alarm / timeStamp / display / control /
+  valueAlarm` metadata
+- **Group PV channels** — composite structures defined via
+  `info(Q:group, …)` JSON tags on records (C++ QSRV JSON format
+  compatible)
+- **Monitor bridge** — initial Snapshot on connect, full Snapshot on
+  every update, fan-in group monitor with trigger rules
+- **pvRequest** — field selection, `record._options.process` / `block`
+- **Pluggable access control** — ChannelProvider / Channel /
+  PvaMonitor traits, record metadata cache
+
+### Dual-protocol across every example
+
+All seven remaining example IOCs now serve CA **and** PVA
+simultaneously from the same `PvDatabase` via
+`epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc`:
+
+| Example           | Protocols                   |
+|-------------------|-----------------------------|
+| `mini-beamline`   | CA + PVA                    |
+| `xrt-beamline`    | CA + PVA                    |
+| `qsrv-ioc`        | CA + PVA                    |
+| `sim-detector`    | CA + PVA                    |
+| `ophyd-test-ioc`  | CA + PVA *(new in 0.9.3)*   |
+| `scope-ioc`       | CA + PVA *(new in 0.9.3)*   |
+| `mqtt-ioc`        | CA + PVA *(new in 0.9.3)*   |
+
+The programmatic `random-signals` demo was removed in favour of a
+uniform st.cmd-driven example set.
+
+### PVA CLI tools
+
+Shipped alongside the CA tools (`caget-rs`, `caput-rs`,
+`camonitor-rs`, `cainfo-rs`, `ca-repeater-rs`):
+
+- `pvget-rs` — read
+- `pvput-rs` — write
+- `pvmonitor-rs` — subscribe
+- `pvinfo-rs` — type / introspection info
 
 ### Documentation
 
-- Drop "experimental" status from `epics-pva-rs`,
-  `epics-bridge-rs`, and the pvAccess CLI tool section
-  (`pvget-rs`, `pvput-rs`, `pvmonitor-rs`, `pvinfo-rs`) in the
+- "Experimental" status removed from `epics-pva-rs`,
+  `epics-bridge-rs`, and the pvAccess CLI tool section in the
   top-level and per-crate READMEs.
-- Refresh stale "server-side planned" notes in `epics-pva-rs`
-  README now that the server is shipped.
+- `epics-pva-rs` README refreshed — stale "server-side is planned"
+  notes replaced with a working `PvaServer` +
+  `run_ca_pva_qsrv_ioc` example.
+
+### Acknowledgements
+
+Huge thanks to the [spvirit](https://github.com/ISISNeutronMuon/spvirit)
+maintainers at ISIS Neutron & Muon Source for the pvAccess wire-protocol
+implementation that makes this release possible.
 
 ## v0.9.2 — 2026-04-16
 
