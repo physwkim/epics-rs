@@ -1,0 +1,509 @@
+# XRT beamline detector template
+# Macros: P, R, PORT, IOC, BL
+#
+# Includes ADBase for standard areaDetector PVs, then adds
+# motor CP links and simulation readback PVs.
+
+include "ADBase.template"
+
+# ===== Undulator motor CP links =====
+
+record(ao, "$(P)$(R)UndGapLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)und:gap.RBV CP")
+    field(OUT,  "$(P)$(R)UndGap PP")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)UndGap") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_UND_GAP")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ai, "$(P)$(R)UndGap_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_UND_GAP")
+    field(SCAN, "I/O Intr")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)UndXLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)und:x.RBV CP")
+    field(OUT,  "$(P)$(R)UndX PP")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)UndX") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_UND_X")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)UndZLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)und:z.RBV CP")
+    field(OUT,  "$(P)$(R)UndZ PP")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)UndZ") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_UND_Z")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+# ===== DCM motor CP links =====
+
+record(ao, "$(P)$(R)DcmThetaLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)dcm:theta.RBV CP")
+    field(OUT,  "$(P)$(R)DcmTheta PP")
+    field(PREC, "5")
+    field(EGU,  "deg")
+}
+
+record(ao, "$(P)$(R)DcmTheta") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_DCM_THETA")
+    field(PREC, "5")
+    field(EGU,  "deg")
+}
+
+record(ai, "$(P)$(R)DcmTheta_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_DCM_THETA")
+    field(SCAN, "I/O Intr")
+    field(PREC, "5")
+    field(EGU,  "deg")
+}
+
+record(ao, "$(P)$(R)DcmTheta2Link") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)dcm:theta2.RBV CP")
+    field(OUT,  "$(P)$(R)DcmTheta2 PP")
+    field(PREC, "3")
+    field(EGU,  "arcsec")
+}
+
+record(ao, "$(P)$(R)DcmTheta2") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_DCM_THETA2")
+    field(PREC, "3")
+    field(EGU,  "arcsec")
+}
+
+record(ao, "$(P)$(R)DcmYLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)dcm:y.RBV CP")
+    field(OUT,  "$(P)$(R)DcmY PP")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)DcmY") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_DCM_Y")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)DcmChi1Link") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)dcm:chi1.RBV CP")
+    field(OUT,  "$(P)$(R)DcmChi1 PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)DcmChi1") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_DCM_CHI1")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)DcmChi2Link") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)dcm:chi2.RBV CP")
+    field(OUT,  "$(P)$(R)DcmChi2 PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)DcmChi2") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_DCM_CHI2")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)DcmZLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)dcm:z.RBV CP")
+    field(OUT,  "$(P)$(R)DcmZ PP")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)DcmZ") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_DCM_Z")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+# ===== HFM motor CP links =====
+
+record(ao, "$(P)$(R)HfmPitchLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:pitch.RBV CP")
+    field(OUT,  "$(P)$(R)HfmPitch PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)HfmPitch") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_PITCH")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ai, "$(P)$(R)HfmPitch_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_PITCH")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)HfmRollLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:roll.RBV CP")
+    field(OUT,  "$(P)$(R)HfmRoll PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)HfmRoll") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_ROLL")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)HfmYawLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:yaw.RBV CP")
+    field(OUT,  "$(P)$(R)HfmYaw PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)HfmYaw") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_YAW")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)HfmXLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:x.RBV CP")
+    field(OUT,  "$(P)$(R)HfmX PP")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmX") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_X")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmYLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:y.RBV CP")
+    field(OUT,  "$(P)$(R)HfmY PP")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmY") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_Y")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmZLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:z.RBV CP")
+    field(OUT,  "$(P)$(R)HfmZ PP")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmZ") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_Z")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmRMajLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:rmaj.RBV CP")
+    field(OUT,  "$(P)$(R)HfmRMaj PP")
+    field(PREC, "1")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmRMaj") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_R_MAJOR")
+    field(PREC, "1")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmRMinLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)hfm:rmin.RBV CP")
+    field(OUT,  "$(P)$(R)HfmRMin PP")
+    field(PREC, "2")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)HfmRMin") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_HFM_R_MINOR")
+    field(PREC, "2")
+    field(EGU,  "mm")
+}
+
+# ===== VFM motor CP links =====
+
+record(ao, "$(P)$(R)VfmPitchLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:pitch.RBV CP")
+    field(OUT,  "$(P)$(R)VfmPitch PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)VfmPitch") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_PITCH")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ai, "$(P)$(R)VfmPitch_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_PITCH")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)VfmRollLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:roll.RBV CP")
+    field(OUT,  "$(P)$(R)VfmRoll PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)VfmRoll") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_ROLL")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)VfmYawLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:yaw.RBV CP")
+    field(OUT,  "$(P)$(R)VfmYaw PP")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)VfmYaw") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_YAW")
+    field(PREC, "4")
+    field(EGU,  "mrad")
+}
+
+record(ao, "$(P)$(R)VfmXLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:x.RBV CP")
+    field(OUT,  "$(P)$(R)VfmX PP")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmX") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_X")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmYLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:y.RBV CP")
+    field(OUT,  "$(P)$(R)VfmY PP")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmY") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_Y")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmZLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:z.RBV CP")
+    field(OUT,  "$(P)$(R)VfmZ PP")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmZ") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_Z")
+    field(PREC, "3")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmRMajLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:rmaj.RBV CP")
+    field(OUT,  "$(P)$(R)VfmRMaj PP")
+    field(PREC, "1")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmRMaj") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_R_MAJOR")
+    field(PREC, "1")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmRMinLink") {
+    field(OMSL, "closed_loop")
+    field(DOL,  "$(BL)vfm:rmin.RBV CP")
+    field(OUT,  "$(P)$(R)VfmRMin PP")
+    field(PREC, "2")
+    field(EGU,  "mm")
+}
+
+record(ao, "$(P)$(R)VfmRMin") {
+    field(DTYP, "asynFloat64")
+    field(OUT,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_VFM_R_MINOR")
+    field(PREC, "2")
+    field(EGU,  "mm")
+}
+
+# ===== Simulation readback PVs =====
+
+record(ai, "$(P)$(R)SrcEnergy_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_SRC_E")
+    field(SCAN, "I/O Intr")
+    field(PREC, "1")
+    field(EGU,  "eV")
+}
+
+record(ai, "$(P)$(R)DcmEnergy_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_DCM_E")
+    field(SCAN, "I/O Intr")
+    field(PREC, "1")
+    field(EGU,  "eV")
+}
+
+record(ai, "$(P)$(R)Efficiency_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_EFF")
+    field(SCAN, "I/O Intr")
+    field(PREC, "2")
+    field(EGU,  "%")
+}
+
+record(ai, "$(P)$(R)Flux_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_FLUX")
+    field(SCAN, "I/O Intr")
+    field(PREC, "2")
+}
+
+record(ai, "$(P)$(R)CentroidX_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_CX")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ai, "$(P)$(R)CentroidZ_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_CZ")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ai, "$(P)$(R)FWHMX_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_FWHM_X")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ai, "$(P)$(R)FWHMZ_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_FWHM_Z")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ai, "$(P)$(R)RmsX_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_RMS_X")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(ai, "$(P)$(R)RmsZ_RBV") {
+    field(DTYP, "asynFloat64")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_RMS_Z")
+    field(SCAN, "I/O Intr")
+    field(PREC, "4")
+    field(EGU,  "mm")
+}
+
+record(longin, "$(P)$(R)NRays_RBV") {
+    field(DTYP, "asynInt32")
+    field(INP,  "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))XRT_SIM_NRAYS")
+    field(SCAN, "I/O Intr")
+}
