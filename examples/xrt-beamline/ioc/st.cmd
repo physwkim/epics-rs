@@ -71,8 +71,9 @@ dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=hfm:x,PORT=hfm_x,VELO=1,
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=hfm:y,PORT=hfm_y,VELO=1,ACCL=0.2,HLM=10,LLM=-10")
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=hfm:z,PORT=hfm_z,VELO=5,ACCL=0.3,HLM=100,LLM=-100")
 # Coddington: R = 2*p*q/(sin(α)*(p+q)), p=27m q=6m α=3mrad → R=3.27km
-dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=hfm:rmaj,PORT=hfm_rmaj,VELO=1000000,ACCL=0.5,HLM=50000000,LLM=100000")
-dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=hfm:rmin,PORT=hfm_rmin,VELO=10,ACCL=0.3,HLM=1000000000,LLM=10")
+# MRES=1.0 to avoid int32 overflow for large radii (km scale)
+dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=hfm:rmaj,PORT=hfm_rmaj,VELO=1000000,ACCL=0.5,HLM=50000000,LLM=100000,MRES=1.0,PREC=0")
+dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=hfm:rmin,PORT=hfm_rmin,VELO=10,ACCL=0.3,HLM=1000000000,LLM=10,MRES=1.0,PREC=0")
 
 # ===== Load VFM motor records =====
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:pitch,PORT=vfm_pitch,VELO=0.5,ACCL=0.5,HLM=10,LLM=1")
@@ -82,8 +83,8 @@ dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:x,PORT=vfm_x,VELO=1,
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:y,PORT=vfm_y,VELO=1,ACCL=0.2,HLM=10,LLM=-10")
 dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:z,PORT=vfm_z,VELO=5,ACCL=0.3,HLM=100,LLM=-100")
 # Coddington: R = 2*p*q/(sin(α)*(p+q)), p=30m q=3m α=3mrad → R=1.82km
-dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:rmaj,PORT=vfm_rmaj,VELO=1000000,ACCL=0.5,HLM=50000000,LLM=100000")
-dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:rmin,PORT=vfm_rmin,VELO=10,ACCL=0.3,HLM=1000000000,LLM=10")
+dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:rmaj,PORT=vfm_rmaj,VELO=1000000,ACCL=0.5,HLM=50000000,LLM=100000,MRES=1.0,PREC=0")
+dbLoadRecords("$(MOTOR)/motor.template", "P=$(PREFIX),M=vfm:rmin,PORT=vfm_rmin,VELO=10,ACCL=0.3,HLM=1000000000,LLM=10,MRES=1.0,PREC=0")
 
 # ===== XRT detector (AreaDetector) =====
 epicsEnvSet("PREFIX", "bl:xrt:")
