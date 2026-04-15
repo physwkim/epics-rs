@@ -8,9 +8,19 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
-default = ["qsrv", "ca-gateway", "ca-gateway-bin"]
+default = ["qsrv", "qsrv-bin", "ca-gateway", "ca-gateway-bin"]
 # Record ↔ pvAccess channels (C++ QSRV equivalent)
-qsrv = ["dep:epics-pva-rs", "dep:serde", "dep:serde_json"]
+qsrv = [
+    "dep:epics-pva-rs",
+    "dep:epics-ca-rs",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:spvirit-server",
+    "dep:spvirit-codec",
+    "dep:spvirit-types",
+]
+# QSRV daemon binary (qsrv-rs)
+qsrv-bin = ["qsrv", "dep:clap", "dep:tracing-subscriber"]
 # CA fan-out gateway (C++ ca-gateway equivalent)
 ca-gateway = ["dep:epics-ca-rs", "dep:regex"]
 # CA gateway daemon binary (ca-gateway-rs)
@@ -20,19 +30,25 @@ pvalink = ["dep:epics-pva-rs"]
 # PVA-to-PVA proxy (planned, requires PVA server)
 pva-gateway = ["dep:epics-pva-rs", "dep:regex"]
 # Convenience: enable all bridges + binaries
-all-bridges = ["qsrv", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway"]
+all-bridges = ["qsrv", "qsrv-bin", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway"]
 
 [dependencies]
 epics-base-rs = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # Feature-gated optional dependencies
 epics-pva-rs = { workspace = true, optional = true }
 epics-ca-rs = { workspace = true, optional = true }
+spvirit-server = { version = "0.1.9", optional = true }
+spvirit-codec = { version = "0.1.9", optional = true }
+spvirit-types = { version = "0.1.9", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+parking_lot = "0.12"
 regex = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 
@@ -40,3 +56,8 @@ clap = { version = "4", features = ["derive"], optional = true }
 name = "ca-gateway-rs"
 path = "src/bin/ca_gateway_rs.rs"
 required-features = ["ca-gateway-bin"]
+
+[[bin]]
+name = "qsrv-rs"
+path = "src/bin/qsrv_rs.rs"
+required-features = ["qsrv-bin"]

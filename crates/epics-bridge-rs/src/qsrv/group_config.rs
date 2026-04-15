@@ -42,6 +42,7 @@ pub struct GroupMember {
     /// Field path within the group structure (e.g., "temperature").
     pub field_name: String,
     /// Source record and field (e.g., "TEMP:ai.VAL").
+    /// Empty for Structure and Const mappings (no backing channel).
     pub channel: String,
     /// How to map the record field to PVA structure.
     pub mapping: FieldMapping,
@@ -51,6 +52,11 @@ pub struct GroupMember {
     pub put_order: i32,
     /// Optional structure ID for this member (from `+id`).
     pub struct_id: Option<String>,
+    /// Constant value for `Const` mapping (from `+value` in JSON).
+    pub const_value: Option<epics_pva_rs::pvdata::PvField>,
+    /// Nanosecond mask: lower bits of nsec are extracted as userTag
+    /// (pvxs `MappingInfo::nsecMask`, from `+nsecmask` in JSON).
+    pub nsec_mask: u32,
 }
 
 /// Defines which group fields are updated when a member's source record changes.
@@ -103,7 +109,11 @@ pub fn parse_info_group(record_name: &str, json: &str) -> BridgeResult<Vec<Group
         let mut def = raw_to_group_def(name, raw)?;
         // Apply channel prefix: bare field names get record_name prefix
         for member in &mut def.members {
-            if !member.channel.contains(':') && !member.channel.contains('.') {
+            // Structure/Const have empty channels — skip prefix.
+            if !member.channel.is_empty()
+                && !member.channel.contains(':')
+                && !member.channel.contains('.')
+            {
                 member.channel = format!("{}.{}", record_name, member.channel);
             }
         }
@@ -123,12 +133,19 @@ pub fn merge_group_defs(existing: &mut HashMap<String, GroupPvDef>, new_defs: Ve
         if let Some(existing_def) = existing.get_mut(&def.name) {
             // Merge members into existing group
             existing_def.members.extend(def.members);
-            // Update struct_id if newly specified
+            // Update struct_id if newly specified (last wins)
             if def.struct_id.is_some() {
                 existing_def.struct_id = def.struct_id;
             }
-            // atomic: use explicit setting if provided (C++ uses last-wins)
-            // keep existing unless new def explicitly sets it
+            // atomic: last-wins with warning on conflict
+            // (pvxs groupconfigprocessor.cpp:274-288)
+            if existing_def.atomic != def.atomic {
+                eprintln!(
+                    "warning: group '{}' atomic setting inconsistent, using latest ({})",
+                    def.name, def.atomic
+                );
+            }
+            existing_def.atomic = def.atomic;
         } else {
             existing.insert(def.name.clone(), def);
         }
@@ -173,6 +190,12 @@ fn raw_to_group_def(name: String, raw: RawGroupDef) -> BridgeResult<GroupPvDef> 
     // C++ QSRV does this in pdb.cpp:510-533 (trigger resolution phase).
     let member_names: std::collections::HashSet<&str> =
         members.iter().map(|m| m.field_name.as_str()).collect();
+    // Members with channels (can actually be triggered at runtime).
+    let channeled_names: std::collections::HashSet<&str> = members
+        .iter()
+        .filter(|m| !m.channel.is_empty())
+        .map(|m| m.field_name.as_str())
+        .collect();
 
     for member in &members {
         if let TriggerDef::Fields(targets) = &member.triggers {
@@ -182,6 +205,14 @@ fn raw_to_group_def(name: String, raw: RawGroupDef) -> BridgeResult<GroupPvDef> 
                         "group '{}': member '{}' has trigger '{}' which is not a member of this group",
                         name, member.field_name, target
                     )));
+                }
+                // Warn if trigger target has no channel (Structure/Const) —
+                // pvxs silently ignores these (groupconfigprocessor.cpp:405-407).
+                if !channeled_names.contains(target.as_str()) {
+                    eprintln!(
+                        "warning: group '{}': trigger '{}' on member '{}' targets a field without a channel (ignored)",
+                        name, target, member.field_name
+                    );
                 }
             }
         }
@@ -200,20 +231,14 @@ fn parse_member(field_name: &str, value: &serde_json::Value) -> BridgeResult<Gro
         BridgeError::GroupConfigError(format!("field '{field_name}' must be an object"))
     })?;
 
-    let channel = obj
-        .get("+channel")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            BridgeError::GroupConfigError(format!("field '{field_name}' missing +channel"))
-        })?
-        .to_string();
-
     let mapping = match obj.get("+type").and_then(|v| v.as_str()) {
         Some("scalar") | None => FieldMapping::Scalar,
         Some("plain") => FieldMapping::Plain,
         Some("meta") => FieldMapping::Meta,
         Some("any") => FieldMapping::Any,
         Some("proc") => FieldMapping::Proc,
+        Some("structure") => FieldMapping::Structure,
+        Some("const") => FieldMapping::Const,
         Some(other) => {
             return Err(BridgeError::GroupConfigError(format!(
                 "unknown +type '{other}' for field '{field_name}'"
@@ -221,10 +246,55 @@ fn parse_member(field_name: &str, value: &serde_json::Value) -> BridgeResult<Gro
         }
     };
 
-    let triggers = match obj.get("+trigger").and_then(|v| v.as_str()) {
-        Some("*") | None => TriggerDef::All,
-        Some("") => TriggerDef::None,
-        Some(s) => TriggerDef::Fields(s.split(',').map(|f| f.trim().to_string()).collect()),
+    // Structure and Const mappings have no backing channel.
+    // Warn and ignore +channel if present (pvxs groupconfigprocessor.cpp:148-155).
+    let channel = match mapping {
+        FieldMapping::Structure | FieldMapping::Const => {
+            if obj.get("+channel").is_some() {
+                eprintln!(
+                    "warning: field '{field_name}' has +type={:?}, ignoring +channel",
+                    if mapping == FieldMapping::Structure {
+                        "structure"
+                    } else {
+                        "const"
+                    }
+                );
+            }
+            String::new()
+        }
+        _ => obj
+            .get("+channel")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                BridgeError::GroupConfigError(format!("field '{field_name}' missing +channel"))
+            })?
+            .to_string(),
+    };
+
+    // Parse constant value for Const mapping. +value is required.
+    let const_value = if mapping == FieldMapping::Const {
+        let val = obj.get("+value").ok_or_else(|| {
+            BridgeError::GroupConfigError(format!(
+                "field '{field_name}': +type=const requires +value"
+            ))
+        })?;
+        Some(json_to_pv_field(val).map_err(|e| {
+            BridgeError::GroupConfigError(format!("field '{field_name}': invalid +value: {e}"))
+        })?)
+    } else {
+        None
+    };
+
+    // Structure and Const have no channel — they cannot trigger or be
+    // triggered, so force TriggerDef::None (pvxs groupconfigprocessor.cpp:405-407).
+    let triggers = if mapping == FieldMapping::Structure || mapping == FieldMapping::Const {
+        TriggerDef::None
+    } else {
+        match obj.get("+trigger").and_then(|v| v.as_str()) {
+            Some("*") | None => TriggerDef::All,
+            Some("") => TriggerDef::None,
+            Some(s) => TriggerDef::Fields(s.split(',').map(|f| f.trim().to_string()).collect()),
+        }
     };
 
     let put_order = obj.get("+putorder").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -234,6 +304,8 @@ fn parse_member(field_name: &str, value: &serde_json::Value) -> BridgeResult<Gro
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let nsec_mask = obj.get("+nsecmask").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
     Ok(GroupMember {
         field_name: field_name.to_string(),
         channel,
@@ -241,7 +313,45 @@ fn parse_member(field_name: &str, value: &serde_json::Value) -> BridgeResult<Gro
         triggers,
         put_order,
         struct_id,
+        const_value,
+        nsec_mask,
     })
+}
+
+/// Convert a JSON value to a PvField for Const mapping.
+fn json_to_pv_field(v: &serde_json::Value) -> Result<epics_pva_rs::pvdata::PvField, String> {
+    use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarValue};
+    match v {
+        serde_json::Value::Bool(b) => Ok(PvField::Scalar(ScalarValue::Boolean(*b))),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(PvField::Scalar(ScalarValue::Int(i as i32)))
+            } else if let Some(f) = n.as_f64() {
+                Ok(PvField::Scalar(ScalarValue::Double(f)))
+            } else {
+                Err(format!("unsupported number: {n}"))
+            }
+        }
+        serde_json::Value::String(s) => Ok(PvField::Scalar(ScalarValue::String(s.clone()))),
+        serde_json::Value::Array(arr) => {
+            let fields: Result<Vec<ScalarValue>, String> = arr
+                .iter()
+                .map(|item| match json_to_pv_field(item)? {
+                    PvField::Scalar(sv) => Ok(sv),
+                    _ => Err("nested arrays/structures not supported in const array".into()),
+                })
+                .collect();
+            Ok(PvField::ScalarArray(fields?))
+        }
+        serde_json::Value::Object(map) => {
+            let mut pv = PvStructure::new("");
+            for (key, val) in map {
+                pv.fields.push((key.clone(), json_to_pv_field(val)?));
+            }
+            Ok(PvField::Structure(pv))
+        }
+        serde_json::Value::Null => Err("null not supported as const value".into()),
+    }
 }
 
 #[cfg(test)]
@@ -423,6 +533,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_info_group_structure_keeps_empty_channel() {
+        let json = r#"{
+            "TEMP:group": {
+                "container": { "+type": "structure" },
+                "val": { "+channel": "VAL", "+type": "plain" }
+            }
+        }"#;
+
+        let groups = parse_info_group("TEMP:sensor", json).unwrap();
+        let container = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "container")
+            .unwrap();
+        // Structure has no channel — must stay empty, not become "TEMP:sensor."
+        assert!(container.channel.is_empty());
+        // Normal member gets prefix
+        let val = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "val")
+            .unwrap();
+        assert_eq!(val.channel, "TEMP:sensor.VAL");
+    }
+
+    #[test]
     fn merge_groups() {
         let mut existing = HashMap::new();
         let defs1 = parse_group_config(
@@ -492,5 +628,164 @@ mod tests {
 
         // "*" doesn't go through field validation
         assert!(parse_group_config(json).is_ok());
+    }
+
+    #[test]
+    fn parse_structure_mapping() {
+        let json = r#"{
+            "GRP:struct": {
+                "container": {
+                    "+type": "structure",
+                    "+id": "my:container/v1"
+                },
+                "val": { "+channel": "R:val" }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        let members = &groups[0].members;
+        let container = members
+            .iter()
+            .find(|m| m.field_name == "container")
+            .unwrap();
+        assert_eq!(container.mapping, FieldMapping::Structure);
+        assert!(container.channel.is_empty());
+        assert_eq!(container.struct_id.as_deref(), Some("my:container/v1"));
+    }
+
+    #[test]
+    fn parse_const_mapping_scalar() {
+        let json = r#"{
+            "GRP:const": {
+                "version": {
+                    "+type": "const",
+                    "+value": 42
+                },
+                "val": { "+channel": "R:val" }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        let members = &groups[0].members;
+        let version = members.iter().find(|m| m.field_name == "version").unwrap();
+        assert_eq!(version.mapping, FieldMapping::Const);
+        assert!(version.channel.is_empty());
+        assert!(version.const_value.is_some());
+        if let Some(epics_pva_rs::pvdata::PvField::Scalar(
+            epics_pva_rs::pvdata::ScalarValue::Int(v),
+        )) = &version.const_value
+        {
+            assert_eq!(*v, 42);
+        } else {
+            panic!("expected Int(42), got {:?}", version.const_value);
+        }
+    }
+
+    #[test]
+    fn parse_const_mapping_string() {
+        let json = r#"{
+            "GRP:const": {
+                "label": {
+                    "+type": "const",
+                    "+value": "hello"
+                }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        let m = &groups[0].members[0];
+        assert_eq!(m.mapping, FieldMapping::Const);
+        if let Some(epics_pva_rs::pvdata::PvField::Scalar(
+            epics_pva_rs::pvdata::ScalarValue::String(s),
+        )) = &m.const_value
+        {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("expected String(\"hello\")");
+        }
+    }
+
+    #[test]
+    fn parse_const_missing_value_is_error() {
+        let json = r#"{
+            "GRP:bad": {
+                "label": {
+                    "+type": "const"
+                }
+            }
+        }"#;
+
+        let result = parse_group_config(json);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("+value"), "expected error about +value: {err}");
+    }
+
+    #[test]
+    fn const_and_structure_default_trigger_none() {
+        let json = r#"{
+            "GRP:t": {
+                "node": { "+type": "structure" },
+                "fixed": { "+type": "const", "+value": 1 },
+                "val": { "+channel": "R:val" }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        let node = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "node")
+            .unwrap();
+        let fixed = groups[0]
+            .members
+            .iter()
+            .find(|m| m.field_name == "fixed")
+            .unwrap();
+        assert!(matches!(node.triggers, TriggerDef::None));
+        assert!(matches!(fixed.triggers, TriggerDef::None));
+    }
+
+    #[test]
+    fn parse_nsecmask() {
+        let json = r#"{
+            "GRP:ns": {
+                "val": {
+                    "+channel": "R:val",
+                    "+nsecmask": 255
+                }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        assert_eq!(groups[0].members[0].nsec_mask, 255);
+    }
+
+    #[test]
+    fn nsecmask_defaults_to_zero() {
+        let json = r#"{
+            "GRP:ns": {
+                "val": { "+channel": "R:val" }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        assert_eq!(groups[0].members[0].nsec_mask, 0);
+    }
+
+    #[test]
+    fn structure_ignores_channel() {
+        // +channel on structure type should be silently ignored
+        let json = r#"{
+            "GRP:s": {
+                "node": {
+                    "+type": "structure",
+                    "+channel": "SHOULD:IGNORE"
+                }
+            }
+        }"#;
+
+        let groups = parse_group_config(json).unwrap();
+        assert!(groups[0].members[0].channel.is_empty());
     }
 }

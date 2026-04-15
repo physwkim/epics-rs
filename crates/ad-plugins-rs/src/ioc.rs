@@ -541,13 +541,29 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
         ));
     }
 
-    // --- NDPvaConfigure (stub — requires PVAccess server from epics-pva-rs) ---
+    // --- NDPvaConfigure ---
+    // C++ signature: NDPvaConfigure(portName, queueSize, blockingCallbacks,
+    //   NDArrayPort, NDArrayAddr, pvName, maxBuffers, maxMemory, priority, stackSize)
+    // args[5] = pvName is a STRING, unlike standard plugin_arg_defs which has Int there.
     {
         let m = mgr.clone();
+        let pva_arg_defs = {
+            let mut defs = plugin_arg_defs();
+            // Replace args[5] (maxBuffers/Int) with pvName/String
+            if defs.len() > 5 {
+                defs[5] = ArgDesc {
+                    name: "pvName",
+                    arg_type: ArgType::String,
+                    optional: true,
+                };
+            }
+            defs
+        };
         app = app.register_startup_command(CommandDef::new(
             "NDPvaConfigure",
-            plugin_arg_defs(),
-            "NDPvaConfigure portName [queueSize] ... (stub)".to_string(),
+            pva_arg_defs,
+            "NDPvaConfigure portName queueSize blockingCallbacks NDArrayPort NDArrayAddr pvName"
+                .to_string(),
             move |args: &[ArgValue], _ctx: &CommandContext| {
                 let (port_name, queue_size, ndarray_port) = extract_plugin_args(args)?;
                 let dtyp = dtyp_from_port(&port_name);
@@ -557,10 +573,34 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
                 }
                 let drv = m.driver()?;
                 let pool = drv.pool();
-                use crate::passthrough::PassthroughProcessor;
+
+                // C++ NDPvaConfigure args[5] is pvName (6th argument).
+                // If not provided, fall back to "{portName}:Image".
+                let pva_pv_name = match args.get(5) {
+                    Some(ArgValue::String(s)) if !s.is_empty() => s.clone(),
+                    _ => format!("{port_name}:Image"),
+                };
+
+                #[cfg(feature = "pva")]
+                let processor = {
+                    let proc = crate::pva::PvaProcessor::new(pva_pv_name.clone());
+                    let latest = proc.latest_handle();
+                    let subscribers = proc.subscribers_handle();
+                    epics_bridge_rs::qsrv::register_pva_pv_global(
+                        &pva_pv_name,
+                        epics_bridge_rs::qsrv::PvaPvHandle {
+                            latest,
+                            subscribers,
+                        },
+                    );
+                    proc
+                };
+                #[cfg(not(feature = "pva"))]
+                let processor = crate::passthrough::PassthroughProcessor::new("NDPvaConfigure");
+
                 let (handle, _jh) = create_plugin_runtime(
                     &port_name,
-                    PassthroughProcessor::new("NDPvaConfigure"),
+                    processor,
                     pool,
                     queue_size,
                     &ndarray_port,
@@ -570,7 +610,10 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
                 if let Err(e) = m.wiring().rewire(handle.array_sender(), "", &ndarray_port) {
                     eprintln!("NDPvaConfigure: wiring failed: {e}");
                 }
-                println!("NDPvaConfigure: port={port_name} (stub)");
+                #[cfg(feature = "pva")]
+                println!("NDPvaConfigure: port={port_name}, PV={pva_pv_name}");
+                #[cfg(not(feature = "pva"))]
+                println!("NDPvaConfigure: port={port_name} (stub — enable 'pva' feature)");
                 Ok(CommandOutcome::Continue)
             },
         ));
@@ -834,5 +877,56 @@ impl AdIoc {
         app.startup_script(script)
             .run(epics_ca_rs::server::run_ca_ioc)
             .await
+    }
+
+    /// Run the IOC with both CA and PVA protocols (QSRV bridge).
+    ///
+    /// Same as [`Self::run`] but uses [`epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc`]
+    /// as the protocol runner, serving records over CA (default port 5064) and
+    /// pvAccess (default port 5075) simultaneously. PVA plugin PVs (NTNDArray)
+    /// registered during st.cmd are wired into the PVA server automatically.
+    #[cfg(feature = "pva")]
+    pub async fn run_with_pva(self, script: &str) -> CaResult<()> {
+        let mut app = self.app.unwrap();
+
+        app = register_all_plugins(app, &self.mgr);
+        app = register_noop_commands(app);
+
+        let autosave_config = Arc::new(Mutex::new(AutosaveStartupConfig::new()));
+        app = app.autosave_startup(autosave_config);
+        app = asyn_rs::adapter::register_asyn_device_support(app);
+
+        let mgr_r = self.mgr.clone();
+        app = app.register_shell_command(CommandDef::new(
+            "asynReport",
+            vec![ArgDesc {
+                name: "level",
+                arg_type: ArgType::Int,
+                optional: true,
+            }],
+            "asynReport [level] - Report registered ports and plugins",
+            move |_args: &[ArgValue], _ctx: &CommandContext| {
+                mgr_r.report();
+                Ok(CommandOutcome::Continue)
+            },
+        ));
+
+        app.startup_script(script)
+            .run(epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc)
+            .await
+    }
+
+    /// Run the IOC with PVA from command-line args.
+    #[cfg(feature = "pva")]
+    pub async fn run_from_args_with_pva(self) -> CaResult<()> {
+        let args: Vec<String> = std::env::args().collect();
+        let script = if args.len() > 1 && !args[1].starts_with('-') {
+            args[1].clone()
+        } else {
+            let bin = args.first().map(|s| s.as_str()).unwrap_or("ioc");
+            eprintln!("Usage: {bin} <st.cmd>");
+            std::process::exit(1);
+        };
+        self.run_with_pva(&script).await
     }
 }

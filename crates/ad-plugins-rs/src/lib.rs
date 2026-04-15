@@ -39,5 +39,8 @@ pub mod std_arrays;
 pub mod time_series;
 pub mod transform;
 
+#[cfg(feature = "pva")]
+pub mod pva;
+
 #[cfg(feature = "ioc")]
 pub mod ioc;

@@ -261,6 +261,11 @@ impl PvDatabase {
     pub async fn all_record_names(&self) -> Vec<String> {
         self.inner.records.read().await.keys().cloned().collect()
     }
+
+    /// Get all simple PV names.
+    pub async fn all_simple_pv_names(&self) -> Vec<String> {
+        self.inner.simple_pvs.read().await.keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]

@@ -71,7 +71,7 @@ use epics_rs::asyn;        // port driver framework
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `ca` | Channel Access client & server | **yes** |
-| `pva` | pvAccess client (experimental) | no |
+| `pva` | pvAccess client & server | no |
 | `bridge` | Record <-> PVA bridge (QSRV equivalent) | no |
 | `asyn` | Async port driver framework | no |
 | `motor` | Motor record + SimMotor | no |
@@ -111,7 +111,7 @@ epics-rs/
 │   ├── epics-rs/         # Umbrella crate (feature-gated re-exports)
 │   ├── epics-base-rs/    # Core: IOC runtime, 23 record types, iocsh, db loader
 │   ├── epics-ca-rs/      # Channel Access protocol (client + server)
-│   ├── epics-pva-rs/     # pvAccess protocol (experimental)
+│   ├── epics-pva-rs/     # pvAccess protocol (client + server via spvirit)
 │   ├── epics-bridge-rs/  # Record <-> PVA bridge (QSRV equivalent)
 │   ├── epics-macros-rs/  # #[derive(EpicsRecord)] proc macro
 │   ├── asyn-rs/          # Async device I/O framework (port driver model)
@@ -126,6 +126,8 @@ epics-rs/
     ├── scope-ioc/        # Digital oscilloscope simulator
     ├── mini-beamline/    # Beamline simulator with DCM, slit, BPM, detectors
     ├── sim-detector/     # areaDetector simulation driver
+    ├── xrt-beamline/     # X-ray beamline with real-time ray tracing (xrt-rs)
+    ├── qsrv-ioc/         # QSRV dual-protocol CA+PVA demo
     ├── mqtt-ioc/         # MQTT IOC example
     └── ...               # Other examples
 ```
@@ -148,7 +150,7 @@ epics-rs (umbrella — feature-gated re-exports)
     │       └── mqtt-rs (MQTT broker bridge)
     │
     ├── epics-ca-rs (Channel Access protocol)
-    ├── epics-pva-rs (pvAccess protocol, experimental)
+    ├── epics-pva-rs (pvAccess client + server)
     └── epics-bridge-rs (Record <-> PVA bridge)
              ├── epics-base-rs
              └── epics-pva-rs
@@ -331,6 +333,15 @@ cainfo-rs TEMP              # metadata
 
 C EPICS clients (`caget`, `camonitor`, CSS, PyDM, etc.) also work as-is.
 
+### PVA Client Tools
+
+```bash
+pvget-rs TEMP              # read via pvAccess
+pvmonitor-rs TEMP           # subscribe via pvAccess
+pvput-rs TEMP 42.0          # write via pvAccess
+pvinfo-rs TEMP              # PV type info
+```
+
 ### Library Usage
 
 #### Declarative IOC Builder
@@ -361,12 +372,14 @@ IocApplication::new()
     .await?;
 ```
 
-The protocol runner is pluggable — future pvAccess support uses the same pattern:
+The protocol runner is pluggable — use `run_ca_pva_qsrv_ioc` for dual CA+PVA:
 
 ```rust
 // CA + PVA simultaneously
-app.run(|config| async {
-    let ca = CaServer::from_parts(config.db.clone(), config.port, ...);
+use epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc;
+app.startup_script("ioc/st.cmd")
+    .run(run_ca_pva_qsrv_ioc)
+    .await?;
     let pva = PvaServer::new(config.db.clone(), 5075);
     epics_base_rs::runtime::select! { _ = ca.run() => {}, _ = pva.run() => {} }
 }).await
@@ -759,10 +772,10 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 
 | Binary | Description |
 |--------|-------------|
-| `pvaget-rs` | PVA read |
-| `pvaput-rs` | PVA write |
-| `pvamonitor-rs` | PVA subscribe |
-| `pvainfo-rs` | PVA metadata |
+| `pvget-rs` | PVA read |
+| `pvput-rs` | PVA write |
+| `pvmonitor-rs` | PVA subscribe |
+| `pvinfo-rs` | PVA metadata |
 
 ### IOC & Tools
 

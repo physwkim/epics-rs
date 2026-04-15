@@ -1,0 +1,17 @@
+[package]
+name = "qsrv-ioc"
+version.workspace = true
+edition.workspace = true
+description = "Demo IOC: CA + PVA dual-protocol server with group PV support"
+publish = false
+
+[features]
+default = ["ioc"]
+ioc = ["dep:epics-base-rs", "dep:epics-pva-rs", "dep:epics-ca-rs", "dep:epics-bridge-rs", "epics-bridge-rs/qsrv"]
+
+[dependencies]
+epics-base-rs = { workspace = true, optional = true }
+epics-pva-rs = { workspace = true, optional = true }
+epics-ca-rs = { workspace = true, optional = true }
+epics-bridge-rs = { workspace = true, optional = true }
+spvirit-server = "0.1.8"

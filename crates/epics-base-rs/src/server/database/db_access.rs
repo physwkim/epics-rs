@@ -238,11 +238,24 @@ impl DbSubscription {
         pv_name: &str,
         ignore_origin: u64,
     ) -> Option<Self> {
+        let mask = (EventMask::VALUE | EventMask::LOG).bits();
+        Self::subscribe_with_mask(db, pv_name, ignore_origin, mask).await
+    }
+
+    /// Subscribe with a custom event mask and origin filtering.
+    ///
+    /// Use `EventMask::PROPERTY` to receive display/control/enum metadata
+    /// change events separately from value events (pvxs DBE_PROPERTY).
+    pub async fn subscribe_with_mask(
+        db: &PvDatabase,
+        pv_name: &str,
+        ignore_origin: u64,
+        mask: u16,
+    ) -> Option<Self> {
         let (record_name, field) = parse_pv_name(pv_name);
         let field = field.to_ascii_uppercase();
         let rec = db.get_record(record_name).await?;
         let sid = next_sid();
-        let mask = (EventMask::VALUE | EventMask::LOG).bits();
         let rx = {
             let mut instance = rec.write().await;
             instance.add_subscriber(&field, sid, DbFieldType::Double, mask)

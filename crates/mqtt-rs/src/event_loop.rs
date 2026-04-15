@@ -44,12 +44,7 @@ pub async fn mqtt_event_loop(
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                handle_incoming_message(
-                    &publish.topic,
-                    &publish.payload,
-                    &topic_map,
-                    &port_handle,
-                );
+                handle_incoming_message(&publish.topic, &publish.payload, &topic_map, &port_handle);
             }
             Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                 tracing::info!("MQTT connected, subscribing to {} topics", topics.len());

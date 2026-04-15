@@ -1,0 +1,25 @@
+{
+    "DEMO:GROUP": {
+        "+id": "demo:group/v1",
+        "+atomic": true,
+        "temperature": {
+            "+channel": "DEMO:AI",
+            "+type": "scalar",
+            "+trigger": "*"
+        },
+        "setpoint": {
+            "+channel": "DEMO:AO",
+            "+type": "plain",
+            "+trigger": "setpoint"
+        },
+        "status": {
+            "+channel": "DEMO:BI",
+            "+type": "scalar",
+            "+trigger": "status"
+        },
+        "version": {
+            "+type": "const",
+            "+value": 1
+        }
+    }
+}

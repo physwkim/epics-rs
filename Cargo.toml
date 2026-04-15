@@ -39,3 +39,4 @@ std-rs = { path = "crates/std-rs", version = "0.9.1" }
 scaler-rs = { path = "crates/scaler-rs", version = "0.9.1" }
 optics-rs = { path = "crates/optics-rs", version = "0.9.1" }
 mqtt-rs = { path = "crates/mqtt-rs", version = "0.9.1" }
+

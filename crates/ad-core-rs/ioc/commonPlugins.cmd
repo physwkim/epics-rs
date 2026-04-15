@@ -210,5 +210,5 @@ dbLoadRecords("NDBadPixel.template", "P=$(PREFIX),R=BadPix1:,PORT=BADPIX1,NDARRA
 
 # ===== PVA plugin =====
 
-NDPvaConfigure("PVA1", $(QSIZE), 0, "$(PORT)", 0)
+NDPvaConfigure("PVA1", $(QSIZE), 0, "$(PORT)", 0, "$(PREFIX)Pva1:Image")
 dbLoadRecords("NDPva.template", "P=$(PREFIX),R=Pva1:,PORT=PVA1,NDARRAY_PORT=$(PORT)")

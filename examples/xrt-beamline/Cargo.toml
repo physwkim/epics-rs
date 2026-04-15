@@ -1,0 +1,30 @@
+[package]
+name = "xrt-beamline"
+version.workspace = true
+edition.workspace = true
+description = "XRT beamline IOC: Undulator + DCM + VFM with real-time ray tracing simulation"
+publish = false
+
+[features]
+ioc = ["dep:epics-base-rs", "dep:epics-ca-rs", "dep:epics-bridge-rs", "dep:ad-plugins-rs", "ad-plugins-rs/ioc", "ad-plugins-rs/pva", "ad-core-rs/ioc", "asyn-rs/epics", "dep:motor-rs"]
+
+[dependencies]
+ad-core-rs = { workspace = true }
+ad-plugins-rs = { workspace = true, optional = true }
+asyn-rs = { workspace = true }
+motor-rs = { workspace = true, optional = true }
+parking_lot = "0.12"
+epics-base-rs = { workspace = true, optional = true }
+epics-ca-rs = { workspace = true, optional = true }
+epics-bridge-rs = { workspace = true, optional = true }
+
+# xrt-rs crates (path to external workspace)
+xrt-core = { path = "../../../xrt-rs/crates/xrt-core" }
+xrt-sources = { path = "../../../xrt-rs/crates/xrt-sources" }
+xrt-materials = { path = "../../../xrt-rs/crates/xrt-materials" }
+xrt-oes = { path = "../../../xrt-rs/crates/xrt-oes" }
+
+[[bin]]
+name = "xrt_ioc"
+path = "src/bin/xrt_ioc.rs"
+required-features = ["ioc"]

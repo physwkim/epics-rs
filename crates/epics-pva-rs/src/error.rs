@@ -14,14 +14,14 @@ pub enum PvaError {
     #[error("protocol error: {0}")]
     Protocol(String),
 
-    #[error("unsupported type code: {0:#04x}")]
-    UnsupportedType(u8),
-
     #[error("connection refused")]
     ConnectionRefused,
 
     #[error("invalid value: {0}")]
     InvalidValue(String),
+
+    #[error("decode error: {0}")]
+    Decode(String),
 }
 
 pub type PvaResult<T> = Result<T, PvaError>;

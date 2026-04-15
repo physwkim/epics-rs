@@ -1,4 +1,4 @@
-//! SimDetector IOC binary.
+//! SimDetector IOC binary — CA + PVA dual-protocol.
 //!
 //! Usage:
 //!   cargo run --bin sim_ioc --features ioc -- ioc/st.cmd
@@ -10,5 +10,5 @@ use epics_base_rs::error::CaResult;
 async fn main() -> CaResult<()> {
     let mut ioc = AdIoc::new();
     sim_detector::ioc_support::register(&mut ioc);
-    ioc.run_from_args().await
+    ioc.run_from_args_with_pva().await
 }

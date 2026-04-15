@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.9.2 — 2026-04-16
+
+### pvAccess / QSRV
+
+- **pvAccess protocol support** — full client & server via [spvirit](https://crates.io/crates/spvirit-server) integration
+- **QSRV bridge** — map EPICS records to PVA NormativeTypes (NTScalar, NTEnum, NTNDArray) via `info(Q:group)` JSON configuration
+- **NDPluginPva** — serve AreaDetector NDArray as NTNDArray over pvAccess, compatible with C++ `pvget -m`
+- **Dual-protocol CA+PVA runner** — `run_ca_pva_qsrv_ioc()` for all example IOCs
+- **PVA CLI tools** — `pvget-rs`, `pvmonitor-rs`, `pvput-rs`, `pvinfo-rs` (renamed from `pvaget-rs` etc.)
+- **spvirit 0.1.9** from crates.io (removed `[patch.crates-io]` path overrides)
+
+### xrt-beamline example
+
+- **Real-time ray tracing simulation** — Undulator → DCM Si(111) → HFM → VFM → Sample at 8 keV
+- 25 motors driving [xrt-rs](https://github.com/physwkim/xrt-rs) ray tracing with AreaDetector output
+- Accumulation over `AcquireTime` for improved statistics
+- PyDM viewer with contrast control, xrtGlow 3D viewer with pyepics PV monitoring
+- Coddington-calculated mirror radii (HFM R=3.27 km, VFM R=1.82 km)
+
+### xrt-rs fixes (companion repo)
+
+- **position_roll**: implement as roll addition matching xrt Python behavior
+- **bracketing**: increase t_min clamp from -1e-6 to -100 mm for large pitch angles (DCM at 14°)
+- **reflect()**: use `state==1` filter to prevent Over ray reprocessing
+
+### Other
+
+- Upgrade spvirit dependencies 0.1.8 → 0.1.9
+- Fix clippy warnings across workspace
+
 ## v0.9.1 — 2026-04-13
 
 ### motor-rs
@@ -627,7 +657,7 @@ _Superseded by v0.7.8 — v0.7.7 was an intermediate release._
 - Reset beacon interval on TCP connect/disconnect (C EPICS parity)
 - Fix caput-rs to use fire-and-forget write like C caput, add `-c` flag for callback mode
 - Show Old/New values in caput-rs output
-- Support multiple PV names in CA/PVA CLI tools (caget, camonitor, cainfo, pvaget, etc.)
+- Support multiple PV names in CA/PVA CLI tools (caget, camonitor, cainfo, pvget, etc.)
 - Add per-field change detection for monitor notifications
 - Add DMOV same-position transition tests
 - Poll motor immediately on StartPolling for faster DMOV response
