@@ -21,17 +21,17 @@ serde_json = "1.0"
 thiserror = "2"
 
 [[bin]]
-name = "pvaget-rs"
-path = "src/bin/pvaget-rs.rs"
+name = "pvget-rs"
+path = "src/bin/pvget-rs.rs"
 
 [[bin]]
-name = "pvaput-rs"
-path = "src/bin/pvaput-rs.rs"
+name = "pvput-rs"
+path = "src/bin/pvput-rs.rs"
 
 [[bin]]
-name = "pvamonitor-rs"
-path = "src/bin/pvamonitor-rs.rs"
+name = "pvmonitor-rs"
+path = "src/bin/pvmonitor-rs.rs"
 
 [[bin]]
-name = "pvainfo-rs"
-path = "src/bin/pvainfo-rs.rs"
+name = "pvinfo-rs"
+path = "src/bin/pvinfo-rs.rs"

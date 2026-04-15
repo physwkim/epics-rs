@@ -63,8 +63,8 @@ camonitor DEMO:AI
 
 ```bash
 # Using epics-pva-rs tools
-pvaget-rs DEMO:AI
-pvaget-rs DEMO:GROUP
+pvget-rs DEMO:AI
+pvget-rs DEMO:GROUP
 
 # Using pvxs tools (if installed)
 pvget DEMO:AI

@@ -627,7 +627,7 @@ _Superseded by v0.7.8 — v0.7.7 was an intermediate release._
 - Reset beacon interval on TCP connect/disconnect (C EPICS parity)
 - Fix caput-rs to use fire-and-forget write like C caput, add `-c` flag for callback mode
 - Show Old/New values in caput-rs output
-- Support multiple PV names in CA/PVA CLI tools (caget, camonitor, cainfo, pvaget, etc.)
+- Support multiple PV names in CA/PVA CLI tools (caget, camonitor, cainfo, pvget, etc.)
 - Add per-field change detection for monitor notifications
 - Add DMOV same-position transition tests
 - Poll motor immediately on StartPolling for faster DMOV response

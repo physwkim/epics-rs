@@ -759,10 +759,10 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 
 | Binary | Description |
 |--------|-------------|
-| `pvaget-rs` | PVA read |
-| `pvaput-rs` | PVA write |
-| `pvamonitor-rs` | PVA subscribe |
-| `pvainfo-rs` | PVA metadata |
+| `pvget-rs` | PVA read |
+| `pvput-rs` | PVA write |
+| `pvmonitor-rs` | PVA subscribe |
+| `pvinfo-rs` | PVA metadata |
 
 ### IOC & Tools
 

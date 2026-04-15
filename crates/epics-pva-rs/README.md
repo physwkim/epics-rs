@@ -13,7 +13,7 @@ No C dependencies. Just `cargo build`.
 pvAccess is the next-generation EPICS protocol that supersedes Channel Access for structured data. Where CA carries primitive scalars and 1D arrays, PVA carries arbitrary nested structures (NormativeTypes like NTScalar, NTEnum, NTTable, NTNDArray, NTMatrix, ...) — making it the natural choice for areaDetector images, MASAR snapshots, structured machine state, and any data richer than a single scalar.
 
 ```
-PVA Client (pvaget-rs, OPI, Python)
+PVA Client (pvget-rs, OPI, Python)
        │
        │  UDP search (port 5076)
        │  TCP virtual circuit (port 5075)
@@ -63,10 +63,10 @@ PvDatabase (epics-base-rs records)
 - Get / Put / Monitor / GetField operations
 
 ### CLI Tools
-- **pvaget-rs** — read PVA channel value (single shot)
-- **pvaput-rs** — write PVA channel value
-- **pvamonitor-rs** — subscribe to PVA channel updates
-- **pvainfo-rs** — display PVA channel structure metadata
+- **pvget-rs** — read PVA channel value (single shot)
+- **pvput-rs** — write PVA channel value
+- **pvmonitor-rs** — subscribe to PVA channel updates
+- **pvinfo-rs** — display PVA channel structure metadata
 
 ## Architecture
 
@@ -79,23 +79,23 @@ epics-pva-rs/src/
 ├── serialize.rs        # primitive read/write with endianness
 ├── codec.rs            # PvaCodec message builders
 ├── client.rs           # PvaClient
-└── bin/                # pvaget-rs, pvaput-rs, pvamonitor-rs, pvainfo-rs
+└── bin/                # pvget-rs, pvput-rs, pvmonitor-rs, pvinfo-rs
 ```
 
 ## Quick Start
 
 ```bash
 # Read a PVA channel (a CA channel served via the future PVA bridge will work the same way)
-pvaget-rs MY:PV
+pvget-rs MY:PV
 
 # Subscribe
-pvamonitor-rs MY:PV
+pvmonitor-rs MY:PV
 
 # Get field type info
-pvainfo-rs MY:PV
+pvinfo-rs MY:PV
 
 # Put
-pvaput-rs MY:PV 42.5
+pvput-rs MY:PV 42.5
 ```
 
 ### Library

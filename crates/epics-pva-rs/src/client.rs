@@ -55,23 +55,40 @@ impl PvaClient {
         }
     }
 
-    // ─── pvaget ──────────────────────────────────────────────────────────
+    // ─── pvget ──────────────────────────────────────────────────────────
 
-    pub async fn pvaget(&self, pv_name: &str) -> PvaResult<DecodedValue> {
+    pub async fn pvget(&self, pv_name: &str) -> PvaResult<DecodedValue> {
         let result = self.inner.pvget(pv_name).await.map_err(pva_err)?;
         Ok(result.value)
     }
 
-    // ─── pvaput ──────────────────────────────────────────────────────────
+    /// Get full result including introspection (needed for typed formatting).
+    pub async fn pvget_full(
+        &self,
+        pv_name: &str,
+    ) -> PvaResult<spvirit_client::PvGetResult> {
+        self.inner.pvget(pv_name).await.map_err(pva_err)
+    }
 
-    pub async fn pvaput(&self, pv_name: &str, value_str: &str) -> PvaResult<()> {
+    /// Get with field filtering (equivalent to `pvget -r "field(value,alarm)"`).
+    pub async fn pvget_fields(
+        &self,
+        pv_name: &str,
+        fields: &[&str],
+    ) -> PvaResult<spvirit_client::PvGetResult> {
+        self.inner.pvget_fields(pv_name, fields).await.map_err(pva_err)
+    }
+
+    // ─── pvput ──────────────────────────────────────────────────────────
+
+    pub async fn pvput(&self, pv_name: &str, value_str: &str) -> PvaResult<()> {
         let json_val = str_to_json_value(value_str);
         self.inner.pvput(pv_name, json_val).await.map_err(pva_err)
     }
 
-    // ─── pvamonitor ──────────────────────────────────────────────────────
+    // ─── pvmonitor ──────────────────────────────────────────────────────
 
-    pub async fn pvamonitor<F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
+    pub async fn pvmonitor<F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
     where
         F: FnMut(&DecodedValue),
     {
@@ -84,9 +101,35 @@ impl PvaClient {
             .map_err(pva_err)
     }
 
-    // ─── pvainfo ─────────────────────────────────────────────────────────
+    // ─── pvinfo ─────────────────────────────────────────────────────────
 
-    pub async fn pvainfo(&self, pv_name: &str) -> PvaResult<StructureDesc> {
-        self.inner.pvinfo(pv_name).await.map_err(pva_err)
+    /// Get type descriptor via GET_FIELD, falling back to pvget introspection
+    /// if the server doesn't support GET_FIELD.
+    pub async fn pvinfo(&self, pv_name: &str) -> PvaResult<StructureDesc> {
+        match self.inner.pvinfo(pv_name).await {
+            Ok(desc) => Ok(desc),
+            Err(_) => {
+                // Fallback: use pvget introspection
+                let result = self.inner.pvget(pv_name).await.map_err(pva_err)?;
+                Ok(result.introspection)
+            }
+        }
+    }
+
+    /// Get type descriptor and server address.
+    pub async fn pvinfo_full(
+        &self,
+        pv_name: &str,
+    ) -> PvaResult<(StructureDesc, std::net::SocketAddr)> {
+        match self.inner.pvinfo_full(pv_name).await {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                // Fallback: use pvget introspection (no server addr available)
+                let result = self.inner.pvget(pv_name).await.map_err(pva_err)?;
+                // Use a placeholder — pvget doesn't expose server_addr yet
+                let addr = "0.0.0.0:0".parse().unwrap();
+                Ok((result.introspection, addr))
+            }
+        }
     }
 }
