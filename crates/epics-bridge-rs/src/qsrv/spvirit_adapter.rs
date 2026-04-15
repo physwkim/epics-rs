@@ -157,11 +157,12 @@ impl PvStore for QsrvPvStore {
         let name_owned = name.to_string();
         let pva_pvs = self.pva_pvs.clone();
         async move {
-            // PVA plugin PVs: derive descriptor from latest snapshot
-            if let Some(handle) = pva_pvs.read().await.get(&name_owned)
-                && let Some(ref payload) = *handle.latest.lock()
-            {
-                return Some(spvirit_codec::spvd_encode::nt_payload_desc(payload));
+            // PVA plugin PVs: derive descriptor from snapshot or default NTNDArray schema
+            if let Some(handle) = pva_pvs.read().await.get(&name_owned) {
+                return Some(match *handle.latest.lock() {
+                    Some(ref payload) => spvirit_codec::spvd_encode::nt_payload_desc(payload),
+                    None => spvirit_codec::spvd_encode::nt_ndarray_desc_default(),
+                });
             }
 
             let channel = self.channel(&name_owned).await?;
