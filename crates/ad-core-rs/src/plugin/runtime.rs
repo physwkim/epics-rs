@@ -705,6 +705,11 @@ impl PluginPortDriver {
 
         // Set plugin identity params
         base.set_string_param(ndarray_params.port_name_self, 0, port_name.into())?;
+        base.set_string_param(
+            ndarray_params.ad_core_version,
+            0,
+            env!("CARGO_PKG_VERSION").into(),
+        )?;
         if !ndarray_port.is_empty() {
             base.set_string_param(plugin_params.nd_array_port, 0, ndarray_port.into())?;
         }

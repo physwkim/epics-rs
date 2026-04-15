@@ -583,7 +583,7 @@ pub fn register_all_plugins(mut app: IocApplication, mgr: &Arc<PluginManager>) -
 
                 #[cfg(feature = "pva")]
                 let processor = {
-                    let proc = crate::pva::PvaProcessor::new();
+                    let proc = crate::pva::PvaProcessor::new(pva_pv_name.clone());
                     let latest = proc.latest_handle();
                     let subscribers = proc.subscribers_handle();
                     epics_bridge_rs::qsrv::register_pva_pv_global(

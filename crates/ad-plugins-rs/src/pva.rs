@@ -18,13 +18,15 @@ use tokio::sync::mpsc;
 
 /// PVA plugin processor: captures the latest NDArray and converts to NtPayload.
 pub struct PvaProcessor {
+    pv_name: String,
     latest: Arc<Mutex<Option<NtPayload>>>,
     subscribers: Arc<Mutex<Vec<mpsc::Sender<NtPayload>>>>,
 }
 
 impl PvaProcessor {
-    pub fn new() -> Self {
+    pub fn new(pv_name: String) -> Self {
         Self {
+            pv_name,
             latest: Arc::new(Mutex::new(None)),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
@@ -43,7 +45,7 @@ impl PvaProcessor {
 
 impl Default for PvaProcessor {
     fn default() -> Self {
-        Self::new()
+        Self::new(String::new())
     }
 }
 
@@ -62,6 +64,15 @@ impl NDPluginProcess for PvaProcessor {
 
     fn plugin_type(&self) -> &str {
         "NDPluginPva"
+    }
+
+    fn register_params(
+        &mut self,
+        base: &mut asyn_rs::port::PortDriverBase,
+    ) -> asyn_rs::error::AsynResult<()> {
+        let idx = base.create_param("PV_NAME", asyn_rs::param::ParamType::Octet)?;
+        base.set_string_param(idx, 0, self.pv_name.clone())?;
+        Ok(())
     }
 
     fn array_data_handle(&self) -> Option<Arc<Mutex<Option<Arc<NDArray>>>>> {
@@ -261,7 +272,7 @@ mod tests {
 
     #[test]
     fn processor_stores_latest() {
-        let mut proc = PvaProcessor::new();
+        let mut proc = PvaProcessor::new("TEST:Pva1:Image".into());
         let pool = NDArrayPool::new(1_000_000);
         let arr = NDArray::new(vec![NDDimension::new(8)], NDDataType::Float64);
 
