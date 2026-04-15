@@ -310,7 +310,6 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
         let _n = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).count();
         eprintln!("  DCM2: good={_n}");
         // No kill_lost — keep all rays with amplitude weighting
-    } else {
     }
 
     // DCM → HFM
@@ -443,7 +442,6 @@ mod tests {
 
     #[test]
     fn test_single_mirror() {
-        use xrt_oes::screen::Screen;
 
         let source = GeometricSource {
             nrays: 2000,
@@ -645,16 +643,7 @@ mod tests {
             0.0,
             motors.dcm_y - motors.vfm_pitch * 1e-3 * 2.0 * 3000.0);
 
-        // Print actual beam positions
-        use xrt_core::beam::RayState;
-        let beam = &result.beamline_output;
-        // We need the raw beam - check the last element for ray positions
-        // Actually, we stored beam after propagate. Let's just rerun quickly to check.
         eprintln!("screen_dx = {} mm", config.screen_dx);
-
-        for el in &result.beamline_output.elements {
-            eprintln!("  {:20} good={:6} lost={:4}", el.name, el.good_count, el.lost_count);
-        }
 
         assert!(result.source_energy > 0.0);
         assert!(result.dcm_energy > 0.0);
