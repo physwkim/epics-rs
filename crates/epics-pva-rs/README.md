@@ -6,8 +6,6 @@ No C dependencies. Just `cargo build`.
 
 **Repository:** <https://github.com/epics-rs/epics-rs>
 
-**Status: Experimental** — client side is functional (search, get, put, monitor, info). The server side and full pvData type system are under development by the spvirit maintainer. See `epics-bridge-rs` for the application-layer Record↔PVA bridge that the server will use.
-
 ## Overview
 
 pvAccess is the next-generation EPICS protocol that supersedes Channel Access for structured data. Where CA carries primitive scalars and 1D arrays, PVA carries arbitrary nested structures (NormativeTypes like NTScalar, NTEnum, NTTable, NTNDArray, NTMatrix, ...) — making it the natural choice for areaDetector images, MASAR snapshots, structured machine state, and any data richer than a single scalar.
@@ -20,7 +18,7 @@ PVA Client (pvget-rs, OPI, Python)
        │  pvData wire format (FieldDesc + values, BitSet deltas)
        │
        ▼
-PVA Server (epics-pva-rs server, planned)
+PVA Server (epics-pva-rs server)
        │
        ▼
 ChannelProvider (epics-bridge-rs BridgeProvider)
@@ -120,9 +118,9 @@ if let Some(val) = pv.get_value() {
 | `EPICS_PVA_SERVER_PORT` | `5075` | TCP server port |
 | `EPICS_PVA_BROADCAST_PORT` | `5076` | UDP search/beacon port |
 
-## Server-Side Status
+## Server
 
-The server-side implementation (TCP listener, UDP beacon, ChannelProvider integration, segmentation, FieldDesc/PvStructure full serialization) is being developed by the [spvirit](https://github.com/spvirit) maintainer. Once available, IOCs will be able to run CA and PVA simultaneously:
+IOCs can run CA and PVA simultaneously:
 
 ```rust
 app.run(|config| async move {

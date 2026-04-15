@@ -21,8 +21,6 @@ Corresponds to C++ EPICS QSRV (`modules/pva2pva/pdbApp/`). Translates between `e
 PVA Client <--> [epics-pva-rs server] <--> BridgeProvider <--> PvDatabase
 ```
 
-**Status: Experimental** — the PVA server side (socket, protocol handling) will be implemented in `epics-pva-rs` by the spvirit maintainer. This crate provides the application-layer bridge that the server calls into.
-
 ## ca_gateway — CA fan-out gateway
 
 Pure Rust port of [EPICS ca-gateway](https://github.com/epics-modules/ca-gateway). A Channel Access proxy that:

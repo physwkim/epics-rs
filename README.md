@@ -448,11 +448,11 @@ Channel Access protocol client and server.
 - Beacon emitter with reset on connect/disconnect
 - Monitor subscriptions with deadband filtering
 
-### epics-pva-rs (experimental)
+### epics-pva-rs
 
 pvAccess protocol client.
 
-### epics-bridge-rs (experimental)
+### epics-bridge-rs
 
 QSRV equivalent — bridges EPICS database records to pvAccess channels:
 
@@ -768,7 +768,7 @@ pydm opi/pydm/ADTop.ui -m "P=SIM1:,R=cam1:"
 | `cainfo-rs` | Display PV metadata |
 | `ca-repeater-rs` | CA name resolver |
 
-### pvAccess Tools (experimental)
+### pvAccess Tools
 
 | Binary | Description |
 |--------|-------------|
