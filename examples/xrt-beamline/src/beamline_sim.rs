@@ -190,8 +190,8 @@ impl Default for SimConfig {
             nrays: 5000,
             geometry: BeamlineGeometry::default(),
             undulator: UndulatorConfig::default(),
-            screen_dx: 0.256,  // ±0.256 mm → 0.5 µm/pixel at 1024 bins
-            screen_dz: 0.256,
+            screen_dx: 50.0,   // ±50 mm — wide for debugging beam position
+            screen_dz: 50.0,
             screen_nx: 1024,
             screen_nz: 1024,
             source_div_x: 50e-6,   // 50 µrad
@@ -282,12 +282,14 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
                 crystal1.base.clone(),
             );
 
+            // 2nd crystal: parallel to 1st crystal (same pitch)
             let xtal2_oe = CrystalOpticalElement::new(
                 FlatSurface,
                 OeParamsBuilder::new()
-                    .center(0.0, geo.source_to_dcm + motors.dcm_y, 0.0)
-                    .pitch(-theta2_rad)
+                    .center(0.0, geo.source_to_dcm + motors.dcm_y, motors.dcm_y)
+                    .pitch(theta2_rad)
                     .roll(motors.dcm_chi2 * 1e-3)
+                    .invert_normal()
                     .build(),
                 crystal2.base.clone(),
             );
@@ -341,10 +343,11 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
         ScatteringTable::ChantlerTotal,
     );
 
+    let z_after_dcm = motors.dcm_y; // DCM fixed exit offset
     let bl = match &si_mirror {
         Ok(mat) => {
             let mut hfm_params = OeParamsBuilder::new()
-                .center(motors.hfm_x, hfm_y, motors.hfm_y)
+                .center(motors.hfm_x, hfm_y, z_after_dcm + motors.hfm_y)
                 .pitch(motors.hfm_pitch * 1e-3)
                 .roll(motors.hfm_roll * 1e-3)
                 .yaw(motors.hfm_yaw * 1e-3)
@@ -360,7 +363,7 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
         }
         Err(_) => {
             let mut hfm_params = OeParamsBuilder::new()
-                .center(motors.hfm_x, hfm_y, motors.hfm_y)
+                .center(motors.hfm_x, hfm_y, z_after_dcm + motors.hfm_y)
                 .pitch(motors.hfm_pitch * 1e-3)
                 .build();
             hfm_params.position_roll = std::f64::consts::FRAC_PI_2;
@@ -383,7 +386,7 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
             let vfm = MaterialOpticalElement::new(
                 BentFlatSurface::new(motors.vfm_r_major, 0.0),
                 OeParamsBuilder::new()
-                    .center(motors.vfm_x, vfm_y, motors.vfm_y)
+                    .center(motors.vfm_x, vfm_y, z_after_dcm + motors.vfm_y)
                     .pitch(motors.vfm_pitch * 1e-3)
                     .roll(motors.vfm_roll * 1e-3)
                     .yaw(motors.vfm_yaw * 1e-3)
@@ -396,7 +399,7 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
             let vfm = xrt_oes::oe::OpticalElement::new(
                 BentFlatSurface::new(motors.vfm_r_major, 0.0),
                 OeParamsBuilder::new()
-                    .center(motors.vfm_x, vfm_y, motors.vfm_y)
+                    .center(motors.vfm_x, vfm_y, z_after_dcm + motors.vfm_y)
                     .pitch(motors.vfm_pitch * 1e-3)
                     .roll(motors.vfm_roll * 1e-3)
                     .yaw(motors.vfm_yaw * 1e-3)
@@ -419,6 +422,21 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
     let sample_y = vfm_y + geo.vfm_to_sample;
     let sample_x = hfm_defl * (geo.hfm_to_vfm + geo.vfm_to_sample);
     let sample_z = motors.dcm_y - vfm_defl * geo.vfm_to_sample;
+    // Debug: print actual beam position after propagation
+    {
+        let good: Vec<usize> = (0..beam.nrays())
+            .filter(|&i| beam.state[i] > 0)
+            .collect();
+        if !good.is_empty() {
+            let n = good.len() as f64;
+            let mx: f64 = good.iter().map(|&i| beam.x[i]).sum::<f64>() / n;
+            let my: f64 = good.iter().map(|&i| beam.y[i]).sum::<f64>() / n;
+            let mz: f64 = good.iter().map(|&i| beam.z[i]).sum::<f64>() / n;
+            eprintln!("  beam actual: x={mx:.1} y={my:.1} z={mz:.1} n_good={}", good.len());
+            eprintln!("  screen at:   x={sample_x:.1} y={sample_y:.1} z={sample_z:.1}");
+        }
+    }
+
     let screen = Screen::new(
         [sample_x, sample_y, sample_z],
         config.screen_dx,
@@ -451,12 +469,38 @@ mod tests {
     #[test]
     fn test_simulate_default() {
         let config = SimConfig {
-            nrays: 500,
+            nrays: 2000,
             ..Default::default()
         };
         let motors = MotorPositions::default();
         let result = simulate(&config, &motors);
+
+        eprintln!("source_energy = {:.1} eV", result.source_energy);
+        eprintln!("dcm_energy = {:.1} eV", result.dcm_energy);
+        eprintln!("efficiency = {:.2}%", result.beamline_output.efficiency() * 100.0);
+        eprintln!("n_captured = {}", result.capture.n_captured);
+        eprintln!("n_missed = {}", result.capture.n_missed);
+        eprintln!("total_intensity = {:.2}", result.capture.total_intensity());
+        let [cx, cz] = result.capture.centroid();
+        eprintln!("centroid = ({:.4}, {:.4}) mm", cx, cz);
+        eprintln!("screen center = ({}, {}, {})",
+            motors.hfm_pitch * 1e-3 * 2.0 * 6000.0,
+            0.0,
+            motors.dcm_y - motors.vfm_pitch * 1e-3 * 2.0 * 3000.0);
+
+        // Print actual beam positions
+        use xrt_core::beam::RayState;
+        let beam = &result.beamline_output;
+        // We need the raw beam - check the last element for ray positions
+        // Actually, we stored beam after propagate. Let's just rerun quickly to check.
+        eprintln!("screen_dx = {} mm", config.screen_dx);
+
+        for el in &result.beamline_output.elements {
+            eprintln!("  {:20} good={:6} lost={:4}", el.name, el.good_count, el.lost_count);
+        }
+
         assert!(result.source_energy > 0.0);
         assert!(result.dcm_energy > 0.0);
+        assert!(result.capture.n_captured > 0, "no rays captured on screen!");
     }
 }
