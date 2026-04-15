@@ -192,10 +192,10 @@ impl Default for SimConfig {
             nrays: 50000,
             geometry: BeamlineGeometry::default(),
             undulator: UndulatorConfig::default(),
-            screen_dx: 0.5,    // ±0.5 mm (auto-center tracks beam position)
-            screen_dz: 0.5,
-            screen_nx: 1024,
-            screen_nz: 1024,
+            screen_dx: 0.2,    // ±0.2 mm, 128 bins → 3.1 µm/pixel
+            screen_dz: 0.2,
+            screen_nx: 128,
+            screen_nz: 128,
             source_div_x: 50e-6,   // 50 µrad
             source_div_z: 20e-6,   // 20 µrad
             source_size_x: 0.3,    // 0.3 mm
