@@ -3,7 +3,11 @@ use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::format;
 
 #[derive(Parser)]
-#[command(name = "pvinfo-rs", version, about = "Show EPICS PV type info via pvAccess")]
+#[command(
+    name = "pvinfo-rs",
+    version,
+    about = "Show EPICS PV type info via pvAccess"
+)]
 struct Args {
     /// PV names to query
     #[arg(required = true)]

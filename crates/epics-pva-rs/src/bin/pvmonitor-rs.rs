@@ -3,7 +3,11 @@ use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::format;
 
 #[derive(Parser)]
-#[command(name = "pvmonitor-rs", version, about = "Monitor EPICS PVs via pvAccess")]
+#[command(
+    name = "pvmonitor-rs",
+    version,
+    about = "Monitor EPICS PVs via pvAccess"
+)]
 struct Args {
     /// PV names to monitor
     #[arg(required = true)]

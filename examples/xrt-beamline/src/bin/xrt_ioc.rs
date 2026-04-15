@@ -79,10 +79,7 @@ async fn main() -> CaResult<()> {
         "ADCORE",
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/ad-core-rs"),
     );
-    epics_base_rs::runtime::env::set_default(
-        "MOTOR",
-        motor_rs::MOTOR_IOC_DIR,
-    );
+    epics_base_rs::runtime::env::set_default("MOTOR", motor_rs::MOTOR_IOC_DIR);
 
     let script = if args.len() > 1 && !args[1].starts_with('-') {
         args[1].clone()
@@ -153,15 +150,9 @@ async fn main() -> CaResult<()> {
                 );
 
                 let xrt_output = NDArrayOutput::new();
-                let xrt_rt = create_xrt_detector(
-                    "XRT",
-                    size_x,
-                    size_y,
-                    max_mem,
-                    xrt_output,
-                    sim_config,
-                )
-                .map_err(|e| format!("failed to create XRT detector: {e}"))?;
+                let xrt_rt =
+                    create_xrt_detector("XRT", size_x, size_y, max_mem, xrt_output, sim_config)
+                        .map_err(|e| format!("failed to create XRT detector: {e}"))?;
 
                 let xrt_handle = xrt_rt.port_handle().clone();
                 asyn_rs::asyn_record::register_port("XRT", xrt_handle, h.trace.clone());

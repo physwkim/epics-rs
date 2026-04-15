@@ -229,7 +229,11 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                 break;
             }
 
-            let efficiency = if n_iterations > 0 { total_efficiency / n_iterations as f64 } else { 0.0 };
+            let efficiency = if n_iterations > 0 {
+                total_efficiency / n_iterations as f64
+            } else {
+                0.0
+            };
             let flux = accum.iter().sum::<f64>();
             let n_captured = total_captured;
             let cx = last_cx;
@@ -241,7 +245,11 @@ fn acquisition_loop(ctx: AcquisitionContext) {
 
             // Convert accumulated intensity to u16 image (transpose for AD)
             let max_val = accum.iter().cloned().fold(0.0_f64, f64::max);
-            let scale = if max_val > 0.0 { 65000.0 / max_val } else { 0.0 };
+            let scale = if max_val > 0.0 {
+                65000.0 / max_val
+            } else {
+                0.0
+            };
 
             let mut u16_data = vec![0u16; nx * nz];
             for ix in 0..nx {

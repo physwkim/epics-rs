@@ -192,17 +192,23 @@ pub fn eval(expr: &CompiledExpr, inputs: &mut ArrayInputs) -> Result<ArrayStackV
                 CoreOp::Shl => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as i32) << ((y as i32) & 31)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| {
+                        ((x as i32) << ((y as i32) & 31)) as f64
+                    })?);
                 }
                 CoreOp::Shr => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as i32) >> ((y as i32) & 31)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| {
+                        ((x as i32) >> ((y as i32) & 31)) as f64
+                    })?);
                 }
                 CoreOp::ShrLogical => {
                     let b = pop1(&mut stack)?;
                     let a = pop1(&mut stack)?;
-                    stack.push(zip_map(a, b, |x, y| ((x as u32) >> ((y as u32) & 31)) as f64)?);
+                    stack.push(zip_map(a, b, |x, y| {
+                        ((x as u32) >> ((y as u32) & 31)) as f64
+                    })?);
                 }
 
                 // Conditional

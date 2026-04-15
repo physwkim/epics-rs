@@ -47,9 +47,7 @@ fn format_info_field(out: &mut String, field: &FieldDesc, depth: usize) {
             out.push_str(&format!("{indent}{id}[] {}\n", field.name));
             // Show element structure indented
             let inner_indent = "    ".repeat(depth + 1);
-            out.push_str(&format!(
-                "{inner_indent}{id}\n"
-            ));
+            out.push_str(&format!("{inner_indent}{id}\n"));
             for f in &desc.fields {
                 format_info_field(out, f, depth + 2);
             }
@@ -140,11 +138,7 @@ fn typecode_array_name(tc: TypeCode) -> &'static str {
 ///     alarm_t alarm
 ///         int severity 0
 /// ```
-pub fn format_raw(
-    pv_name: &str,
-    desc: &StructureDesc,
-    value: &DecodedValue,
-) -> String {
+pub fn format_raw(pv_name: &str, desc: &StructureDesc, value: &DecodedValue) -> String {
     let mut out = String::new();
     let id = desc.struct_id.as_deref().unwrap_or("structure");
     out.push_str(&format!("{pv_name} {id} \n"));
@@ -225,11 +219,7 @@ fn format_raw_field(out: &mut String, desc: &FieldDesc, value: &DecodedValue, de
 /// NTScalar: `PV_NAME timestamp value`
 /// NTEnum: `PV_NAME timestamp (index) choice`
 /// Other: falls back to raw mode.
-pub fn format_nt(
-    pv_name: &str,
-    desc: &StructureDesc,
-    value: &DecodedValue,
-) -> String {
+pub fn format_nt(pv_name: &str, desc: &StructureDesc, value: &DecodedValue) -> String {
     let struct_id = desc.struct_id.as_deref().unwrap_or("");
     let fields = match value {
         DecodedValue::Structure(f) => f,
@@ -274,33 +264,31 @@ fn format_nt_enum(pv_name: &str, fields: &[(String, DecodedValue)]) -> String {
         })
         .unwrap_or_else(|| "<undefined>".to_string());
 
-    let (index, choice) = if let Some(DecodedValue::Structure(enum_fields)) =
-        find_field(fields, "value")
-    {
-        let idx = find_field(enum_fields, "index")
-            .map(|v| format_scalar_value(v))
-            .unwrap_or_else(|| "0".to_string());
-        let choice = if let Some(DecodedValue::Array(choices)) =
-            find_field(enum_fields, "choices")
-        {
-            let idx_num: usize = idx.parse().unwrap_or(0);
-            choices
-                .get(idx_num)
-                .map(|v| {
-                    if let DecodedValue::String(s) = v {
-                        s.clone()
-                    } else {
-                        format!("{v}")
-                    }
-                })
-                .unwrap_or_default()
+    let (index, choice) =
+        if let Some(DecodedValue::Structure(enum_fields)) = find_field(fields, "value") {
+            let idx = find_field(enum_fields, "index")
+                .map(|v| format_scalar_value(v))
+                .unwrap_or_else(|| "0".to_string());
+            let choice =
+                if let Some(DecodedValue::Array(choices)) = find_field(enum_fields, "choices") {
+                    let idx_num: usize = idx.parse().unwrap_or(0);
+                    choices
+                        .get(idx_num)
+                        .map(|v| {
+                            if let DecodedValue::String(s) = v {
+                                s.clone()
+                            } else {
+                                format!("{v}")
+                            }
+                        })
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+            (idx, choice)
         } else {
-            String::new()
+            ("0".to_string(), String::new())
         };
-        (idx, choice)
-    } else {
-        ("0".to_string(), String::new())
-    };
 
     format!("{pv_name} {ts} ({index}) {choice}\n")
 }

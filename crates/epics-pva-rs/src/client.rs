@@ -63,10 +63,7 @@ impl PvaClient {
     }
 
     /// Get full result including introspection (needed for typed formatting).
-    pub async fn pvget_full(
-        &self,
-        pv_name: &str,
-    ) -> PvaResult<spvirit_client::PvGetResult> {
+    pub async fn pvget_full(&self, pv_name: &str) -> PvaResult<spvirit_client::PvGetResult> {
         self.inner.pvget(pv_name).await.map_err(pva_err)
     }
 
@@ -76,7 +73,10 @@ impl PvaClient {
         pv_name: &str,
         fields: &[&str],
     ) -> PvaResult<spvirit_client::PvGetResult> {
-        self.inner.pvget_fields(pv_name, fields).await.map_err(pva_err)
+        self.inner
+            .pvget_fields(pv_name, fields)
+            .await
+            .map_err(pva_err)
     }
 
     // ─── pvput ──────────────────────────────────────────────────────────

@@ -46,7 +46,11 @@ impl ADDriverBase {
             0,
             env!("CARGO_PKG_VERSION").into(),
         )?;
-        port_base.set_string_param(params.base.driver_version, 0, env!("CARGO_PKG_VERSION").into())?;
+        port_base.set_string_param(
+            params.base.driver_version,
+            0,
+            env!("CARGO_PKG_VERSION").into(),
+        )?;
         port_base.set_string_param(params.base.codec, 0, String::new())?;
 
         // C++ ADBase constructor: setIntegerParam(ADMaxSizeX, maxSizeX)

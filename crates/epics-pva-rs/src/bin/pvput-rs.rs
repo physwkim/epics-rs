@@ -2,7 +2,11 @@ use clap::Parser;
 use epics_pva_rs::client::PvaClient;
 
 #[derive(Parser)]
-#[command(name = "pvput-rs", version, about = "Write a value to an EPICS PV via pvAccess")]
+#[command(
+    name = "pvput-rs",
+    version,
+    about = "Write a value to an EPICS PV via pvAccess"
+)]
 struct Args {
     /// PV name to write to
     pv_name: String,

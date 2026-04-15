@@ -3,7 +3,11 @@ use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::format;
 
 #[derive(Parser)]
-#[command(name = "pvget-rs", version, about = "Read EPICS PV values via pvAccess")]
+#[command(
+    name = "pvget-rs",
+    version,
+    about = "Read EPICS PV values via pvAccess"
+)]
 struct Args {
     /// PV names to read
     #[arg(required = true)]
@@ -42,14 +46,22 @@ fn parse_pv_request(request: &str) -> Vec<&str> {
     } else {
         trimmed
     };
-    inner.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+    inner
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
     let client = PvaClient::new().expect("failed to create PVA client");
-    let mode = if args.verbose > 0 { "raw" } else { args.mode.as_str() };
+    let mode = if args.verbose > 0 {
+        "raw"
+    } else {
+        args.mode.as_str()
+    };
     let fields = parse_pv_request(&args.request);
 
     let mut failed = false;

@@ -14,8 +14,8 @@ use xrt_oes::beamline::{BeamlineOutput, OeParamsBuilder};
 use xrt_oes::crystal_oe::CrystalOpticalElement;
 use xrt_oes::material_oe::MaterialOpticalElement;
 use xrt_oes::screen::{Screen, ScreenCapture};
-use xrt_oes::surfaces::flat::FlatSurface;
 use xrt_oes::surfaces::bent_flat::BentFlatSurface;
+use xrt_oes::surfaces::flat::FlatSurface;
 use xrt_sources::distributions::{EnergyDist, SpatialDist};
 use xrt_sources::geometric::GeometricSource;
 
@@ -36,11 +36,11 @@ pub struct BeamlineGeometry {
 impl Default for BeamlineGeometry {
     fn default() -> Self {
         Self {
-            source_to_dcm: 25_000.0,  // 25 m
-            dcm_gap: 15.0,            // 15 mm between crystals
-            dcm_to_hfm: 2_000.0,      // 2 m
-            hfm_to_vfm: 3_000.0,      // 3 m
-            vfm_to_sample: 3_000.0,   // 3 m
+            source_to_dcm: 25_000.0, // 25 m
+            dcm_gap: 15.0,           // 15 mm between crystals
+            dcm_to_hfm: 2_000.0,     // 2 m
+            hfm_to_vfm: 3_000.0,     // 3 m
+            vfm_to_sample: 3_000.0,  // 3 m
         }
     }
 }
@@ -62,10 +62,10 @@ pub struct UndulatorConfig {
 impl Default for UndulatorConfig {
     fn default() -> Self {
         Self {
-            electron_energy: 3.0,  // 3 GeV
-            period: 10.0,          // 10 mm
+            electron_energy: 3.0, // 3 GeV
+            period: 10.0,         // 10 mm
             k_max: 2.5,
-            gap_min: 5.0,          // 5 mm
+            gap_min: 5.0, // 5 mm
             gap_coeff: std::f64::consts::PI,
         }
     }
@@ -93,9 +93,9 @@ impl UndulatorConfig {
 #[derive(Debug, Clone)]
 pub struct MotorPositions {
     // Undulator
-    pub und_gap: f64,    // mm
-    pub und_x: f64,      // mm
-    pub und_z: f64,      // mm
+    pub und_gap: f64, // mm
+    pub und_x: f64,   // mm
+    pub und_z: f64,   // mm
 
     // DCM
     pub dcm_theta: f64,  // degrees
@@ -129,7 +129,7 @@ pub struct MotorPositions {
 impl Default for MotorPositions {
     fn default() -> Self {
         Self {
-            und_gap: 6.1,  // 8 keV at period=10mm
+            und_gap: 6.1, // 8 keV at period=10mm
             und_x: 0.0,
             und_z: 0.0,
             dcm_theta: 14.31, // Si(111) Bragg angle for 8 keV
@@ -147,7 +147,7 @@ impl Default for MotorPositions {
             // Coddington: R = 2*p*q / (sin(α)*(p+q))
             // HFM: p=27m, q=6m, α=3mrad → R=3.27km
             hfm_r_major: 3_272_727.0,
-            hfm_r_minor: 1e9,          // no sagittal focusing
+            hfm_r_minor: 1e9, // no sagittal focusing
             vfm_pitch: 3.0,
             vfm_roll: 0.0,
             vfm_yaw: 0.0,
@@ -156,7 +156,7 @@ impl Default for MotorPositions {
             vfm_z: 0.0,
             // VFM: p=30m, q=3m, α=3mrad → R=1.82km
             vfm_r_major: 1_818_182.0,
-            vfm_r_minor: 1e9,          // no sagittal focusing
+            vfm_r_minor: 1e9, // no sagittal focusing
         }
     }
 }
@@ -192,14 +192,14 @@ impl Default for SimConfig {
             nrays: 50000,
             geometry: BeamlineGeometry::default(),
             undulator: UndulatorConfig::default(),
-            screen_dx: 0.2,    // ±0.2 mm, 128 bins → 3.1 µm/pixel
+            screen_dx: 0.2, // ±0.2 mm, 128 bins → 3.1 µm/pixel
             screen_dz: 0.2,
             screen_nx: 128,
             screen_nz: 128,
-            source_div_x: 50e-6,   // 50 µrad
-            source_div_z: 20e-6,   // 20 µrad
-            source_size_x: 0.3,    // 0.3 mm
-            source_size_z: 0.02,   // 0.02 mm
+            source_div_x: 50e-6,    // 50 µrad
+            source_div_z: 20e-6,    // 20 µrad
+            source_size_x: 0.3,     // 0.3 mm
+            source_size_z: 0.02,    // 0.02 mm
             energy_bandwidth: 0.02, // 2% ΔE/E
         }
     }
@@ -260,9 +260,7 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
     let y_dcm2 = y_dcm1 + dcm_dy;
 
     let table = ScatteringTable::ChantlerTotal;
-    let si_mirror = Material::new(
-        &["Si"], None, 2.33, MaterialKind::Mirror, None, table,
-    );
+    let si_mirror = Material::new(&["Si"], None, 2.33, MaterialKind::Mirror, None, table);
 
     // 4. Manual pipeline: each OE → kill lost → drift → next OE
     //    (xrt-rs reflect() processes Over rays too, so we must kill them)
@@ -270,8 +268,24 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
     // Source → DCM crystal 1
     beam.propagate(geo.source_to_dcm);
 
-    let si1 = CrystalSi::new([1,1,1], 297.15, CrystalGeometry::BraggReflected, 1.0, None, 0.0, table);
-    let si2 = CrystalSi::new([1,1,1], 297.15, CrystalGeometry::BraggReflected, 1.0, None, 0.0, table);
+    let si1 = CrystalSi::new(
+        [1, 1, 1],
+        297.15,
+        CrystalGeometry::BraggReflected,
+        1.0,
+        None,
+        0.0,
+        table,
+    );
+    let si2 = CrystalSi::new(
+        [1, 1, 1],
+        297.15,
+        CrystalGeometry::BraggReflected,
+        1.0,
+        None,
+        0.0,
+        table,
+    );
 
     if let (Ok(c1), Ok(c2)) = (si1, si2) {
         let xtal1 = CrystalOpticalElement::new(
@@ -291,7 +305,10 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
         let nm3 = (0..beam.nrays()).filter(|&i| beam.state[i] == -3).count();
         let n0 = (0..beam.nrays()).filter(|&i| beam.state[i] == 0).count();
         let n2 = (0..beam.nrays()).filter(|&i| beam.state[i] == 2).count();
-        eprintln!("  DCM1: Good={n1} Over={n3} Out={nm1} Absorbed={nm2} Dead={nm3} state0={n0} state2={n2} total={}", beam.nrays());
+        eprintln!(
+            "  DCM1: Good={n1} Over={n3} Out={nm1} Absorbed={nm2} Dead={nm3} state0={n0} state2={n2} total={}",
+            beam.nrays()
+        );
         // No kill_lost — keep all rays with amplitude weighting
 
         beam.propagate(dcm_path);
@@ -326,7 +343,10 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
             .build();
         p.position_roll = std::f64::consts::FRAC_PI_2;
         let hfm = MaterialOpticalElement::new(
-            BentFlatSurface::new(motors.hfm_r_major, 0.0), p, mat.clone());
+            BentFlatSurface::new(motors.hfm_r_major, 0.0),
+            p,
+            mat.clone(),
+        );
         hfm.reflect(&mut beam);
         let _n = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).count();
         eprintln!("  HFM:  good={_n}");
@@ -362,7 +382,10 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
             .build();
         p.position_roll = std::f64::consts::PI;
         let vfm = MaterialOpticalElement::new(
-            BentFlatSurface::new(motors.vfm_r_major, 0.0), p, mat.clone());
+            BentFlatSurface::new(motors.vfm_r_major, 0.0),
+            p,
+            mat.clone(),
+        );
         vfm.reflect(&mut beam);
         let _n = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).count();
         eprintln!("  VFM:  good={_n}");
@@ -379,9 +402,7 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
     let z_sample = dcm_dz - vfm_defl * geo.vfm_to_sample;
 
     let screen_center = {
-        let good: Vec<usize> = (0..beam.nrays())
-            .filter(|&i| beam.state[i] == 1)
-            .collect();
+        let good: Vec<usize> = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).collect();
         if good.len() > 10 {
             let n = good.len() as f64;
             let c = [
@@ -389,7 +410,13 @@ pub fn simulate(config: &SimConfig, motors: &MotorPositions) -> SimResult {
                 good.iter().map(|&i| beam.y[i]).sum::<f64>() / n,
                 good.iter().map(|&i| beam.z[i]).sum::<f64>() / n,
             ];
-            eprintln!("  screen auto: ({:.1},{:.1},{:.1}) n_good={}", c[0], c[1], c[2], good.len());
+            eprintln!(
+                "  screen auto: ({:.1},{:.1},{:.1}) n_good={}",
+                c[0],
+                c[1],
+                c[2],
+                good.len()
+            );
             c
         } else {
             eprintln!("  screen fallback: ({x_sample:.1},{y_sample:.1},{z_sample:.1})");
@@ -427,9 +454,10 @@ mod tests {
     use super::*;
 
     fn beam_stats(beam: &xrt_core::beam::Beam) -> (f64, f64, f64, f64, f64, f64, usize) {
-        let good: Vec<usize> = (0..beam.nrays())
-            .filter(|&i| beam.state[i] == 1).collect();  // Good only, not Over/Dead
-        if good.is_empty() { return (0.0,0.0,0.0,0.0,0.0,0.0,0); }
+        let good: Vec<usize> = (0..beam.nrays()).filter(|&i| beam.state[i] == 1).collect(); // Good only, not Over/Dead
+        if good.is_empty() {
+            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0);
+        }
         let n = good.len() as f64;
         let mx = good.iter().map(|&i| beam.x[i]).sum::<f64>() / n;
         let my = good.iter().map(|&i| beam.y[i]).sum::<f64>() / n;
@@ -442,7 +470,6 @@ mod tests {
 
     #[test]
     fn test_single_mirror() {
-
         let source = GeometricSource {
             nrays: 2000,
             dist_x: SpatialDist::Normal(0.3),
@@ -455,8 +482,15 @@ mod tests {
         let mut beam = source.shine();
         beam.propagate(25000.0);
 
-        let si = Material::new(&["Si"], None, 2.33, MaterialKind::Mirror, None,
-                               ScatteringTable::ChantlerTotal).unwrap();
+        let si = Material::new(
+            &["Si"],
+            None,
+            2.33,
+            MaterialKind::Mirror,
+            None,
+            ScatteringTable::ChantlerTotal,
+        )
+        .unwrap();
 
         // Simple flat mirror: pitch=3mrad at y=25000
         let m1 = MaterialOpticalElement::new(
@@ -474,7 +508,10 @@ mod tests {
         eprintln!("Single mirror: n={n} pos=({x:.1},{y:.1},{z:.1}) dir=({a:.6},{b:.6},{c:.6})");
         eprintln!("  expected: y≈30000, z≈-30 (2*3mrad*5000=30mm deflection)");
         for el in &output.elements {
-            eprintln!("  {:10} good={} lost={}", el.name, el.good_count, el.lost_count);
+            eprintln!(
+                "  {:10} good={} lost={}",
+                el.name, el.good_count, el.lost_count
+            );
         }
         assert!(n > 100, "should have good rays");
         assert!((y - 30000.0).abs() < 500.0, "y={y} should be near 30000");
@@ -494,8 +531,15 @@ mod tests {
         let mut beam = source.shine();
         beam.propagate(25000.0);
 
-        let si = Material::new(&["Si"], None, 2.33, MaterialKind::Mirror, None,
-                               ScatteringTable::ChantlerTotal).unwrap();
+        let si = Material::new(
+            &["Si"],
+            None,
+            2.33,
+            MaterialKind::Mirror,
+            None,
+            ScatteringTable::ChantlerTotal,
+        )
+        .unwrap();
 
         // Mirror with positionRoll=pi/2: should deflect horizontally
         let mut params = OeParamsBuilder::new()
@@ -512,7 +556,10 @@ mod tests {
         eprintln!("posRoll=pi/2: n={n} pos=({x:.1},{y:.1},{z:.1}) dir=({a:.6},{b:.6},{c:.6})");
         eprintln!("  expected: y≈30000, x≈30 (horizontal deflection), z≈0");
         for el in &output.elements {
-            eprintln!("  {:10} good={} lost={}", el.name, el.good_count, el.lost_count);
+            eprintln!(
+                "  {:10} good={} lost={}",
+                el.name, el.good_count, el.lost_count
+            );
         }
         assert!(n > 100, "should have good rays");
     }
@@ -532,8 +579,15 @@ mod tests {
         let mut beam = source.shine();
         beam.propagate(25000.0);
 
-        let si = Material::new(&["Si"], None, 2.33, MaterialKind::Mirror, None,
-                               ScatteringTable::ChantlerTotal).unwrap();
+        let si = Material::new(
+            &["Si"],
+            None,
+            2.33,
+            MaterialKind::Mirror,
+            None,
+            ScatteringTable::ChantlerTotal,
+        )
+        .unwrap();
 
         let mut params = OeParamsBuilder::new()
             .center(0.0, 25000.0, 0.0)
@@ -549,7 +603,10 @@ mod tests {
         eprintln!("posRoll=pi: n={n} pos=({x:.1},{y:.1},{z:.1}) dir=({a:.6},{b:.6},{c:.6})");
         eprintln!("  expected: y≈30000, z≈-30 (downward), x≈0");
         for el in &output.elements {
-            eprintln!("  {:10} good={} lost={}", el.name, el.good_count, el.lost_count);
+            eprintln!(
+                "  {:10} good={} lost={}",
+                el.name, el.good_count, el.lost_count
+            );
         }
     }
 
@@ -568,8 +625,15 @@ mod tests {
         let mut beam = source.shine();
         beam.propagate(27000.0);
 
-        let si = Material::new(&["Si"], None, 2.33, MaterialKind::Mirror, None,
-                               ScatteringTable::ChantlerTotal).unwrap();
+        let si = Material::new(
+            &["Si"],
+            None,
+            2.33,
+            MaterialKind::Mirror,
+            None,
+            ScatteringTable::ChantlerTotal,
+        )
+        .unwrap();
 
         // HFM at y=27000, posRoll=pi/2
         let mut hp = OeParamsBuilder::new()
@@ -577,13 +641,15 @@ mod tests {
             .pitch(0.003)
             .build();
         hp.position_roll = std::f64::consts::FRAC_PI_2;
-        let hfm = MaterialOpticalElement::new(
-            BentFlatSurface::new(3_272_727.0, 0.0), hp, si.clone());
+        let hfm =
+            MaterialOpticalElement::new(BentFlatSurface::new(3_272_727.0, 0.0), hp, si.clone());
 
         hfm.reflect(&mut beam);
         // Kill non-Good rays so VFM doesn't process them
         for i in 0..beam.nrays() {
-            if beam.state[i] != 1 { beam.state[i] = -1; }
+            if beam.state[i] != 1 {
+                beam.state[i] = -1;
+            }
         }
         let (x, y, z, a, b, c, n) = beam_stats(&beam);
         eprintln!("After HFM: n={n} pos=({x:.1},{y:.1},{z:.1}) dir=({a:.6},{b:.6},{c:.6})");
@@ -596,12 +662,13 @@ mod tests {
             .pitch(0.003)
             .build();
         vp.position_roll = std::f64::consts::PI;
-        let vfm = MaterialOpticalElement::new(
-            BentFlatSurface::new(1_818_182.0, 0.0), vp, si);
+        let vfm = MaterialOpticalElement::new(BentFlatSurface::new(1_818_182.0, 0.0), vp, si);
 
         vfm.reflect(&mut beam);
         for i in 0..beam.nrays() {
-            if beam.state[i] != 1 { beam.state[i] = -1; }
+            if beam.state[i] != 1 {
+                beam.state[i] = -1;
+            }
         }
 
         beam.propagate(3000.0);
@@ -618,7 +685,10 @@ mod tests {
         let und = UndulatorConfig::default();
         // At 15mm gap with default params
         let e = und.energy_from_gap(15.0);
-        assert!(e > 1000.0 && e < 50000.0, "energy={e} eV should be reasonable");
+        assert!(
+            e > 1000.0 && e < 50000.0,
+            "energy={e} eV should be reasonable"
+        );
     }
 
     #[test]
@@ -632,16 +702,21 @@ mod tests {
 
         eprintln!("source_energy = {:.1} eV", result.source_energy);
         eprintln!("dcm_energy = {:.1} eV", result.dcm_energy);
-        eprintln!("efficiency = {:.2}%", result.beamline_output.efficiency() * 100.0);
+        eprintln!(
+            "efficiency = {:.2}%",
+            result.beamline_output.efficiency() * 100.0
+        );
         eprintln!("n_captured = {}", result.capture.n_captured);
         eprintln!("n_missed = {}", result.capture.n_missed);
         eprintln!("total_intensity = {:.2}", result.capture.total_intensity());
         let [cx, cz] = result.capture.centroid();
         eprintln!("centroid = ({:.4}, {:.4}) mm", cx, cz);
-        eprintln!("screen center = ({}, {}, {})",
+        eprintln!(
+            "screen center = ({}, {}, {})",
             motors.hfm_pitch * 1e-3 * 2.0 * 6000.0,
             0.0,
-            motors.dcm_y - motors.vfm_pitch * 1e-3 * 2.0 * 3000.0);
+            motors.dcm_y - motors.vfm_pitch * 1e-3 * 2.0 * 3000.0
+        );
 
         eprintln!("screen_dx = {} mm", config.screen_dx);
 
