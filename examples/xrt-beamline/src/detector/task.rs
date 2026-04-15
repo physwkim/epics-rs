@@ -161,17 +161,23 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             let n_captured = sim_result.capture.n_captured;
 
             // Convert screen intensity to u16 image
+            // Screen stores [ix * nz + iz] (x=row, z=col)
+            // AreaDetector expects [iz * nx + ix] (z=row, x=col) for correct display
             let nx = ctx.sim_config.screen_nx;
             let nz = ctx.sim_config.screen_nz;
             let intensity = &sim_result.capture.intensity;
 
-            // Normalize to 16-bit range
             let max_val = intensity.iter().cloned().fold(0.0_f64, f64::max);
             let scale = if max_val > 0.0 { 65000.0 / max_val } else { 0.0 };
-            let u16_data: Vec<u16> = intensity
-                .iter()
-                .map(|&v| (v * scale).round().clamp(0.0, 65535.0) as u16)
-                .collect();
+
+            // Transpose: [ix*nz+iz] → [iz*nx+ix]
+            let mut u16_data = vec![0u16; nx * nz];
+            for ix in 0..nx {
+                for iz in 0..nz {
+                    let v = intensity[ix * nz + iz] * scale;
+                    u16_data[iz * nx + ix] = v.round().clamp(0.0, 65535.0) as u16;
+                }
+            }
 
             let dims = vec![NDDimension::new(nx), NDDimension::new(nz)];
             let mut frame = NDArray {
