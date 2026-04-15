@@ -7,6 +7,10 @@ reflections instead of collapsing them into one ``double_reflect`` step.
 
 import sys
 import numpy as np
+import matplotlib
+matplotlib.use('Qt5Agg')
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 
 import xrt.backends.raycing as raycing
 import xrt.backends.raycing.sources as rs
@@ -68,7 +72,7 @@ DEFAULT_MOTORS = {
 }
 
 PV_NAMES = {
-    key: f'bl:{key.replace("_", ":")}' for key in DEFAULT_MOTORS
+    key: f'bl:{key.replace("_", ":")}.RBV' for key in DEFAULT_MOTORS
 }
 
 
@@ -179,18 +183,126 @@ def run_process(bl):
         'beam': beam_g, 'bd1': bd1_g, 'bg': bg_g, 'bl1': bl1, 'bl2': bl2,
         'bh': bh_g, 'bhl': bhl, 'bv': bv_g, 'bvl': bvl, 'bs': bs_g,
     }
+    bl._raw_sample_beam = bs  # unfiltered beam for 2D profile
     bl.prepare_flow()
     return outDict
 
 rr.run_process = run_process
 
 
+class SampleView(qt.QWidget):
+    """Real-time 2D beam profile at sample position."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sample Beam Profile")
+        self.resize(500, 500)
+
+        self.fig, self.axes = plt.subplots(2, 2, figsize=(6, 6),
+            gridspec_kw={'width_ratios': [3, 1], 'height_ratios': [1, 3],
+                         'hspace': 0.05, 'wspace': 0.05})
+        self.ax_main = self.axes[1, 0]
+        self.ax_xproj = self.axes[0, 0]
+        self.ax_zproj = self.axes[1, 1]
+        self.axes[0, 1].set_visible(False)
+
+        self.ax_xproj.tick_params(labelbottom=False)
+        self.ax_zproj.tick_params(labelleft=False)
+
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        layout = qt.QVBoxLayout(self)
+        self.info_label = qt.QLabel("")
+        self.info_label.setStyleSheet("font-family: monospace; font-size: 11px;")
+        layout.addWidget(self.info_label)
+        layout.addWidget(self.canvas)
+
+    def update_beam(self, beam, energy=0.0):
+        good = beam.state == 1
+        if good.sum() == 0:
+            self.info_label.setText("No good rays at sample")
+            return
+
+        x = beam.x[good] * 1e3  # mm → µm
+        z = beam.z[good] * 1e3
+
+        # Robust outlier removal using MAD (median absolute deviation)
+        def mad_filter(arr, threshold=5.0):
+            med = np.median(arr)
+            mad = np.median(np.abs(arr - med))
+            if mad < 0.01:
+                mad = 0.01
+            return np.abs(arr - med) < threshold * mad * 1.4826
+
+        mask = mad_filter(x) & mad_filter(z)
+        x, z = x[mask], z[mask]
+        n_good = len(x)
+        if n_good == 0:
+            self.info_label.setText("No good rays after filtering")
+            return
+
+        # Center on beam and auto-range based on IQR
+        cx, cz = np.median(x), np.median(z)
+        x = x - cx  # center the data
+        z = z - cz
+        iqr_x = np.percentile(np.abs(x), 95)
+        iqr_z = np.percentile(np.abs(z), 95)
+        xlim = max(iqr_x * 2, 5)  # at least ±5 µm
+        zlim = max(iqr_z * 2, 5)
+
+        # 2D histogram
+        bins = 128
+        H, xe, ze = np.histogram2d(x, z, bins=bins,
+                                    range=[[-xlim, xlim], [-zlim, zlim]])
+
+        self.ax_main.cla()
+        self.ax_main.imshow(H.T, origin='lower', aspect='auto',
+                            extent=[-xlim, xlim, -zlim, zlim],
+                            cmap='inferno', interpolation='nearest')
+        self.ax_main.set_xlabel(u'x (µm)')
+        self.ax_main.set_ylabel(u'z (µm)')
+
+        # X projection
+        self.ax_xproj.cla()
+        xc = 0.5 * (xe[:-1] + xe[1:])
+        self.ax_xproj.fill_between(xc, H.sum(axis=1), color='C0', alpha=0.7)
+        self.ax_xproj.set_xlim(-xlim, xlim)
+        self.ax_xproj.set_ylabel('counts')
+
+        # Z projection
+        self.ax_zproj.cla()
+        zc = 0.5 * (ze[:-1] + ze[1:])
+        self.ax_zproj.fill_betweenx(zc, H.sum(axis=0), color='C1', alpha=0.7)
+        self.ax_zproj.set_ylim(-zlim, zlim)
+        self.ax_zproj.set_xlabel('counts')
+
+        # FWHM
+        def fwhm(proj, centers):
+            peak = proj.max()
+            if peak <= 0:
+                return 0.0
+            half = peak * 0.5
+            above = centers[proj >= half]
+            return float(above[-1] - above[0]) if len(above) >= 2 else 0.0
+
+        fwhm_x = fwhm(H.sum(axis=1), xc)
+        fwhm_z = fwhm(H.sum(axis=0), zc)
+
+        self.info_label.setText(
+            f"E={energy:.1f} eV  |  N_good={n_good}  |  "
+            f"FWHM x={fwhm_x:.1f} µm  z={fwhm_z:.1f} µm  |  "
+            f"center x={cx:.1f} z={cz:.1f} µm"
+        )
+
+        self.canvas.draw_idle()
+
+
 class PvUpdater(qtcore.QObject):
     refresh_requested = qtcore.pyqtSignal()
 
-    def __init__(self, glow, debounce_ms=50):
+    def __init__(self, glow, sample_view=None, debounce_ms=50):
         super().__init__(glow)
         self.glow = glow
+        self.sample_view = sample_view
         self.last = None
         self.pvs = {}
         self.debounce_ms = debounce_ms
@@ -283,14 +395,20 @@ class PvUpdater(qtcore.QObject):
         self.pending_changes.clear()
 
         bl = build_beamline(motors)
-        run_process(bl)
+        outDict = run_process(bl)
         ray_path = bl.export_to_glow()
         self.glow.bl = bl
         self.glow.updateOEsList(ray_path)
         self.glow.customGlWidget.glDraw()
-        self.glow.setWindowTitle(
-            f"XRT Beamline  E={dcm_energy_from_theta(motors['dcm_theta']):.1f} eV"
-        )
+
+        energy = dcm_energy_from_theta(motors['dcm_theta'])
+        self.glow.setWindowTitle(f"XRT Beamline  E={energy:.1f} eV")
+
+        # Update 2D sample view with unfiltered beam
+        if self.sample_view is not None:
+            bs = getattr(bl, '_raw_sample_beam', None)
+            if bs is not None:
+                self.sample_view.update_beam(bs, energy=energy)
 
 
 def main():
@@ -310,7 +428,11 @@ def main():
     glow = xrtglow.xrtGlow(arrayOfRays)
     glow.bl = bl
     glow.setWindowTitle("XRT Beamline")
-    glow.pv_updater = PvUpdater(glow)
+
+    sample_view = SampleView()
+    sample_view.show()
+
+    glow.pv_updater = PvUpdater(glow, sample_view=sample_view)
     glow.pv_updater.log_differences_vs_defaults()
     glow.pv_updater.refresh()
     glow.show()
