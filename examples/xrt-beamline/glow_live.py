@@ -162,12 +162,24 @@ def build_beamline(motors=None):
     return bl
 
 
+def kill_lost(beam):
+    """Kill non-Good rays so subsequent OEs don't process them."""
+    bad = beam.state != 1
+    if np.any(bad):
+        beam.state[bad] = -1
+    return beam
+
+
 def run_process(bl):
     beam = bl.src.shine()
     bd1, bl1 = bl.dcm1.reflect(beam)
+    kill_lost(bd1)
     bg, bl2 = bl.dcm2.reflect(bd1)
+    kill_lost(bg)
     bh, bhl = bl.hfm.reflect(bg)
+    kill_lost(bh)
     bv, bvl = bl.vfm.reflect(bh)
+    kill_lost(bv)
     bs = bl.sample.expose(bv)
 
     # Keep the real beams for propagation, but give xrtGlow cleaned copies so
