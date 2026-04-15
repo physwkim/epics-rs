@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.9.3 — 2026-04-15
+
+### Examples
+
+- All example IOCs now serve both Channel Access and pvAccess
+  simultaneously:
+  - `ophyd-test-ioc`: switch `AdIoc` to `run_from_args_with_pva`
+    (enable `ad-plugins-rs/pva`)
+  - `scope-ioc`: swap `run_ca_ioc` for
+    `epics_bridge_rs::qsrv::run_ca_pva_qsrv_ioc`
+  - `mqtt-ioc`: same protocol-runner swap
+- Remove `random-signals` example — it was a programmatic
+  `IocBuilder` demo rather than a st.cmd-style IOC, and its
+  unused `db/` file made the divergence more confusing than
+  useful. The seven remaining examples are all st.cmd-driven
+  dual-protocol IOCs.
+
+### Documentation
+
+- Drop "experimental" status from `epics-pva-rs`,
+  `epics-bridge-rs`, and the pvAccess CLI tool section
+  (`pvget-rs`, `pvput-rs`, `pvmonitor-rs`, `pvinfo-rs`) in the
+  top-level and per-crate READMEs.
+- Refresh stale "server-side planned" notes in `epics-pva-rs`
+  README now that the server is shipped.
+
 ## v0.9.2 — 2026-04-16
 
 ### pvAccess / QSRV
