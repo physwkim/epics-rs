@@ -148,33 +148,98 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                 }
             }
 
-            // Run XRT simulation
-            let sim_result = beamline_sim::simulate(&ctx.sim_config, &config.motors);
-
-            // Extract statistics
-            let [cx, cz] = sim_result.capture.centroid();
-            let [rms_x, rms_z] = sim_result.capture.rms_size();
-            let fwhm_x = sim_result.capture.fwhm_x().unwrap_or(0.0);
-            let fwhm_z = sim_result.capture.fwhm_z().unwrap_or(0.0);
-            let efficiency = sim_result.beamline_output.efficiency();
-            let flux = sim_result.capture.total_intensity();
-            let n_captured = sim_result.capture.n_captured;
-
-            // Convert screen intensity to u16 image
-            // Screen stores [ix * nz + iz] (x=row, z=col)
-            // AreaDetector expects [iz * nx + ix] (z=row, x=col) for correct display
+            // Accumulate ray tracing over acquire_time
             let nx = ctx.sim_config.screen_nx;
             let nz = ctx.sim_config.screen_nz;
-            let intensity = &sim_result.capture.intensity;
+            let mut accum = vec![0.0f64; nx * nz];
+            let mut total_captured = 0usize;
+            let mut total_efficiency = 0.0f64;
+            let mut last_cx = 0.0f64;
+            let mut last_cz = 0.0f64;
+            let mut last_fwhm_x = 0.0f64;
+            let mut last_fwhm_z = 0.0f64;
+            let mut last_rms_x = 0.0f64;
+            let mut last_rms_z = 0.0f64;
+            let mut last_source_energy = 0.0f64;
+            let mut last_dcm_energy = 0.0f64;
+            let mut n_iterations = 0u32;
 
-            let max_val = intensity.iter().cloned().fold(0.0_f64, f64::max);
+            loop {
+                // Check for stop
+                match ctx.acq_rx.try_recv() {
+                    Ok(AcqCommand::Stop) => {
+                        ctx.end_acquisition(config.wait_for_plugins);
+                        break;
+                    }
+                    Ok(AcqCommand::Start) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        ctx.end_acquisition(config.wait_for_plugins);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+
+                // Check dirty flags for motor changes
+                let dirty_flags = ctx.dirty.lock().take();
+                if dirty_flags.any {
+                    if let Ok(cfg) =
+                        XrtConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.xrt)
+                    {
+                        config = cfg;
+                    }
+                    // Reset accumulator on motor change
+                    accum.fill(0.0);
+                    total_captured = 0;
+                    n_iterations = 0;
+                }
+
+                // Run one simulation iteration
+                let sim_result = beamline_sim::simulate(&ctx.sim_config, &config.motors);
+
+                // Accumulate intensity
+                for (a, &v) in accum.iter_mut().zip(sim_result.capture.intensity.iter()) {
+                    *a += v;
+                }
+                total_captured += sim_result.capture.n_captured;
+                total_efficiency += sim_result.beamline_output.efficiency();
+                n_iterations += 1;
+
+                // Update stats from latest run
+                let [cx, cz] = sim_result.capture.centroid();
+                let [rms_x, rms_z] = sim_result.capture.rms_size();
+                last_cx = cx;
+                last_cz = cz;
+                last_fwhm_x = sim_result.capture.fwhm_x().unwrap_or(0.0);
+                last_fwhm_z = sim_result.capture.fwhm_z().unwrap_or(0.0);
+                last_rms_x = rms_x;
+                last_rms_z = rms_z;
+                last_source_energy = sim_result.source_energy;
+                last_dcm_energy = sim_result.dcm_energy;
+
+                // Check if acquire_time reached
+                if start_time.elapsed().as_secs_f64() >= config.acquire_time {
+                    break;
+                }
+            }
+
+            let efficiency = if n_iterations > 0 { total_efficiency / n_iterations as f64 } else { 0.0 };
+            let flux = accum.iter().sum::<f64>();
+            let n_captured = total_captured;
+            let cx = last_cx;
+            let cz = last_cz;
+            let fwhm_x = last_fwhm_x;
+            let fwhm_z = last_fwhm_z;
+            let rms_x = last_rms_x;
+            let rms_z = last_rms_z;
+
+            // Convert accumulated intensity to u16 image (transpose for AD)
+            let max_val = accum.iter().cloned().fold(0.0_f64, f64::max);
             let scale = if max_val > 0.0 { 65000.0 / max_val } else { 0.0 };
 
-            // Transpose: [ix*nz+iz] → [iz*nx+ix]
             let mut u16_data = vec![0u16; nx * nz];
             for ix in 0..nx {
                 for iz in 0..nz {
-                    let v = intensity[ix * nz + iz] * scale;
+                    let v = accum[ix * nz + iz] * scale;
                     u16_data[iz * nx + ix] = v.round().clamp(0.0, 65535.0) as u16;
                 }
             }
@@ -189,14 +254,6 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                 attributes: ad_core_rs::attributes::NDAttributeList::new(),
                 codec: None,
             };
-
-            // Wait for acquire_time
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let delay = (config.acquire_time - elapsed).max(1e-5);
-            if wait_for_stop(&ctx.acq_rx, Duration::from_secs_f64(delay)) {
-                ctx.end_acquisition(config.wait_for_plugins);
-                break;
-            }
 
             // Update counters
             num_counter += 1;
@@ -243,12 +300,12 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                     asyn_rs::request::ParamSetValue::Float64 {
                         reason: ctx.xrt.sim_source_energy,
                         addr: 0,
-                        value: sim_result.source_energy,
+                        value: last_source_energy,
                     },
                     asyn_rs::request::ParamSetValue::Float64 {
                         reason: ctx.xrt.sim_dcm_energy,
                         addr: 0,
-                        value: sim_result.dcm_energy,
+                        value: last_dcm_energy,
                     },
                     asyn_rs::request::ParamSetValue::Float64 {
                         reason: ctx.xrt.sim_efficiency,
