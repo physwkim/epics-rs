@@ -216,6 +216,8 @@ pub struct SimResult {
 }
 
 /// Kill non-Good rays so subsequent OEs don't process them.
+/// Not used after xrt-rs state==1 filter fix, but kept for reference.
+#[allow(dead_code)]
 fn kill_lost_rays(beam: &mut xrt_core::beam::Beam) {
     for i in 0..beam.nrays() {
         if beam.state[i] != 1 {
