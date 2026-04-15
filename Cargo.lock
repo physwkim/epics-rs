@@ -2179,7 +2179,9 @@ dependencies = [
 
 [[package]]
 name = "spvirit-client"
-version = "0.1.8"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcff118f2f2aa879f023fce3484cfe28a228db0b6d9fa72f655d51a3193f8d8b"
 dependencies = [
  "chrono",
  "dns-lookup",
@@ -2194,7 +2196,9 @@ dependencies = [
 
 [[package]]
 name = "spvirit-codec"
-version = "0.1.8"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7297990d3e5c79764184c4fe42747dede26b469b759d40fc694df4e1925418cc"
 dependencies = [
  "hex",
  "spvirit-types",
@@ -2203,7 +2207,9 @@ dependencies = [
 
 [[package]]
 name = "spvirit-server"
-version = "0.1.8"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f2c6d6e8b83e7360f93c98a5ae05c9d3012d796c72e99a764c85da865357d02"
 dependencies = [
  "get_if_addrs",
  "regex",
@@ -2218,7 +2224,9 @@ dependencies = [
 
 [[package]]
 name = "spvirit-types"
-version = "0.1.8"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a90fc39912a601e9e7a6fd48234b5ff9c0d176a91b3bb3b75c91072a9a3b8c"
 
 [[package]]
 name = "std-rs"

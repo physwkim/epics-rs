@@ -9,10 +9,10 @@ repository.workspace = true
 
 [dependencies]
 epics-base-rs = { workspace = true }
-spvirit-client = "0.1.8"
-spvirit-codec = "0.1.8"
-spvirit-server = "0.1.8"
-spvirit-types = "0.1.8"
+spvirit-client = "0.1.9"
+spvirit-codec = "0.1.9"
+spvirit-server = "0.1.9"
+spvirit-types = "0.1.9"
 tracing = "0.1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
