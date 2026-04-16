@@ -127,7 +127,7 @@ epics-rs/
     ├── mini-beamline/    # Beamline simulator with DCM, slit, BPM, detectors
     ├── sim-detector/     # areaDetector simulation driver
     ├── xrt-beamline/     # X-ray beamline with real-time ray tracing (xrt-rs)
-    ├── qsrv-ioc/         # QSRV dual-protocol CA+PVA demo
+    ├── qsrv-ioc/         # QSRV group PV demo (PVA composite over CA records)
     ├── mqtt-ioc/         # MQTT IOC example
     └── ...               # Other examples
 ```
