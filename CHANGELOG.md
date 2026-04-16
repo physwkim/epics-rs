@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.9.4 — 2026-04-16
+
+### Async / reliable plugin data path
+
+- **`asyn-rs`, `ad-core-rs`** — plugin pipeline on a fully async data
+  path with bounded backpressure for parameter updates and array
+  propagation.
+- **`ad-core-rs`** — driver-facing async runtime facade (`rt::spawn`,
+  `rt::timeout`, `rt::CommandReceiver`, …) so drivers no longer depend
+  on `tokio` directly. All example acquisition tasks migrated.
+
+### Scan scheduler
+
+- Dedupe entries on registration — a record can no longer be scanned
+  twice after rate changes.
+- Preserve PINI → init-hook ordering across the dual schedulers.
+
+### mqtt-rs
+
+- Connected PV no longer latches at 0 after a recoverable `rumqttc`
+  state error. Connected=1 is now also restored on any inbound
+  `Publish` or `PingResp`, not just `ConnAck`.
+- `mqtt-ioc` installs `tracing_subscriber` (EnvFilter, default `info`,
+  `RUST_LOG`-controlled) so MQTT connection errors and reconnects
+  reach stdout.
+
 ## v0.9.3 — 2026-04-15 — First production-ready pvAccess support
 
 `epics-rs` now ships a full pvAccess (PVA) stack — client, server,
