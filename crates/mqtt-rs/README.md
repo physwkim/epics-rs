@@ -13,7 +13,7 @@ Inspired by [epicsMQTT](https://github.com/epics-modules/mqtt) (C++ MQTT support
 - **JSON payloads** — extract nested fields via dot-path (e.g. `sensor.temperature`)
 - **Bidirectional** — input records subscribe, output records publish
 - **Auto-reconnect** — rumqttc handles broker reconnection transparently
-- **Connection status PV** — bi record with alarm on disconnect
+- **Connection status PV** — bi record with alarm on disconnect; tracked via ConnAck *and* inbound activity (Publish / PingResp) so the PV cannot get stuck at 0 after a recoverable rumqttc error
 - **Zigbee2MQTT builders** — optional device type builders for Z2M (Plug, Light, Switch, TempSensor, Motion, Remote)
 
 ## Topic Address Format
@@ -179,6 +179,49 @@ app = register_z2m_commands(app);  // adds mqttZ2m* commands
 | asynOctet | `FLAT:STRING` | `JSON:STRING` | Read / Write |
 | asynInt32Array | `FLAT:INTARRAY` | — | Read / Write |
 | asynFloat64Array | `FLAT:FLOATARRAY` | — | Read / Write |
+
+## Connection Status PV
+
+`mqttDriverConfigure`'s optional 5th argument creates a `bi` record wired to an
+internal `_MQTT_CONNECTED` asyn parameter:
+
+```
+mqttDriverConfigure("MQTT1", "mqtt://broker:1883", "clientId", 1, "TEST:MQTT:Connected")
+```
+
+The record is defined with `ZNAM="Disconnected"`, `ONAM="Connected"`, and
+`ZSV="MAJOR"` (disconnect raises a MAJOR alarm). The driver flips the
+underlying value based on the MQTT event stream:
+
+| Event | Connected PV |
+|-------|--------------|
+| `Incoming::ConnAck` (fresh handshake / every reconnect) | `1` |
+| `Incoming::Publish` (subscribed topic message) — when flag is `0` | `1` |
+| `Incoming::PingResp` (keep-alive response) — when flag is `0` | `1` |
+| `eventloop.poll()` returns `Err(_)` (any `ConnectionError`) | `0` |
+
+Publish/PingResp fallbacks exist because some `rumqttc` errors are recoverable
+state errors (e.g. packet-id collision) that return `Err` *without* tearing
+down the TCP/MQTT session. Without these fallbacks the PV would latch at `0`
+even while data keeps flowing. Any subsequent proof-of-life packet (a
+subscribed Publish, a PingResp to the keep-alive heartbeat) will automatically
+restore the PV to `1`.
+
+## Logging
+
+mqtt-rs emits `tracing` events; they are silent unless your binary installs a
+subscriber. The `mqtt-ioc` example does this via `tracing_subscriber::fmt`;
+for your own IOC add the same (or any subscriber) to see mqtt-rs output:
+
+| Event | Level | Message |
+|-------|-------|---------|
+| Reconnect handshake | `info` | `MQTT connected, subscribing to N topics` |
+| `poll()` error | `error` | `MQTT connection error: <ConnectionError variant>` |
+| Connected=1 restored from Publish/PingResp | `debug` | `MQTT {Publish,PingResp} received while Connected=0 — restoring Connected=1` |
+
+With the default filter `info` you see reconnects and errors. Use
+`RUST_LOG=info,mqtt_rs=debug` to additionally see the recovery path (useful
+when diagnosing why the Connected PV moved).
 
 ## Dependencies
 

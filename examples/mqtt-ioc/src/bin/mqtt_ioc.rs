@@ -11,6 +11,16 @@ use epics_ca_rs::server::ioc_app::IocApplication;
 
 #[epics_base_rs::epics_main]
 async fn main() -> CaResult<()> {
+    // Install a tracing subscriber so mqtt-rs log lines (e.g.,
+    // "MQTT connection error: ...", "MQTT connected, subscribing ...")
+    // actually reach stdout. Controlled via `RUST_LOG` (defaults to info).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+
     let args: Vec<String> = std::env::args().collect();
 
     epics_base_rs::runtime::env::set_default("MQTT_IOC", env!("CARGO_MANIFEST_DIR"));

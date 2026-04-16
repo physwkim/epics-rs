@@ -40,24 +40,30 @@ pub async fn mqtt_event_loop(
 
     // Subscriptions are driven exclusively on ConnAck (covers both the first
     // connect and every reconnect), so no pre-loop subscribe is needed.
+    //
+    // `is_connected` mirrors the Connected PV locally so we can detect the
+    // "stuck at 0" case where a recoverable rumqttc error flipped the PV to 0
+    // but the underlying TCP/MQTT session is still alive (no ConnAck will come
+    // to flip it back). Any inbound packet (`Publish`, `PingResp`) is direct
+    // proof the session is alive, so we use it as a fallback recovery signal.
+    let mut is_connected = false;
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Incoming::Publish(publish))) => {
+                if !is_connected {
+                    tracing::debug!(
+                        "MQTT Publish received while Connected=0 — restoring Connected=1"
+                    );
+                    mark_connected(&port_handle, connected_param).await;
+                    is_connected = true;
+                }
                 handle_incoming_message(&publish.topic, &publish.payload, &topic_map, &port_handle)
                     .await;
             }
             Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                 tracing::info!("MQTT connected, subscribing to {} topics", topics.len());
-                let _ = port_handle
-                    .set_params_and_notify(
-                        0,
-                        vec![ParamSetValue::Int32 {
-                            reason: connected_param,
-                            addr: 0,
-                            value: 1,
-                        }],
-                    )
-                    .await;
+                mark_connected(&port_handle, connected_param).await;
+                is_connected = true;
                 // Spawn subscribe so we return to `poll()` immediately — the
                 // event loop is the only thing that drains rumqttc's command
                 // channel, so awaiting subscribe inline risks stalling.
@@ -67,6 +73,15 @@ pub async fn mqtt_event_loop(
                 tokio::spawn(async move {
                     subscribe_all(&sub_client, &sub_topics, sub_qos).await;
                 });
+            }
+            Ok(Event::Incoming(Incoming::PingResp)) => {
+                if !is_connected {
+                    tracing::debug!(
+                        "MQTT PingResp received while Connected=0 — restoring Connected=1"
+                    );
+                    mark_connected(&port_handle, connected_param).await;
+                    is_connected = true;
+                }
             }
             Err(e) => {
                 tracing::error!("MQTT connection error: {e}");
@@ -80,11 +95,26 @@ pub async fn mqtt_event_loop(
                         }],
                     )
                     .await;
+                is_connected = false;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             _ => {}
         }
     }
+}
+
+/// Set the Connected PV to 1.
+async fn mark_connected(port_handle: &PortHandle, connected_param: usize) {
+    let _ = port_handle
+        .set_params_and_notify(
+            0,
+            vec![ParamSetValue::Int32 {
+                reason: connected_param,
+                addr: 0,
+                value: 1,
+            }],
+        )
+        .await;
 }
 
 /// Forward publish requests from EPICS writes into rumqttc's command channel.

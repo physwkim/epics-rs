@@ -29,6 +29,27 @@ cargo build --release -p mqtt-ioc --features ioc
 ./target/release/mqtt_ioc examples/mqtt-ioc/ioc/st.cmd
 ```
 
+### Logging
+
+The binary installs a `tracing_subscriber` controlled by `RUST_LOG`
+(default: `info`):
+
+```bash
+# Default — reconnects (info) and errors (error) only
+./target/release/mqtt_ioc examples/mqtt-ioc/ioc/st.cmd
+
+# Also show Connected PV recovery path (Publish/PingResp restoring Connected=1)
+RUST_LOG=info,mqtt_rs=debug ./target/release/mqtt_ioc examples/mqtt-ioc/ioc/st.cmd
+```
+
+Useful lines to watch for:
+
+- `MQTT connection error: <variant>` — the `rumqttc` `ConnectionError`
+  variant is what tells you whether a disconnect was a real network
+  failure vs. a recoverable state error.
+- `MQTT connected, subscribing to N topics` — logged on every fresh
+  ConnAck (initial connect and every reconnect).
+
 ## Z2M Builder Example
 
 The default `st.cmd` uses Z2M device type builders. Each line registers MQTT topics and creates EPICS records automatically:
