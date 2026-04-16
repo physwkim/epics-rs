@@ -14,7 +14,9 @@ use asyn_rs::user::AsynUser;
 use ad_core_rs::driver::{ADDriver, ADDriverBase, ImageMode};
 use ad_core_rs::ndarray_pool::NDArrayPool;
 use ad_core_rs::params::ADBaseParams;
-use ad_core_rs::plugin::channel::{ArrayPublisher, NDArrayOutput, NDArraySender, QueuedArrayCounter};
+use ad_core_rs::plugin::channel::{
+    ArrayPublisher, NDArrayOutput, NDArraySender, QueuedArrayCounter,
+};
 
 use crate::beamline_sim::{MotorPositions, SimConfig};
 

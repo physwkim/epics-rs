@@ -415,9 +415,21 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
         let sort_free = self.sort_size - self.sort_buffer.len();
         ParamBatch {
             addr0: vec![
-                ParamSetValue::Int32 { reason: self.plugin_params.sort_free, addr: 0, value: sort_free },
-                ParamSetValue::Int32 { reason: self.plugin_params.disordered_arrays, addr: 0, value: self.sort_buffer.disordered_arrays },
-                ParamSetValue::Int32 { reason: self.plugin_params.dropped_output_arrays, addr: 0, value: self.sort_buffer.dropped_output_arrays },
+                ParamSetValue::Int32 {
+                    reason: self.plugin_params.sort_free,
+                    addr: 0,
+                    value: sort_free,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.plugin_params.disordered_arrays,
+                    addr: 0,
+                    value: self.sort_buffer.disordered_arrays,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.plugin_params.dropped_output_arrays,
+                    addr: 0,
+                    value: self.sort_buffer.dropped_output_arrays,
+                },
             ],
             extra: std::collections::HashMap::new(),
         }
@@ -496,23 +508,73 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
             let info = report_arr.info();
             let color_mode = if report_arr.dims.len() <= 2 { 0 } else { 2 };
             addr0.extend([
-                ParamSetValue::Int32 { reason: self.ndarray_params.array_counter, addr: 0, value: self.array_counter },
-                ParamSetValue::Int32 { reason: self.ndarray_params.unique_id, addr: 0, value: report_arr.unique_id },
-                ParamSetValue::Int32 { reason: self.ndarray_params.n_dimensions, addr: 0, value: report_arr.dims.len() as i32 },
-                ParamSetValue::Int32 { reason: self.ndarray_params.array_size_x, addr: 0, value: info.x_size as i32 },
-                ParamSetValue::Int32 { reason: self.ndarray_params.array_size_y, addr: 0, value: info.y_size as i32 },
-                ParamSetValue::Int32 { reason: self.ndarray_params.array_size_z, addr: 0, value: info.color_size as i32 },
-                ParamSetValue::Int32 { reason: self.ndarray_params.array_size, addr: 0, value: info.total_bytes as i32 },
-                ParamSetValue::Int32 { reason: self.ndarray_params.data_type, addr: 0, value: report_arr.data.data_type() as i32 },
-                ParamSetValue::Int32 { reason: self.ndarray_params.color_mode, addr: 0, value: color_mode },
-                ParamSetValue::Float64 { reason: self.ndarray_params.timestamp_rbv, addr: 0, value: report_arr.timestamp.as_f64() },
-                ParamSetValue::Int32 { reason: self.ndarray_params.epics_ts_sec, addr: 0, value: report_arr.timestamp.sec as i32 },
-                ParamSetValue::Int32 { reason: self.ndarray_params.epics_ts_nsec, addr: 0, value: report_arr.timestamp.nsec as i32 },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.array_counter,
+                    addr: 0,
+                    value: self.array_counter,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.unique_id,
+                    addr: 0,
+                    value: report_arr.unique_id,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.n_dimensions,
+                    addr: 0,
+                    value: report_arr.dims.len() as i32,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.array_size_x,
+                    addr: 0,
+                    value: info.x_size as i32,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.array_size_y,
+                    addr: 0,
+                    value: info.y_size as i32,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.array_size_z,
+                    addr: 0,
+                    value: info.color_size as i32,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.array_size,
+                    addr: 0,
+                    value: info.total_bytes as i32,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.data_type,
+                    addr: 0,
+                    value: report_arr.data.data_type() as i32,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.color_mode,
+                    addr: 0,
+                    value: color_mode,
+                },
+                ParamSetValue::Float64 {
+                    reason: self.ndarray_params.timestamp_rbv,
+                    addr: 0,
+                    value: report_arr.timestamp.as_f64(),
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.epics_ts_sec,
+                    addr: 0,
+                    value: report_arr.timestamp.sec as i32,
+                },
+                ParamSetValue::Int32 {
+                    reason: self.ndarray_params.epics_ts_nsec,
+                    addr: 0,
+                    value: report_arr.timestamp.nsec as i32,
+                },
             ]);
         }
 
         addr0.push(ParamSetValue::Float64 {
-            reason: self.plugin_params.execution_time, addr: 0, value: elapsed_ms,
+            reason: self.plugin_params.execution_time,
+            addr: 0,
+            value: elapsed_ms,
         });
 
         // ArrayRate_RBV is computed by a calc record in the DB template
@@ -521,21 +583,69 @@ impl<P: NDPluginProcess> SharedProcessorInner<P> {
         // Plugin-specific param updates.
         for update in &param_updates {
             match update {
-                ParamUpdate::Int32 { reason, addr, value } => {
-                    let pv = ParamSetValue::Int32 { reason: *reason, addr: *addr, value: *value };
-                    if *addr == 0 { addr0.push(pv); } else { extra.entry(*addr).or_default().push(pv); }
+                ParamUpdate::Int32 {
+                    reason,
+                    addr,
+                    value,
+                } => {
+                    let pv = ParamSetValue::Int32 {
+                        reason: *reason,
+                        addr: *addr,
+                        value: *value,
+                    };
+                    if *addr == 0 {
+                        addr0.push(pv);
+                    } else {
+                        extra.entry(*addr).or_default().push(pv);
+                    }
                 }
-                ParamUpdate::Float64 { reason, addr, value } => {
-                    let pv = ParamSetValue::Float64 { reason: *reason, addr: *addr, value: *value };
-                    if *addr == 0 { addr0.push(pv); } else { extra.entry(*addr).or_default().push(pv); }
+                ParamUpdate::Float64 {
+                    reason,
+                    addr,
+                    value,
+                } => {
+                    let pv = ParamSetValue::Float64 {
+                        reason: *reason,
+                        addr: *addr,
+                        value: *value,
+                    };
+                    if *addr == 0 {
+                        addr0.push(pv);
+                    } else {
+                        extra.entry(*addr).or_default().push(pv);
+                    }
                 }
-                ParamUpdate::Octet { reason, addr, value } => {
-                    let pv = ParamSetValue::Octet { reason: *reason, addr: *addr, value: value.clone() };
-                    if *addr == 0 { addr0.push(pv); } else { extra.entry(*addr).or_default().push(pv); }
+                ParamUpdate::Octet {
+                    reason,
+                    addr,
+                    value,
+                } => {
+                    let pv = ParamSetValue::Octet {
+                        reason: *reason,
+                        addr: *addr,
+                        value: value.clone(),
+                    };
+                    if *addr == 0 {
+                        addr0.push(pv);
+                    } else {
+                        extra.entry(*addr).or_default().push(pv);
+                    }
                 }
-                ParamUpdate::Float64Array { reason, addr, value } => {
-                    let pv = ParamSetValue::Float64Array { reason: *reason, addr: *addr, value: value.clone() };
-                    if *addr == 0 { addr0.push(pv); } else { extra.entry(*addr).or_default().push(pv); }
+                ParamUpdate::Float64Array {
+                    reason,
+                    addr,
+                    value,
+                } => {
+                    let pv = ParamSetValue::Float64Array {
+                        reason: *reason,
+                        addr: *addr,
+                        value: value.clone(),
+                    };
+                    if *addr == 0 {
+                        addr0.push(pv);
+                    } else {
+                        extra.entry(*addr).or_default().push(pv);
+                    }
                 }
             }
         }
@@ -584,7 +694,10 @@ struct ParamBatch {
 
 impl ParamBatch {
     fn empty() -> Self {
-        Self { addr0: Vec::new(), extra: std::collections::HashMap::new() }
+        Self {
+            addr0: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }
     }
 
     fn merge(&mut self, other: ParamBatch) {
@@ -1140,23 +1253,29 @@ fn plugin_data_loop<P: NDPluginProcess>(
                             // Handle sort param changes
                             if reason == sort_mode_reason {
                                 let mode = value.as_i32();
-                                let mut guard = shared.lock();
-                                guard.sort_mode = mode;
-                                if mode == 0 {
-                                    let output = guard.flush_sort_buffer();
-                                    let senders = guard.output.lock().senders_clone();
-                                    let port = guard.port_handle.clone();
-                                    sort_flush_active = false;
-                                    drop(guard);
+                                // Scope the guard so clippy can verify the lock
+                                // is released before any await.
+                                let flush_work = {
+                                    let mut guard = shared.lock();
+                                    guard.sort_mode = mode;
+                                    if mode == 0 {
+                                        let output = guard.flush_sort_buffer();
+                                        let senders = guard.output.lock().senders_clone();
+                                        let port = guard.port_handle.clone();
+                                        sort_flush_active = false;
+                                        Some((output, senders, port))
+                                    } else {
+                                        sort_flush_active = guard.sort_time > 0.0;
+                                        if sort_flush_active {
+                                            let dur = std::time::Duration::from_secs_f64(guard.sort_time);
+                                            sort_flush_interval = tokio::time::interval(dur);
+                                        }
+                                        None
+                                    }
+                                };
+                                if let Some((output, senders, port)) = flush_work {
                                     output.publish_arrays(&senders).await;
                                     output.batch.flush(&port).await;
-                                } else {
-                                    sort_flush_active = guard.sort_time > 0.0;
-                                    if sort_flush_active {
-                                        let dur = std::time::Duration::from_secs_f64(guard.sort_time);
-                                        sort_flush_interval = tokio::time::interval(dur);
-                                    }
-                                    drop(guard);
                                 }
                             }
                             if reason == sort_time_reason {

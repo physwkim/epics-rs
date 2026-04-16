@@ -43,26 +43,30 @@ impl AcquisitionContext {
         if wait_for_plugins {
             self.queued_counter.wait_until_zero(Duration::from_secs(5));
         }
-        if let Err(e) = self.port_handle.set_params_and_notify(
-            0,
-            vec![
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: self.ad.acquire_busy,
-                    addr: 0,
-                    value: 0,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: self.ad.status,
-                    addr: 0,
-                    value: ADStatus::Idle as i32,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: self.ad.acquire,
-                    addr: 0,
-                    value: 0,
-                },
-            ],
-        ).await {
+        if let Err(e) = self
+            .port_handle
+            .set_params_and_notify(
+                0,
+                vec![
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: self.ad.acquire_busy,
+                        addr: 0,
+                        value: 0,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: self.ad.status,
+                        addr: 0,
+                        value: ADStatus::Idle as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: self.ad.acquire,
+                        addr: 0,
+                        value: 0,
+                    },
+                ],
+            )
+            .await
+        {
             eprintln!("set_params_and_notify error (end_acquisition): {e}");
         }
     }
@@ -151,12 +155,15 @@ impl TaskState {
 }
 
 /// Check if a Stop command has been received within the given duration.
-async fn wait_for_stop(acq_rx: &mut tokio::sync::mpsc::Receiver<AcqCommand>, duration: Duration) -> bool {
+async fn wait_for_stop(
+    acq_rx: &mut tokio::sync::mpsc::Receiver<AcqCommand>,
+    duration: Duration,
+) -> bool {
     match tokio::time::timeout(duration, acq_rx.recv()).await {
         Ok(Some(AcqCommand::Stop)) => true,
         Ok(Some(AcqCommand::Start)) => false,
-        Ok(None) => true,   // channel closed
-        Err(_) => false,     // timeout
+        Ok(None) => true, // channel closed
+        Err(_) => false,  // timeout
     }
 }
 
@@ -188,26 +195,30 @@ async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
         }
 
         // Initialize counters via PortHandle
-        if let Err(e) = ctx.port_handle.set_params_and_notify(
-            0,
-            vec![
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: ctx.ad.num_images_counter,
-                    addr: 0,
-                    value: 0,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: ctx.ad.status,
-                    addr: 0,
-                    value: ADStatus::Acquire as i32,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: ctx.ad.acquire_busy,
-                    addr: 0,
-                    value: 1,
-                },
-            ],
-        ).await {
+        if let Err(e) = ctx
+            .port_handle
+            .set_params_and_notify(
+                0,
+                vec![
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.num_images_counter,
+                        addr: 0,
+                        value: 0,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.status,
+                        addr: 0,
+                        value: ADStatus::Acquire as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.acquire_busy,
+                        addr: 0,
+                        value: 1,
+                    },
+                ],
+            )
+            .await
+        {
             eprintln!("set_params_and_notify error (acquire start): {e}");
         }
 
@@ -235,7 +246,9 @@ async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
             // Only re-read config when parameters changed
             if reset {
                 config =
-                    match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim).await {
+                    match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim)
+                        .await
+                    {
                         Ok(cfg) => cfg,
                         Err(_) => break,
                     };
@@ -261,36 +274,40 @@ async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
 
             // Counter updates + callParamCallbacks always run (like C EPICS).
             // Only doCallbacksGenericPointer (publish) is gated by array_callbacks.
-            if let Err(e) = ctx.port_handle.set_params_and_notify(
-                0,
-                vec![
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.base.array_counter,
-                        addr: 0,
-                        value: array_counter,
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.num_images_counter,
-                        addr: 0,
-                        value: num_counter,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.ad.base.timestamp_rbv,
-                        addr: 0,
-                        value: frame.timestamp.as_f64(),
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.base.epics_ts_sec,
-                        addr: 0,
-                        value: frame.timestamp.sec as i32,
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.base.epics_ts_nsec,
-                        addr: 0,
-                        value: frame.timestamp.nsec as i32,
-                    },
-                ],
-            ).await {
+            if let Err(e) = ctx
+                .port_handle
+                .set_params_and_notify(
+                    0,
+                    vec![
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.base.array_counter,
+                            addr: 0,
+                            value: array_counter,
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.num_images_counter,
+                            addr: 0,
+                            value: num_counter,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.ad.base.timestamp_rbv,
+                            addr: 0,
+                            value: frame.timestamp.as_f64(),
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.base.epics_ts_sec,
+                            addr: 0,
+                            value: frame.timestamp.sec as i32,
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.base.epics_ts_nsec,
+                            addr: 0,
+                            value: frame.timestamp.nsec as i32,
+                        },
+                    ],
+                )
+                .await
+            {
                 eprintln!("set_params_and_notify error (frame update): {e}");
             }
 

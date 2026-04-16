@@ -43,18 +43,21 @@ pub async fn mqtt_event_loop(
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                handle_incoming_message(&publish.topic, &publish.payload, &topic_map, &port_handle).await;
+                handle_incoming_message(&publish.topic, &publish.payload, &topic_map, &port_handle)
+                    .await;
             }
             Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                 tracing::info!("MQTT connected, subscribing to {} topics", topics.len());
-                let _ = port_handle.set_params_and_notify(
-                    0,
-                    vec![ParamSetValue::Int32 {
-                        reason: connected_param,
-                        addr: 0,
-                        value: 1,
-                    }],
-                ).await;
+                let _ = port_handle
+                    .set_params_and_notify(
+                        0,
+                        vec![ParamSetValue::Int32 {
+                            reason: connected_param,
+                            addr: 0,
+                            value: 1,
+                        }],
+                    )
+                    .await;
                 // Spawn subscribe so we return to `poll()` immediately — the
                 // event loop is the only thing that drains rumqttc's command
                 // channel, so awaiting subscribe inline risks stalling.
@@ -67,14 +70,16 @@ pub async fn mqtt_event_loop(
             }
             Err(e) => {
                 tracing::error!("MQTT connection error: {e}");
-                let _ = port_handle.set_params_and_notify(
-                    0,
-                    vec![ParamSetValue::Int32 {
-                        reason: connected_param,
-                        addr: 0,
-                        value: 0,
-                    }],
-                ).await;
+                let _ = port_handle
+                    .set_params_and_notify(
+                        0,
+                        vec![ParamSetValue::Int32 {
+                            reason: connected_param,
+                            addr: 0,
+                            value: 0,
+                        }],
+                    )
+                    .await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             _ => {}
@@ -190,10 +195,10 @@ async fn handle_incoming_message(
         }
     }
 
-    if !batch_updates.is_empty() {
-        if let Err(e) = port_handle.set_params_and_notify(0, batch_updates).await {
-            eprintln!("set_params_and_notify error (mqtt payload): {e}");
-        }
+    if !batch_updates.is_empty()
+        && let Err(e) = port_handle.set_params_and_notify(0, batch_updates).await
+    {
+        eprintln!("set_params_and_notify error (mqtt payload): {e}");
     }
 }
 

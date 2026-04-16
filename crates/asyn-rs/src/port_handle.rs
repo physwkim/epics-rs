@@ -181,7 +181,8 @@ impl PortHandle {
 
     pub async fn write_int32(&self, reason: usize, addr: i32, value: i32) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit_async(RequestOp::Int32Write { value }, user).await?;
+        self.submit_async(RequestOp::Int32Write { value }, user)
+            .await?;
         Ok(())
     }
 
@@ -196,7 +197,8 @@ impl PortHandle {
 
     pub async fn write_int64(&self, reason: usize, addr: i32, value: i64) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit_async(RequestOp::Int64Write { value }, user).await?;
+        self.submit_async(RequestOp::Int64Write { value }, user)
+            .await?;
         Ok(())
     }
 
@@ -211,7 +213,8 @@ impl PortHandle {
 
     pub async fn write_float64(&self, reason: usize, addr: i32, value: f64) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit_async(RequestOp::Float64Write { value }, user).await?;
+        self.submit_async(RequestOp::Float64Write { value }, user)
+            .await?;
         Ok(())
     }
 
@@ -222,7 +225,9 @@ impl PortHandle {
         buf_size: usize,
     ) -> AsynResult<Vec<u8>> {
         let user = AsynUser::new(reason).with_addr(addr);
-        let result = self.submit_async(RequestOp::OctetRead { buf_size }, user).await?;
+        let result = self
+            .submit_async(RequestOp::OctetRead { buf_size }, user)
+            .await?;
         result.data.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "octet read returned no data".into(),
@@ -231,7 +236,8 @@ impl PortHandle {
 
     pub async fn write_octet(&self, reason: usize, addr: i32, data: Vec<u8>) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit_async(RequestOp::OctetWrite { data }, user).await?;
+        self.submit_async(RequestOp::OctetWrite { data }, user)
+            .await?;
         Ok(())
     }
 
@@ -297,7 +303,8 @@ impl PortHandle {
 
     pub async fn write_enum(&self, reason: usize, addr: i32, index: usize) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit_async(RequestOp::EnumWrite { index }, user).await?;
+        self.submit_async(RequestOp::EnumWrite { index }, user)
+            .await?;
         Ok(())
     }
 
@@ -459,7 +466,8 @@ impl PortHandle {
         addr: i32,
         updates: Vec<crate::request::ParamSetValue>,
     ) -> AsynResult<()> {
-        self.enqueue(RequestOp::CallParamCallbacks { addr, updates }, addr).await
+        self.enqueue(RequestOp::CallParamCallbacks { addr, updates }, addr)
+            .await
     }
 
     /// Sync version of [`set_params_and_notify`] for non-async contexts

@@ -36,37 +36,44 @@ impl AcquisitionContext {
         if wait_for_plugins {
             self.queued_counter.wait_until_zero(Duration::from_secs(5));
         }
-        if let Err(e) = self.port_handle.set_params_and_notify(
-            0,
-            vec![
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: self.ad.acquire_busy,
-                    addr: 0,
-                    value: 0,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: self.ad.status,
-                    addr: 0,
-                    value: ADStatus::Idle as i32,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: self.ad.acquire,
-                    addr: 0,
-                    value: 0,
-                },
-            ],
-        ).await {
+        if let Err(e) = self
+            .port_handle
+            .set_params_and_notify(
+                0,
+                vec![
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: self.ad.acquire_busy,
+                        addr: 0,
+                        value: 0,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: self.ad.status,
+                        addr: 0,
+                        value: ADStatus::Idle as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: self.ad.acquire,
+                        addr: 0,
+                        value: 0,
+                    },
+                ],
+            )
+            .await
+        {
             eprintln!("set_params_and_notify error (end_acquisition): {e}");
         }
     }
 }
 
-async fn wait_for_stop(acq_rx: &mut tokio::sync::mpsc::Receiver<AcqCommand>, duration: Duration) -> bool {
+async fn wait_for_stop(
+    acq_rx: &mut tokio::sync::mpsc::Receiver<AcqCommand>,
+    duration: Duration,
+) -> bool {
     match tokio::time::timeout(duration, acq_rx.recv()).await {
         Ok(Some(AcqCommand::Stop)) => true,
         Ok(Some(AcqCommand::Start)) => false,
-        Ok(None) => true,   // channel closed
-        Err(_) => false,     // timeout
+        Ok(None) => true, // channel closed
+        Err(_) => false,  // timeout
     }
 }
 
@@ -95,26 +102,30 @@ async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
         }
 
         // Initialize counters
-        if let Err(e) = ctx.port_handle.set_params_and_notify(
-            0,
-            vec![
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: ctx.ad.num_images_counter,
-                    addr: 0,
-                    value: 0,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: ctx.ad.status,
-                    addr: 0,
-                    value: ADStatus::Acquire as i32,
-                },
-                asyn_rs::request::ParamSetValue::Int32 {
-                    reason: ctx.ad.acquire_busy,
-                    addr: 0,
-                    value: 1,
-                },
-            ],
-        ).await {
+        if let Err(e) = ctx
+            .port_handle
+            .set_params_and_notify(
+                0,
+                vec![
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.num_images_counter,
+                        addr: 0,
+                        value: 0,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.status,
+                        addr: 0,
+                        value: ADStatus::Acquire as i32,
+                    },
+                    asyn_rs::request::ParamSetValue::Int32 {
+                        reason: ctx.ad.acquire_busy,
+                        addr: 0,
+                        value: 1,
+                    },
+                ],
+            )
+            .await
+        {
             eprintln!("set_params_and_notify error (acquire start): {e}");
         }
 
@@ -183,7 +194,8 @@ async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
                 let dirty_flags = ctx.dirty.lock().take();
                 if dirty_flags.any {
                     if let Ok(cfg) =
-                        XrtConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.xrt).await
+                        XrtConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.xrt)
+                            .await
                     {
                         config = cfg;
                     }
@@ -275,97 +287,101 @@ async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
             frame.timestamp = ad_core_rs::timestamp::EpicsTimestamp::now();
 
             // Update simulation readback PVs + frame counters
-            if let Err(e) = ctx.port_handle.set_params_and_notify(
-                0,
-                vec![
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.base.array_counter,
-                        addr: 0,
-                        value: array_counter,
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.num_images_counter,
-                        addr: 0,
-                        value: num_counter,
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.base.array_size_x,
-                        addr: 0,
-                        value: nx as i32,
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.base.array_size_y,
-                        addr: 0,
-                        value: nz as i32,
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.ad.base.array_size,
-                        addr: 0,
-                        value: (nx * nz * 2) as i32,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.ad.base.timestamp_rbv,
-                        addr: 0,
-                        value: frame.timestamp.as_f64(),
-                    },
-                    // Simulation readbacks
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_source_energy,
-                        addr: 0,
-                        value: last_source_energy,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_dcm_energy,
-                        addr: 0,
-                        value: last_dcm_energy,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_efficiency,
-                        addr: 0,
-                        value: efficiency * 100.0,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_flux,
-                        addr: 0,
-                        value: flux,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_centroid_x,
-                        addr: 0,
-                        value: cx,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_centroid_z,
-                        addr: 0,
-                        value: cz,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_fwhm_x,
-                        addr: 0,
-                        value: fwhm_x,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_fwhm_z,
-                        addr: 0,
-                        value: fwhm_z,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_rms_x,
-                        addr: 0,
-                        value: rms_x,
-                    },
-                    asyn_rs::request::ParamSetValue::Float64 {
-                        reason: ctx.xrt.sim_rms_z,
-                        addr: 0,
-                        value: rms_z,
-                    },
-                    asyn_rs::request::ParamSetValue::Int32 {
-                        reason: ctx.xrt.sim_nrays,
-                        addr: 0,
-                        value: n_captured as i32,
-                    },
-                ],
-            ).await {
+            if let Err(e) = ctx
+                .port_handle
+                .set_params_and_notify(
+                    0,
+                    vec![
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.base.array_counter,
+                            addr: 0,
+                            value: array_counter,
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.num_images_counter,
+                            addr: 0,
+                            value: num_counter,
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.base.array_size_x,
+                            addr: 0,
+                            value: nx as i32,
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.base.array_size_y,
+                            addr: 0,
+                            value: nz as i32,
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.ad.base.array_size,
+                            addr: 0,
+                            value: (nx * nz * 2) as i32,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.ad.base.timestamp_rbv,
+                            addr: 0,
+                            value: frame.timestamp.as_f64(),
+                        },
+                        // Simulation readbacks
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_source_energy,
+                            addr: 0,
+                            value: last_source_energy,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_dcm_energy,
+                            addr: 0,
+                            value: last_dcm_energy,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_efficiency,
+                            addr: 0,
+                            value: efficiency * 100.0,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_flux,
+                            addr: 0,
+                            value: flux,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_centroid_x,
+                            addr: 0,
+                            value: cx,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_centroid_z,
+                            addr: 0,
+                            value: cz,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_fwhm_x,
+                            addr: 0,
+                            value: fwhm_x,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_fwhm_z,
+                            addr: 0,
+                            value: fwhm_z,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_rms_x,
+                            addr: 0,
+                            value: rms_x,
+                        },
+                        asyn_rs::request::ParamSetValue::Float64 {
+                            reason: ctx.xrt.sim_rms_z,
+                            addr: 0,
+                            value: rms_z,
+                        },
+                        asyn_rs::request::ParamSetValue::Int32 {
+                            reason: ctx.xrt.sim_nrays,
+                            addr: 0,
+                            value: n_captured as i32,
+                        },
+                    ],
+                )
+                .await
+            {
                 eprintln!("set_params_and_notify error (frame update): {e}");
             }
 
