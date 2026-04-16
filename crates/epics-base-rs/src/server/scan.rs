@@ -55,10 +55,16 @@ impl ScanScheduler {
                     .process_record_with_links(name, &mut visited, 0)
                     .await;
             }
+            // Release non-owner schedulers so they can run their hooks now.
+            self.db.mark_pini_done();
+        } else {
+            // Non-owner: wait for the owner to finish PINI before running hooks.
+            // This preserves the "PINI before after-init hooks" contract.
+            self.db.wait_for_pini().await;
         }
 
-        // Always run the caller's after-init hooks (they may be protocol-specific
-        // — e.g. registering PVA PVs after the DB is loaded).
+        // Run the caller's after-init hooks (protocol-specific, e.g. registering
+        // PVA PVs after the DB is loaded). Always AFTER PINI is done.
         for hook in hooks {
             hook();
         }

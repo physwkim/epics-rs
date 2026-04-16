@@ -93,6 +93,14 @@ struct PvDatabaseInner {
     /// Prevents duplicate scan tasks when multiple protocol servers (CA + PVA)
     /// both try to start scanning on the same DB.
     scan_started: std::sync::atomic::AtomicBool,
+    /// True once PINI processing has completed. Non-owner schedulers await
+    /// this before running their hooks, preserving the "PINI before hooks"
+    /// ordering contract.
+    pini_done: std::sync::atomic::AtomicBool,
+    /// Fired by the scan owner after PINI completes. Non-owners register
+    /// interest on this before re-checking `pini_done` to avoid missing the
+    /// signal (`notify_waiters` does not store a permit).
+    pini_notify: tokio::sync::Notify,
 }
 
 /// Database of all process variables hosted by this server.
@@ -128,6 +136,8 @@ impl PvDatabase {
                 scan_index: RwLock::new(HashMap::new()),
                 cp_links: RwLock::new(HashMap::new()),
                 scan_started: std::sync::atomic::AtomicBool::new(false),
+                pini_done: std::sync::atomic::AtomicBool::new(false),
+                pini_notify: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -137,10 +147,48 @@ impl PvDatabase {
     /// Used by `ScanScheduler::run_with_hooks` to prevent duplicate scan tasks
     /// when multiple protocol servers (CA + PVA) both try to start scanning.
     pub fn try_claim_scan_start(&self) -> bool {
-        !self
-            .inner
+        self.inner
             .scan_started
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Mark PINI processing complete. Wakes any non-owner scan schedulers
+    /// that were waiting before running their hooks.
+    pub fn mark_pini_done(&self) {
+        self.inner
+            .pini_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.pini_notify.notify_waiters();
+    }
+
+    /// Wait until the scan owner has completed PINI processing.
+    /// Returns immediately if PINI has already completed.
+    pub async fn wait_for_pini(&self) {
+        if self
+            .inner
+            .pini_done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        // Register interest BEFORE re-checking the flag to avoid missing a
+        // signal that arrives between the load and the await — `notify_waiters`
+        // does not store a permit for late subscribers.
+        let notified = self.inner.pini_notify.notified();
+        if self
+            .inner
+            .pini_done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        notified.await;
     }
 
     /// Install an async resolver invoked when [`PvDatabase::has_name`]
