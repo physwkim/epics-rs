@@ -17,6 +17,7 @@ use ad_core_rs::params::ADBaseParams;
 use ad_core_rs::plugin::channel::{
     ArrayPublisher, NDArrayOutput, NDArraySender, QueuedArrayCounter,
 };
+use ad_core_rs::runtime as rt;
 
 use crate::beamline_sim::{MotorPositions, SimConfig};
 
@@ -30,7 +31,7 @@ pub struct XrtDetector {
     pub xrt_params: XrtDetectorParams,
     motor_param_set: Vec<usize>,
     dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
-    acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
+    acq_tx: rt::CommandSender<AcqCommand>,
 }
 
 impl XrtDetector {
@@ -39,7 +40,7 @@ impl XrtDetector {
         size_x: i32,
         size_y: i32,
         max_memory: usize,
-        acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
+        acq_tx: rt::CommandSender<AcqCommand>,
         dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
     ) -> AsynResult<Self> {
         let mut ad = ADDriverBase::new(port_name, size_x, size_y, max_memory)?;
@@ -210,7 +211,7 @@ pub fn create_xrt_detector(
     array_output: NDArrayOutput,
     sim_config: SimConfig,
 ) -> AsynResult<XrtDetectorRuntime> {
-    let (acq_tx, acq_rx) = tokio::sync::mpsc::channel(16);
+    let (acq_tx, acq_rx) = rt::command_channel(16);
     let dirty = Arc::new(parking_lot::Mutex::new(DirtyFlags::default()));
     dirty.lock().set();
 

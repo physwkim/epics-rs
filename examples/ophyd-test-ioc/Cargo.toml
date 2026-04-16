@@ -15,7 +15,6 @@ asyn-rs = { workspace = true }
 motor-rs = { workspace = true, optional = true }
 sim-detector = { path = "../sim-detector", optional = true }
 parking_lot = "0.12"
-tokio = { version = "1", features = ["sync", "time", "rt"] }
 rand = "0.9"
 libm = "0.2"
 epics-base-rs = { workspace = true, optional = true }

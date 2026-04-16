@@ -20,6 +20,7 @@ pub mod params;
 pub mod pixel_cast;
 pub mod plugin;
 pub mod roi;
+pub mod runtime;
 pub mod timestamp;
 
 #[cfg(feature = "ioc")]

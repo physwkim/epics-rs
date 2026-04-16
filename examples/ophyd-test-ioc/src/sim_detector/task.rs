@@ -10,6 +10,7 @@ use ad_core_rs::driver::{ADStatus, ImageMode};
 use ad_core_rs::ndarray::{NDArray, NDDataBuffer, NDDimension};
 use ad_core_rs::params::ADBaseParams;
 use ad_core_rs::plugin::channel::{ArrayPublisher, QueuedArrayCounter};
+use ad_core_rs::runtime as rt;
 
 use crate::physics::{self, MovingDotImageConfig};
 
@@ -26,7 +27,7 @@ pub enum AcqCommand {
 
 /// Bundled state for the acquisition task thread.
 pub(crate) struct AcquisitionContext {
-    pub acq_rx: tokio::sync::mpsc::Receiver<AcqCommand>,
+    pub acq_rx: rt::CommandReceiver<AcqCommand>,
     pub port_handle: PortHandle,
     pub publisher: ArrayPublisher,
     pub dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
@@ -73,10 +74,10 @@ impl AcquisitionContext {
 
 /// Check if a Stop command has been received within the given duration.
 async fn wait_for_stop(
-    acq_rx: &mut tokio::sync::mpsc::Receiver<AcqCommand>,
+    acq_rx: &mut rt::CommandReceiver<AcqCommand>,
     duration: Duration,
 ) -> bool {
-    match tokio::time::timeout(duration, acq_rx.recv()).await {
+    match rt::timeout(duration, acq_rx.recv()).await {
         Ok(Some(AcqCommand::Stop)) => true,
         Ok(Some(AcqCommand::Start)) => false,
         Ok(None) => true, // channel closed
@@ -86,18 +87,7 @@ async fn wait_for_stop(
 
 /// Start the acquisition task thread.
 pub(crate) fn start_acquisition_task(ctx: AcquisitionContext) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("MovingDotTask".into())
-        .spawn(move || acquisition_loop(ctx))
-        .expect("failed to spawn MovingDotTask thread")
-}
-
-fn acquisition_loop(ctx: AcquisitionContext) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(acquisition_loop_async(ctx));
+    rt::run_thread_named("MovingDotTask", move || acquisition_loop_async(ctx))
 }
 
 async fn acquisition_loop_async(mut ctx: AcquisitionContext) {

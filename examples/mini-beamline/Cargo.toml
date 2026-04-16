@@ -16,7 +16,6 @@ motor-rs = { workspace = true, optional = true }
 optics-rs = { workspace = true, optional = true }
 rand = "0.9"
 parking_lot = "0.12"
-tokio = { version = "1", features = ["sync", "time", "rt"] }
 libm = "0.2"
 epics-base-rs = { workspace = true, optional = true }
 epics-ca-rs = { workspace = true, optional = true }

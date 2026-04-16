@@ -13,6 +13,7 @@ use ad_core_rs::params::ADBaseParams;
 use ad_core_rs::plugin::channel::{
     ArrayPublisher, NDArrayOutput, NDArraySender, QueuedArrayCounter,
 };
+use ad_core_rs::runtime as rt;
 
 use crate::params::SimDetectorParams;
 use crate::task::{AcqCommand, AcquisitionContext, start_acquisition_task};
@@ -22,7 +23,7 @@ pub struct SimDetector {
     pub ad: ADDriverBase,
     pub sim_params: SimDetectorParams,
     pub dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
-    acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
+    acq_tx: rt::CommandSender<AcqCommand>,
 }
 
 impl SimDetector {
@@ -31,7 +32,7 @@ impl SimDetector {
         max_size_x: i32,
         max_size_y: i32,
         max_memory: usize,
-        acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
+        acq_tx: rt::CommandSender<AcqCommand>,
         dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
     ) -> AsynResult<Self> {
         let mut ad = ADDriverBase::new(port_name, max_size_x, max_size_y, max_memory)?;
@@ -282,7 +283,7 @@ pub fn create_sim_detector(
     max_memory: usize,
     array_output: NDArrayOutput,
 ) -> AsynResult<SimDetectorRuntime> {
-    let (acq_tx, acq_rx) = tokio::sync::mpsc::channel(16);
+    let (acq_tx, acq_rx) = rt::command_channel(16);
     let dirty = Arc::new(parking_lot::Mutex::new(DirtyFlags::default()));
     dirty.lock().set_all();
 
