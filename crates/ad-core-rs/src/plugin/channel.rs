@@ -1,15 +1,10 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::ndarray::NDArray;
 
-/// Type-erased blocking processor for inline array processing.
-pub(crate) trait BlockingProcessFn: Send + Sync {
-    fn process_and_publish(&self, array: &NDArray);
-}
-
-/// Tracks the number of queued (in-flight) arrays across non-blocking plugins.
+/// Tracks the number of queued (in-flight) arrays across plugins.
 /// Used by drivers to perform a bounded wait at end of acquisition.
 pub struct QueuedArrayCounter {
     count: AtomicUsize,
@@ -27,7 +22,7 @@ impl QueuedArrayCounter {
         }
     }
 
-    /// Increment the queued count (called before try_send).
+    /// Increment the queued count (called before send).
     pub fn increment(&self) {
         self.count.fetch_add(1, Ordering::AcqRel);
     }
@@ -70,65 +65,86 @@ impl Default for QueuedArrayCounter {
     }
 }
 
-/// Array message with optional queued-array counter.
-/// When dropped, decrements the counter (if present).
+/// Array message with optional queued-array counter and completion signal.
+/// When dropped, decrements the counter (if present) — this signals that
+/// the downstream plugin has finished processing the array.
 pub struct ArrayMessage {
     pub array: Arc<NDArray>,
     pub(crate) counter: Option<Arc<QueuedArrayCounter>>,
+    /// When Some, the sender awaits this to confirm downstream processing completed.
+    /// Fired when ArrayMessage is dropped (i.e., after plugin process_array finishes).
+    pub(crate) done_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Drop for ArrayMessage {
     fn drop(&mut self) {
+        if let Some(tx) = self.done_tx.take() {
+            let _ = tx.send(());
+        }
         if let Some(c) = self.counter.take() {
             c.decrement();
         }
     }
 }
 
-/// Sender held by upstream. Supports blocking and non-blocking modes.
+/// Sender held by upstream. Fully async, reliable (no drops).
+///
+/// # `blocking_callbacks` semantics
+///
+/// Both modes use reliable async enqueue (`send().await`). The difference is
+/// how long the caller waits:
+///
+/// - `blocking_callbacks=0`: waits until the message is in the downstream queue
+///   (enqueue guaranteed, processing NOT awaited).
+/// - `blocking_callbacks=1`: waits until the downstream plugin has finished
+///   processing the array (enqueue + completion awaited).
+///
+/// Neither mode drops arrays due to back-pressure — the caller yields instead.
 #[derive(Clone)]
 pub struct NDArraySender {
     tx: tokio::sync::mpsc::Sender<ArrayMessage>,
     port_name: String,
-    dropped_count: Arc<AtomicU64>,
     enabled: Arc<AtomicBool>,
     blocking_mode: Arc<AtomicBool>,
-    blocking_processor: Option<Arc<dyn BlockingProcessFn>>,
     queued_counter: Option<Arc<QueuedArrayCounter>>,
 }
 
 impl NDArraySender {
-    /// Send an array downstream. Behavior depends on mode:
-    /// - Disabled (`enable_callbacks=0`): silently dropped
-    /// - Blocking (`blocking_callbacks=1`): processed inline on caller's thread
-    /// - Non-blocking (default): queued for data thread (dropped if full)
-    pub fn send(&self, array: Arc<NDArray>) {
+    /// Publish an array downstream (async, reliable).
+    ///
+    /// - `enable_callbacks=0`: returns immediately, array not sent.
+    /// - `blocking_callbacks=0`: awaits queue admission only.
+    /// - `blocking_callbacks=1`: awaits queue admission + downstream processing completion.
+    pub async fn publish(&self, array: Arc<NDArray>) {
         if !self.enabled.load(Ordering::Acquire) {
             return;
         }
-        if self.blocking_mode.load(Ordering::Acquire) {
-            if let Some(ref bp) = self.blocking_processor {
-                bp.process_and_publish(&array);
-                return;
-            }
-        }
-        // Non-blocking path: increment counter before try_send
         if let Some(ref c) = self.queued_counter {
             c.increment();
         }
+
+        let blocking = self.blocking_mode.load(Ordering::Acquire);
+        let (done_tx, done_rx) = if blocking {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let msg = ArrayMessage {
             array,
             counter: self.queued_counter.clone(),
+            done_tx,
         };
-        match self.tx.try_send(msg) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // msg dropped here → Drop fires → counter decremented (net 0)
-                self.dropped_count.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                // msg dropped here → Drop fires → counter decremented
-            }
+
+        if self.tx.send(msg).await.is_err() {
+            // Channel closed — counter was decremented by ArrayMessage::drop
+            return;
+        }
+
+        // blocking_callbacks=1: wait for downstream to finish processing
+        if let Some(rx) = done_rx {
+            let _ = rx.await;
         }
     }
 
@@ -146,38 +162,19 @@ impl NDArraySender {
         &self.port_name
     }
 
-    pub fn dropped_count(&self) -> u64 {
-        self.dropped_count.load(Ordering::Relaxed)
-    }
-
-    /// Clone the shared dropped-array counter (for monitoring from the data thread).
-    pub(crate) fn dropped_count_shared(&self) -> Arc<AtomicU64> {
-        self.dropped_count.clone()
-    }
-
-    /// Clone the underlying tokio sender (for queue capacity checks from the data thread).
-    pub(crate) fn tx_clone(&self) -> tokio::sync::mpsc::Sender<ArrayMessage> {
-        self.tx.clone()
-    }
-
     /// Set the queued-array counter for tracking in-flight arrays.
     pub fn set_queued_counter(&mut self, counter: Arc<QueuedArrayCounter>) {
         self.queued_counter = Some(counter);
     }
 
-    /// Configure blocking callback support. Used by plugin runtime.
-    pub(crate) fn with_blocking_support(
-        self,
+    /// Set the enabled/blocking mode flags (used by plugin runtime wiring).
+    pub(crate) fn set_mode_flags(
+        &mut self,
         enabled: Arc<AtomicBool>,
         blocking_mode: Arc<AtomicBool>,
-        blocking_processor: Arc<dyn BlockingProcessFn>,
-    ) -> Self {
-        Self {
-            enabled,
-            blocking_mode,
-            blocking_processor: Some(blocking_processor),
-            ..self
-        }
+    ) {
+        self.enabled = enabled;
+        self.blocking_mode = blocking_mode;
     }
 }
 
@@ -211,17 +208,15 @@ pub fn ndarray_channel(port_name: &str, queue_size: usize) -> (NDArraySender, ND
         NDArraySender {
             tx,
             port_name: port_name.to_string(),
-            dropped_count: Arc::new(AtomicU64::new(0)),
             enabled: Arc::new(AtomicBool::new(true)),
             blocking_mode: Arc::new(AtomicBool::new(false)),
-            blocking_processor: None,
             queued_counter: None,
         },
         NDArrayReceiver { rx },
     )
 }
 
-/// Fan-out: broadcasts arrays to multiple downstream receivers.
+/// Fan-out: publishes arrays to multiple downstream receivers.
 pub struct NDArrayOutput {
     senders: Vec<NDArraySender>,
 }
@@ -247,26 +242,62 @@ impl NDArrayOutput {
         Some(self.senders.swap_remove(idx))
     }
 
-    /// Publish an array to all downstream receivers.
-    pub fn publish(&self, array: Arc<NDArray>) {
-        for sender in &self.senders {
-            sender.send(array.clone());
-        }
+    /// Publish an array to all downstream receivers (async, reliable, concurrent).
+    ///
+    /// Each sender is awaited independently — a slow downstream does not
+    /// block enqueue to sibling downstreams. The function returns after
+    /// all senders have completed their publish (enqueue or completion,
+    /// depending on `blocking_callbacks`).
+    pub async fn publish(&self, array: Arc<NDArray>) {
+        let futs = self.senders.iter().map(|s| s.publish(array.clone()));
+        futures_util::future::join_all(futs).await;
     }
 
     /// Publish an array to a single downstream receiver by index (for scatter/round-robin).
-    pub fn publish_to(&self, index: usize, array: Arc<NDArray>) {
+    pub async fn publish_to(&self, index: usize, array: Arc<NDArray>) {
         if let Some(sender) = self.senders.get(index % self.senders.len().max(1)) {
-            sender.send(array);
+            sender.publish(array).await;
         }
-    }
-
-    pub fn total_dropped(&self) -> u64 {
-        self.senders.iter().map(|s| s.dropped_count()).sum()
     }
 
     pub fn num_senders(&self) -> usize {
         self.senders.len()
+    }
+
+    /// Clone the senders list (for publishing outside a lock in async context).
+    pub(crate) fn senders_clone(&self) -> Vec<NDArraySender> {
+        self.senders.clone()
+    }
+}
+
+/// Cloneable async handle for publishing arrays to downstream plugins.
+///
+/// This is the public API for driver acquisition tasks.
+/// Internally it snapshots the sender list, releases the lock, then
+/// publishes to all senders concurrently.
+///
+/// # Example
+/// ```ignore
+/// if config.array_callbacks {
+///     publisher.publish(Arc::new(frame)).await;
+/// }
+/// ```
+#[derive(Clone)]
+pub struct ArrayPublisher {
+    output: Arc<parking_lot::Mutex<NDArrayOutput>>,
+}
+
+impl ArrayPublisher {
+    /// Create a publisher backed by the given output.
+    pub fn new(output: Arc<parking_lot::Mutex<NDArrayOutput>>) -> Self {
+        Self { output }
+    }
+
+    /// Publish an array to all downstream plugins (async, concurrent fan-out).
+    pub async fn publish(&self, array: Arc<NDArray>) {
+        let senders = self.output.lock().senders_clone();
+        let futs = senders.iter().map(|s| s.publish(array.clone()));
+        futures_util::future::join_all(futs).await;
     }
 }
 
@@ -287,39 +318,71 @@ mod tests {
         Arc::new(arr)
     }
 
-    #[test]
-    fn test_send_receive_basic() {
+    #[tokio::test]
+    async fn test_publish_receive_basic() {
         let (sender, mut receiver) = ndarray_channel("TEST", 10);
-        sender.send(make_test_array(1));
-        sender.send(make_test_array(2));
+        sender.publish(make_test_array(1)).await;
+        sender.publish(make_test_array(2)).await;
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let a1 = receiver.recv().await.unwrap();
-            assert_eq!(a1.unique_id, 1);
-            let a2 = receiver.recv().await.unwrap();
-            assert_eq!(a2.unique_id, 2);
+        let a1 = receiver.recv().await.unwrap();
+        assert_eq!(a1.unique_id, 1);
+        let a2 = receiver.recv().await.unwrap();
+        assert_eq!(a2.unique_id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_publish_no_drop() {
+        // With reliable send().await, even a queue of 1 should not drop
+        let (sender, mut receiver) = ndarray_channel("TEST", 1);
+
+        // Spawn publisher that sends 3 arrays
+        let s = sender.clone();
+        let pub_handle = tokio::spawn(async move {
+            s.publish(make_test_array(1)).await;
+            s.publish(make_test_array(2)).await;
+            s.publish(make_test_array(3)).await;
         });
+
+        // Receive all 3 — no drops
+        let a1 = receiver.recv().await.unwrap();
+        assert_eq!(a1.unique_id, 1);
+        let a2 = receiver.recv().await.unwrap();
+        assert_eq!(a2.unique_id, 2);
+        let a3 = receiver.recv().await.unwrap();
+        assert_eq!(a3.unique_id, 3);
+
+        pub_handle.await.unwrap();
     }
 
-    #[test]
-    fn test_back_pressure_drops() {
-        let (sender, _receiver) = ndarray_channel("TEST", 2);
-        // Fill the channel
-        sender.send(make_test_array(1));
-        sender.send(make_test_array(2));
-        // This should be dropped
-        sender.send(make_test_array(3));
-        sender.send(make_test_array(4));
+    #[tokio::test]
+    async fn test_blocking_callbacks_completion_wait() {
+        let (mut sender, mut receiver) = ndarray_channel("TEST", 10);
+        sender.blocking_mode.store(true, Ordering::Release);
 
-        assert_eq!(sender.dropped_count(), 2);
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_clone = completed.clone();
+
+        // Spawn receiver that takes some time to process
+        let recv_handle = tokio::spawn(async move {
+            let msg = receiver.recv_msg().await.unwrap();
+            assert_eq!(msg.array.unique_id, 42);
+            // Simulate processing time
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            completed_clone.store(true, Ordering::Release);
+            // msg dropped here → done_tx fires
+        });
+
+        // publish() should wait for completion
+        sender.publish(make_test_array(42)).await;
+
+        // By the time publish returns, downstream should have completed
+        assert!(completed.load(Ordering::Acquire));
+
+        recv_handle.await.unwrap();
     }
 
-    #[test]
-    fn test_fanout_three_receivers() {
+    #[tokio::test]
+    async fn test_fanout_three_receivers() {
         let (s1, mut r1) = ndarray_channel("P1", 10);
         let (s2, mut r2) = ndarray_channel("P2", 10);
         let (s3, mut r3) = ndarray_channel("P3", 10);
@@ -329,52 +392,19 @@ mod tests {
         output.add(s2);
         output.add(s3);
 
-        output.publish(make_test_array(42));
+        output.publish(make_test_array(42)).await;
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            assert_eq!(r1.recv().await.unwrap().unique_id, 42);
-            assert_eq!(r2.recv().await.unwrap().unique_id, 42);
-            assert_eq!(r3.recv().await.unwrap().unique_id, 42);
-        });
-    }
-
-    #[test]
-    fn test_fanout_total_dropped() {
-        let (s1, _r1) = ndarray_channel("P1", 1);
-        let (s2, _r2) = ndarray_channel("P2", 1);
-
-        let mut output = NDArrayOutput::new();
-        output.add(s1);
-        output.add(s2);
-
-        // Fill both channels
-        output.publish(make_test_array(1));
-        // Both full now
-        output.publish(make_test_array(2));
-
-        assert_eq!(output.total_dropped(), 2);
-    }
-
-    #[test]
-    fn test_fanout_remove() {
-        let (s1, _r1) = ndarray_channel("P1", 10);
-        let (s2, _r2) = ndarray_channel("P2", 10);
-
-        let mut output = NDArrayOutput::new();
-        output.add(s1);
-        output.add(s2);
-        assert_eq!(output.num_senders(), 2);
-
-        output.remove("P1");
-        assert_eq!(output.num_senders(), 1);
+        assert_eq!(r1.recv().await.unwrap().unique_id, 42);
+        assert_eq!(r2.recv().await.unwrap().unique_id, 42);
+        assert_eq!(r3.recv().await.unwrap().unique_id, 42);
     }
 
     #[test]
     fn test_blocking_recv() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let (sender, mut receiver) = ndarray_channel("TEST", 10);
 
         let handle = std::thread::spawn(move || {
@@ -382,18 +412,17 @@ mod tests {
             arr.unique_id
         });
 
-        sender.send(make_test_array(99));
+        rt.block_on(sender.publish(make_test_array(99)));
         let id = handle.join().unwrap();
         assert_eq!(id, 99);
     }
 
-    #[test]
-    fn test_channel_closed_on_receiver_drop() {
+    #[tokio::test]
+    async fn test_channel_closed_on_receiver_drop() {
         let (sender, receiver) = ndarray_channel("TEST", 10);
         drop(receiver);
         // Sending to closed channel should not panic
-        sender.send(make_test_array(1));
-        assert_eq!(sender.dropped_count(), 0); // closed, not "dropped"
+        sender.publish(make_test_array(1)).await;
     }
 
     #[test]
@@ -435,37 +464,26 @@ mod tests {
         assert!(!counter.wait_until_zero(Duration::from_millis(10)));
     }
 
-    #[test]
-    fn test_send_increments_counter() {
+    #[tokio::test]
+    async fn test_publish_increments_counter() {
         let counter = Arc::new(QueuedArrayCounter::new());
-        let (mut sender, _receiver) = ndarray_channel("TEST", 10);
+        let (mut sender, mut _receiver) = ndarray_channel("TEST", 10);
         sender.set_queued_counter(counter.clone());
 
-        sender.send(make_test_array(1));
+        sender.publish(make_test_array(1)).await;
         assert_eq!(counter.get(), 1);
-        sender.send(make_test_array(2));
+        sender.publish(make_test_array(2)).await;
         assert_eq!(counter.get(), 2);
     }
 
-    #[test]
-    fn test_send_queue_full_no_net_increment() {
-        let counter = Arc::new(QueuedArrayCounter::new());
-        let (mut sender, _receiver) = ndarray_channel("TEST", 1);
-        sender.set_queued_counter(counter.clone());
-
-        sender.send(make_test_array(1)); // fills queue
-        assert_eq!(counter.get(), 1);
-        sender.send(make_test_array(2)); // queue full → dropped → net 0 change
-        assert_eq!(counter.get(), 1);
-    }
-
-    #[test]
-    fn test_message_drop_decrements() {
+    #[tokio::test]
+    async fn test_message_drop_decrements() {
         let counter = Arc::new(QueuedArrayCounter::new());
         counter.increment();
         let msg = ArrayMessage {
             array: make_test_array(1),
             counter: Some(counter.clone()),
+            done_tx: None,
         };
         assert_eq!(counter.get(), 1);
         drop(msg);

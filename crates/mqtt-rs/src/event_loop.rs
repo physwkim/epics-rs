@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asyn_rs::port_handle::PortHandle;
-use asyn_rs::request::{ParamSetValue, RequestOp};
-use asyn_rs::user::AsynUser;
+use asyn_rs::request::ParamSetValue;
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions};
 use tokio::sync::mpsc;
 
@@ -44,18 +43,18 @@ pub async fn mqtt_event_loop(
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                handle_incoming_message(&publish.topic, &publish.payload, &topic_map, &port_handle);
+                handle_incoming_message(&publish.topic, &publish.payload, &topic_map, &port_handle).await;
             }
             Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                 tracing::info!("MQTT connected, subscribing to {} topics", topics.len());
-                port_handle.set_params_and_notify(
+                let _ = port_handle.set_params_and_notify(
                     0,
                     vec![ParamSetValue::Int32 {
                         reason: connected_param,
                         addr: 0,
                         value: 1,
                     }],
-                );
+                ).await;
                 // Spawn subscribe so we return to `poll()` immediately — the
                 // event loop is the only thing that drains rumqttc's command
                 // channel, so awaiting subscribe inline risks stalling.
@@ -68,14 +67,14 @@ pub async fn mqtt_event_loop(
             }
             Err(e) => {
                 tracing::error!("MQTT connection error: {e}");
-                port_handle.set_params_and_notify(
+                let _ = port_handle.set_params_and_notify(
                     0,
                     vec![ParamSetValue::Int32 {
                         reason: connected_param,
                         addr: 0,
                         value: 0,
                     }],
-                );
+                ).await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             _ => {}
@@ -110,7 +109,7 @@ async fn subscribe_all(client: &AsyncClient, topics: &[String], qos: crate::conf
     }
 }
 
-fn handle_incoming_message(
+async fn handle_incoming_message(
     topic: &str,
     payload: &[u8],
     topic_map: &HashMap<String, Vec<(usize, TopicAddress)>>,
@@ -166,15 +165,12 @@ fn handle_incoming_message(
                         });
                     }
                     DecodedValue::UInt32(v) => {
-                        // No ParamSetValue::UInt32Digital; use submit_no_wait
-                        let user = AsynUser::new(*reason).with_addr(0);
-                        port_handle.submit_no_wait(
-                            RequestOp::UInt32DigitalWrite {
-                                value: v,
-                                mask: 0xFFFF_FFFF,
-                            },
-                            user,
-                        );
+                        batch_updates.push(ParamSetValue::UInt32Digital {
+                            reason: *reason,
+                            addr: 0,
+                            value: v,
+                            mask: 0xFFFF_FFFF,
+                        });
                     }
                     DecodedValue::Int32Array(_v) => {
                         // No ParamSetValue::Int32Array; log a warning for now.
@@ -195,7 +191,9 @@ fn handle_incoming_message(
     }
 
     if !batch_updates.is_empty() {
-        port_handle.set_params_and_notify(0, batch_updates);
+        if let Err(e) = port_handle.set_params_and_notify(0, batch_updates).await {
+            eprintln!("set_params_and_notify error (mqtt payload): {e}");
+        }
     }
 }
 

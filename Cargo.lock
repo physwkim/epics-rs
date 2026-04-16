@@ -9,6 +9,7 @@ dependencies = [
  "asyn-rs",
  "epics-base-rs",
  "epics-ca-rs",
+ "futures-util",
  "parking_lot",
  "thiserror 2.0.18",
  "tokio",
@@ -743,6 +744,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-macro"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "futures-sink"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -761,6 +773,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
  "futures-core",
+ "futures-macro",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -1125,6 +1138,7 @@ dependencies = [
  "optics-rs",
  "parking_lot",
  "rand 0.9.3",
+ "tokio",
 ]
 
 [[package]]
@@ -1354,6 +1368,7 @@ dependencies = [
  "parking_lot",
  "rand 0.9.3",
  "sim-detector",
+ "tokio",
 ]
 
 [[package]]
@@ -2114,6 +2129,7 @@ dependencies = [
  "epics-base-rs",
  "parking_lot",
  "rand 0.9.3",
+ "tokio",
 ]
 
 [[package]]
@@ -3043,6 +3059,7 @@ dependencies = [
  "epics-ca-rs",
  "motor-rs",
  "parking_lot",
+ "tokio",
  "xrt-core",
  "xrt-materials",
  "xrt-oes",

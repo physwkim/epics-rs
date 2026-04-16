@@ -95,9 +95,10 @@ pub fn create_port_runtime_boxed(
     // Completion notification (actor thread → shutdown_and_wait)
     let (completion_tx, completion_rx) = std::sync::mpsc::channel::<()>();
 
-    // Clone broadcast sender for interrupt subscription
-    let broadcast_sender = driver.base().interrupts.broadcast_sender();
-    let handle_interrupts = Arc::new(InterruptManager::from_broadcast_sender(broadcast_sender));
+    // Share interrupt state (broadcast + mailboxes) so subscribers registered
+    // via PortHandle receive notifications from the driver's call_param_callbacks.
+    let shared_intr_state = driver.base().interrupts.shared_state();
+    let handle_interrupts = Arc::new(InterruptManager::from_shared_state(shared_intr_state));
 
     // Actor channel
     let (tx, rx) = mpsc::channel(config.channel_capacity);

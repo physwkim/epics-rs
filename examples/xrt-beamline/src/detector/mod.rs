@@ -14,7 +14,7 @@ use asyn_rs::user::AsynUser;
 use ad_core_rs::driver::{ADDriver, ADDriverBase, ImageMode};
 use ad_core_rs::ndarray_pool::NDArrayPool;
 use ad_core_rs::params::ADBaseParams;
-use ad_core_rs::plugin::channel::{NDArrayOutput, NDArraySender, QueuedArrayCounter};
+use ad_core_rs::plugin::channel::{ArrayPublisher, NDArrayOutput, NDArraySender, QueuedArrayCounter};
 
 use crate::beamline_sim::{MotorPositions, SimConfig};
 
@@ -28,7 +28,7 @@ pub struct XrtDetector {
     pub xrt_params: XrtDetectorParams,
     motor_param_set: Vec<usize>,
     dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
-    acq_tx: std::sync::mpsc::Sender<AcqCommand>,
+    acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
 }
 
 impl XrtDetector {
@@ -37,7 +37,7 @@ impl XrtDetector {
         size_x: i32,
         size_y: i32,
         max_memory: usize,
-        acq_tx: std::sync::mpsc::Sender<AcqCommand>,
+        acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
         dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
     ) -> AsynResult<Self> {
         let mut ad = ADDriverBase::new(port_name, size_x, size_y, max_memory)?;
@@ -124,10 +124,10 @@ impl PortDriver for XrtDetector {
                     ad_core_rs::driver::ADStatus::Acquire as i32,
                 )?;
                 self.ad.port_base.call_param_callbacks(0)?;
-                let _ = self.acq_tx.send(AcqCommand::Start);
+                let _ = self.acq_tx.try_send(AcqCommand::Start);
             } else if value == 0 && acquiring != 0 {
                 self.ad.port_base.set_int32_param(acquire_idx, 0, value)?;
-                let _ = self.acq_tx.send(AcqCommand::Stop);
+                let _ = self.acq_tx.try_send(AcqCommand::Stop);
             } else {
                 self.ad.port_base.set_int32_param(acquire_idx, 0, value)?;
             }
@@ -208,7 +208,7 @@ pub fn create_xrt_detector(
     array_output: NDArrayOutput,
     sim_config: SimConfig,
 ) -> AsynResult<XrtDetectorRuntime> {
-    let (acq_tx, acq_rx) = std::sync::mpsc::channel();
+    let (acq_tx, acq_rx) = tokio::sync::mpsc::channel(16);
     let dirty = Arc::new(parking_lot::Mutex::new(DirtyFlags::default()));
     dirty.lock().set();
 
@@ -226,7 +226,7 @@ pub fn create_xrt_detector(
     let task_handle = start_acquisition_task(AcquisitionContext {
         acq_rx,
         port_handle: runtime_handle.port_handle().clone(),
-        array_output: shared_output.clone(),
+        publisher: ArrayPublisher::new(shared_output.clone()),
         dirty,
         ad: ad_params,
         xrt: xrt_params,

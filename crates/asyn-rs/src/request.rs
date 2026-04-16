@@ -30,6 +30,12 @@ pub enum ParamSetValue {
         addr: i32,
         value: Vec<f64>,
     },
+    UInt32Digital {
+        reason: usize,
+        addr: i32,
+        value: u32,
+        mask: u32,
+    },
 }
 
 /// Operation the worker thread will dispatch to the port driver.

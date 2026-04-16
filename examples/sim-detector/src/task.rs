@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -11,7 +11,7 @@ use ad_core_rs::ndarray::{NDArray, NDDataBuffer};
 use ad_core_rs::params::ADBaseParams;
 
 use ad_core_rs::color_layout::ColorLayout;
-use ad_core_rs::plugin::channel::{NDArrayOutput, QueuedArrayCounter};
+use ad_core_rs::plugin::channel::{ArrayPublisher, QueuedArrayCounter};
 use ad_core_rs::roi::crop_roi;
 
 use crate::compute::{self, SineState};
@@ -28,9 +28,9 @@ pub enum AcqCommand {
 
 /// Bundled state for the acquisition task thread.
 pub(crate) struct AcquisitionContext {
-    pub acq_rx: std::sync::mpsc::Receiver<AcqCommand>,
+    pub acq_rx: tokio::sync::mpsc::Receiver<AcqCommand>,
     pub port_handle: PortHandle,
-    pub array_output: Arc<parking_lot::Mutex<NDArrayOutput>>,
+    pub publisher: ArrayPublisher,
     pub dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
     pub ad: ADBaseParams,
     pub sim: SimDetectorParams,
@@ -39,11 +39,11 @@ pub(crate) struct AcquisitionContext {
 
 impl AcquisitionContext {
     /// Drain in-flight arrays (if configured) and transition to Idle.
-    fn end_acquisition(&self, wait_for_plugins: bool) {
+    async fn end_acquisition(&self, wait_for_plugins: bool) {
         if wait_for_plugins {
             self.queued_counter.wait_until_zero(Duration::from_secs(5));
         }
-        self.port_handle.set_params_and_notify(
+        if let Err(e) = self.port_handle.set_params_and_notify(
             0,
             vec![
                 asyn_rs::request::ParamSetValue::Int32 {
@@ -62,7 +62,9 @@ impl AcquisitionContext {
                     value: 0,
                 },
             ],
-        );
+        ).await {
+            eprintln!("set_params_and_notify error (end_acquisition): {e}");
+        }
     }
 }
 
@@ -149,32 +151,12 @@ impl TaskState {
 }
 
 /// Check if a Stop command has been received within the given duration.
-/// Uses spin + try_recv for short delays to avoid macOS recv_timeout oversleep.
-fn wait_for_stop(acq_rx: &std::sync::mpsc::Receiver<AcqCommand>, duration: Duration) -> bool {
-    let deadline = Instant::now() + duration;
-
-    if duration.as_millis() < 10 {
-        // Short delay: spin with try_recv to avoid macOS timer resolution issues
-        loop {
-            match acq_rx.try_recv() {
-                Ok(AcqCommand::Stop) => return true,
-                Ok(AcqCommand::Start) => {} // stale start, ignore
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::hint::spin_loop();
-        }
-    } else {
-        // Longer delay: use recv_timeout
-        match acq_rx.recv_timeout(duration) {
-            Ok(AcqCommand::Stop) => true,
-            Ok(AcqCommand::Start) => false,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
-        }
+async fn wait_for_stop(acq_rx: &mut tokio::sync::mpsc::Receiver<AcqCommand>, duration: Duration) -> bool {
+    match tokio::time::timeout(duration, acq_rx.recv()).await {
+        Ok(Some(AcqCommand::Stop)) => true,
+        Ok(Some(AcqCommand::Start)) => false,
+        Ok(None) => true,   // channel closed
+        Err(_) => false,     // timeout
     }
 }
 
@@ -187,18 +169,26 @@ pub(crate) fn start_acquisition_task(ctx: AcquisitionContext) -> std::thread::Jo
 }
 
 fn acquisition_loop(ctx: AcquisitionContext) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(acquisition_loop_async(ctx));
+}
+
+async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
     let mut task_state = TaskState::new();
 
     loop {
         // Wait for Start command
-        match ctx.acq_rx.recv() {
-            Ok(AcqCommand::Start) => {}
-            Ok(AcqCommand::Stop) => continue, // stale stop, ignore
-            Err(_) => break,                  // channel closed = shutdown
+        match ctx.acq_rx.recv().await {
+            Some(AcqCommand::Start) => {}
+            Some(AcqCommand::Stop) => continue, // stale stop, ignore
+            None => break,                      // channel closed = shutdown
         }
 
         // Initialize counters via PortHandle
-        ctx.port_handle.set_params_and_notify(
+        if let Err(e) = ctx.port_handle.set_params_and_notify(
             0,
             vec![
                 asyn_rs::request::ParamSetValue::Int32 {
@@ -217,23 +207,26 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                     value: 1,
                 },
             ],
-        );
+        ).await {
+            eprintln!("set_params_and_notify error (acquire start): {e}");
+        }
 
         let mut num_counter = 0;
         let mut array_counter = ctx
             .port_handle
-            .read_int32_blocking(ctx.ad.base.array_counter, 0)
+            .read_int32(ctx.ad.base.array_counter, 0)
+            .await
             .unwrap_or(0);
 
         // Read initial config
         let mut config =
-            match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim) {
+            match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim).await {
                 Ok(cfg) => cfg,
                 Err(_) => continue,
             };
 
         loop {
-            let start_time = Instant::now();
+            let start_time = std::time::Instant::now();
 
             // Take dirty flags (shared with driver)
             let dirty_flags = ctx.dirty.lock().take();
@@ -242,7 +235,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             // Only re-read config when parameters changed
             if reset {
                 config =
-                    match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim) {
+                    match SimConfigSnapshot::read_via_handle(&ctx.port_handle, &ctx.ad, &ctx.sim).await {
                         Ok(cfg) => cfg,
                         Err(_) => break,
                     };
@@ -254,8 +247,8 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             // Exposure time sleep with stop interruption
             let elapsed = start_time.elapsed().as_secs_f64();
             let delay = (config.acquire_time - elapsed).max(MIN_DELAY_SECS);
-            if wait_for_stop(&ctx.acq_rx, Duration::from_secs_f64(delay)) {
-                ctx.end_acquisition(config.wait_for_plugins);
+            if wait_for_stop(&mut ctx.acq_rx, Duration::from_secs_f64(delay)).await {
+                ctx.end_acquisition(config.wait_for_plugins).await;
                 break;
             }
 
@@ -268,7 +261,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
 
             // Counter updates + callParamCallbacks always run (like C EPICS).
             // Only doCallbacksGenericPointer (publish) is gated by array_callbacks.
-            ctx.port_handle.set_params_and_notify(
+            if let Err(e) = ctx.port_handle.set_params_and_notify(
                 0,
                 vec![
                     asyn_rs::request::ParamSetValue::Int32 {
@@ -297,10 +290,12 @@ fn acquisition_loop(ctx: AcquisitionContext) {
                         value: frame.timestamp.nsec as i32,
                     },
                 ],
-            );
+            ).await {
+                eprintln!("set_params_and_notify error (frame update): {e}");
+            }
 
             if config.array_callbacks {
-                ctx.array_output.lock().publish(Arc::new(frame));
+                ctx.publisher.publish(Arc::new(frame)).await;
             }
 
             // Check stop conditions
@@ -309,7 +304,7 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             if image_mode == ImageMode::Single
                 || (image_mode == ImageMode::Multiple && num_counter >= num_images)
             {
-                ctx.end_acquisition(config.wait_for_plugins);
+                ctx.end_acquisition(config.wait_for_plugins).await;
                 break;
             }
 
@@ -317,8 +312,8 @@ fn acquisition_loop(ctx: AcquisitionContext) {
             let total_elapsed = start_time.elapsed().as_secs_f64();
             let period_delay = config.acquire_period - total_elapsed;
             if period_delay > 0.0 {
-                if wait_for_stop(&ctx.acq_rx, Duration::from_secs_f64(period_delay)) {
-                    ctx.end_acquisition(config.wait_for_plugins);
+                if wait_for_stop(&mut ctx.acq_rx, Duration::from_secs_f64(period_delay)).await {
+                    ctx.end_acquisition(config.wait_for_plugins).await;
                     break;
                 }
             }

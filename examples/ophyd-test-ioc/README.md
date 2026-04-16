@@ -35,6 +35,16 @@ A MovingDot 2D area detector using the ADDriver pattern with standard areaDetect
 
 Plugins are loaded twice — under both `XF:31IDA-BI{Cam:Tbl}:` and `ADSIM:` prefixes for ophyd test compatibility.
 
+The MovingDot acquisition task is fully async. A driver author only needs three types from `ad_core_rs::plugin::channel`:
+
+| Type | Purpose |
+|------|---------|
+| `PortHandle` | Read/write parameters via `read_int32().await`, `set_params_and_notify().await` |
+| `ArrayPublisher` | Publish a generated frame to downstream plugins: `publisher.publish(frame).await` |
+| `QueuedArrayCounter` | Wait until in-flight frames drain at end of acquisition |
+
+The acquisition loop runs inside a `current_thread` tokio runtime created by the task thread. All I/O is async and reliable — there are no lossy or blocking APIs in the data path.
+
 ## Build and Run
 
 ```bash

@@ -135,6 +135,18 @@ Beam size at sample (demagnification):
 | `bl:xrt:cam1:FWHMZ_RBV` | mm | Beam FWHM z |
 | `bl:xrt:cam1:NRays_RBV` | — | Number of good rays at sample |
 
+## Detector Acquisition Task API
+
+The XRT detector's acquisition task is fully async. A driver author only needs three types from `ad_core_rs::plugin::channel`:
+
+| Type | Purpose |
+|------|---------|
+| `PortHandle` | Read/write parameters via `read_int32().await`, `set_params_and_notify().await` |
+| `ArrayPublisher` | Publish a generated frame to downstream plugins: `publisher.publish(frame).await` |
+| `QueuedArrayCounter` | Wait until in-flight frames drain at end of acquisition |
+
+The acquisition loop runs inside a `current_thread` tokio runtime created by the task thread. All I/O is async and reliable — there are no lossy or blocking APIs in the data path.
+
 ## Build & Run
 
 ### EPICS IOC (Rust)

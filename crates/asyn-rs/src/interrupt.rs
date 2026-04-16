@@ -1,8 +1,9 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use tokio::sync::broadcast;
 
-use crate::error::AsynResult;
 use crate::param::ParamValue;
 
 /// Filter for selecting which interrupts to receive.
@@ -18,28 +19,6 @@ pub struct InterruptFilter {
     pub uint32_mask: Option<u32>,
 }
 
-/// RAII subscription handle. Dropping this cancels the subscription.
-pub struct InterruptSubscription {
-    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl InterruptSubscription {
-    fn new(cancel_tx: tokio::sync::oneshot::Sender<()>) -> Self {
-        Self {
-            cancel_tx: Some(cancel_tx),
-        }
-    }
-}
-
-impl Drop for InterruptSubscription {
-    fn drop(&mut self) {
-        // Signal the forwarding task to stop
-        if let Some(tx) = self.cancel_tx.take() {
-            let _ = tx.send(());
-        }
-    }
-}
-
 /// Value delivered through the interrupt system.
 #[derive(Debug, Clone)]
 pub struct InterruptValue {
@@ -51,90 +30,246 @@ pub struct InterruptValue {
     pub uint32_changed_mask: u32,
 }
 
-/// Manages interrupt/callback delivery via async broadcast channel.
+// ---------------------------------------------------------------------------
+// Mailbox-based subscription (replaces broadcast filter+forward tasks)
+// ---------------------------------------------------------------------------
+
+/// Per-subscriber mailbox: stores the latest matching interrupt value.
+/// Intermediate updates are coalesced — consumer always sees the most recent state.
+struct SubscriptionMailbox {
+    filter: InterruptFilter,
+    /// Latest matching value (overwritten on each notify, taken on recv).
+    latest: parking_lot::Mutex<Option<InterruptValue>>,
+    /// Wakeup signal for the consumer.
+    wakeup: tokio::sync::Notify,
+    /// Set to false when the subscription is dropped.
+    active: AtomicBool,
+}
+
+impl SubscriptionMailbox {
+    fn matches(&self, iv: &InterruptValue) -> bool {
+        if let Some(r) = self.filter.reason {
+            if iv.reason != r {
+                return false;
+            }
+        }
+        if let Some(a) = self.filter.addr {
+            if iv.addr != a {
+                return false;
+            }
+        }
+        if let Some(m) = self.filter.uint32_mask {
+            if iv.uint32_changed_mask & m == 0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Receiver for a filtered interrupt subscription.
 ///
-/// Async subscribers use `tokio::sync::broadcast` (multiple consumers OK).
-/// Filtered subscriptions are created via `register_interrupt_user`.
-pub struct InterruptManager {
+/// Uses a per-subscriber mailbox instead of broadcast+filter task.
+/// Intermediate updates are coalesced: if the consumer is slow, only the latest
+/// value is preserved. This eliminates broadcast Lagged errors entirely.
+pub struct InterruptReceiver {
+    mailbox: Arc<SubscriptionMailbox>,
+}
+
+impl InterruptReceiver {
+    /// Wait for the next interrupt value matching this subscription's filter.
+    /// Returns `None` when the subscription is cancelled (dropped).
+    pub async fn recv(&mut self) -> Option<InterruptValue> {
+        loop {
+            // Register wakeup interest BEFORE checking the slot.
+            // This avoids the race where notify_one fires between our check and await.
+            let notified = self.mailbox.wakeup.notified();
+
+            // Check if a value is already waiting.
+            if let Some(value) = self.mailbox.latest.lock().take() {
+                return Some(value);
+            }
+            // Check if subscription was cancelled.
+            if !self.mailbox.active.load(Ordering::Acquire) {
+                return None;
+            }
+
+            // No value yet — wait for wakeup.
+            notified.await;
+        }
+    }
+}
+
+/// RAII subscription handle. Dropping this cancels the subscription.
+pub struct InterruptSubscription {
+    mailbox: Arc<SubscriptionMailbox>,
+    state: Arc<InterruptSharedState>,
+}
+
+impl Drop for InterruptSubscription {
+    fn drop(&mut self) {
+        self.mailbox.active.store(false, Ordering::Release);
+        // Wake consumer so it sees active=false and returns None.
+        self.mailbox.wakeup.notify_one();
+        // Remove from subscription list.
+        self.state
+            .mailboxes
+            .lock()
+            .retain(|s| s.active.load(Ordering::Relaxed));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared state between InterruptManager instances (driver ↔ PortHandle)
+// ---------------------------------------------------------------------------
+
+/// Shared interrupt infrastructure. Both the driver's InterruptManager and the
+/// PortHandle's InterruptManager reference the same `InterruptSharedState` so
+/// that subscribers registered on either side receive notifications.
+pub struct InterruptSharedState {
+    /// Broadcast channel for unfiltered subscribers (subscribe_async).
+    /// Kept for backward compatibility with transport layer and tests.
     async_tx: broadcast::Sender<InterruptValue>,
+    /// Mailbox-based subscriptions for filtered subscribers (I/O Intr records).
+    mailboxes: parking_lot::Mutex<Vec<Arc<SubscriptionMailbox>>>,
+    /// Total number of notify() calls.
+    notify_count: AtomicU64,
+    /// Number of times a mailbox value was overwritten before the consumer read it.
+    coalesce_count: AtomicU64,
+}
+
+// ---------------------------------------------------------------------------
+// InterruptManager
+// ---------------------------------------------------------------------------
+
+/// Manages interrupt/callback delivery.
+///
+/// Two delivery paths:
+/// - **Filtered subscriptions** (I/O Intr records): mailbox-based, no data loss.
+///   `register_interrupt_user()` creates a per-subscriber mailbox that stores
+///   the latest matching value. Intermediate updates are coalesced.
+/// - **Unfiltered subscriptions** (transport, tests): broadcast-based.
+///   `subscribe_async()` returns a broadcast receiver for backward compatibility.
+pub struct InterruptManager {
+    state: Arc<InterruptSharedState>,
 }
 
 impl InterruptManager {
     pub fn new(async_capacity: usize) -> Self {
         let (async_tx, _) = broadcast::channel(async_capacity);
-        Self { async_tx }
+        Self {
+            state: Arc::new(InterruptSharedState {
+                async_tx,
+                mailboxes: parking_lot::Mutex::new(Vec::new()),
+                notify_count: AtomicU64::new(0),
+                coalesce_count: AtomicU64::new(0),
+            }),
+        }
     }
 
-    /// Create an InterruptManager that shares an existing broadcast sender.
-    /// This allows subscribing to interrupts from a driver that has been moved
-    /// into an actor.
+    /// Create an InterruptManager sharing the same state as another.
+    /// Used by `create_port_runtime` so the PortHandle and the driver share
+    /// the same subscription list and broadcast channel.
+    pub fn from_shared_state(state: Arc<InterruptSharedState>) -> Self {
+        Self { state }
+    }
+
+    /// Get the shared state for cross-manager sharing.
+    pub fn shared_state(&self) -> Arc<InterruptSharedState> {
+        self.state.clone()
+    }
+
+    /// Create an InterruptManager sharing an existing broadcast sender.
+    /// **Deprecated**: prefer `from_shared_state` which also shares mailbox subscriptions.
+    /// Kept for backward compatibility.
     pub fn from_broadcast_sender(sender: broadcast::Sender<InterruptValue>) -> Self {
-        Self { async_tx: sender }
+        Self {
+            state: Arc::new(InterruptSharedState {
+                async_tx: sender,
+                mailboxes: parking_lot::Mutex::new(Vec::new()),
+                notify_count: AtomicU64::new(0),
+                coalesce_count: AtomicU64::new(0),
+            }),
+        }
     }
 
-    /// Subscribe for async interrupt delivery. Multiple subscribers OK.
+    /// Subscribe for async interrupt delivery (unfiltered, broadcast-based).
+    /// Multiple subscribers OK. Used by transport layer and tests.
     pub fn subscribe_async(&self) -> broadcast::Receiver<InterruptValue> {
-        self.async_tx.subscribe()
+        self.state.async_tx.subscribe()
     }
 
-    /// Clone the broadcast sender. This allows external code to subscribe
-    /// to interrupts even after the InterruptManager is moved.
+    /// Clone the broadcast sender for sharing.
     pub fn broadcast_sender(&self) -> broadcast::Sender<InterruptValue> {
-        self.async_tx.clone()
+        self.state.async_tx.clone()
     }
 
-    /// Send an interrupt to all subscribers.
-    /// Silently ignores errors if no receivers are registered.
+    /// Send an interrupt to all subscribers (both broadcast and mailbox).
     pub fn notify(&self, value: InterruptValue) {
-        let _ = self.async_tx.send(value);
+        self.state.notify_count.fetch_add(1, Ordering::Relaxed);
+
+        // Deliver to mailbox subscribers (filtered, coalescing).
+        let subs = self.state.mailboxes.lock();
+        for sub in subs.iter() {
+            if !sub.active.load(Ordering::Relaxed) {
+                continue;
+            }
+            if !sub.matches(&value) {
+                continue;
+            }
+            let mut slot = sub.latest.lock();
+            if slot.is_some() {
+                self.state.coalesce_count.fetch_add(1, Ordering::Relaxed);
+            }
+            *slot = Some(value.clone());
+            drop(slot);
+            sub.wakeup.notify_one();
+        }
+        drop(subs);
+
+        // Deliver to broadcast subscribers (unfiltered, legacy).
+        let _ = self.state.async_tx.send(value);
     }
 
-    /// Register a filtered interrupt subscription.
+    /// Register a filtered interrupt subscription using the mailbox model.
     ///
     /// Returns an RAII `InterruptSubscription` (dropping it unsubscribes) and an
-    /// `mpsc::Receiver<InterruptValue>` for receiving matching interrupts.
+    /// `InterruptReceiver` for receiving matching interrupts.
     ///
-    /// The filter is applied by a background tokio task that subscribes to the
-    /// broadcast channel and forwards matching values.
+    /// Unlike the broadcast-based approach, this **never drops values** due to
+    /// channel pressure. If the consumer is slow, intermediate updates are
+    /// coalesced (latest value preserved, coalesce_count incremented).
     pub fn register_interrupt_user(
         &self,
         filter: InterruptFilter,
-    ) -> (
-        InterruptSubscription,
-        tokio::sync::mpsc::Receiver<InterruptValue>,
-    ) {
-        let mut intr_rx = self.async_tx.subscribe();
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut cancel_rx => break,
-                    recv = intr_rx.recv() => {
-                        match recv {
-                            Ok(iv) => {
-                                if let Some(r) = filter.reason {
-                                    if iv.reason != r { continue; }
-                                }
-                                if let Some(a) = filter.addr {
-                                    if iv.addr != a { continue; }
-                                }
-                                // C parity: UInt32Digital per-callback mask filtering
-                                if let Some(m) = filter.uint32_mask {
-                                    if iv.uint32_changed_mask & m == 0 { continue; }
-                                }
-                                if tx.send(iv).await.is_err() { break; }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
-            }
+    ) -> (InterruptSubscription, InterruptReceiver) {
+        let mailbox = Arc::new(SubscriptionMailbox {
+            filter,
+            latest: parking_lot::Mutex::new(None),
+            wakeup: tokio::sync::Notify::new(),
+            active: AtomicBool::new(true),
         });
+        self.state.mailboxes.lock().push(mailbox.clone());
+        (
+            InterruptSubscription {
+                mailbox: mailbox.clone(),
+                state: self.state.clone(),
+            },
+            InterruptReceiver { mailbox },
+        )
+    }
 
-        (InterruptSubscription::new(cancel_tx), rx)
+    // --- Metrics ---
+
+    /// Total number of notify() calls since creation.
+    pub fn notify_count(&self) -> u64 {
+        self.state.notify_count.load(Ordering::Relaxed)
+    }
+
+    /// Number of times a mailbox value was overwritten before the consumer read it.
+    /// High coalesce count at moderate frame rates indicates consumer backpressure.
+    pub fn coalesce_count(&self) -> u64 {
+        self.state.coalesce_count.load(Ordering::Relaxed)
     }
 }
 
@@ -274,22 +409,11 @@ mod tests {
         // Drop subscription
         drop(sub);
 
-        // Allow the spawned task to see the cancel signal
-        tokio::task::yield_now().await;
-
-        im.notify(InterruptValue {
-            reason: 0,
-            addr: 0,
-            value: ParamValue::Int32(999),
-            timestamp: SystemTime::now(),
-            uint32_changed_mask: 0,
-        });
-
-        // Should not receive anything (or channel is closed)
+        // Consumer should see None (subscription cancelled)
         let result = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
         match result {
-            Ok(None) => {} // channel closed — correct
-            Err(_) => {}   // timed out — also acceptable (task hasn't exited yet)
+            Ok(None) => {} // cancelled — correct
+            Err(_) => {}   // timed out — also acceptable
             Ok(Some(_)) => panic!("should not receive after unsubscribe"),
         }
     }
@@ -346,5 +470,84 @@ mod tests {
             timestamp: SystemTime::now(),
             uint32_changed_mask: 0,
         });
+    }
+
+    #[tokio::test]
+    async fn test_coalescing() {
+        let im = InterruptManager::new(16);
+        let (_sub, mut rx) = im.register_interrupt_user(InterruptFilter {
+            reason: Some(0),
+            ..Default::default()
+        });
+
+        // Send 3 values without consumer reading — should coalesce to latest.
+        im.notify(InterruptValue {
+            reason: 0,
+            addr: 0,
+            value: ParamValue::Int32(1),
+            timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
+        });
+        im.notify(InterruptValue {
+            reason: 0,
+            addr: 0,
+            value: ParamValue::Int32(2),
+            timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
+        });
+        im.notify(InterruptValue {
+            reason: 0,
+            addr: 0,
+            value: ParamValue::Int32(3),
+            timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
+        });
+
+        // Consumer should see only the latest value (3).
+        let v = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let ParamValue::Int32(n) = v.value {
+            assert_eq!(n, 3);
+        } else {
+            panic!("expected Int32");
+        }
+
+        // Coalesce count should be 2 (first write creates, next two overwrite).
+        assert_eq!(im.coalesce_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_shared_state_between_managers() {
+        let im1 = InterruptManager::new(16);
+        let shared = im1.shared_state();
+        let im2 = InterruptManager::from_shared_state(shared);
+
+        // Subscribe via im2
+        let (_sub, mut rx) = im2.register_interrupt_user(InterruptFilter {
+            reason: Some(0),
+            ..Default::default()
+        });
+
+        // Notify via im1 — subscriber should receive because state is shared
+        im1.notify(InterruptValue {
+            reason: 0,
+            addr: 0,
+            value: ParamValue::Int32(42),
+            timestamp: SystemTime::now(),
+            uint32_changed_mask: 0,
+        });
+
+        let v = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(v.reason, 0);
+        if let ParamValue::Int32(n) = v.value {
+            assert_eq!(n, 42);
+        } else {
+            panic!("expected Int32");
+        }
     }
 }

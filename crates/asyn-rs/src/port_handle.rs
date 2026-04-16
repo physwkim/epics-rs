@@ -134,7 +134,7 @@ impl PortHandle {
         if tokio::runtime::Handle::try_current().is_ok() {
             // Inside a tokio runtime — use block_in_place to avoid panicking
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(self.submit(op, user))
+                tokio::runtime::Handle::current().block_on(self.submit_async(op, user))
             })
         } else {
             // Plain thread — use blocking_send/blocking_recv directly
@@ -151,8 +151,11 @@ impl PortHandle {
         }
     }
 
-    /// Submit a request and await completion (for async callers).
-    pub async fn submit(&self, op: RequestOp, user: AsynUser) -> AsynResult<RequestResult> {
+    /// Submit a request and await completion (reliable, for async callers).
+    ///
+    /// Waits for channel space and returns the
+    /// actor's reply. Use this for operations where delivery must be guaranteed.
+    pub async fn submit_async(&self, op: RequestOp, user: AsynUser) -> AsynResult<RequestResult> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let msg = ActorMessage::new(op, user, CancelToken::new(), reply_tx);
         self.tx.send(msg).await.map_err(|_| AsynError::Status {
@@ -169,7 +172,7 @@ impl PortHandle {
 
     pub async fn read_int32(&self, reason: usize, addr: i32) -> AsynResult<i32> {
         let user = AsynUser::new(reason).with_addr(addr);
-        let result = self.submit(RequestOp::Int32Read, user).await?;
+        let result = self.submit_async(RequestOp::Int32Read, user).await?;
         result.int_val.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "int32 read returned no value".into(),
@@ -178,13 +181,13 @@ impl PortHandle {
 
     pub async fn write_int32(&self, reason: usize, addr: i32, value: i32) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Int32Write { value }, user).await?;
+        self.submit_async(RequestOp::Int32Write { value }, user).await?;
         Ok(())
     }
 
     pub async fn read_int64(&self, reason: usize, addr: i32) -> AsynResult<i64> {
         let user = AsynUser::new(reason).with_addr(addr);
-        let result = self.submit(RequestOp::Int64Read, user).await?;
+        let result = self.submit_async(RequestOp::Int64Read, user).await?;
         result.int64_val.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "int64 read returned no value".into(),
@@ -193,13 +196,13 @@ impl PortHandle {
 
     pub async fn write_int64(&self, reason: usize, addr: i32, value: i64) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Int64Write { value }, user).await?;
+        self.submit_async(RequestOp::Int64Write { value }, user).await?;
         Ok(())
     }
 
     pub async fn read_float64(&self, reason: usize, addr: i32) -> AsynResult<f64> {
         let user = AsynUser::new(reason).with_addr(addr);
-        let result = self.submit(RequestOp::Float64Read, user).await?;
+        let result = self.submit_async(RequestOp::Float64Read, user).await?;
         result.float_val.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "float64 read returned no value".into(),
@@ -208,7 +211,7 @@ impl PortHandle {
 
     pub async fn write_float64(&self, reason: usize, addr: i32, value: f64) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Float64Write { value }, user).await?;
+        self.submit_async(RequestOp::Float64Write { value }, user).await?;
         Ok(())
     }
 
@@ -219,7 +222,7 @@ impl PortHandle {
         buf_size: usize,
     ) -> AsynResult<Vec<u8>> {
         let user = AsynUser::new(reason).with_addr(addr);
-        let result = self.submit(RequestOp::OctetRead { buf_size }, user).await?;
+        let result = self.submit_async(RequestOp::OctetRead { buf_size }, user).await?;
         result.data.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "octet read returned no data".into(),
@@ -228,7 +231,7 @@ impl PortHandle {
 
     pub async fn write_octet(&self, reason: usize, addr: i32, data: Vec<u8>) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::OctetWrite { data }, user).await?;
+        self.submit_async(RequestOp::OctetWrite { data }, user).await?;
         Ok(())
     }
 
@@ -240,7 +243,7 @@ impl PortHandle {
     ) -> AsynResult<u32> {
         let user = AsynUser::new(reason).with_addr(addr);
         let result = self
-            .submit(RequestOp::UInt32DigitalRead { mask }, user)
+            .submit_async(RequestOp::UInt32DigitalRead { mask }, user)
             .await?;
         result.uint_val.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
@@ -256,21 +259,21 @@ impl PortHandle {
         mask: u32,
     ) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::UInt32DigitalWrite { value, mask }, user)
+        self.submit_async(RequestOp::UInt32DigitalWrite { value, mask }, user)
             .await?;
         Ok(())
     }
 
     pub async fn flush(&self, reason: usize, addr: i32) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Flush, user).await?;
+        self.submit_async(RequestOp::Flush, user).await?;
         Ok(())
     }
 
     pub async fn drv_user_create(&self, drv_info: &str) -> AsynResult<usize> {
         let user = AsynUser::default();
         let result = self
-            .submit(
+            .submit_async(
                 RequestOp::DrvUserCreate {
                     drv_info: drv_info.to_string(),
                 },
@@ -285,7 +288,7 @@ impl PortHandle {
 
     pub async fn read_enum(&self, reason: usize, addr: i32) -> AsynResult<usize> {
         let user = AsynUser::new(reason).with_addr(addr);
-        let result = self.submit(RequestOp::EnumRead, user).await?;
+        let result = self.submit_async(RequestOp::EnumRead, user).await?;
         result.enum_index.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
             message: "enum read returned no index".into(),
@@ -294,7 +297,7 @@ impl PortHandle {
 
     pub async fn write_enum(&self, reason: usize, addr: i32, index: usize) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::EnumWrite { index }, user).await?;
+        self.submit_async(RequestOp::EnumWrite { index }, user).await?;
         Ok(())
     }
 
@@ -306,7 +309,7 @@ impl PortHandle {
     ) -> AsynResult<Vec<i32>> {
         let user = AsynUser::new(reason).with_addr(addr);
         let result = self
-            .submit(RequestOp::Int32ArrayRead { max_elements }, user)
+            .submit_async(RequestOp::Int32ArrayRead { max_elements }, user)
             .await?;
         result.int32_array.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
@@ -321,7 +324,7 @@ impl PortHandle {
         data: Vec<i32>,
     ) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Int32ArrayWrite { data }, user)
+        self.submit_async(RequestOp::Int32ArrayWrite { data }, user)
             .await?;
         Ok(())
     }
@@ -334,7 +337,7 @@ impl PortHandle {
     ) -> AsynResult<Vec<f64>> {
         let user = AsynUser::new(reason).with_addr(addr);
         let result = self
-            .submit(RequestOp::Float64ArrayRead { max_elements }, user)
+            .submit_async(RequestOp::Float64ArrayRead { max_elements }, user)
             .await?;
         result.float64_array.ok_or_else(|| AsynError::Status {
             status: AsynStatus::Error,
@@ -349,7 +352,7 @@ impl PortHandle {
         data: Vec<f64>,
     ) -> AsynResult<()> {
         let user = AsynUser::new(reason).with_addr(addr);
-        self.submit(RequestOp::Float64ArrayWrite { data }, user)
+        self.submit_async(RequestOp::Float64ArrayWrite { data }, user)
             .await?;
         Ok(())
     }
@@ -357,7 +360,7 @@ impl PortHandle {
     /// Flush changed parameters as interrupt notifications (async).
     pub async fn call_param_callbacks(&self, addr: i32) -> AsynResult<()> {
         let user = AsynUser::new(0).with_addr(addr);
-        self.submit(
+        self.submit_async(
             RequestOp::CallParamCallbacks {
                 addr,
                 updates: vec![],
@@ -427,23 +430,7 @@ impl PortHandle {
         Ok(())
     }
 
-    /// Flush changed parameters as interrupt notifications (fire-and-forget).
-    ///
-    /// Safe to call from within a Tokio runtime context.
-    /// The actor processes messages in FIFO order, so prior writes are
-    /// guaranteed to be applied before this callback runs.
-    pub fn call_param_callbacks_no_wait(&self, addr: i32) {
-        let user = AsynUser::new(0).with_addr(addr);
-        self.submit_no_wait(
-            RequestOp::CallParamCallbacks {
-                addr,
-                updates: vec![],
-            },
-            user,
-        );
-    }
-
-    /// Set parameters directly and fire callbacks atomically.
+    /// Set parameters directly and fire callbacks atomically (reliable, blocking).
     ///
     /// This is the correct way for **background/acquisition threads** to update
     /// parameters. It mirrors the C ADCore pattern of:
@@ -453,51 +440,69 @@ impl PortHandle {
     /// callParamCallbacks();
     /// ```
     ///
-    /// # Why not `write_int32_no_wait` + `call_param_callbacks_no_wait`?
-    ///
-    /// `write_int32_no_wait` routes through the driver's `writeInt32()` method,
-    /// which is the **external write** path (designed for CA client puts). This
-    /// can trigger unwanted side effects (e.g., starting acquisition again) and
-    /// sends two separate messages to the actor queue — the callback may fire
-    /// before all writes are processed, or may miss changed flags.
-    ///
-    /// `set_params_and_notify` sets parameters directly in the param cache and
-    /// fires callbacks in a **single atomic actor message**, ensuring all I/O Intr
-    /// records see the updated values.
+    /// Delivery to the actor inbox is guaranteed (waits if channel is full).
+    /// The actor processes messages in FIFO order.
     ///
     /// # Example
     /// ```ignore
     /// port_handle.set_params_and_notify(0, vec![
     ///     ParamSetValue::Int32 { reason: acquire_busy, addr: 0, value: 0 },
     ///     ParamSetValue::Int32 { reason: status, addr: 0, value: ADStatus::Idle as i32 },
-    /// ]);
+    /// ]).await?;
     /// ```
-    pub fn set_params_and_notify(&self, addr: i32, updates: Vec<crate::request::ParamSetValue>) {
-        let user = AsynUser::new(0).with_addr(addr);
-        self.submit_no_wait(RequestOp::CallParamCallbacks { addr, updates }, user);
-    }
-
-    /// Send a write request without waiting for the reply.
-    /// The actor still processes it in FIFO order, so a subsequent blocking
-    /// call (e.g. call_param_callbacks_blocking) guarantees prior writes are done.
-    pub fn submit_no_wait(&self, op: RequestOp, user: AsynUser) {
-        let (reply_tx, _reply_rx) = oneshot::channel();
-        let msg = ActorMessage::new(op, user, CancelToken::new(), reply_tx);
-        let _ = self.tx.try_send(msg);
-    }
-
-    /// Send a write request without waiting. Routes through the driver's `writeInt32()`.
     ///
-    /// **Note:** For background thread parameter updates, prefer [`set_params_and_notify`]
-    /// which sets params directly without going through the driver's write method.
-    pub fn write_int32_no_wait(&self, reason: usize, addr: i32, value: i32) {
-        let user = AsynUser::new(reason).with_addr(addr);
-        self.submit_no_wait(RequestOp::Int32Write { value }, user);
+    /// Guarantees inbox enqueue (`send().await`). Does NOT wait for actor
+    /// processing — returns as soon as the message is in the channel.
+    /// Use `_blocking` variant from non-async contexts (std threads).
+    pub async fn set_params_and_notify(
+        &self,
+        addr: i32,
+        updates: Vec<crate::request::ParamSetValue>,
+    ) -> AsynResult<()> {
+        self.enqueue(RequestOp::CallParamCallbacks { addr, updates }, addr).await
     }
 
-    pub fn write_float64_no_wait(&self, reason: usize, addr: i32, value: f64) {
-        let user = AsynUser::new(reason).with_addr(addr);
-        self.submit_no_wait(RequestOp::Float64Write { value }, user);
+    /// Sync version of [`set_params_and_notify`] for non-async contexts
+    /// (std threads, acquisition tasks). Uses `blocking_send` internally.
+    ///
+    /// Returns an error if called from within a Tokio runtime — use the async
+    /// version instead.
+    pub fn set_params_and_notify_blocking(
+        &self,
+        addr: i32,
+        updates: Vec<crate::request::ParamSetValue>,
+    ) -> AsynResult<()> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(AsynError::Status {
+                status: AsynStatus::Error,
+                message: "set_params_and_notify_blocking called inside Tokio runtime; \
+                          use the async set_params_and_notify() instead"
+                    .into(),
+            });
+        }
+        self.enqueue_blocking(RequestOp::CallParamCallbacks { addr, updates }, addr)
+    }
+
+    /// Enqueue-only async helper: guaranteed delivery, no reply wait.
+    async fn enqueue(&self, op: RequestOp, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        let (reply_tx, _) = oneshot::channel();
+        let msg = ActorMessage::new(op, user, CancelToken::new(), reply_tx);
+        self.tx.send(msg).await.map_err(|_| AsynError::Status {
+            status: AsynStatus::Error,
+            message: format!("actor channel closed for port {}", self.port_name),
+        })
+    }
+
+    /// Enqueue-only sync helper: guaranteed delivery, no reply wait.
+    fn enqueue_blocking(&self, op: RequestOp, addr: i32) -> AsynResult<()> {
+        let user = AsynUser::new(0).with_addr(addr);
+        let (reply_tx, _) = oneshot::channel();
+        let msg = ActorMessage::new(op, user, CancelToken::new(), reply_tx);
+        self.tx.blocking_send(msg).map_err(|_| AsynError::Status {
+            status: AsynStatus::Error,
+            message: format!("actor channel closed for port {}", self.port_name),
+        })
     }
 
     // --- Option convenience methods ---
@@ -531,7 +536,7 @@ impl PortHandle {
     pub async fn get_option(&self, key: &str) -> AsynResult<String> {
         let user = AsynUser::default();
         let result = self
-            .submit(
+            .submit_async(
                 RequestOp::GetOption {
                     key: key.to_string(),
                 },
@@ -546,7 +551,7 @@ impl PortHandle {
 
     pub async fn set_option(&self, key: &str, value: &str) -> AsynResult<()> {
         let user = AsynUser::default();
-        self.submit(
+        self.submit_async(
             RequestOp::SetOption {
                 key: key.to_string(),
                 value: value.to_string(),

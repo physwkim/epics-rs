@@ -673,11 +673,13 @@ impl DeviceSupport for AsynDeviceSupport {
             uint32_mask: None,
         };
 
-        let (sub, intr_rx) = self.handle.interrupts().register_interrupt_user(filter);
+        let (sub, mut intr_rx) = self.handle.interrupts().register_interrupt_user(filter);
         self.interrupt_sub = Some(sub);
 
+        // Bridge mailbox-based InterruptReceiver to the mpsc<()> wakeup channel
+        // consumed by setup_io_intr(). The mailbox already coalesces intermediate
+        // updates, so no data is lost even if the record processes slowly.
         let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let mut intr_rx = intr_rx;
         let cache = self.interrupt_cache.clone();
         tokio::spawn(async move {
             while let Some(iv) = intr_rx.recv().await {

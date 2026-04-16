@@ -62,7 +62,7 @@ impl RuntimeClient for InProcessClient {
 
         Box::pin(async move {
             let result = handle
-                .submit(op, user)
+                .submit_async(op, user)
                 .await
                 .map_err(TransportError::from)?;
             Ok(result_to_reply(&result, request_id))

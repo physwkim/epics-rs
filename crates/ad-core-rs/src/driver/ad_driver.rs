@@ -18,8 +18,6 @@ pub struct ADDriverBase {
     pub pool: Arc<NDArrayPool>,
     pub array_output: NDArrayOutput,
     pub queued_counter: Arc<QueuedArrayCounter>,
-    rate_last_counter: i32,
-    rate_last_time: std::time::Instant,
 }
 
 impl ADDriverBase {
@@ -99,8 +97,6 @@ impl ADDriverBase {
             pool,
             array_output: NDArrayOutput::new(),
             queued_counter: Arc::new(QueuedArrayCounter::new()),
-            rate_last_counter: 0,
-            rate_last_time: std::time::Instant::now(),
         })
     }
 
@@ -111,7 +107,14 @@ impl ADDriverBase {
     }
 
     /// Publish an array: update counters, push to plugins and channel outputs, fire callbacks.
-    pub fn publish_array(&mut self, array: Arc<NDArray>) -> AsynResult<()> {
+    /// Updates driver param cache and fires param callbacks for a new array.
+    /// If array callbacks are enabled, returns the array that the caller must
+    /// publish asynchronously to downstream consumers via
+    /// `array_output.publish(arr).await`.
+    ///
+    /// This function does NOT publish the array — the caller is responsible
+    /// for that in an async context. Returns `None` when callbacks are disabled.
+    pub fn prepare_array(&mut self, array: Arc<NDArray>) -> AsynResult<Option<Arc<NDArray>>> {
         let counter = self
             .port_base
             .get_int32_param(self.params.base.array_counter, 0)?
@@ -153,31 +156,20 @@ impl ADDriverBase {
             .get_int32_param(self.params.base.array_callbacks, 0)?
             != 0;
 
-        if callbacks_enabled {
+        let to_publish = if callbacks_enabled {
             self.port_base.set_generic_pointer_param(
                 self.params.base.ndarray_data,
                 0,
                 array.clone() as Arc<dyn std::any::Any + Send + Sync>,
             )?;
-
-            self.array_output.publish(array);
-        }
-
-        // Compute array rate (Hz) based on counter delta over elapsed time.
-        let now = std::time::Instant::now();
-        let dt = now.duration_since(self.rate_last_time).as_secs_f64();
-        if dt >= 1.0 {
-            let delta = counter - self.rate_last_counter;
-            let rate = if delta > 0 { delta as f64 / dt } else { 0.0 };
-            self.rate_last_counter = counter;
-            self.rate_last_time = now;
-            self.port_base
-                .set_float64_param(self.params.base.array_rate, 0, rate)?;
-        }
+            Some(array)
+        } else {
+            None
+        };
 
         self.port_base.call_param_callbacks(0)?;
 
-        Ok(())
+        Ok(to_publish)
     }
 
     /// Set shutter state (open/close). In C++ this dispatches based on shutter mode.
@@ -253,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn test_publish_array_increments_counter() {
+    fn test_prepare_array_increments_counter() {
         let mut ad = ADDriverBase::new("TEST", 256, 256, 50_000_000).unwrap();
         let arr = ad
             .pool
@@ -265,7 +257,7 @@ mod tests {
                 crate::ndarray::NDDataType::UInt8,
             )
             .unwrap();
-        ad.publish_array(Arc::new(arr)).unwrap();
+        ad.prepare_array(Arc::new(arr)).unwrap();
         assert_eq!(
             ad.port_base
                 .get_int32_param(ad.params.base.array_counter, 0)
@@ -275,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn test_publish_array_skips_output_when_callbacks_disabled() {
+    fn test_prepare_array_skips_output_when_callbacks_disabled() {
         use crate::plugin::channel::ndarray_channel;
 
         let mut ad = ADDriverBase::new("TEST", 64, 64, 1_000_000).unwrap();
@@ -296,7 +288,7 @@ mod tests {
                 crate::ndarray::NDDataType::UInt8,
             )
             .unwrap();
-        ad.publish_array(Arc::new(arr)).unwrap();
+        ad.prepare_array(Arc::new(arr)).unwrap();
 
         // Counter still increments, but generic pointer should NOT be updated to an NDArray
         assert_eq!(
@@ -327,7 +319,7 @@ mod tests {
             )
             .unwrap();
         let id = arr.unique_id;
-        ad.publish_array(Arc::new(arr)).unwrap();
+        ad.prepare_array(Arc::new(arr)).unwrap();
 
         let gp = ad
             .port_base
@@ -423,7 +415,7 @@ mod tests {
             )
             .unwrap();
         let id = arr.unique_id;
-        ad.publish_array(Arc::new(arr)).unwrap();
+        ad.prepare_array(Arc::new(arr)).unwrap();
 
         let received = receiver.blocking_recv().unwrap();
         assert_eq!(received.unique_id, id);

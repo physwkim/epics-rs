@@ -43,28 +43,29 @@ pub struct MovingDotConfigSnapshot {
 }
 
 impl MovingDotConfigSnapshot {
-    /// Read config via PortHandle (blocking). For use from the acquisition task thread.
-    pub fn read_via_handle(
+    /// Read config via PortHandle (async). For use from the acquisition task thread.
+    pub async fn read_via_handle(
         handle: &PortHandle,
         ad: &ADBaseParams,
         dot: &MovingDotParams,
     ) -> AsynResult<Self> {
         Ok(Self {
-            motor_x: handle.read_float64_blocking(dot.motor_x_pos, 0)?,
-            motor_y: handle.read_float64_blocking(dot.motor_y_pos, 0)?,
-            beam_current: handle.read_float64_blocking(dot.beam_current, 0)?,
-            shutter_open: handle.read_int32_blocking(dot.shutter_open, 0)? != 0,
-            acquire_time: handle.read_float64_blocking(ad.acquire_time, 0)?,
-            acquire_period: handle.read_float64_blocking(ad.acquire_period, 0)?,
-            image_mode: ImageMode::from_i32(handle.read_int32_blocking(ad.image_mode, 0)?),
-            num_images: handle.read_int32_blocking(ad.num_images, 0)?,
-            array_callbacks: handle.read_int32_blocking(ad.base.array_callbacks, 0)? != 0,
+            motor_x: handle.read_float64(dot.motor_x_pos, 0).await?,
+            motor_y: handle.read_float64(dot.motor_y_pos, 0).await?,
+            beam_current: handle.read_float64(dot.beam_current, 0).await?,
+            shutter_open: handle.read_int32(dot.shutter_open, 0).await? != 0,
+            acquire_time: handle.read_float64(ad.acquire_time, 0).await?,
+            acquire_period: handle.read_float64(ad.acquire_period, 0).await?,
+            image_mode: ImageMode::from_i32(handle.read_int32(ad.image_mode, 0).await?),
+            num_images: handle.read_int32(ad.num_images, 0).await?,
+            array_callbacks: handle.read_int32(ad.base.array_callbacks, 0).await? != 0,
             wait_for_plugins: handle
-                .read_int32_blocking(ad.base.wait_for_plugins, 0)
+                .read_int32(ad.base.wait_for_plugins, 0)
+                .await
                 .unwrap_or(0)
                 != 0,
-            size_x: handle.read_int32_blocking(ad.size_x, 0)? as usize,
-            size_y: handle.read_int32_blocking(ad.size_y, 0)? as usize,
+            size_x: handle.read_int32(ad.size_x, 0).await? as usize,
+            size_y: handle.read_int32(ad.size_y, 0).await? as usize,
         })
     }
 }

@@ -494,6 +494,27 @@ areaDetector framework:
 - **23 plugins** — Stats, ROI, ROIStat, Process, Transform, ColorConvert, Overlay, FFT, TimeSeries, CircularBuff, Codec, Gather, Scatter, StdArrays, FileTIFF, FileJPEG, FileHDF5, Attribute, AttrPlot, BadPixel, PosPlugin, Passthrough
 - **Parallel processing** — rayon data-parallelism for CPU-heavy plugins (Stats, ROIStat, ColorConvert, Process). Shared thread pool sized to `available_cores - 2` to leave headroom for driver threads and the async runtime. Enabled by default; see [ad-plugins README](crates/ad-plugins-rs/README.md#parallel-processing)
 
+#### Async acquisition API
+
+Detector acquisition tasks are fully async. The data path has no lossy or
+blocking APIs — param updates and frame publishing all use reliable async
+enqueue. A driver author implementing an acquisition task only needs three
+types from `ad_core_rs::plugin::channel`:
+
+| Type | Purpose |
+|------|---------|
+| `PortHandle` | Read/write parameters: `read_int32().await`, `set_params_and_notify().await` |
+| `ArrayPublisher` | Publish a generated frame to downstream plugins: `publisher.publish(frame).await` |
+| `QueuedArrayCounter` | Wait until in-flight frames drain at end of acquisition |
+
+`blocking_callbacks` controls completion-wait depth, not thread blocking:
+- `0`: await queue admission only (downstream processes asynchronously)
+- `1`: await queue admission + downstream processing completion
+
+Fan-out to multiple plugins is concurrent — a slow downstream does not
+stall sibling downstreams. See `examples/sim-detector` for a full driver
+implementation.
+
 ### Calc Engine (in epics-base-rs)
 
 Expression engine:

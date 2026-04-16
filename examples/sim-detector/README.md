@@ -27,6 +27,37 @@ SimDetector (PortDriver)
 
 The driver uses a dirty flag system to avoid recomputing caches unnecessarily. Changing a gain parameter only invalidates the gain cache, not the peak positions.
 
+## Acquisition Task API
+
+Acquisition tasks are fully async. A driver author only needs three types from `ad_core_rs::plugin::channel`:
+
+| Type | Purpose |
+|------|---------|
+| `PortHandle` | Read/write parameters via `read_int32().await`, `set_params_and_notify().await` |
+| `ArrayPublisher` | Publish a generated frame to downstream plugins: `publisher.publish(frame).await` |
+| `QueuedArrayCounter` | Wait until in-flight frames drain at end of acquisition |
+
+The acquisition loop runs inside a `current_thread` tokio runtime created by the task thread. All I/O is async and reliable — there are no lossy or blocking APIs in the data path.
+
+```rust
+async fn acquisition_loop_async(mut ctx: AcquisitionContext) {
+    loop {
+        // Read config via PortHandle (async)
+        let acquire_time = ctx.port_handle.read_float64(ctx.ad.acquire_time, 0).await?;
+
+        // Generate frame...
+
+        // Batch-update params via PortHandle (async, reliable)
+        ctx.port_handle.set_params_and_notify(0, vec![...]).await?;
+
+        // Publish frame to downstream plugins (concurrent fan-out)
+        if config.array_callbacks {
+            ctx.publisher.publish(Arc::new(frame)).await;
+        }
+    }
+}
+```
+
 ## Parameters
 
 ### Gains

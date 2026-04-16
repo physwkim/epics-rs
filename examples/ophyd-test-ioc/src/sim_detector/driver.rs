@@ -10,7 +10,7 @@ use asyn_rs::user::AsynUser;
 use ad_core_rs::driver::{ADDriver, ADDriverBase, ImageMode};
 use ad_core_rs::ndarray_pool::NDArrayPool;
 use ad_core_rs::params::ADBaseParams;
-use ad_core_rs::plugin::channel::{NDArrayOutput, NDArraySender, QueuedArrayCounter};
+use ad_core_rs::plugin::channel::{ArrayPublisher, NDArrayOutput, NDArraySender, QueuedArrayCounter};
 
 use crate::physics::MovingDotImageConfig;
 
@@ -23,7 +23,7 @@ pub struct MovingDotDetector {
     pub ad: ADDriverBase,
     pub dot_params: MovingDotParams,
     dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
-    acq_tx: std::sync::mpsc::Sender<AcqCommand>,
+    acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
 }
 
 impl MovingDotDetector {
@@ -32,7 +32,7 @@ impl MovingDotDetector {
         max_size_x: i32,
         max_size_y: i32,
         max_memory: usize,
-        acq_tx: std::sync::mpsc::Sender<AcqCommand>,
+        acq_tx: tokio::sync::mpsc::Sender<AcqCommand>,
         dirty: Arc<parking_lot::Mutex<DirtyFlags>>,
     ) -> AsynResult<Self> {
         let mut ad = ADDriverBase::new(port_name, max_size_x, max_size_y, max_memory)?;
@@ -85,10 +85,10 @@ impl PortDriver for MovingDotDetector {
                 .unwrap_or(0);
             if value != 0 && acquiring == 0 {
                 self.ad.port_base.set_int32_param(acquire_idx, 0, value)?;
-                let _ = self.acq_tx.send(AcqCommand::Start);
+                let _ = self.acq_tx.try_send(AcqCommand::Start);
             } else if value == 0 && acquiring != 0 {
                 self.ad.port_base.set_int32_param(acquire_idx, 0, value)?;
-                let _ = self.acq_tx.send(AcqCommand::Stop);
+                let _ = self.acq_tx.try_send(AcqCommand::Stop);
             } else {
                 self.ad.port_base.set_int32_param(acquire_idx, 0, value)?;
             }
@@ -202,7 +202,7 @@ pub fn create_moving_dot_with_config(
     array_output: NDArrayOutput,
     image_config: MovingDotImageConfig,
 ) -> AsynResult<MovingDotRuntime> {
-    let (acq_tx, acq_rx) = std::sync::mpsc::channel();
+    let (acq_tx, acq_rx) = tokio::sync::mpsc::channel(16);
     let dirty = Arc::new(parking_lot::Mutex::new(DirtyFlags::default()));
     dirty.lock().set();
 
@@ -220,7 +220,7 @@ pub fn create_moving_dot_with_config(
     let task_handle = start_acquisition_task(AcquisitionContext {
         acq_rx,
         port_handle: runtime_handle.port_handle().clone(),
-        array_output: shared_output.clone(),
+        publisher: ArrayPublisher::new(shared_output.clone()),
         dirty,
         ad: ad_params,
         dot: dot_params,

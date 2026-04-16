@@ -45,7 +45,7 @@ fn test_driver_to_stats_pipeline() {
         }
     }
 
-    driver.publish_array(Arc::new(arr)).unwrap();
+    driver.prepare_array(Arc::new(arr)).unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -81,7 +81,7 @@ fn test_driver_to_std_arrays_pipeline() {
         .unwrap();
 
     let id = arr.unique_id;
-    driver.publish_array(Arc::new(arr)).unwrap();
+    driver.prepare_array(Arc::new(arr)).unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -695,7 +695,7 @@ fn test_process_and_publish_writes_array_size_params() {
         NDDataType::UInt8,
     );
     arr.unique_id = 42;
-    driver.publish_array(Arc::new(arr)).unwrap();
+    driver.prepare_array(Arc::new(arr)).unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
