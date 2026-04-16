@@ -66,10 +66,7 @@ impl AcquisitionContext {
     }
 }
 
-async fn wait_for_stop(
-    acq_rx: &mut rt::CommandReceiver<AcqCommand>,
-    duration: Duration,
-) -> bool {
+async fn wait_for_stop(acq_rx: &mut rt::CommandReceiver<AcqCommand>, duration: Duration) -> bool {
     match rt::timeout(duration, acq_rx.recv()).await {
         Ok(Some(AcqCommand::Stop)) => true,
         Ok(Some(AcqCommand::Start)) => false,

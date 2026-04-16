@@ -141,7 +141,9 @@ impl std::error::Error for Elapsed {}
 
 /// Await `fut`, returning `Err(Elapsed)` if it doesn't resolve within `duration`.
 pub async fn timeout<F: Future>(duration: Duration, fut: F) -> Result<F::Output, Elapsed> {
-    tokio::time::timeout(duration, fut).await.map_err(|_| Elapsed)
+    tokio::time::timeout(duration, fut)
+        .await
+        .map_err(|_| Elapsed)
 }
 
 /// Async sleep for the given duration.

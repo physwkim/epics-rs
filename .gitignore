@@ -4,3 +4,7 @@ examples/*/ioc/autosave/*.sav*
 examples/mini-beamline/ioc/autosave/*.tmp
 examples/mini-beamline/ioc/autosave/*.sav*
 examples/ophyd-test-ioc/ioc/0*
+
+# Python bytecode (e.g., from PyDM opi scripts)
+__pycache__/
+*.pyc
