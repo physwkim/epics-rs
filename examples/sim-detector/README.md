@@ -193,6 +193,27 @@ caput SIM1:cam1:Acquire 1
 camonitor SIM1:Stats1:MeanValue_RBV
 ```
 
+## AD Viewer (PyDM)
+
+A PyDM display at `opi/pydm/adViewer.py` shows the CA (`image1:ArrayData`)
+and PVA (`Pva1:Image`) plugin outputs side by side, with Start/Stop
+controls and per-plugin Enable toggles.
+
+```bash
+pydm examples/sim-detector/opi/pydm/adViewer.py \
+    --macro "P=SIM1:,R=cam1:,IMAGE=image1:,PVA=Pva1:,PVA_PV=SIM1:Pva1:Image"
+```
+
+Macros:
+
+| Macro   | Default              | Meaning                      |
+|---------|----------------------|------------------------------|
+| `P`     | `SIM1:`              | Shared prefix                |
+| `R`     | `cam1:`              | Camera record suffix         |
+| `IMAGE` | `image1:`            | CA plugin suffix             |
+| `PVA`   | `Pva1:`              | PVA plugin suffix            |
+| `PVA_PV`| `SIM1:Pva1:Image`    | Name under which PVA serves  |
+
 ## License
 
 MIT
