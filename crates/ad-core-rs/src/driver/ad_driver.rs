@@ -415,7 +415,13 @@ mod tests {
             )
             .unwrap();
         let id = arr.unique_id;
-        ad.prepare_array(Arc::new(arr)).unwrap();
+        let to_publish = ad.prepare_array(Arc::new(arr)).unwrap().unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(ad.array_output.publish(to_publish));
 
         let received = receiver.blocking_recv().unwrap();
         assert_eq!(received.unique_id, id);

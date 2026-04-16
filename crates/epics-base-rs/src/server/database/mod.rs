@@ -89,6 +89,10 @@ struct PvDatabaseInner {
     external_resolver: RwLock<Option<ExternalPvResolver>>,
     /// Optional async resolver invoked on `has_name` misses (e.g. CA gateway).
     search_resolver: RwLock<Option<SearchResolver>>,
+    /// True once the ScanScheduler has been started for this DB.
+    /// Prevents duplicate scan tasks when multiple protocol servers (CA + PVA)
+    /// both try to start scanning on the same DB.
+    scan_started: std::sync::atomic::AtomicBool,
 }
 
 /// Database of all process variables hosted by this server.
@@ -123,8 +127,20 @@ impl PvDatabase {
                 records: RwLock::new(HashMap::new()),
                 scan_index: RwLock::new(HashMap::new()),
                 cp_links: RwLock::new(HashMap::new()),
+                scan_started: std::sync::atomic::AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Atomically claim the right to start the scan scheduler for this DB.
+    /// Returns `true` on the first call, `false` on subsequent calls.
+    /// Used by `ScanScheduler::run_with_hooks` to prevent duplicate scan tasks
+    /// when multiple protocol servers (CA + PVA) both try to start scanning.
+    pub fn try_claim_scan_start(&self) -> bool {
+        !self
+            .inner
+            .scan_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Install an async resolver invoked when [`PvDatabase::has_name`]

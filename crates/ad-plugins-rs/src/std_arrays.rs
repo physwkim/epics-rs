@@ -110,7 +110,11 @@ mod tests {
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        handle.array_sender().send(make_array(42));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(handle.array_sender().publish(make_array(42)));
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let latest = data.lock().clone();

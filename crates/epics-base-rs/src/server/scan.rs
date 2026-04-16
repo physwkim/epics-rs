@@ -36,23 +36,41 @@ impl ScanScheduler {
     /// After PINI records are processed, the hooks are invoked before
     /// periodic scan tasks begin. This ensures pollers start only after
     /// the initial record processing burst is complete.
+    ///
+    /// If another `ScanScheduler` has already started for the same DB (e.g.
+    /// CA server already running when PVA server starts in a QSRV setup),
+    /// this call still runs the provided hooks but does NOT spawn duplicate
+    /// scan tasks. It then awaits forever so the caller's `tokio::select!`
+    /// behaves as expected.
     pub async fn run_with_hooks(&self, hooks: Vec<Box<dyn FnOnce() + Send>>) {
-        // Process PINI records at startup (with full link chain)
-        let pini_records = self.db.pini_records().await;
-        for name in &pini_records {
-            let mut visited = HashSet::new();
-            let _ = self
-                .db
-                .process_record_with_links(name, &mut visited, 0)
-                .await;
+        let is_first = self.db.try_claim_scan_start();
+
+        if is_first {
+            // Process PINI records at startup (with full link chain)
+            let pini_records = self.db.pini_records().await;
+            for name in &pini_records {
+                let mut visited = HashSet::new();
+                let _ = self
+                    .db
+                    .process_record_with_links(name, &mut visited, 0)
+                    .await;
+            }
         }
 
-        // Run after-init hooks (start pollers, etc.)
+        // Always run the caller's after-init hooks (they may be protocol-specific
+        // — e.g. registering PVA PVs after the DB is loaded).
         for hook in hooks {
             hook();
         }
 
-        // Spawn a task for each periodic scan rate
+        if !is_first {
+            // Another ScanScheduler already owns the periodic tasks for this DB.
+            // Avoid spawning duplicates; just park this future.
+            std::future::pending::<()>().await;
+            return;
+        }
+
+        // Spawn a task for each periodic scan rate (first caller only).
         let mut handles = Vec::new();
         for &scan_type in PERIODIC_SCANS {
             if let Some(duration) = scan_type.interval() {

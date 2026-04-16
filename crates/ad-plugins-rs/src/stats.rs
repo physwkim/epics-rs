@@ -1523,7 +1523,11 @@ mod tests {
             }
         }
 
-        handle.array_sender().send(Arc::new(arr));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(handle.array_sender().publish(Arc::new(arr)));
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let result = stats.lock().clone();

@@ -45,7 +45,12 @@ fn test_driver_to_stats_pipeline() {
         }
     }
 
-    driver.prepare_array(Arc::new(arr)).unwrap();
+    let to_publish = driver.prepare_array(Arc::new(arr)).unwrap().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(driver.array_output.publish(to_publish));
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -81,7 +86,12 @@ fn test_driver_to_std_arrays_pipeline() {
         .unwrap();
 
     let id = arr.unique_id;
-    driver.prepare_array(Arc::new(arr)).unwrap();
+    let to_publish = driver.prepare_array(Arc::new(arr)).unwrap().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(driver.array_output.publish(to_publish));
 
     std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -115,10 +125,15 @@ fn test_pool_reuse_in_pipeline() {
 
 #[test]
 fn test_rewire_ndarray_port_at_runtime() {
-    use ad_core_rs::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::channel::{ArrayPublisher, NDArrayOutput};
     use ad_core_rs::plugin::runtime::{ProcessResult, create_plugin_runtime};
     use asyn_rs::request::RequestOp;
     use asyn_rs::user::AsynUser;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     let pool = Arc::new(NDArrayPool::new(1_000_000));
     let wiring = Arc::new(WiringRegistry::new());
@@ -126,9 +141,11 @@ fn test_rewire_ndarray_port_at_runtime() {
     // Create two "upstream" outputs: SIM1 and ROI1
     let sim_output = Arc::new(parking_lot::Mutex::new(NDArrayOutput::new()));
     wiring.register_output("SIM1", sim_output.clone());
+    let sim_publisher = ArrayPublisher::new(sim_output.clone());
 
     let roi_output = Arc::new(parking_lot::Mutex::new(NDArrayOutput::new()));
     wiring.register_output("ROI1", roi_output.clone());
+    let roi_publisher = ArrayPublisher::new(roi_output.clone());
 
     // Tracking processor — records unique_id of last processed array
     struct TrackingProcessor {
@@ -169,7 +186,7 @@ fn test_rewire_ndarray_port_at_runtime() {
     // Send array from SIM1
     let mut arr = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
     arr.unique_id = 100;
-    sim_output.lock().publish(Arc::new(arr));
+    rt.block_on(sim_publisher.publish(Arc::new(arr)));
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(
         *last_id.lock(),
@@ -193,7 +210,7 @@ fn test_rewire_ndarray_port_at_runtime() {
     // Send array from SIM1 — should NOT reach STATS1 anymore
     let mut arr2 = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
     arr2.unique_id = 200;
-    sim_output.lock().publish(Arc::new(arr2));
+    rt.block_on(sim_publisher.publish(Arc::new(arr2)));
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(
         *last_id.lock(),
@@ -204,7 +221,7 @@ fn test_rewire_ndarray_port_at_runtime() {
     // Send array from ROI1 — should reach STATS1
     let mut arr3 = NDArray::new(vec![NDDimension::new(4)], NDDataType::UInt8);
     arr3.unique_id = 300;
-    roi_output.lock().publish(Arc::new(arr3));
+    rt.block_on(roi_publisher.publish(Arc::new(arr3)));
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(
         *last_id.lock(),
@@ -215,11 +232,16 @@ fn test_rewire_ndarray_port_at_runtime() {
 
 #[test]
 fn test_rewire_through_real_roi_plugin() {
-    use ad_core_rs::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::channel::{ArrayPublisher, NDArrayOutput};
     use ad_core_rs::plugin::runtime::{ProcessResult, create_plugin_runtime};
     use ad_plugins_rs::roi::{ROIConfig, ROIDimConfig, ROIProcessor};
     use asyn_rs::request::RequestOp;
     use asyn_rs::user::AsynUser;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     let pool = Arc::new(NDArrayPool::new(1_000_000));
     let wiring = Arc::new(WiringRegistry::new());
@@ -227,6 +249,7 @@ fn test_rewire_through_real_roi_plugin() {
     // SIM1 driver output
     let sim_output = Arc::new(parking_lot::Mutex::new(NDArrayOutput::new()));
     wiring.register_output("SIM1", sim_output.clone());
+    let sim_publisher = ArrayPublisher::new(sim_output.clone());
 
     // Create ROI1 plugin wired to SIM1 (full-frame passthrough ROI)
     let mut roi_config = ROIConfig::default();
@@ -311,7 +334,7 @@ fn test_rewire_through_real_roi_plugin() {
         NDDataType::UInt8,
     );
     arr.unique_id = 100;
-    sim_output.lock().publish(Arc::new(arr));
+    rt.block_on(sim_publisher.publish(Arc::new(arr)));
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(*last_id.lock(), 100, "STATS1 gets array from SIM1");
 
@@ -336,7 +359,7 @@ fn test_rewire_through_real_roi_plugin() {
         NDDataType::UInt8,
     );
     arr2.unique_id = 200;
-    sim_output.lock().publish(Arc::new(arr2));
+    rt.block_on(sim_publisher.publish(Arc::new(arr2)));
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let received_id = *last_id.lock();
@@ -348,8 +371,13 @@ fn test_rewire_through_real_roi_plugin() {
 
 #[test]
 fn test_roi_param_change_enables_output() {
-    use ad_core_rs::plugin::channel::NDArrayOutput;
+    use ad_core_rs::plugin::channel::{ArrayPublisher, NDArrayOutput};
     use ad_core_rs::plugin::runtime::{ProcessResult, create_plugin_runtime};
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     let pool = Arc::new(NDArrayPool::new(1_000_000));
     let wiring = Arc::new(WiringRegistry::new());
@@ -357,6 +385,7 @@ fn test_roi_param_change_enables_output() {
     // SIM1 driver output
     let sim_output = Arc::new(parking_lot::Mutex::new(NDArrayOutput::new()));
     wiring.register_output("SIM1", sim_output.clone());
+    let sim_publisher = ArrayPublisher::new(sim_output.clone());
 
     // Create ROI1 with DEFAULT config (size=0) — like the real IOC
     let (roi_handle, roi_params, _roi_jh) =
@@ -415,7 +444,7 @@ fn test_roi_param_change_enables_output() {
         NDDataType::UInt8,
     );
     arr.unique_id = 100;
-    sim_output.lock().publish(Arc::new(arr));
+    rt.block_on(sim_publisher.publish(Arc::new(arr)));
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(
         *last_id.lock(),
@@ -439,7 +468,7 @@ fn test_roi_param_change_enables_output() {
         NDDataType::UInt8,
     );
     arr2.unique_id = 200;
-    sim_output.lock().publish(Arc::new(arr2));
+    rt.block_on(sim_publisher.publish(Arc::new(arr2)));
     std::thread::sleep(std::time::Duration::from_millis(200));
     assert_eq!(
         *last_id.lock(),
@@ -695,7 +724,12 @@ fn test_process_and_publish_writes_array_size_params() {
         NDDataType::UInt8,
     );
     arr.unique_id = 42;
-    driver.prepare_array(Arc::new(arr)).unwrap();
+    let to_publish = driver.prepare_array(Arc::new(arr)).unwrap().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(driver.array_output.publish(to_publish));
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 

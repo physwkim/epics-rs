@@ -356,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blocking_callbacks_completion_wait() {
-        let (mut sender, mut receiver) = ndarray_channel("TEST", 10);
+        let (sender, mut receiver) = ndarray_channel("TEST", 10);
         sender.blocking_mode.store(true, Ordering::Release);
 
         let completed = Arc::new(AtomicBool::new(false));
