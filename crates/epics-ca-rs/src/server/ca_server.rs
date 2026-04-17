@@ -335,10 +335,22 @@ impl CaServer {
 
         eprintln!("CA server: UDP search on port {port}, TCP on port {tcp_port}");
 
+        // Spawn UDP responder as its own task so its waker isn't multiplexed
+        // through a select! branch (which can drop/replace wakers between polls
+        // and miss edge-triggered epoll events).
+        let udp_handle = epics_base_rs::runtime::task::spawn(async move {
+            udp::run_udp_search_responder(db_udp, port, tcp_port).await
+        });
+
         let result = tokio::select! {
-            r = udp::run_udp_search_responder(db_udp, port, tcp_port) => {
+            r = udp_handle => {
                 eprintln!("UDP responder exited: {r:?}");
-                r
+                match r {
+                    Ok(inner) => inner,
+                    Err(e) => Err(CaError::Io(
+                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                    )),
+                }
             }
             r = tcp_handle => {
                 eprintln!("TCP listener exited: {r:?}");
