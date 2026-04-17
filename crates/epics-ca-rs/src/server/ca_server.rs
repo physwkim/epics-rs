@@ -325,6 +325,7 @@ impl CaServer {
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
             tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp, conn_events).await
         });
+        let tcp_abort = tcp_handle.abort_handle();
 
         let tcp_port = tcp_rx.await.map_err(|_| {
             CaError::Io(std::io::Error::new(
@@ -341,6 +342,7 @@ impl CaServer {
         let udp_handle = epics_base_rs::runtime::task::spawn(async move {
             udp::run_udp_search_responder(db_udp, port, tcp_port).await
         });
+        let udp_abort = udp_handle.abort_handle();
 
         let result = tokio::select! {
             r = udp_handle => {
@@ -371,6 +373,11 @@ impl CaServer {
             }
         };
 
+        // Tear down spawned tasks whose JoinHandles were moved into the
+        // select!. Calling abort() on a handle whose task already finished
+        // is a no-op, so it's safe to call unconditionally.
+        udp_abort.abort();
+        tcp_abort.abort();
         if let Some(h) = autosave_handle {
             h.abort();
         }
