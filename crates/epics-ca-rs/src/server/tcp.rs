@@ -513,11 +513,7 @@ async fn dispatch_message(
                 .unwrap_or(AccessLevel::ReadWrite);
             if access != AccessLevel::ReadWrite {
                 if is_notify {
-                    let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
-                    resp.data_type = write_type as u16;
-                    resp.count = hdr.count;
-                    resp.cid = ECA_NOWTACCESS;
-                    resp.available = ioid;
+                    let resp = write_notify_response(write_type as u16, ECA_NOWTACCESS, ioid);
                     let mut w = writer.lock().await;
                     w.write_all(&resp.to_bytes()).await?;
                     w.flush().await?;
@@ -526,7 +522,6 @@ async fn dispatch_message(
             }
 
             let count = hdr.actual_count() as usize;
-            let write_count = hdr.count; // Echo back in response (matches C EPICS)
             let new_value = match EpicsValue::from_bytes_array(write_type, payload, count) {
                 Ok(v) => v,
                 Err(_) => {
@@ -577,11 +572,7 @@ async fn dispatch_message(
                         // automatically if the client disconnects (rx sender dropped).
                         let _ = rx.await;
 
-                        let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
-                        resp.data_type = write_type as u16;
-                        resp.count = write_count;
-                        resp.cid = eca_status;
-                        resp.available = ioid;
+                        let resp = write_notify_response(write_type as u16, eca_status, ioid);
 
                         let mut w = writer_c.lock().await;
                         let _ = w.write_all(&resp.to_bytes()).await;
@@ -589,11 +580,7 @@ async fn dispatch_message(
                     });
                 } else {
                     // Synchronous completion — respond immediately
-                    let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
-                    resp.data_type = write_type as u16;
-                    resp.count = write_count;
-                    resp.cid = eca_status;
-                    resp.available = ioid;
+                    let resp = write_notify_response(write_type as u16, eca_status, ioid);
 
                     let mut w = writer.lock().await;
                     w.write_all(&resp.to_bytes()).await?;
@@ -934,6 +921,17 @@ async fn reeval_access_rights(
     Ok(())
 }
 
+fn write_notify_response(data_type: u16, eca_status: u32, ioid: u32) -> CaHeader {
+    let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
+    resp.data_type = data_type;
+    // C libca is stricter about zero-payload WRITE_NOTIFY replies than our
+    // Rust client. Mirroring rsrv here avoids disconnects from standard caput.
+    resp.count = 1;
+    resp.cid = eca_status;
+    resp.available = ioid;
+    resp
+}
+
 /// Send a command-specific zero-payload error response.
 /// Used for READ_NOTIFY, WRITE_NOTIFY, and EVENT_ADD error replies.
 async fn send_cmd_error(
@@ -943,11 +941,16 @@ async fn send_cmd_error(
     eca_status: u32,
     ioid_or_subid: u32,
 ) -> CaResult<()> {
-    let mut resp = CaHeader::new(cmd);
-    resp.data_type = data_type;
-    resp.count = 0;
-    resp.cid = eca_status;
-    resp.available = ioid_or_subid;
+    let resp = if cmd == CA_PROTO_WRITE_NOTIFY {
+        write_notify_response(data_type, eca_status, ioid_or_subid)
+    } else {
+        let mut resp = CaHeader::new(cmd);
+        resp.data_type = data_type;
+        resp.count = 0;
+        resp.cid = eca_status;
+        resp.available = ioid_or_subid;
+        resp
+    };
     let mut w = writer.lock().await;
     w.write_all(&resp.to_bytes()).await?;
     w.flush().await?;
@@ -974,4 +977,29 @@ async fn send_ca_error(
     w.write_all(&error_msg_bytes).await?;
     w.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_notify_response_uses_fixed_count() {
+        let resp = write_notify_response(6, ECA_NORMAL, 123);
+        assert_eq!(resp.cmmd, CA_PROTO_WRITE_NOTIFY);
+        assert_eq!(resp.postsize, 0);
+        assert_eq!(resp.data_type, 6);
+        assert_eq!(resp.count, 1);
+        assert_eq!(resp.cid, ECA_NORMAL);
+        assert_eq!(resp.available, 123);
+    }
+
+    #[test]
+    fn write_notify_errors_use_same_header_shape() {
+        let resp = write_notify_response(3, ECA_BADTYPE, 77);
+        assert_eq!(resp.count, 1);
+        assert_eq!(resp.data_type, 3);
+        assert_eq!(resp.cid, ECA_BADTYPE);
+        assert_eq!(resp.available, 77);
+    }
 }
