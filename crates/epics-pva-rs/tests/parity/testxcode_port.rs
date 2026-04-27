@@ -253,6 +253,128 @@ fn pvxs_descriptor_nt_scalar_uint32_round_trip() {
 // decoder fills them with defaults. Our `decode_pv_field_with_bitset`
 // already does this; verify against a constructed wire stream.
 
+// ── testDeserialize1 (pvxs testxcode.cpp:119) ──────────────────────
+//
+// Counterpart to testSerialize1: decode each wire pattern back into
+// an NTScalar(UInt32) and verify which bits are marked + values.
+
+#[test]
+fn pvxs_deserialize_29_zero_bytes_full_default() {
+    // pvxs: from_wire_full of 29 zero bytes → default NTScalar UInt32.
+    let desc = nt_scalar_uint32_desc();
+    let wire = vec![0u8; 29];
+    let mut cur = Cursor::new(wire.as_slice());
+    let v = epics_pva_rs::pvdata::encode::decode_pv_field(&desc, &mut cur, ByteOrder::Big)
+        .expect("decode_pv_field full");
+    if let PvField::Structure(s) = v {
+        match s.get_value() {
+            Some(ScalarValue::UInt(n)) => assert_eq!(*n, 0),
+            other => panic!("value: {other:?}"),
+        }
+    } else {
+        panic!("expected struct");
+    }
+    // All bytes consumed.
+    assert_eq!(cur.position(), 29);
+}
+
+#[test]
+fn pvxs_deserialize_empty_bitset_no_marks() {
+    // pvxs: from_wire_valid of "\x00" → empty bitset, no marks
+    let desc = nt_scalar_uint32_desc();
+    let wire: &[u8] = b"\x00";
+    let mut cur = Cursor::new(wire);
+    let bs = BitSet::decode(&mut cur, ByteOrder::Big).unwrap();
+    assert!(bs.is_empty());
+    let _ = epics_pva_rs::pvdata::encode::decode_pv_field_with_bitset(
+        &desc,
+        &bs,
+        0,
+        &mut cur,
+        ByteOrder::Big,
+    )
+    .expect("decode empty");
+    assert_eq!(cur.position(), 1);
+}
+
+#[test]
+fn pvxs_deserialize_value_only_marks_value_bit() {
+    // pvxs: from_wire_valid of "\x01\x02\xde\xad\xbe\xef"
+    //   → only "value" marked, value = 0xdeadbeef.
+    let desc = nt_scalar_uint32_desc();
+    let wire: &[u8] = b"\x01\x02\xde\xad\xbe\xef";
+    let mut cur = Cursor::new(wire);
+    let bs = BitSet::decode(&mut cur, ByteOrder::Big).unwrap();
+    assert!(bs.get(1)); // value bit
+    assert!(!bs.get(8)); // timeStamp.nanoseconds not set
+    let v = epics_pva_rs::pvdata::encode::decode_pv_field_with_bitset(
+        &desc,
+        &bs,
+        0,
+        &mut cur,
+        ByteOrder::Big,
+    )
+    .expect("decode value-only");
+    if let PvField::Structure(s) = v {
+        match s.get_value() {
+            Some(ScalarValue::UInt(n)) => assert_eq!(*n, 0xdeadbeef),
+            other => panic!("value: {other:?}"),
+        }
+    } else {
+        panic!("expected struct");
+    }
+}
+
+#[test]
+fn pvxs_deserialize_alarm_message_and_nanoseconds() {
+    // pvxs: from_wire_valid of "\x02 \x01\x0bhello world\x00\x00\x00\xab"
+    //   → alarm.message="hello world", timeStamp.nanoseconds=0xab.
+    let desc = nt_scalar_uint32_desc();
+    let wire: &[u8] = b"\x02\x20\x01\x0bhello world\x00\x00\x00\xab";
+    let mut cur = Cursor::new(wire);
+    let bs = BitSet::decode(&mut cur, ByteOrder::Big).unwrap();
+    assert!(bs.get(5)); // alarm.message
+    assert!(bs.get(8)); // timeStamp.nanoseconds
+    assert!(!bs.get(1)); // value not set
+    let v = epics_pva_rs::pvdata::encode::decode_pv_field_with_bitset(
+        &desc,
+        &bs,
+        0,
+        &mut cur,
+        ByteOrder::Big,
+    )
+    .expect("decode alarm+ts");
+    if let PvField::Structure(s) = v {
+        // value defaulted (0)
+        match s.get_value() {
+            Some(ScalarValue::UInt(n)) => assert_eq!(*n, 0),
+            other => panic!("value: {other:?}"),
+        }
+        // alarm.message present
+        if let Some(PvField::Structure(alarm)) = s.get_field("alarm") {
+            match alarm.get_field("message") {
+                Some(PvField::Scalar(ScalarValue::String(s))) => {
+                    assert_eq!(s, "hello world");
+                }
+                other => panic!("alarm.message: {other:?}"),
+            }
+        } else {
+            panic!("alarm not structure");
+        }
+        // timeStamp.nanoseconds = 0xab
+        if let Some(PvField::Structure(ts)) = s.get_field("timeStamp") {
+            match ts.get_field("nanoseconds") {
+                Some(PvField::Scalar(ScalarValue::Int(n))) => assert_eq!(*n, 0xab),
+                other => panic!("ts.nanoseconds: {other:?}"),
+            }
+        } else {
+            panic!("timeStamp not structure");
+        }
+    } else {
+        panic!("expected struct");
+    }
+}
+
 // ── testRegressBadBitMask (pvxs testxcode.cpp:1165) ────────────────
 //
 // pvxs `from_wire(buf, BitMask)` rejects the null marker (0xff): a
