@@ -11,3 +11,5 @@ mod wire_dump;
 mod tls_interop;
 #[path = "parity/stability_interop.rs"]
 mod stability_interop;
+#[path = "parity/testbitmask_port.rs"]
+mod testbitmask_port;

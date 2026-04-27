@@ -97,6 +97,32 @@ impl BitSet {
         })
     }
 
+    /// Find the next set bit at or after `start`. Returns `size()` (the
+    /// total bit-storage size in bits) when no bit ≥ `start` is set.
+    /// Mirrors pvxs `BitMask::findSet`.
+    pub fn find_set(&self, start: usize) -> usize {
+        let total_bits = self.size();
+        let mut i = start;
+        while i < total_bits {
+            if self.get(i) {
+                return i;
+            }
+            i += 1;
+        }
+        total_bits
+    }
+
+    /// Total bit-storage size, in bits — i.e. `bytes.len() * 8`. Note this
+    /// is *not* the highest set bit; use `find_set(0)` for that.
+    pub fn size(&self) -> usize {
+        self.bytes.len() * 8
+    }
+
+    /// Backing-byte count (storage size / 8 in pvxs terms `wsize` / 8).
+    pub fn byte_size(&self) -> usize {
+        self.bytes.len()
+    }
+
     /// Number of bits set.
     pub fn count(&self) -> usize {
         self.bytes.iter().map(|b| b.count_ones() as usize).sum()
@@ -109,15 +135,46 @@ impl BitSet {
         out
     }
 
-    /// Append the encoded form to `buf`. Trims trailing zero bytes per pvxs
-    /// `bitmask.cpp::to_wire`.
+    /// Append the encoded form to `buf`. Matches pvxs `bitmask.cpp::to_wire`:
+    /// emit u64 words plus any trailing partial bytes, with the *bit*
+    /// numbering staying LSB-first (bit 0 = LSB of word 0). For little-
+    /// endian wire byte order, this means byte 0 of the wire = LSB byte
+    /// of word 0 = our `self.bytes[0]`. For big-endian, the bytes within
+    /// each 8-byte word are reversed: wire byte 0 = MSB byte of word 0
+    /// = our `self.bytes[7]`.
     pub fn write_into(&self, order: ByteOrder, buf: &mut Vec<u8>) {
+        // Trim trailing zero bytes (LSB-first numbering: trim from the
+        // end of `self.bytes`, which is the high-order bytes).
         let mut nbytes = self.bytes.len();
         while nbytes > 0 && self.bytes[nbytes - 1] == 0 {
             nbytes -= 1;
         }
         encode_size_into(nbytes as u32, order, buf);
-        buf.extend_from_slice(&self.bytes[..nbytes]);
+
+        match order {
+            ByteOrder::Little => {
+                // Wire bytes == storage bytes for LE.
+                buf.extend_from_slice(&self.bytes[..nbytes]);
+            }
+            ByteOrder::Big => {
+                // Emit u64 words byte-reversed; trailing partial bytes
+                // (less than 8) are emitted in their original order
+                // because they sit beyond the last full word.
+                let nwords = nbytes / 8;
+                let extra = nbytes % 8;
+                for w in 0..nwords {
+                    let start = w * 8;
+                    let mut word = [0u8; 8];
+                    word.copy_from_slice(&self.bytes[start..start + 8]);
+                    word.reverse();
+                    buf.extend_from_slice(&word);
+                }
+                if extra > 0 {
+                    let start = nwords * 8;
+                    buf.extend_from_slice(&self.bytes[start..start + extra]);
+                }
+            }
+        }
     }
 
     /// Decode the next BitSet from `cur`.
@@ -125,7 +182,29 @@ impl BitSet {
         let nbytes = decode_size(cur, order)?
             .ok_or_else(|| DecodeError("bitset size cannot be null".into()))?
             as usize;
-        let bytes = cur.get_bytes(nbytes)?;
+        let wire = cur.get_bytes(nbytes)?;
+        let bytes = match order {
+            ByteOrder::Little => wire,
+            ByteOrder::Big => {
+                // Reverse byte order within each 8-byte word; trailing
+                // partial bytes pass through.
+                let nwords = nbytes / 8;
+                let extra = nbytes % 8;
+                let mut out = Vec::with_capacity(nbytes);
+                for w in 0..nwords {
+                    let start = w * 8;
+                    let mut word = [0u8; 8];
+                    word.copy_from_slice(&wire[start..start + 8]);
+                    word.reverse();
+                    out.extend_from_slice(&word);
+                }
+                if extra > 0 {
+                    let start = nwords * 8;
+                    out.extend_from_slice(&wire[start..start + extra]);
+                }
+                out
+            }
+        };
         Ok(Self { bytes })
     }
 }
