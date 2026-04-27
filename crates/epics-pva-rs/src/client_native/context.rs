@@ -294,4 +294,110 @@ impl PvaClient {
         let ch = self.channel(pv_name).await?;
         op_rpc(&ch, request_desc, request_value, self.inner.timeout).await
     }
+
+    /// Begin a `connect` builder for `pv_name`. Use this to attach
+    /// onConnect/onDisconnect callbacks that fire whenever the channel
+    /// transitions across the Active boundary. Mirrors pvxs's
+    /// `Context::connect(name).onConnect(...).exec()`.
+    pub fn connect(&self, pv_name: &str) -> ConnectBuilder<'_> {
+        ConnectBuilder {
+            client: self,
+            pv_name: pv_name.to_string(),
+            on_connect: None,
+            on_disconnect: None,
+        }
+    }
+}
+
+/// Callback type for [`ConnectBuilder::on_connect`] /
+/// [`ConnectBuilder::on_disconnect`].
+type ConnectCb = Box<dyn Fn() + Send + Sync + 'static>;
+
+/// Builder for a connect-watcher operation. Configure callbacks then
+/// call `exec()` to spawn a watcher task. The returned [`ConnectHandle`]
+/// owns the task — drop it to stop watching.
+pub struct ConnectBuilder<'a> {
+    client: &'a PvaClient,
+    pv_name: String,
+    on_connect: Option<ConnectCb>,
+    on_disconnect: Option<ConnectCb>,
+}
+
+impl<'a> ConnectBuilder<'a> {
+    /// Register a callback that fires every time the channel becomes
+    /// Active (initial connect + every reconnect).
+    pub fn on_connect<F>(mut self, f: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_connect = Some(Box::new(f));
+        self
+    }
+
+    /// Register a callback that fires every time the channel leaves
+    /// Active (disconnect + close).
+    pub fn on_disconnect<F>(mut self, f: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_disconnect = Some(Box::new(f));
+        self
+    }
+
+    /// Spawn the watcher task. The returned handle owns the task; drop
+    /// it to stop watching. The channel itself stays in the client's
+    /// channel map so other ops can keep using it.
+    pub async fn exec(self) -> PvaResult<ConnectHandle> {
+        let ch = self.client.channel(&self.pv_name).await?;
+        let on_connect = self.on_connect;
+        let on_disconnect = self.on_disconnect;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        let task = tokio::spawn(async move {
+            let mut was_active = false;
+            loop {
+                let active_now = matches!(
+                    ch.current_state(),
+                    super::channel::ChannelState::Active { .. }
+                );
+                if active_now && !was_active {
+                    if let Some(cb) = &on_connect {
+                        cb();
+                    }
+                } else if !active_now && was_active {
+                    if let Some(cb) = &on_disconnect {
+                        cb();
+                    }
+                }
+                was_active = active_now;
+
+                tokio::select! {
+                    _ = ch.state_changed.notified() => {}
+                    _ = cancel_task.cancelled() => break,
+                }
+            }
+        });
+
+        Ok(ConnectHandle {
+            cancel,
+            task: Some(task),
+        })
+    }
+}
+
+/// Handle returned by [`ConnectBuilder::exec`]. Drop to stop the
+/// watcher task; the channel itself is unaffected.
+pub struct ConnectHandle {
+    cancel: tokio_util::sync::CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for ConnectHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(t) = self.task.take() {
+            t.abort();
+        }
+    }
 }

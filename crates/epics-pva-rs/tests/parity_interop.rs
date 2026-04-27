@@ -31,3 +31,5 @@ mod testudp_port;
 mod testdiscover_port;
 #[path = "parity/testnt_port.rs"]
 mod testnt_port;
+#[path = "parity/testget_port.rs"]
+mod testget_port;
