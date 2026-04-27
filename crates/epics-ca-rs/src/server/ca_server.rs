@@ -29,6 +29,11 @@ pub struct CaServerBuilder {
     /// `reload_acf()` from the same source. None when the ACF was
     /// supplied in-memory via `acf(config)`.
     acf_path: Option<String>,
+    /// Optional CA-over-TLS configuration. When set, accepted TCP
+    /// connections are wrapped in a `tokio_rustls::server::TlsStream`
+    /// before the CA handshake runs.
+    #[cfg(feature = "tls")]
+    tls: Option<crate::tls::TlsConfig>,
 }
 
 impl CaServerBuilder {
@@ -38,7 +43,17 @@ impl CaServerBuilder {
             port: CA_SERVER_PORT,
             acf: None,
             acf_path: None,
+            #[cfg(feature = "tls")]
+            tls: None,
         }
+    }
+
+    /// Enable CA over TLS using the supplied server-side configuration.
+    /// Built with the `tls` cargo feature.
+    #[cfg(feature = "tls")]
+    pub fn with_tls(mut self, tls: crate::tls::TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     // ── CA-specific methods ──────────────────────────────────────────

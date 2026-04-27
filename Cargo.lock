@@ -25,6 +25,7 @@ dependencies = [
  "epics-base-rs",
  "epics-bridge-rs",
  "epics-ca-rs",
+ "epics-pva-rs",
  "image",
  "jpeg-decoder",
  "jpeg-encoder",
@@ -36,7 +37,6 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
- "spvirit-types",
  "tiff 0.9.1",
  "tokio",
  "tracing",
@@ -585,8 +585,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "spvirit-codec",
- "spvirit-types",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -605,9 +603,12 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "proptest",
+ "rustls-pemfile",
+ "rustls-pki-types",
  "socket2 0.5.10",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tracing",
  "tracing-subscriber",
 ]
@@ -633,8 +634,6 @@ dependencies = [
  "hostname",
  "serde_json",
  "socket2 0.5.10",
- "spvirit-codec",
- "spvirit-types",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2078,10 +2077,10 @@ dependencies = [
  "log",
  "rustls-native-certs",
  "rustls-pemfile",
- "rustls-webpki",
+ "rustls-webpki 0.102.8",
  "thiserror 1.0.69",
  "tokio",
- "tokio-rustls",
+ "tokio-rustls 0.25.0",
 ]
 
 [[package]]
@@ -2139,7 +2138,21 @@ dependencies = [
  "log",
  "ring",
  "rustls-pki-types",
- "rustls-webpki",
+ "rustls-webpki 0.102.8",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "rustls"
+version = "0.23.39"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c2c118cb077cca2822033836dfb1b975355dfb784b5e8da48f7b6c5db74e60e"
+dependencies = [
+ "once_cell",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.13",
  "subtle",
  "zeroize",
 ]
@@ -2180,6 +2193,17 @@ name = "rustls-webpki"
 version = "0.102.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "untrusted",
+]
+
+[[package]]
+name = "rustls-webpki"
+version = "0.103.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -2494,8 +2518,9 @@ dependencies = [
 
 [[package]]
 name = "spvirit-codec"
-version = "0.1.9"
-source = "git+https://github.com/ISISNeutronMuon/spvirit.git?rev=5af368efda9cdea5e4946af5d4157d2cf5645edd#5af368efda9cdea5e4946af5d4157d2cf5645edd"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbd3de2c465a06e9e79214193dc2ed5f9415129d3239bf244ec7521082d516d6"
 dependencies = [
  "hex",
  "spvirit-types",
@@ -2504,8 +2529,9 @@ dependencies = [
 
 [[package]]
 name = "spvirit-server"
-version = "0.1.9"
-source = "git+https://github.com/ISISNeutronMuon/spvirit.git?rev=5af368efda9cdea5e4946af5d4157d2cf5645edd#5af368efda9cdea5e4946af5d4157d2cf5645edd"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77a198c38fdb3e12a8cc6aeeaa23a2e4935fb6cd6f2f95292c5e092a921f3a40"
 dependencies = [
  "get_if_addrs",
  "regex",
@@ -2520,8 +2546,9 @@ dependencies = [
 
 [[package]]
 name = "spvirit-types"
-version = "0.1.9"
-source = "git+https://github.com/ISISNeutronMuon/spvirit.git?rev=5af368efda9cdea5e4946af5d4157d2cf5645edd#5af368efda9cdea5e4946af5d4157d2cf5645edd"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4efb98bf32140dde9cc5618341ddb19d84f107434f308765b901582eabeb074d"
 
 [[package]]
 name = "std-rs"
@@ -2697,8 +2724,18 @@ version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "775e0c0f0adb3a2f22a00c4745d728b479985fc15ee7ca6a2608388c5569860f"
 dependencies = [
- "rustls",
+ "rustls 0.22.4",
  "rustls-pki-types",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-rustls"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+dependencies = [
+ "rustls 0.23.39",
  "tokio",
 ]
 
@@ -3496,13 +3533,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "spvirit-client"
-version = "0.1.9"
-source = "git+https://github.com/ISISNeutronMuon/spvirit.git?rev=5af368efda9cdea5e4946af5d4157d2cf5645edd#5af368efda9cdea5e4946af5d4157d2cf5645edd"
-
-[[patch.unused]]
-name = "spvirit-tools"
-version = "0.1.9"
-source = "git+https://github.com/ISISNeutronMuon/spvirit.git?rev=5af368efda9cdea5e4946af5d4157d2cf5645edd#5af368efda9cdea5e4946af5d4157d2cf5645edd"

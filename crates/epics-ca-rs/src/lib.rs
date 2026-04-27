@@ -20,6 +20,7 @@ pub mod observability;
 pub mod protocol;
 pub mod repeater;
 pub mod server;
+pub mod tls;
 
 // Re-export commonly used types from epics-base-rs for convenience
 pub use epics_base_rs::error::{CaError, CaResult};

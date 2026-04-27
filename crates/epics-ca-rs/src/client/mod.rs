@@ -273,6 +273,20 @@ struct ChannelSnapshot {
     pv_name: String,
 }
 
+/// Optional configuration knobs for `CaClient::new_with_config`.
+/// All fields default to the same behaviour as the no-arg
+/// `CaClient::new()`, so callers only need to set what they want
+/// to override.
+#[derive(Default)]
+pub struct CaClientConfig {
+    /// Enable CA-over-TLS. When `Some`, every TCP virtual circuit
+    /// negotiated by the transport manager is wrapped in a
+    /// `tokio_rustls::TlsStream` before the CA handshake. UDP search
+    /// remains plaintext. Requires the `tls` cargo feature.
+    #[cfg(feature = "tls")]
+    pub tls: Option<crate::tls::TlsConfig>,
+}
+
 impl CaClient {
     pub async fn new() -> CaResult<Self> {
         // Run repeater registration in background — don't block client startup.
