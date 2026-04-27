@@ -295,6 +295,7 @@ pub struct CaServer {
     /// mDNS instance name to announce as. None disables announce.
     mdns_instance: Option<String>,
     /// Extra TXT key=value pairs for the mDNS announce.
+    #[cfg_attr(not(feature = "discovery"), allow(dead_code))]
     mdns_txt: Vec<(String, String)>,
     /// RFC 2136 dynamic DNS UPDATE registration. None disables it.
     #[cfg(feature = "discovery-dns-update")]

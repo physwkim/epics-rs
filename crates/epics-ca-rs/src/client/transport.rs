@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+#[cfg(feature = "experimental-rust-tls")]
 use std::sync::Arc;
 use std::time::Duration;
 
