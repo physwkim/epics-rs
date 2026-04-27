@@ -16,6 +16,7 @@
 
 pub(crate) mod channel;
 pub mod client;
+pub mod discovery;
 pub mod observability;
 pub mod protocol;
 pub mod repeater;

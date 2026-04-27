@@ -1,0 +1,224 @@
+//! Service discovery for CA — mDNS + DNS-SD.
+//!
+//! Removes the operational burden of maintaining `EPICS_CA_ADDR_LIST`
+//! across every client. IOCs announce themselves; clients discover
+//! them automatically.
+//!
+//! Two transport mechanisms, same `_epics-ca._tcp` service type:
+//!
+//! - **mDNS** (link-local multicast, RFC 6762) — single subnet only.
+//!   Zero infrastructure: pure UDP multicast 224.0.0.251:5353.
+//! - **DNS-SD over unicast DNS** (RFC 6763) — works across subnets,
+//!   the WAN, anywhere standard DNS reaches. Requires zone records
+//!   on a site DNS server.
+//!
+//! Both are gated behind the `discovery` cargo feature. The bare
+//! [`Backend`] trait works without the feature — applications can
+//! plug in custom discovery backends (Consul, etcd, site CMDB, ...)
+//! without depending on mdns-sd or hickory-resolver.
+
+use std::net::SocketAddr;
+
+mod r#static;
+
+pub use r#static::StaticBackend;
+
+#[cfg(feature = "discovery")]
+mod mdns;
+#[cfg(feature = "discovery")]
+mod dnssd;
+#[cfg(feature = "discovery")]
+mod zone;
+
+#[cfg(feature = "discovery")]
+pub use dnssd::DnsSdBackend;
+#[cfg(feature = "discovery")]
+pub use mdns::MdnsBackend;
+#[cfg(feature = "discovery")]
+pub use zone::ZoneSnippet;
+
+/// Standard CA service type. Used by both mDNS announces and DNS-SD
+/// PTR records. Format `_<name>._<proto>` per RFC 6763 §4.1.
+pub const CA_SERVICE_TYPE: &str = "_epics-ca._tcp";
+
+/// Trait every discovery backend implements. The CA client polls
+/// `discover()` once at startup; long-lived backends can also feed
+/// updates via [`subscribe`].
+#[async_trait::async_trait]
+pub trait Backend: Send + Sync {
+    /// Return all IOCs currently known to this backend. Called once
+    /// at `CaClient` construction. The result is merged with
+    /// `EPICS_CA_ADDR_LIST` and the auto-discovered NIC broadcasts.
+    async fn discover(&self) -> Vec<SocketAddr>;
+
+    /// Optional: subscribe to live updates as IOCs come and go. Default
+    /// implementation returns `None` meaning the backend is "scan once".
+    /// Backends that watch for changes (mDNS, watch-style DNS) override
+    /// this to push updates into the search engine.
+    fn subscribe(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent>> {
+        None
+    }
+}
+
+/// Live update from a discovery backend.
+#[derive(Debug, Clone)]
+pub enum DiscoveryEvent {
+    /// A new IOC just came online.
+    Added {
+        instance: String,
+        addr: SocketAddr,
+    },
+    /// An IOC is no longer reachable.
+    Removed {
+        instance: String,
+        addr: SocketAddr,
+    },
+}
+
+/// What the operator/library author asked for via configuration.
+/// Resolved into a concrete set of `Backend` instances by
+/// `build_backends`.
+#[derive(Debug, Clone)]
+pub enum DiscoveryConfig {
+    /// Plain `EPICS_CA_ADDR_LIST` style — explicit list of addresses.
+    Static(Vec<SocketAddr>),
+    /// Discover via mDNS on the link-local segment.
+    #[cfg(feature = "discovery")]
+    Mdns,
+    /// Discover via unicast DNS-SD against a site DNS server.
+    /// `zone` is the DNS zone to query, e.g. `facility.local`.
+    #[cfg(feature = "discovery")]
+    DnsSd { zone: String },
+    /// Try multiple backends in order, merging the results.
+    Composite(Vec<DiscoveryConfig>),
+}
+
+/// Convert a [`DiscoveryConfig`] into runnable backends. Returns
+/// `Vec<Box<dyn Backend>>` so call sites stay backend-agnostic.
+pub fn build_backends(cfg: DiscoveryConfig) -> Vec<Box<dyn Backend>> {
+    match cfg {
+        DiscoveryConfig::Static(addrs) => vec![Box::new(StaticBackend::new(addrs))],
+        DiscoveryConfig::Composite(items) => {
+            items.into_iter().flat_map(build_backends).collect()
+        }
+        #[cfg(feature = "discovery")]
+        DiscoveryConfig::Mdns => match mdns::MdnsBackend::new() {
+            Ok(b) => vec![Box::new(b)],
+            Err(e) => {
+                tracing::warn!(error = %e, "mDNS backend init failed; skipping");
+                vec![]
+            }
+        },
+        #[cfg(feature = "discovery")]
+        DiscoveryConfig::DnsSd { zone } => match dnssd::DnsSdBackend::new(zone) {
+            Ok(b) => vec![Box::new(b)],
+            Err(e) => {
+                tracing::warn!(error = %e, "DNS-SD backend init failed; skipping");
+                vec![]
+            }
+        },
+    }
+}
+
+/// Parse `EPICS_CA_DISCOVERY` env var into a `DiscoveryConfig`.
+///
+/// Supported syntax (whitespace-separated, evaluated in order):
+/// - `mdns`             — enable mDNS
+/// - `dnssd:<zone>`     — enable DNS-SD against the given zone
+/// - `static:<addr>,..` — static address list (comma-separated)
+///
+/// Examples:
+/// - `EPICS_CA_DISCOVERY=mdns dnssd:facility.local`
+/// - `EPICS_CA_DISCOVERY=dnssd:operations.example.org`
+///
+/// Returns `None` when the env var is unset or empty (no discovery).
+pub fn from_env() -> Option<DiscoveryConfig> {
+    let raw = epics_base_rs::runtime::env::get("EPICS_CA_DISCOVERY")?;
+    let mut items: Vec<DiscoveryConfig> = Vec::new();
+    for token in raw.split_whitespace() {
+        if let Some(cfg) = parse_token(token) {
+            items.push(cfg);
+        }
+    }
+    match items.len() {
+        0 => None,
+        1 => Some(items.into_iter().next().unwrap()),
+        _ => Some(DiscoveryConfig::Composite(items)),
+    }
+}
+
+fn parse_token(tok: &str) -> Option<DiscoveryConfig> {
+    if tok == "mdns" {
+        #[cfg(feature = "discovery")]
+        {
+            return Some(DiscoveryConfig::Mdns);
+        }
+        #[cfg(not(feature = "discovery"))]
+        {
+            tracing::warn!("EPICS_CA_DISCOVERY=mdns ignored — built without `discovery` feature");
+            return None;
+        }
+    }
+    if let Some(zone) = tok.strip_prefix("dnssd:") {
+        #[cfg(feature = "discovery")]
+        {
+            return Some(DiscoveryConfig::DnsSd {
+                zone: zone.to_string(),
+            });
+        }
+        #[cfg(not(feature = "discovery"))]
+        {
+            let _ = zone;
+            tracing::warn!("EPICS_CA_DISCOVERY=dnssd:* ignored — built without `discovery` feature");
+            return None;
+        }
+    }
+    if let Some(rest) = tok.strip_prefix("static:") {
+        let addrs: Vec<SocketAddr> = rest
+            .split(',')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if addrs.is_empty() {
+            tracing::warn!(token = %tok, "EPICS_CA_DISCOVERY static: parsed no addresses");
+            return None;
+        }
+        return Some(DiscoveryConfig::Static(addrs));
+    }
+    tracing::warn!(token = %tok, "EPICS_CA_DISCOVERY: unrecognized token");
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_static_token() {
+        let cfg = parse_token("static:10.0.0.1:5064,10.0.0.2:5064").unwrap();
+        match cfg {
+            DiscoveryConfig::Static(addrs) => assert_eq!(addrs.len(), 2),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_token_is_none() {
+        assert!(parse_token("foo:bar").is_none());
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn parse_mdns_token() {
+        assert!(matches!(parse_token("mdns"), Some(DiscoveryConfig::Mdns)));
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn parse_dnssd_token() {
+        let cfg = parse_token("dnssd:facility.local").unwrap();
+        match cfg {
+            DiscoveryConfig::DnsSd { zone } => assert_eq!(zone, "facility.local"),
+            _ => panic!("wrong variant"),
+        }
+    }
+}
