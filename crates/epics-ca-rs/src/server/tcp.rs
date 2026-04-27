@@ -4,9 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::broadcast;
 
 /// Maximum accumulated TCP read buffer per client (DoS guard).
@@ -178,6 +177,7 @@ pub async fn run_tcp_listener(
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
     conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
+    #[cfg(feature = "tls")] tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -202,6 +202,10 @@ pub async fn run_tcp_listener(
             let _ = tx.send(ServerConnectionEvent::Connected(peer));
         }
         let conn_events = conn_events.clone();
+        #[cfg(feature = "tls")]
+        let tls_acceptor = tls
+            .clone()
+            .map(tokio_rustls::TlsAcceptor::from);
 
         // Enable OS-level TCP keepalive on accepted socket so half-open
         // connections (e.g. NAT timeout, gateway down) are detected within
@@ -214,9 +218,48 @@ pub async fn run_tcp_listener(
             let _ = sock.set_keepalive(true);
             let _ = sock.set_tcp_keepalive(&keepalive);
         }
+        let _ = stream.set_nodelay(true);
 
         epics_base_rs::runtime::task::spawn(async move {
-            let result = handle_client(stream, peer, db, acf, actual_port).await;
+            // TLS dispatch: when configured, wrap the accepted TCP
+            // stream in a TlsAcceptor handshake. The client cert (if
+            // any) is harvested afterwards for mTLS identity.
+            let result: CaResult<()> = {
+                #[cfg(feature = "tls")]
+                {
+                    if let Some(acceptor) = tls_acceptor {
+                        match acceptor.accept(stream).await {
+                            Ok(tls_stream) => {
+                                // Extract verified peer identity from the
+                                // client certificate, if presented.
+                                let identity = tls_stream
+                                    .get_ref()
+                                    .1
+                                    .peer_certificates()
+                                    .and_then(|chain| chain.first())
+                                    .map(crate::tls::identity_from_cert);
+                                if let Some(ref id) = identity {
+                                    tracing::info!(peer = %peer, identity = %id,
+                                        "mTLS identity verified");
+                                }
+                                handle_client(tls_stream, peer, db, acf, actual_port, identity)
+                                    .await
+                            }
+                            Err(e) => {
+                                tracing::warn!(peer = %peer, error = %e,
+                                    "TLS handshake failed");
+                                Err(epics_base_rs::error::CaError::Io(e))
+                            }
+                        }
+                    } else {
+                        handle_client(stream, peer, db, acf, actual_port, None).await
+                    }
+                }
+                #[cfg(not(feature = "tls"))]
+                {
+                    handle_client(stream, peer, db, acf, actual_port, None).await
+                }
+            };
             beacon_reset.notify_one();
             if let Some(tx) = &conn_events {
                 let _ = tx.send(ServerConnectionEvent::Disconnected(peer));
@@ -246,23 +289,32 @@ pub async fn run_tcp_listener(
     }
 }
 
-async fn handle_client(
-    stream: tokio::net::TcpStream,
+/// Handle one CA client over the supplied stream.
+///
+/// `initial_hostname` is the verified peer identity from the TLS
+/// handshake (mTLS only). When `Some`, it takes precedence over
+/// `peer.ip()` for the `state.hostname` ACF key — the
+/// cryptographically authenticated identity is always more
+/// trustworthy than the network address.
+async fn handle_client<S>(
+    stream: S,
     peer: SocketAddr,
     db: Arc<PvDatabase>,
     acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
     tcp_port: u16,
-) -> CaResult<()> {
-    // Disable Nagle's algorithm to avoid extra latency for small control messages.
-    let _ = stream.set_nodelay(true);
-
-    let (mut reader, writer) = stream.into_split();
+    initial_hostname: Option<String>,
+) -> CaResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
     let mut state = ClientState::new(acf, tcp_port);
-    // Default hostname: peer IP (matches C rsrv with EPICS_CAS_USE_HOST_NAMES=NO).
-    // The CA_PROTO_HOST_NAME message overrides this only when the env var
-    // explicitly opts in to client-supplied hostnames.
-    state.hostname = peer.ip().to_string();
+    // Default hostname: verified TLS identity if present, otherwise the
+    // peer IP. Matches C rsrv default with EPICS_CAS_USE_HOST_NAMES=NO,
+    // upgraded transparently when mTLS is in effect.
+    state.hostname = initial_hostname.unwrap_or_else(|| peer.ip().to_string());
+    let mut reader = reader;
 
     let mut buf = vec![0u8; 8192];
     let mut accumulated = Vec::new();
@@ -337,12 +389,12 @@ async fn handle_client(
     Ok(())
 }
 
-async fn dispatch_message(
+async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
     hdr: &CaHeader,
     payload: &[u8],
     state: &mut ClientState,
     db: &Arc<PvDatabase>,
-    writer: &Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+    writer: &Arc<Mutex<BufWriter<W>>>,
 ) -> CaResult<()> {
     match hdr.cmmd {
         CA_PROTO_VERSION => {
@@ -1140,8 +1192,8 @@ async fn get_full_snapshot(
     }
 }
 
-async fn send_monitor_snapshot(
-    writer: &Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+async fn send_monitor_snapshot<W: AsyncWrite + Unpin + Send + 'static>(
+    writer: &Arc<Mutex<BufWriter<W>>>,
     sub_id: u32,
     data_type: u16,
     snapshot: &epics_base_rs::server::snapshot::Snapshot,
@@ -1167,9 +1219,9 @@ async fn send_monitor_snapshot(
 
 /// Re-evaluate and re-send CA_PROTO_ACCESS_RIGHTS for all open channels.
 /// Called when hostname or username changes.
-async fn reeval_access_rights(
+async fn reeval_access_rights<W: AsyncWrite + Unpin + Send + 'static>(
     state: &mut ClientState,
-    writer: &Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+    writer: &Arc<Mutex<BufWriter<W>>>,
 ) -> CaResult<()> {
     if state.channels.is_empty() {
         return Ok(());
@@ -1201,8 +1253,8 @@ async fn reeval_access_rights(
 
 /// Send a command-specific zero-payload error response.
 /// Used for READ_NOTIFY, WRITE_NOTIFY, and EVENT_ADD error replies.
-async fn send_cmd_error(
-    writer: &Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+async fn send_cmd_error<W: AsyncWrite + Unpin + Send + 'static>(
+    writer: &Arc<Mutex<BufWriter<W>>>,
     cmd: u16,
     data_type: u16,
     eca_status: u32,
@@ -1220,8 +1272,8 @@ async fn send_cmd_error(
 }
 
 /// Send a CA_PROTO_ERROR response with the original header and an error message.
-async fn send_ca_error(
-    writer: &Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+async fn send_ca_error<W: AsyncWrite + Unpin + Send + 'static>(
+    writer: &Arc<Mutex<BufWriter<W>>>,
     original_hdr: &CaHeader,
     eca_status: u32,
     message: &str,

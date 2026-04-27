@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::sync::Notify;
 
 use epics_base_rs::runtime::sync::{Mutex, mpsc};
@@ -62,14 +61,22 @@ impl FlowControlGate {
 
 /// Spawn a task that forwards monitor events from a PV subscription to the client TCP stream.
 /// Returns a handle that can be used to cancel the subscription.
-pub fn spawn_monitor_sender(
+///
+/// Generic over the writer type so the same task body works for plain
+/// `tokio::net::tcp::OwnedWriteHalf` and the TLS-wrapped
+/// `WriteHalf<TlsStream<TcpStream>>` produced by the server's TLS
+/// dispatch path.
+pub fn spawn_monitor_sender<W>(
     pv: Arc<ProcessVariable>,
     sub_id: u32,
     data_type: u16,
-    writer: Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+    writer: Arc<Mutex<BufWriter<W>>>,
     flow_control: Arc<FlowControlGate>,
     mut rx: mpsc::Receiver<MonitorEvent>,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<()>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     epics_base_rs::runtime::task::spawn(async move {
         loop {
             // Prefer any coalesced overflow value before blocking on the
@@ -95,11 +102,11 @@ pub fn spawn_monitor_sender(
     })
 }
 
-async fn send_event(
+async fn send_event<W: AsyncWrite + Unpin + Send + 'static>(
     data_type: u16,
     sub_id: u32,
     event: &MonitorEvent,
-    writer: &Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+    writer: &Arc<Mutex<BufWriter<W>>>,
 ) -> std::io::Result<()> {
     let payload = encode_dbr(data_type, &event.snapshot)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "encode"))?;

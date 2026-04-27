@@ -156,6 +156,14 @@ impl CaServerBuilder {
     pub async fn build(self) -> CaResult<CaServer> {
         let (db, autosave_config) = self.ioc.build().await?;
         let acf = Arc::new(tokio::sync::RwLock::new(self.acf));
+        #[cfg(feature = "tls")]
+        let tls = self.tls.and_then(|t| match t {
+            crate::tls::TlsConfig::Server(arc) => Some(arc),
+            crate::tls::TlsConfig::Client(_) => {
+                tracing::warn!("client-side TlsConfig passed to CaServer; ignoring");
+                None
+            }
+        });
         Ok(CaServer {
             db,
             port: self.port,
@@ -165,6 +173,8 @@ impl CaServerBuilder {
             autosave_manager: None,
             conn_events: None,
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
+            #[cfg(feature = "tls")]
+            tls,
         })
     }
 }
@@ -188,6 +198,12 @@ pub struct CaServer {
     conn_events: Option<tokio::sync::broadcast::Sender<crate::server::tcp::ServerConnectionEvent>>,
     /// Callbacks to run after PINI processing (e.g., start pollers).
     after_init_hooks: std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+    /// Optional TLS configuration. When set, accepted TCP connections
+    /// are wrapped in a `tokio_rustls::server::TlsStream` before the
+    /// CA handshake runs. mTLS configurations additionally extract a
+    /// verified peer identity for ACF rule matching.
+    #[cfg(feature = "tls")]
+    tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 }
 
 impl CaServer {
@@ -214,6 +230,8 @@ impl CaServer {
             autosave_manager,
             conn_events: None,
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 
@@ -399,8 +417,27 @@ impl CaServer {
         let beacon_reset_tcp = beacon_reset.clone();
 
         let conn_events = self.conn_events.clone();
+        #[cfg(feature = "tls")]
+        let tls = self.tls.clone();
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
-            tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp, conn_events).await
+            #[cfg(feature = "tls")]
+            {
+                tcp::run_tcp_listener(
+                    db_tcp,
+                    port,
+                    acf,
+                    tcp_tx,
+                    beacon_reset_tcp,
+                    conn_events,
+                    tls,
+                )
+                .await
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp, conn_events)
+                    .await
+            }
         });
         let tcp_abort = tcp_handle.abort_handle();
 

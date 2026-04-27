@@ -29,7 +29,7 @@ async fn setup(pvs: Vec<(&str, EpicsValue)>) -> CaResult<epics_ca_rs::client::Ca
         db.add_pv(name, val).await;
     }
 
-    let acf = Arc::new(None);
+    let acf = Arc::new(tokio::sync::RwLock::new(None));
 
     // Start TCP on port 0, get the real port via oneshot.
     let (tcp_tx, tcp_rx) = tokio::sync::oneshot::channel();
