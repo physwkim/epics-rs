@@ -375,6 +375,143 @@ fn pvxs_deserialize_alarm_message_and_nanoseconds() {
     }
 }
 
+// ── testSerialize2 (pvxs testxcode.cpp:256) — variant + union + array ─
+//
+// pvxs's simpledef has multiple complex field types. We port the
+// Any/Variant cases since those exercise our encode_pv_field_with_bitset
+// for FieldDesc::Variant.
+
+fn variant_only_desc() -> FieldDesc {
+    // Equivalent to pvxs simpledef with only the `any` field at bit 1.
+    FieldDesc::Structure {
+        struct_id: String::new(),
+        fields: vec![("any".into(), FieldDesc::Variant)],
+    }
+}
+
+#[test]
+fn pvxs_serialize_variant_carrying_uint32() {
+    // pvxs simpledef "any" = UInt32(0x600df00d):
+    //   bitset bit 7 set + variant_descriptor(0x26) + value
+    // We use a 1-field struct so "any" sits at bit 1.
+    //   bitset byte = 0x02, then 0x26 + 4 BE bytes.
+    let desc = variant_only_desc();
+    let mut s = PvStructure::new("");
+    s.fields.push((
+        "any".into(),
+        PvField::Variant(Box::new(epics_pva_rs::pvdata::VariantValue {
+            desc: Some(FieldDesc::Scalar(ScalarType::UInt)),
+            value: PvField::Scalar(ScalarValue::UInt(0x600df00d)),
+        })),
+    ));
+    let value = PvField::Structure(s);
+    let mut bitset = BitSet::new();
+    bitset.set(1);
+    let mut buf = Vec::new();
+    bitset.write_into(ByteOrder::Big, &mut buf);
+    encode_pv_field_with_bitset(&value, &desc, &bitset, 0, ByteOrder::Big, &mut buf);
+
+    // Expected: bitset(\x01\x02) + variant_desc(\x26) + UInt32 BE(0x600df00d)
+    let expected: &[u8] = b"\x01\x02\x26\x60\x0d\xf0\x0d";
+    assert_eq!(buf, expected);
+}
+
+#[test]
+fn pvxs_serialize_variant_marked_but_null() {
+    // pvxs: only marked, no value → "\x01\x80\xff" in simpledef (bit 7).
+    // In our 1-field struct, "any" is bit 1 → "\x01\x02\xff".
+    let desc = variant_only_desc();
+    let mut s = PvStructure::new("");
+    s.fields.push((
+        "any".into(),
+        PvField::Variant(Box::new(epics_pva_rs::pvdata::VariantValue {
+            desc: None,
+            value: PvField::Null,
+        })),
+    ));
+    let value = PvField::Structure(s);
+    let mut bitset = BitSet::new();
+    bitset.set(1);
+    let mut buf = Vec::new();
+    bitset.write_into(ByteOrder::Big, &mut buf);
+    encode_pv_field_with_bitset(&value, &desc, &bitset, 0, ByteOrder::Big, &mut buf);
+
+    let expected: &[u8] = b"\x01\x02\xff";
+    assert_eq!(buf, expected);
+}
+
+#[test]
+fn pvxs_serialize_uint64_array_three_values() {
+    // pvxs simpledef "value" = UInt64A {1, 0xdeadbeef, 2}:
+    //   bitset bit 1 + size(3) + 3 u64 BE
+    let desc = FieldDesc::Structure {
+        struct_id: "simple_t".into(),
+        fields: vec![("value".into(), FieldDesc::ScalarArray(ScalarType::ULong))],
+    };
+    let mut s = PvStructure::new("simple_t");
+    s.fields.push((
+        "value".into(),
+        PvField::ScalarArray(vec![
+            ScalarValue::ULong(1),
+            ScalarValue::ULong(0xdeadbeef),
+            ScalarValue::ULong(2),
+        ]),
+    ));
+    let value = PvField::Structure(s);
+    let mut bitset = BitSet::new();
+    bitset.set(1);
+    let mut buf = Vec::new();
+    bitset.write_into(ByteOrder::Big, &mut buf);
+    encode_pv_field_with_bitset(&value, &desc, &bitset, 0, ByteOrder::Big, &mut buf);
+
+    // Expected: bitset(\x01\x02) + size(\x03) + 3 u64 BE
+    let mut expected = Vec::new();
+    expected.extend_from_slice(b"\x01\x02\x03");
+    expected.extend_from_slice(&1u64.to_be_bytes());
+    expected.extend_from_slice(&0xdeadbeefu64.to_be_bytes());
+    expected.extend_from_slice(&2u64.to_be_bytes());
+    assert_eq!(buf, expected);
+}
+
+#[test]
+fn pvxs_serialize_union_choice_b_string() {
+    // pvxs simpledef "choice" = Union{a: float32, b: string}, "->b" = "test".
+    //   bitset bit 9 set + selector(1) + length(4) + "test"
+    // We use a 1-field struct → "choice" at bit 1.
+    //   "\x01\x02\x01\x04test"  (bit 1 set, selector=1, "\x04test")
+    let desc = FieldDesc::Structure {
+        struct_id: String::new(),
+        fields: vec![(
+            "choice".into(),
+            FieldDesc::Union {
+                struct_id: String::new(),
+                variants: vec![
+                    ("a".into(), FieldDesc::Scalar(ScalarType::Float)),
+                    ("b".into(), FieldDesc::Scalar(ScalarType::String)),
+                ],
+            },
+        )],
+    };
+    let mut s = PvStructure::new("");
+    s.fields.push((
+        "choice".into(),
+        PvField::Union {
+            selector: 1,
+            variant_name: "b".into(),
+            value: Box::new(PvField::Scalar(ScalarValue::String("test".into()))),
+        },
+    ));
+    let value = PvField::Structure(s);
+    let mut bitset = BitSet::new();
+    bitset.set(1);
+    let mut buf = Vec::new();
+    bitset.write_into(ByteOrder::Big, &mut buf);
+    encode_pv_field_with_bitset(&value, &desc, &bitset, 0, ByteOrder::Big, &mut buf);
+
+    let expected: &[u8] = b"\x01\x02\x01\x04test";
+    assert_eq!(buf, expected);
+}
+
 // ── testRegressBadBitMask (pvxs testxcode.cpp:1165) ────────────────
 //
 // pvxs `from_wire(buf, BitMask)` rejects the null marker (0xff): a
