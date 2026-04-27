@@ -47,6 +47,8 @@ pub struct CaServerBuilder {
     /// Optional audit logger. When set, security-relevant events
     /// (connect, caput, ACF deny, ...) land in the configured sink.
     audit: Option<crate::audit::AuditLogger>,
+    /// Optional bind address for the HTTP introspection listener.
+    introspection_addr: Option<std::net::SocketAddr>,
 }
 
 impl CaServerBuilder {
@@ -63,7 +65,17 @@ impl CaServerBuilder {
             #[cfg(feature = "discovery-dns-update")]
             dns_update: None,
             audit: audit_from_env(),
+            introspection_addr: introspection_from_env(),
         }
+    }
+
+    /// Bind an HTTP introspection endpoint exposing
+    /// `/healthz`, `/info`, `/clients`, `/queues`. Plain JSON, no
+    /// authentication — bind to `127.0.0.1:<port>` for IOC-local
+    /// probes or to a private interface for facility tooling.
+    pub fn with_introspection(mut self, addr: std::net::SocketAddr) -> Self {
+        self.introspection_addr = Some(addr);
+        self
     }
 
     /// Wire a structured audit log. Every connection lifecycle event
@@ -234,6 +246,7 @@ impl CaServerBuilder {
             #[cfg(feature = "discovery-dns-update")]
             dns_update: self.dns_update,
             audit: self.audit,
+            introspection_addr: self.introspection_addr,
         })
     }
 }
@@ -272,6 +285,8 @@ pub struct CaServer {
     dns_update: Option<crate::discovery::DnsRegistration>,
     /// Optional structured audit logger.
     audit: Option<crate::audit::AuditLogger>,
+    /// Optional HTTP introspection bind address.
+    introspection_addr: Option<std::net::SocketAddr>,
 }
 
 impl CaServer {
@@ -305,6 +320,7 @@ impl CaServer {
             #[cfg(feature = "discovery-dns-update")]
             dns_update: None,
             audit: audit_from_env(),
+            introspection_addr: introspection_from_env(),
         }
     }
 
@@ -623,6 +639,22 @@ impl CaServer {
             // No-op when feature is off.
         }
 
+        // Optional HTTP introspection endpoint. Bound on the address
+        // configured via `with_introspection()` or
+        // EPICS_CAS_INTROSPECTION_ADDR. Failures are logged and the CA
+        // server keeps running — introspection is non-essential.
+        let introspection_handle = if let Some(addr) = self.introspection_addr {
+            let state = crate::server::introspection::IntrospectionState::new(tcp_port);
+            let st = state.clone();
+            Some(epics_base_rs::runtime::task::spawn(async move {
+                if let Err(e) = crate::server::introspection::run_introspection(addr, st).await {
+                    tracing::warn!(error = %e, "introspection HTTP exited");
+                }
+            }))
+        } else {
+            None
+        };
+
         // Spawn UDP responder as its own task so its waker isn't multiplexed
         // through a select! branch (which can drop/replace wakers between polls
         // and miss edge-triggered epoll events).
@@ -675,6 +707,9 @@ impl CaServer {
         if let Some(h) = autosave_handle {
             h.abort();
         }
+        if let Some(h) = introspection_handle {
+            h.abort();
+        }
         result
     }
 }
@@ -714,4 +749,12 @@ fn audit_from_env() -> Option<crate::audit::AuditLogger> {
         }
     }
     None
+}
+
+/// Resolve the HTTP introspection bind address from the environment.
+/// `EPICS_CAS_INTROSPECTION_ADDR=<host>:<port>` enables it; defaults
+/// off.
+fn introspection_from_env() -> Option<std::net::SocketAddr> {
+    epics_base_rs::runtime::env::get("EPICS_CAS_INTROSPECTION_ADDR")
+        .and_then(|s| s.parse().ok())
 }

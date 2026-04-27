@@ -229,13 +229,22 @@ How many consecutive dropped messages cause the connection to be
 torn down. Default: 100. Set to 0 to never disconnect (drop-only
 mode).
 
+### `EPICS_CAS_INTROSPECTION_ADDR` (rust-only)
+
+`host:port` to bind the HTTP introspection endpoint. When set, the
+server exposes `/healthz`, `/info`, `/clients`, `/queues` for
+external supervisors (Kubernetes probes, oncall dashboards). Plain
+JSON, no auth — bind to `127.0.0.1:<port>` for IOC-local access or
+to a private interface for facility tooling.
+
 ## Compatibility notes
 
 The **rust-only** variables (`EPICS_CA_MONITOR_QUEUE`,
 `EPICS_CAS_INACTIVITY_TMO`, `EPICS_CAS_MAX_CHANNELS`,
 `EPICS_CAS_MAX_SUBS_PER_CHAN`, `EPICS_CAS_AUDIT_FILE`,
-`EPICS_CAS_AUDIT`, `EPICS_CAS_RATE_LIMIT_*`) are no-ops if observed
-by libca/rsrv.
+`EPICS_CAS_AUDIT`, `EPICS_CAS_RATE_LIMIT_*`,
+`EPICS_CAS_INTROSPECTION_ADDR`) are no-ops if observed by
+libca/rsrv.
 They were chosen to mirror libca's variable-naming convention so
 operators don't need to learn a separate vocabulary.
 
