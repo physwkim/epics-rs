@@ -64,6 +64,20 @@ impl ScalarType {
         self.type_code() | 0x08
     }
 
+    /// Element size in bytes for fixed-width scalars. Variable-length
+    /// types (`Boolean`, `String`) report `1` since the wire encoding
+    /// of `Boolean` is a single byte and `String` has no fixed width.
+    /// Mirrors pvxs `TypeCode::size()`.
+    pub fn element_size(self) -> usize {
+        match self {
+            Self::Boolean | Self::Byte | Self::UByte => 1,
+            Self::Short | Self::UShort => 2,
+            Self::Int | Self::UInt | Self::Float => 4,
+            Self::Long | Self::ULong | Self::Double => 8,
+            Self::String => 1, // variable; pvxs reports 1 too
+        }
+    }
+
     /// Decode scalar type from an array type code.
     pub fn from_array_type_code(code: u8) -> Option<Self> {
         if code & 0x08 != 0 {

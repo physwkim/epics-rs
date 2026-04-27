@@ -19,3 +19,7 @@ mod testxcode_port;
 mod testendian_port;
 #[path = "parity/testpvreq_port.rs"]
 mod testpvreq_port;
+#[path = "parity/testtype_port.rs"]
+mod testtype_port;
+#[path = "parity/testdata_port.rs"]
+mod testdata_port;
