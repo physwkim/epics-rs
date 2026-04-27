@@ -210,6 +210,7 @@ pub async fn run_tcp_listener(
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
     conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
     audit: Option<crate::audit::AuditLogger>,
+    drain: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(feature = "experimental-rust-tls")] tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
@@ -223,7 +224,20 @@ pub async fn run_tcp_listener(
     let _ = tcp_port_tx.send(actual_port);
 
     loop {
+        // Drain mode: stop accepting new connections. Existing
+        // connections continue to be served by their own tasks; the
+        // CaServer::run() loop coordinates the grace period and the
+        // ultimate exit.
+        if drain.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::info!("TCP listener: drain mode set, exiting accept loop");
+            return Ok(());
+        }
         let (stream, peer) = listener.accept().await?;
+        if drain.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::info!(peer = %peer, "drain mode: rejecting new connection");
+            drop(stream);
+            continue;
+        }
         tracing::info!(peer = %peer, "CA client connected");
         metrics::counter!("ca_server_accepts_total").increment(1);
         metrics::gauge!("ca_server_clients_active").increment(1.0);

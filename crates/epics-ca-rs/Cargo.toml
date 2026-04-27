@@ -130,6 +130,10 @@ name = "ca-lint-rs"
 path = "src/bin/ca-lint-rs.rs"
 
 [[bin]]
+name = "ca-admin-rs"
+path = "src/bin/ca-admin-rs.rs"
+
+[[bin]]
 name = "ca-soak"
 path = "src/bin/ca-soak.rs"
 

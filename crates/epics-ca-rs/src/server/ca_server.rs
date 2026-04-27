@@ -49,6 +49,9 @@ pub struct CaServerBuilder {
     audit: Option<crate::audit::AuditLogger>,
     /// Optional bind address for the HTTP introspection listener.
     introspection_addr: Option<std::net::SocketAddr>,
+    /// Grace period (seconds) for graceful drain on signal or admin
+    /// request.
+    drain_grace_secs: u64,
 }
 
 impl CaServerBuilder {
@@ -66,6 +69,7 @@ impl CaServerBuilder {
             dns_update: None,
             audit: audit_from_env(),
             introspection_addr: introspection_from_env(),
+            drain_grace_secs: drain_grace_from_env(),
         }
     }
 
@@ -247,6 +251,7 @@ impl CaServerBuilder {
             dns_update: self.dns_update,
             audit: self.audit,
             introspection_addr: self.introspection_addr,
+            drain_grace_secs: self.drain_grace_secs,
         })
     }
 }
@@ -287,6 +292,9 @@ pub struct CaServer {
     audit: Option<crate::audit::AuditLogger>,
     /// Optional HTTP introspection bind address.
     introspection_addr: Option<std::net::SocketAddr>,
+    /// Grace period in seconds applied when drain is requested.
+    /// Default 30 s; configurable via EPICS_CAS_DRAIN_GRACE_SECS.
+    drain_grace_secs: u64,
 }
 
 impl CaServer {
@@ -321,6 +329,7 @@ impl CaServer {
             dns_update: None,
             audit: audit_from_env(),
             introspection_addr: introspection_from_env(),
+            drain_grace_secs: drain_grace_from_env(),
         }
     }
 
@@ -536,6 +545,11 @@ impl CaServer {
             metrics::counter!("ca_server_tls_enabled_total").increment(1);
         }
         let audit_for_tcp = self.audit.clone();
+        // Drain coordination — shared between the TCP listener
+        // (checks before accept) and the introspection /drain admin
+        // route (sets when triggered).
+        let drain = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drain_for_tcp = drain.clone();
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
             #[cfg(feature = "experimental-rust-tls")]
             {
@@ -547,6 +561,7 @@ impl CaServer {
                     beacon_reset_tcp,
                     conn_events,
                     audit_for_tcp,
+                    drain_for_tcp,
                     tls,
                 )
                 .await
@@ -561,10 +576,43 @@ impl CaServer {
                     beacon_reset_tcp,
                     conn_events,
                     audit_for_tcp,
+                    drain_for_tcp,
                 )
                 .await
             }
         });
+
+        // Signal-driven drain: SIGTERM (and SIGINT on unix) flips the
+        // drain flag. The accept loop will exit; existing connections
+        // continue until the grace period elapses, after which run()
+        // returns and the rest of the spawned tasks are aborted.
+        #[cfg(unix)]
+        let signal_handle = {
+            let drain = drain.clone();
+            let grace = self.drain_grace_secs;
+            Some(epics_base_rs::runtime::task::spawn(async move {
+                let mut sigterm =
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "drain: cannot install SIGTERM handler");
+                            return;
+                        }
+                    };
+                if sigterm.recv().await.is_some() {
+                    tracing::info!(grace_secs = grace,
+                        "SIGTERM received; entering drain mode");
+                    drain.store(true, std::sync::atomic::Ordering::Release);
+                    metrics::counter!("ca_server_drain_total").increment(1);
+                    tokio::time::sleep(std::time::Duration::from_secs(grace)).await;
+                    tracing::info!("drain grace expired; exiting");
+                    std::process::exit(0);
+                }
+            }))
+        };
+        #[cfg(not(unix))]
+        let signal_handle: Option<tokio::task::JoinHandle<()>> = None;
         let tcp_abort = tcp_handle.abort_handle();
 
         let tcp_port = tcp_rx.await.map_err(|_| {
@@ -645,6 +693,31 @@ impl CaServer {
         // server keeps running — introspection is non-essential.
         let introspection_handle = if let Some(addr) = self.introspection_addr {
             let state = crate::server::introspection::IntrospectionState::new(tcp_port);
+            // Share the drain flag so POST /drain triggers the same
+            // graceful-shutdown path as SIGTERM.
+            let state = state.with_drain(drain.clone());
+            // Wire POST /reload-acf to the same machinery the
+            // built-in reload uses.
+            let acf_clone = self.acf.clone();
+            let acf_path_clone = self.acf_source_path.lock().ok().and_then(|g| g.clone());
+            let reload_fn: Arc<dyn Fn() -> Result<(), String> + Send + Sync> =
+                Arc::new(move || -> Result<(), String> {
+                    let path = acf_path_clone
+                        .as_ref()
+                        .ok_or("no ACF source path registered")?;
+                    let content = std::fs::read_to_string(path)
+                        .map_err(|e| format!("read {path}: {e}"))?;
+                    let cfg = access_security::parse_acf(&content)
+                        .map_err(|e| format!("parse {path}: {e}"))?;
+                    // Avoid awaiting inside the closure — spawn a one-shot
+                    // task to swap the RwLock contents.
+                    let acf = acf_clone.clone();
+                    tokio::spawn(async move {
+                        *acf.write().await = Some(cfg);
+                    });
+                    Ok(())
+                });
+            let state = state.with_reload_acf(reload_fn);
             let st = state.clone();
             Some(epics_base_rs::runtime::task::spawn(async move {
                 if let Err(e) = crate::server::introspection::run_introspection(addr, st).await {
@@ -710,6 +783,9 @@ impl CaServer {
         if let Some(h) = introspection_handle {
             h.abort();
         }
+        if let Some(h) = signal_handle {
+            h.abort();
+        }
         result
     }
 }
@@ -757,4 +833,14 @@ fn audit_from_env() -> Option<crate::audit::AuditLogger> {
 fn introspection_from_env() -> Option<std::net::SocketAddr> {
     epics_base_rs::runtime::env::get("EPICS_CAS_INTROSPECTION_ADDR")
         .and_then(|s| s.parse().ok())
+}
+
+/// Drain grace seconds from the env. Default 30 — long enough for a
+/// rolling restart to finish active monitor batches, short enough
+/// that a Kubernetes terminationGracePeriodSeconds of 60 still leaves
+/// headroom for SIGKILL.
+fn drain_grace_from_env() -> u64 {
+    epics_base_rs::runtime::env::get("EPICS_CAS_DRAIN_GRACE_SECS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30)
 }

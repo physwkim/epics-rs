@@ -45,6 +45,11 @@ pub struct IntrospectionState {
     pub max_subs_per_channel: u64,
     pub rate_limit_msgs_per_sec: u64,
     pub rate_limit_burst: u64,
+    /// Drain flag, shared with the TCP listener. POST /drain flips it.
+    pub drain: Arc<std::sync::atomic::AtomicBool>,
+    /// Hook for POST /reload-acf. None when the server has no ACF
+    /// source path registered.
+    pub reload_acf: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
 }
 
 impl IntrospectionState {
@@ -59,7 +64,28 @@ impl IntrospectionState {
             max_subs_per_channel: 0,
             rate_limit_msgs_per_sec: 0,
             rate_limit_burst: 0,
+            drain: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reload_acf: None,
         })
+    }
+
+    /// Builder-style: set the shared drain flag (so POST /drain
+    /// signals the same bool the TCP listener checks).
+    pub fn with_drain(mut self: Arc<Self>, drain: Arc<std::sync::atomic::AtomicBool>) -> Arc<Self> {
+        // SAFETY: only ever called before the introspection task is
+        // spawned, while the Arc is unique to the configurer.
+        let inner = Arc::get_mut(&mut self).expect("with_drain on shared Arc");
+        inner.drain = drain;
+        self
+    }
+
+    pub fn with_reload_acf(
+        mut self: Arc<Self>,
+        f: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Arc<Self> {
+        let inner = Arc::get_mut(&mut self).expect("with_reload_acf on shared Arc");
+        inner.reload_acf = Some(f);
+        self
     }
 
     pub async fn add_peer(&self, peer: SocketAddr) {
@@ -134,18 +160,48 @@ async fn handle_request(
     }
 
     let (method, path) = parse_request_line(&request_line);
-    if method != "GET" {
-        return write_response(reader.into_inner(), 405, "Method Not Allowed", "").await;
-    }
-
-    let (status, body) = match path {
-        "/healthz" => (200, "{\"status\":\"ok\"}".to_string()),
-        "/info" => (200, render_info(&state)),
-        "/clients" => (200, render_clients(&state).await),
-        "/queues" => (200, render_queues(&state)),
-        _ => (404, "{\"error\":\"not_found\"}".to_string()),
+    let (status, body) = match (method, path) {
+        ("GET", "/healthz") => (200, "{\"status\":\"ok\"}".to_string()),
+        ("GET", "/info") => (200, render_info(&state)),
+        ("GET", "/clients") => (200, render_clients(&state).await),
+        ("GET", "/queues") => (200, render_queues(&state)),
+        ("POST", "/drain") => {
+            state.drain.store(true, std::sync::atomic::Ordering::Release);
+            metrics::counter!("ca_server_drain_total").increment(1);
+            (200, "{\"drain\":true}".to_string())
+        }
+        ("POST", "/reload-acf") => match &state.reload_acf {
+            Some(f) => match f() {
+                Ok(()) => (200, "{\"reload_acf\":\"ok\"}".to_string()),
+                Err(e) => (500, format!("{{\"error\":\"{}\"}}", escape_json(&e))),
+            },
+            None => (
+                501,
+                "{\"error\":\"reload_acf not configured\"}".to_string(),
+            ),
+        },
+        ("GET", _) | ("POST", _) => (404, "{\"error\":\"not_found\"}".to_string()),
+        _ => return write_response(reader.into_inner(), 405, "Method Not Allowed", "").await,
     };
     write_response(reader.into_inner(), status, status_text(status), &body).await
+}
+
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn parse_request_line(line: &str) -> (&str, &str) {
@@ -161,6 +217,8 @@ fn status_text(code: u16) -> &'static str {
         200 => "OK",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
         _ => "OK",
     }
 }
