@@ -1175,6 +1175,17 @@ fn pv_field_to_field_desc(field: &PvField) -> FieldDesc {
                 .map(|(name, f)| (name.clone(), pv_field_to_field_desc(f)))
                 .collect(),
         },
+        // Other shapes don't appear in qsrv group Const mappings; return a
+        // benign empty structure so callers never see a partial decode.
+        PvField::StructureArray(_)
+        | PvField::Union { .. }
+        | PvField::UnionArray(_)
+        | PvField::Variant(_)
+        | PvField::VariantArray(_)
+        | PvField::Null => FieldDesc::Structure {
+            struct_id: String::new(),
+            fields: Vec::new(),
+        },
     }
 }
 

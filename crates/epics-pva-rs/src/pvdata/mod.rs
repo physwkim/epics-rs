@@ -9,4 +9,4 @@ pub mod encode;
 
 pub use field::FieldDesc;
 pub use scalar::{ScalarType, ScalarValue};
-pub use structure::{PvField, PvStructure};
+pub use structure::{PvField, PvStructure, UnionItem, VariantValue};

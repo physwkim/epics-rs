@@ -215,6 +215,14 @@ pub fn pv_structure_to_epics(pv: &PvStructure) -> Option<EpicsValue> {
                 None
             }
         }
+        // Other composite shapes are not (yet) represented as a single
+        // EpicsValue. Handled out-of-line by the qsrv group/native source.
+        PvField::StructureArray(_)
+        | PvField::Union { .. }
+        | PvField::UnionArray(_)
+        | PvField::Variant(_)
+        | PvField::VariantArray(_)
+        | PvField::Null => None,
     }
 }
 

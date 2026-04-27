@@ -7,8 +7,18 @@ use std::fmt;
 
 use super::scalar::ScalarType;
 
-/// Description of a field's type (for introspection, no values).
-#[derive(Debug, Clone)]
+/// Description of a field's type (introspection only — no values).
+///
+/// This mirrors the full pvData type space (matching pvxs `data.h::TypeDef`):
+///
+/// - `Scalar` / `ScalarArray` cover the 12 scalar types and their arrays
+///   (`String` and `String[]` flow through the `ScalarType::String` variant).
+/// - `Structure` / `StructureArray` are named records.
+/// - `Union` / `UnionArray` are tagged unions over a fixed list of variants.
+/// - `Variant` / `VariantArray` are "any" — the value carries its own
+///   descriptor on the wire.
+/// - `BoundedString` is a string with a wire-side maximum length tag.
+#[derive(Debug, Clone, PartialEq)]
 pub enum FieldDesc {
     Scalar(ScalarType),
     ScalarArray(ScalarType),
@@ -16,40 +26,56 @@ pub enum FieldDesc {
         struct_id: String,
         fields: Vec<(String, FieldDesc)>,
     },
+    StructureArray {
+        struct_id: String,
+        fields: Vec<(String, FieldDesc)>,
+    },
+    Union {
+        struct_id: String,
+        variants: Vec<(String, FieldDesc)>,
+    },
+    UnionArray {
+        struct_id: String,
+        variants: Vec<(String, FieldDesc)>,
+    },
+    Variant,
+    VariantArray,
+    BoundedString(u32),
 }
 
 impl FieldDesc {
     /// Get the scalar type of a `value` field in a structure.
     pub fn value_scalar_type(&self) -> Option<ScalarType> {
-        match self {
-            FieldDesc::Structure { fields, .. } => {
-                for (name, desc) in fields {
-                    if name == "value" {
-                        if let FieldDesc::Scalar(st) = desc {
-                            return Some(*st);
-                        }
+        if let FieldDesc::Structure { fields, .. } = self {
+            for (name, desc) in fields {
+                if name == "value" {
+                    if let FieldDesc::Scalar(st) = desc {
+                        return Some(*st);
                     }
                 }
-                None
             }
-            _ => None,
         }
+        None
     }
 
-    /// Number of immediate fields (for structures).
+    /// Number of immediate fields (for structures and unions).
     pub fn field_count(&self) -> usize {
         match self {
-            FieldDesc::Structure { fields, .. } => fields.len(),
+            FieldDesc::Structure { fields, .. } | FieldDesc::StructureArray { fields, .. } => {
+                fields.len()
+            }
+            FieldDesc::Union { variants, .. } | FieldDesc::UnionArray { variants, .. } => {
+                variants.len()
+            }
             _ => 0,
         }
     }
 
     /// Total number of bit positions this descriptor occupies in a monitor
     /// `BitSet`. The root structure occupies bit 0; each nested field adds 1
-    /// (and recursively for nested structures).
+    /// (and recursively for nested structures). pvData spec §5.4.
     ///
-    /// pvData spec §5.4: "field n+1 follows field n, with sub-fields counted
-    /// in declaration order before the next sibling".
+    /// Unions, scalars, and arrays count as a single bit.
     pub fn total_bits(&self) -> usize {
         1 + match self {
             FieldDesc::Structure { fields, .. } => fields
@@ -70,6 +96,15 @@ impl FieldDesc {
         let parts: Vec<&str> = path.split('.').collect();
         find_bit_for_path(self, 0, &parts).map(|(idx, _)| idx)
     }
+
+    /// True iff this descriptor names a string type (Scalar/String,
+    /// BoundedString).
+    pub fn is_string_like(&self) -> bool {
+        matches!(
+            self,
+            FieldDesc::Scalar(ScalarType::String) | FieldDesc::BoundedString(_)
+        )
+    }
 }
 
 fn find_bit_for_path(desc: &FieldDesc, base: usize, path: &[&str]) -> Option<(usize, usize)> {
@@ -79,7 +114,7 @@ fn find_bit_for_path(desc: &FieldDesc, base: usize, path: &[&str]) -> Option<(us
     let head = path[0];
     let tail = &path[1..];
     if let FieldDesc::Structure { fields, .. } = desc {
-        let mut offset = base + 1; // bit 0 = this structure itself
+        let mut offset = base + 1;
         for (name, child) in fields {
             if name == head {
                 return find_bit_for_path(child, offset, tail);
@@ -102,13 +137,36 @@ impl FieldDesc {
         match self {
             FieldDesc::Scalar(st) => write!(f, "{st}"),
             FieldDesc::ScalarArray(st) => write!(f, "{st}[]"),
-            FieldDesc::Structure { struct_id, fields } => {
-                if struct_id.is_empty() {
-                    writeln!(f, "structure")?;
+            FieldDesc::Variant => write!(f, "any"),
+            FieldDesc::VariantArray => write!(f, "any[]"),
+            FieldDesc::BoundedString(_) => write!(f, "string"),
+            FieldDesc::Structure { struct_id, fields }
+            | FieldDesc::StructureArray { struct_id, fields } => {
+                let suffix = if matches!(self, FieldDesc::StructureArray { .. }) {
+                    "[]"
                 } else {
-                    writeln!(f, "structure {struct_id}")?;
+                    ""
+                };
+                if struct_id.is_empty() {
+                    writeln!(f, "structure{suffix}")?;
+                } else {
+                    writeln!(f, "structure{suffix} {struct_id}")?;
                 }
                 for (name, desc) in fields {
+                    write!(f, "{pad}    {name}: ")?;
+                    desc.fmt_indent(f, indent + 1)?;
+                    writeln!(f)?;
+                }
+                Ok(())
+            }
+            FieldDesc::Union { variants, .. } | FieldDesc::UnionArray { variants, .. } => {
+                let suffix = if matches!(self, FieldDesc::UnionArray { .. }) {
+                    "[]"
+                } else {
+                    ""
+                };
+                writeln!(f, "union{suffix}")?;
+                for (name, desc) in variants {
                     write!(f, "{pad}    {name}: ")?;
                     desc.fmt_indent(f, indent + 1)?;
                     writeln!(f)?;
@@ -157,7 +215,6 @@ mod tests {
     #[test]
     fn total_bits_counts_root_plus_children() {
         let nt = nt_scalar_double();
-        // 1 (root) + 1 (value) + 4 (alarm + 3 children) + 4 (timeStamp + 3 children) = 10
         assert_eq!(nt.total_bits(), 10);
     }
 
@@ -187,5 +244,17 @@ mod tests {
     fn value_scalar_type_extraction() {
         let nt = nt_scalar_double();
         assert_eq!(nt.value_scalar_type(), Some(ScalarType::Double));
+    }
+
+    #[test]
+    fn union_field_count() {
+        let u = FieldDesc::Union {
+            struct_id: String::new(),
+            variants: vec![
+                ("doubleValue".into(), FieldDesc::ScalarArray(ScalarType::Double)),
+                ("intValue".into(), FieldDesc::ScalarArray(ScalarType::Int)),
+            ],
+        };
+        assert_eq!(u.field_count(), 2);
     }
 }

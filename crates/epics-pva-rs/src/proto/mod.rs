@@ -30,7 +30,7 @@ pub mod string;
 pub use bitset::BitSet;
 pub use buffer::{ByteOrder, DecodeError, ReadExt, WriteExt};
 pub use command::{Command, ControlCommand, MessageType, QosFlags};
-pub use header::{PvaHeader, MAGIC, PVA_VERSION};
+pub use header::{HeaderFlags, PvaHeader, MAGIC, PVA_VERSION};
 pub use ip::{ip_from_bytes, ip_to_bytes};
 pub use selector::Selector;
 pub use size::{decode_size, encode_size, encode_size_into, NULL_MARKER};

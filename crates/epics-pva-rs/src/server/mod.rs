@@ -1,8 +1,9 @@
 //! PVA server components — protocol bridge, server wrapper, protocol runner.
 
-pub mod bridge;
+pub mod native_source;
 pub mod pva_server;
 
+pub use native_source::PvDatabaseSource;
 pub use pva_server::{PvaServer, PvaServerBuilder};
 
 use epics_base_rs::error::CaResult;

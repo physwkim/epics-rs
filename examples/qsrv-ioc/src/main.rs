@@ -36,7 +36,7 @@ use epics_base_rs::types::EpicsValue;
 use epics_bridge_rs::qsrv::{BridgeProvider, QsrvPvStore};
 use epics_ca_rs::server::CaServer;
 use epics_pva_rs::server::PvaServer;
-use spvirit_server::PvStore;
+use epics_pva_rs::server_native::ChannelSource;
 
 #[epics_base_rs::epics_main]
 async fn main() -> CaResult<()> {
@@ -98,7 +98,7 @@ async fn main() -> CaResult<()> {
     let ca_handle = epics_base_rs::runtime::task::spawn(async move { ca_server.run().await });
 
     let result = pva_server
-        .run_with_store_and_shell(store, |_shell| {
+        .run_with_source_and_shell(store, |_shell| {
             // iocsh commands (dbl, dbgf, dbpf, etc.) are built-in
         })
         .await;

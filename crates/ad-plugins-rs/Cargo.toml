@@ -27,11 +27,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rayon = { version = "1", optional = true }
 rust-hdf5 = { version = "0.2", features = ["threadsafe", "all_filters"] }
 spvirit-types = { version = "0.1.9", optional = true }
-spvirit-server = { version = "0.1.9", optional = true }
 epics-bridge-rs = { workspace = true, features = ["qsrv"], optional = true }
 
 [features]
 default = ["parallel"]
 ioc = ["ad-core-rs/ioc"]
-pva = ["dep:spvirit-types", "dep:spvirit-server", "dep:epics-bridge-rs"]
+pva = ["dep:spvirit-types", "dep:epics-bridge-rs"]
 parallel = ["rayon"]

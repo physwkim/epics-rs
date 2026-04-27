@@ -20,7 +20,7 @@ use clap::Parser;
 
 use epics_bridge_rs::qsrv::{BridgeProvider, QsrvPvStore};
 use epics_pva_rs::server::{PvaServer, PvaServerBuilder};
-use spvirit_server::PvStore;
+use epics_pva_rs::server_native::ChannelSource;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -102,7 +102,7 @@ async fn run(args: Args) -> Result<(), String> {
     );
 
     server
-        .run_with_store(store)
+        .run_with_source(store)
         .await
         .map_err(|e| e.to_string())
 }

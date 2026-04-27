@@ -1,12 +1,16 @@
 //! pvxs-compatible output formatting for PVA values and type descriptors.
 //!
-//! Matches the output style of C++ pvxs `pvget`, `pvinfo`, etc.
+//! Operates on native [`crate::pvdata`] types (`FieldDesc` / `PvField` /
+//! `PvStructure`) — no `spvirit_codec` dependency. Mirrors the layout pvxs
+//! `pvget` / `pvinfo` produce.
 
-use spvirit_codec::spvd_decode::{DecodedValue, FieldDesc, FieldType, StructureDesc, TypeCode};
+use std::fmt::Write as _;
+
+use crate::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
 
 // ─── pvinfo formatting (type descriptor) ────────────────────────────────────
 
-/// Format a `StructureDesc` in pvxs `pvinfo` style.
+/// Format a top-level structure descriptor in pvxs `pvinfo` style.
 ///
 /// ```text
 /// epics:nt/NTNDArray:1.0
@@ -15,199 +19,205 @@ use spvirit_codec::spvd_decode::{DecodedValue, FieldDesc, FieldType, StructureDe
 ///     codec_t codec
 ///         string name
 /// ```
-pub fn format_info(desc: &StructureDesc) -> String {
+pub fn format_info(desc: &FieldDesc) -> String {
     format_info_indented(desc, 0)
 }
 
-/// Format a `StructureDesc` with a base indentation level.
-/// Used by pvinfo-rs to render under the `Type:` header.
-pub fn format_info_indented(desc: &StructureDesc, base_depth: usize) -> String {
+/// Format with a base indentation level (used by pvinfo-rs to nest under
+/// the `Type:` header).
+pub fn format_info_indented(desc: &FieldDesc, base_depth: usize) -> String {
     let mut out = String::new();
     let indent = "    ".repeat(base_depth);
-    let id = desc.struct_id.as_deref().unwrap_or("structure");
-    out.push_str(&format!("{indent}{id}\n"));
-    for field in &desc.fields {
-        format_info_field(&mut out, field, base_depth + 1);
-    }
+    let id = struct_id_or_default(desc, "structure");
+    let _ = writeln!(out, "{indent}{id}");
+    write_info_children(&mut out, desc, base_depth + 1);
     out
 }
 
-fn format_info_field(out: &mut String, field: &FieldDesc, depth: usize) {
+fn struct_id_or_default<'a>(desc: &'a FieldDesc, fallback: &'a str) -> &'a str {
+    match desc {
+        FieldDesc::Structure { struct_id, .. } | FieldDesc::StructureArray { struct_id, .. }
+            if !struct_id.is_empty() =>
+        {
+            struct_id.as_str()
+        }
+        FieldDesc::Union { struct_id, .. } | FieldDesc::UnionArray { struct_id, .. }
+            if !struct_id.is_empty() =>
+        {
+            struct_id.as_str()
+        }
+        _ => fallback,
+    }
+}
+
+fn write_info_children(out: &mut String, desc: &FieldDesc, depth: usize) {
+    match desc {
+        FieldDesc::Structure { fields, .. } | FieldDesc::StructureArray { fields, .. } => {
+            for (name, child) in fields {
+                write_info_field(out, name, child, depth);
+            }
+        }
+        FieldDesc::Union { variants, .. } | FieldDesc::UnionArray { variants, .. } => {
+            for (name, child) in variants {
+                write_info_field(out, name, child, depth);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn write_info_field(out: &mut String, name: &str, desc: &FieldDesc, depth: usize) {
     let indent = "    ".repeat(depth);
-    match &field.field_type {
-        FieldType::Structure(desc) => {
-            let id = desc.struct_id.as_deref().unwrap_or("structure");
-            out.push_str(&format!("{indent}{id} {}\n", field.name));
-            for f in &desc.fields {
-                format_info_field(out, f, depth + 1);
+    match desc {
+        FieldDesc::Structure { struct_id, fields } => {
+            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            let _ = writeln!(out, "{indent}{id} {name}");
+            for (n, c) in fields {
+                write_info_field(out, n, c, depth + 1);
             }
         }
-        FieldType::StructureArray(desc) => {
-            let id = desc.struct_id.as_deref().unwrap_or("structure");
-            out.push_str(&format!("{indent}{id}[] {}\n", field.name));
-            // Show element structure indented
+        FieldDesc::StructureArray { struct_id, fields } => {
+            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            let _ = writeln!(out, "{indent}{id}[] {name}");
             let inner_indent = "    ".repeat(depth + 1);
-            out.push_str(&format!("{inner_indent}{id}\n"));
-            for f in &desc.fields {
-                format_info_field(out, f, depth + 2);
+            let _ = writeln!(out, "{inner_indent}{id}");
+            for (n, c) in fields {
+                write_info_field(out, n, c, depth + 2);
             }
         }
-        FieldType::Union(fields) => {
-            out.push_str(&format!("{indent}union {}\n", field.name));
-            for f in fields {
-                format_info_field(out, f, depth + 1);
+        FieldDesc::Union { variants, .. } => {
+            let _ = writeln!(out, "{indent}union {name}");
+            for (n, c) in variants {
+                write_info_field(out, n, c, depth + 1);
             }
         }
-        FieldType::UnionArray(fields) => {
-            out.push_str(&format!("{indent}union[] {}\n", field.name));
-            for f in fields {
-                format_info_field(out, f, depth + 1);
+        FieldDesc::UnionArray { variants, .. } => {
+            let _ = writeln!(out, "{indent}union[] {name}");
+            for (n, c) in variants {
+                write_info_field(out, n, c, depth + 1);
             }
         }
         _ => {
-            out.push_str(&format!(
-                "{indent}{} {}\n",
-                pvxs_type_name(&field.field_type),
-                field.name
-            ));
+            let _ = writeln!(out, "{indent}{} {name}", type_name(desc));
         }
     }
 }
 
-/// Type name in pvxs style (all array types fully qualified).
-fn pvxs_type_name(ft: &FieldType) -> &'static str {
-    match ft {
-        FieldType::Scalar(tc) => typecode_name(*tc),
-        FieldType::ScalarArray(tc) => typecode_array_name(*tc),
-        FieldType::String => "string",
-        FieldType::StringArray => "string[]",
-        FieldType::Variant => "any",
-        FieldType::VariantArray => "any[]",
-        FieldType::BoundedString(_) => "string",
-        // Structure/Union handled by caller
-        FieldType::Structure(_) => "structure",
-        FieldType::StructureArray(_) => "structure[]",
-        FieldType::Union(_) => "union",
-        FieldType::UnionArray(_) => "union[]",
+fn type_name(desc: &FieldDesc) -> &'static str {
+    match desc {
+        FieldDesc::Scalar(st) => scalar_type_name(*st),
+        FieldDesc::ScalarArray(st) => scalar_array_type_name(*st),
+        FieldDesc::Variant => "any",
+        FieldDesc::VariantArray => "any[]",
+        FieldDesc::BoundedString(_) => "string",
+        FieldDesc::Structure { .. } => "structure",
+        FieldDesc::StructureArray { .. } => "structure[]",
+        FieldDesc::Union { .. } => "union",
+        FieldDesc::UnionArray { .. } => "union[]",
     }
 }
 
-fn typecode_name(tc: TypeCode) -> &'static str {
-    match tc {
-        TypeCode::Boolean => "boolean",
-        TypeCode::Int8 => "byte",
-        TypeCode::Int16 => "short",
-        TypeCode::Int32 => "int",
-        TypeCode::Int64 => "long",
-        TypeCode::UInt8 => "ubyte",
-        TypeCode::UInt16 => "ushort",
-        TypeCode::UInt32 => "uint",
-        TypeCode::UInt64 => "ulong",
-        TypeCode::Float32 => "float",
-        TypeCode::Float64 => "double",
-        TypeCode::String => "string",
-        _ => "unknown",
+fn scalar_type_name(st: ScalarType) -> &'static str {
+    match st {
+        ScalarType::Boolean => "boolean",
+        ScalarType::Byte => "byte",
+        ScalarType::Short => "short",
+        ScalarType::Int => "int",
+        ScalarType::Long => "long",
+        ScalarType::UByte => "ubyte",
+        ScalarType::UShort => "ushort",
+        ScalarType::UInt => "uint",
+        ScalarType::ULong => "ulong",
+        ScalarType::Float => "float",
+        ScalarType::Double => "double",
+        ScalarType::String => "string",
     }
 }
 
-fn typecode_array_name(tc: TypeCode) -> &'static str {
-    match tc {
-        TypeCode::Boolean => "boolean[]",
-        TypeCode::Int8 => "byte[]",
-        TypeCode::Int16 => "short[]",
-        TypeCode::Int32 => "int[]",
-        TypeCode::Int64 => "long[]",
-        TypeCode::UInt8 => "ubyte[]",
-        TypeCode::UInt16 => "ushort[]",
-        TypeCode::UInt32 => "uint[]",
-        TypeCode::UInt64 => "ulong[]",
-        TypeCode::Float32 => "float[]",
-        TypeCode::Float64 => "double[]",
-        TypeCode::String => "string[]",
-        _ => "array",
+fn scalar_array_type_name(st: ScalarType) -> &'static str {
+    match st {
+        ScalarType::Boolean => "boolean[]",
+        ScalarType::Byte => "byte[]",
+        ScalarType::Short => "short[]",
+        ScalarType::Int => "int[]",
+        ScalarType::Long => "long[]",
+        ScalarType::UByte => "ubyte[]",
+        ScalarType::UShort => "ushort[]",
+        ScalarType::UInt => "uint[]",
+        ScalarType::ULong => "ulong[]",
+        ScalarType::Float => "float[]",
+        ScalarType::Double => "double[]",
+        ScalarType::String => "string[]",
     }
 }
 
-// ─── pvget raw/verbose formatting (type + value) ────────────────────────────
+// ─── pvget raw / verbose formatting (type + value) ──────────────────────────
 
 /// Format value with type descriptors in pvxs raw/verbose style.
-///
-/// ```text
-/// SIM1:cam1:Gain_RBV epics:nt/NTScalar:1.0
-///     double value 1
-///     alarm_t alarm
-///         int severity 0
-/// ```
-pub fn format_raw(pv_name: &str, desc: &StructureDesc, value: &DecodedValue) -> String {
+pub fn format_raw(pv_name: &str, desc: &FieldDesc, value: &PvField) -> String {
     let mut out = String::new();
-    let id = desc.struct_id.as_deref().unwrap_or("structure");
-    out.push_str(&format!("{pv_name} {id} \n"));
-    if let DecodedValue::Structure(fields) = value {
-        for (name, val) in fields {
-            if let Some(fd) = desc.fields.iter().find(|f| f.name == *name) {
-                format_raw_field(&mut out, fd, val, 1);
+    let id = struct_id_or_default(desc, "structure");
+    let _ = writeln!(out, "{pv_name} {id} ");
+    if let (FieldDesc::Structure { fields, .. }, PvField::Structure(s)) = (desc, value) {
+        for (name, child_desc) in fields {
+            if let Some(child_val) = s.get_field(name) {
+                write_raw_field(&mut out, name, child_desc, child_val, 1);
             }
         }
     }
     out
 }
 
-fn format_raw_field(out: &mut String, desc: &FieldDesc, value: &DecodedValue, depth: usize) {
+fn write_raw_field(
+    out: &mut String,
+    name: &str,
+    desc: &FieldDesc,
+    value: &PvField,
+    depth: usize,
+) {
     let indent = "    ".repeat(depth);
-    match (&desc.field_type, value) {
-        (FieldType::Structure(sdesc), DecodedValue::Structure(fields)) => {
-            let id = sdesc.struct_id.as_deref().unwrap_or("structure");
-            // Check if it's a timestamp — format specially
-            if is_timestamp_struct(sdesc) {
-                let ts_str = format_timestamp(fields);
-                out.push_str(&format!("{indent}{id} {} {ts_str}\n", desc.name));
-            } else if is_enum_struct(sdesc) {
-                // enum_t: show "(index) choice" summary on the same line
-                let summary = format_enum_summary(fields);
-                out.push_str(&format!("{indent}{id} {} {summary}\n", desc.name));
+    match (desc, value) {
+        (FieldDesc::Structure { struct_id, fields }, PvField::Structure(s)) => {
+            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            if struct_id == "time_t" {
+                let ts_str = format_timestamp(s);
+                let _ = writeln!(out, "{indent}{id} {name} {ts_str}");
+            } else if struct_id == "enum_t" {
+                let summary = format_enum_summary(s);
+                let _ = writeln!(out, "{indent}{id} {name} {summary}");
             } else {
-                out.push_str(&format!("{indent}{id} {}\n", desc.name));
+                let _ = writeln!(out, "{indent}{id} {name}");
             }
-            for (name, val) in fields {
-                if let Some(fd) = sdesc.fields.iter().find(|f| f.name == *name) {
-                    format_raw_field(out, fd, val, depth + 1);
+            for (n, child_desc) in fields {
+                if let Some(child_val) = s.get_field(n) {
+                    write_raw_field(out, n, child_desc, child_val, depth + 1);
                 }
             }
         }
-        (FieldType::StructureArray(sdesc), DecodedValue::Array(items)) => {
-            let id = sdesc.struct_id.as_deref().unwrap_or("structure");
-            out.push_str(&format!("{indent}{id}[] {}\n", desc.name));
-            for item in items {
-                if let DecodedValue::Structure(fields) = item {
-                    out.push_str(&format!("{}    {id} \n", indent));
-                    for (name, val) in fields {
-                        if let Some(fd) = sdesc.fields.iter().find(|f| f.name == *name) {
-                            format_raw_field(out, fd, val, depth + 2);
-                        }
+        (FieldDesc::StructureArray { struct_id, fields }, PvField::StructureArray(items)) => {
+            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            let _ = writeln!(out, "{indent}{id}[] {name}");
+            for s in items {
+                let _ = writeln!(out, "{indent}    {id} ");
+                for (n, child_desc) in fields {
+                    if let Some(child_val) = s.get_field(n) {
+                        write_raw_field(out, n, child_desc, child_val, depth + 2);
                     }
                 }
             }
         }
-        (FieldType::Union(_), DecodedValue::Structure(fields)) => {
-            // Union displayed as selected variant
-            if let Some((variant_name, variant_val)) = fields.first() {
-                let type_name = value_type_name(variant_val);
-                out.push_str(&format!(
-                    "{indent}union {}\n{indent}    {type_name} {variant_name} {}\n",
-                    desc.name,
-                    format_value_inline(variant_val)
-                ));
-            } else {
-                out.push_str(&format!("{indent}union {}\n", desc.name));
-            }
+        (FieldDesc::Union { .. }, PvField::Union { variant_name, value, .. }) => {
+            // Show selected variant on the same line as `union`.
+            let _ = writeln!(
+                out,
+                "{indent}union {name}\n{indent}    {} {variant_name} {}",
+                value_type_name(value),
+                format_value_inline(value),
+            );
         }
         _ => {
-            let type_name = pvxs_type_name(&desc.field_type);
-            out.push_str(&format!(
-                "{indent}{type_name} {} {}\n",
-                desc.name,
-                format_value_inline(value)
-            ));
+            let tn = type_name(desc);
+            let _ = writeln!(out, "{indent}{tn} {name} {}", format_value_inline(value));
         }
     }
 }
@@ -215,163 +225,149 @@ fn format_raw_field(out: &mut String, desc: &FieldDesc, value: &DecodedValue, de
 // ─── pvget NT mode formatting ───────────────────────────────────────────────
 
 /// Format value in NT mode (default pvget output).
-///
-/// NTScalar: `PV_NAME timestamp value`
-/// NTEnum: `PV_NAME timestamp (index) choice`
-/// Other: falls back to raw mode.
-pub fn format_nt(pv_name: &str, desc: &StructureDesc, value: &DecodedValue) -> String {
-    let struct_id = desc.struct_id.as_deref().unwrap_or("");
-    let fields = match value {
-        DecodedValue::Structure(f) => f,
+pub fn format_nt(pv_name: &str, desc: &FieldDesc, value: &PvField) -> String {
+    let id = struct_id_or_default(desc, "");
+    let s = match value {
+        PvField::Structure(s) => s,
         _ => return format!("{pv_name} {value}\n"),
     };
-
-    if struct_id.starts_with("epics:nt/NTScalar:") {
-        format_nt_scalar(pv_name, fields)
-    } else if struct_id.starts_with("epics:nt/NTEnum:") {
-        format_nt_enum(pv_name, fields)
+    if id.starts_with("epics:nt/NTScalar:") {
+        format_nt_scalar(pv_name, s)
+    } else if id.starts_with("epics:nt/NTEnum:") {
+        format_nt_enum(pv_name, s)
     } else {
-        // Fall back to raw for non-NT or complex types
         format_raw(pv_name, desc, value)
     }
 }
 
-fn format_nt_scalar(pv_name: &str, fields: &[(String, DecodedValue)]) -> String {
-    let val = find_field(fields, "value")
-        .map(|v| format_scalar_value(v))
+fn format_nt_scalar(pv_name: &str, s: &PvStructure) -> String {
+    let val = s
+        .get_field("value")
+        .map(format_value_inline)
         .unwrap_or_default();
-    let ts = find_field(fields, "timeStamp")
-        .map(|v| {
-            if let DecodedValue::Structure(ts_fields) = v {
-                format_timestamp(ts_fields)
-            } else {
-                "<undefined>".to_string()
-            }
+    let ts = s
+        .get_field("timeStamp")
+        .and_then(|f| match f {
+            PvField::Structure(ts) => Some(format_timestamp(ts)),
+            _ => None,
         })
         .unwrap_or_else(|| "<undefined>".to_string());
-    // pvxs aligns columns: PV_NAME  timestamp  value
     format!("{pv_name} {ts} {val}\n")
 }
 
-fn format_nt_enum(pv_name: &str, fields: &[(String, DecodedValue)]) -> String {
-    let ts = find_field(fields, "timeStamp")
-        .map(|v| {
-            if let DecodedValue::Structure(ts_fields) = v {
-                format_timestamp(ts_fields)
-            } else {
-                "<undefined>".to_string()
-            }
+fn format_nt_enum(pv_name: &str, s: &PvStructure) -> String {
+    let ts = s
+        .get_field("timeStamp")
+        .and_then(|f| match f {
+            PvField::Structure(ts) => Some(format_timestamp(ts)),
+            _ => None,
         })
         .unwrap_or_else(|| "<undefined>".to_string());
-
-    let (index, choice) =
-        if let Some(DecodedValue::Structure(enum_fields)) = find_field(fields, "value") {
-            let idx = find_field(enum_fields, "index")
-                .map(|v| format_scalar_value(v))
+    let (idx, choice) = match s.get_field("value") {
+        Some(PvField::Structure(es)) => {
+            let i = es
+                .get_field("index")
+                .map(format_value_inline)
                 .unwrap_or_else(|| "0".to_string());
-            let choice =
-                if let Some(DecodedValue::Array(choices)) = find_field(enum_fields, "choices") {
-                    let idx_num: usize = idx.parse().unwrap_or(0);
-                    choices
-                        .get(idx_num)
-                        .map(|v| {
-                            if let DecodedValue::String(s) = v {
-                                s.clone()
-                            } else {
-                                format!("{v}")
-                            }
-                        })
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-            (idx, choice)
-        } else {
-            ("0".to_string(), String::new())
-        };
-
-    format!("{pv_name} {ts} ({index}) {choice}\n")
+            let choice = if let Some(PvField::ScalarArray(items)) = es.get_field("choices") {
+                let n: usize = i.parse().unwrap_or(0);
+                items
+                    .get(n)
+                    .map(|v| match v {
+                        ScalarValue::String(s) => s.clone(),
+                        other => format!("{other}"),
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (i, choice)
+        }
+        _ => ("0".to_string(), String::new()),
+    };
+    format!("{pv_name} {ts} ({idx}) {choice}\n")
 }
 
 // ─── JSON formatting ────────────────────────────────────────────────────────
 
 /// Format value as JSON (pvget -M json style).
-pub fn format_json(pv_name: &str, value: &DecodedValue) -> String {
-    let json = decoded_to_json(value);
-    format!("{pv_name} {json}\n")
+pub fn format_json(pv_name: &str, value: &PvField) -> String {
+    format!("{pv_name} {}\n", value_to_json(value))
 }
 
-fn decoded_to_json(value: &DecodedValue) -> String {
+fn value_to_json(value: &PvField) -> String {
     match value {
-        DecodedValue::Null => "null".to_string(),
-        DecodedValue::Boolean(v) => format!("{v}"),
-        DecodedValue::Int8(v) => format!("{v}"),
-        DecodedValue::Int16(v) => format!("{v}"),
-        DecodedValue::Int32(v) => format!("{v}"),
-        DecodedValue::Int64(v) => format!("{v}"),
-        DecodedValue::UInt8(v) => format!("{v}"),
-        DecodedValue::UInt16(v) => format!("{v}"),
-        DecodedValue::UInt32(v) => format!("{v}"),
-        DecodedValue::UInt64(v) => format!("{v}"),
-        DecodedValue::Float32(v) => {
-            if v.fract() == 0.0 {
-                format!("{v:.1}")
+        PvField::Scalar(sv) => scalar_to_json(sv),
+        PvField::ScalarArray(items) => {
+            let parts: Vec<String> = items.iter().map(scalar_to_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        PvField::Structure(s) => structure_to_json(s),
+        PvField::StructureArray(items) => {
+            let parts: Vec<String> = items.iter().map(structure_to_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        PvField::Union { value, .. } => value_to_json(value),
+        PvField::UnionArray(items) => {
+            let parts: Vec<String> = items.iter().map(|it| value_to_json(&it.value)).collect();
+            format!("[{}]", parts.join(","))
+        }
+        PvField::Variant(v) => value_to_json(&v.value),
+        PvField::VariantArray(items) => {
+            let parts: Vec<String> = items.iter().map(|it| value_to_json(&it.value)).collect();
+            format!("[{}]", parts.join(","))
+        }
+        PvField::Null => "null".to_string(),
+    }
+}
+
+fn structure_to_json(s: &PvStructure) -> String {
+    let parts: Vec<String> = s
+        .fields
+        .iter()
+        .map(|(n, v)| format!("{n}:{}", value_to_json(v)))
+        .collect();
+    format!("{{{}}}", parts.join(","))
+}
+
+fn scalar_to_json(v: &ScalarValue) -> String {
+    match v {
+        ScalarValue::String(s) => format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
+        ScalarValue::Float(f) => {
+            if f.fract() == 0.0 {
+                format!("{f:.1}")
             } else {
-                format!("{v}")
+                format!("{f}")
             }
         }
-        DecodedValue::Float64(v) => {
-            if v.fract() == 0.0 {
-                format!("{v:.1}")
+        ScalarValue::Double(f) => {
+            if f.fract() == 0.0 {
+                format!("{f:.1}")
             } else {
-                format!("{v}")
+                format!("{f}")
             }
         }
-        DecodedValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-        DecodedValue::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(|v| decoded_to_json(v)).collect();
-            format!("[{}]", items.join(","))
-        }
-        DecodedValue::Structure(fields) => {
-            let items: Vec<String> = fields
-                .iter()
-                .map(|(name, val)| format!("{}:{}", name, decoded_to_json(val)))
-                .collect();
-            format!("{{{}}}", items.join(","))
-        }
-        DecodedValue::Raw(data) => format!("\"<{} bytes>\"", data.len()),
+        other => format!("{other}"),
     }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-fn find_field<'a>(fields: &'a [(String, DecodedValue)], name: &str) -> Option<&'a DecodedValue> {
-    fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)
-}
-
-fn is_timestamp_struct(desc: &StructureDesc) -> bool {
-    desc.struct_id.as_deref() == Some("time_t")
-}
-
-fn is_enum_struct(desc: &StructureDesc) -> bool {
-    desc.struct_id.as_deref() == Some("enum_t")
-}
-
-/// Format enum summary: "(index) ChoiceName"
-fn format_enum_summary(fields: &[(String, DecodedValue)]) -> String {
-    let idx = find_field(fields, "index")
-        .map(|v| format_scalar_value(v))
+fn format_enum_summary(s: &PvStructure) -> String {
+    let idx = s
+        .get_field("index")
+        .map(format_value_inline)
         .unwrap_or_else(|| "0".to_string());
-    let choice = if let Some(DecodedValue::Array(choices)) = find_field(fields, "choices") {
-        let idx_num: usize = idx.parse().unwrap_or(0);
-        choices
-            .get(idx_num)
-            .map(|v| {
-                if let DecodedValue::String(s) = v {
-                    s.clone()
-                } else {
-                    format!("{v}")
-                }
+    let choice = if let Some(PvField::ScalarArray(items)) = s.get_field("choices") {
+        let n: usize = idx.parse().unwrap_or(0);
+        items
+            .get(n)
+            .map(|v| match v {
+                ScalarValue::String(s) => s.clone(),
+                other => format!("{other}"),
             })
             .unwrap_or_default()
     } else {
@@ -380,24 +376,23 @@ fn format_enum_summary(fields: &[(String, DecodedValue)]) -> String {
     format!("({idx}) {choice}")
 }
 
-/// Format an EPICS timestamp from a time_t structure fields.
-/// Returns "YYYY-MM-DD HH:MM:SS.mmm" or "<undefined>" if epoch is 0.
-fn format_timestamp(fields: &[(String, DecodedValue)]) -> String {
-    let sec = match find_field(fields, "secondsPastEpoch") {
-        Some(DecodedValue::Int64(s)) => *s,
-        Some(DecodedValue::Int32(s)) => *s as i64,
+/// Format an EPICS timestamp from a `time_t` structure. Returns
+/// `YYYY-MM-DD HH:MM:SS.mmm` in local time, or `<undefined>` for epoch=0.
+fn format_timestamp(s: &PvStructure) -> String {
+    let sec = match s.get_field("secondsPastEpoch") {
+        Some(PvField::Scalar(ScalarValue::Long(v))) => *v,
+        Some(PvField::Scalar(ScalarValue::Int(v))) => *v as i64,
         _ => return "<undefined>".to_string(),
     };
     if sec == 0 {
         return "<undefined>".to_string();
     }
-    let nsec = match find_field(fields, "nanoseconds") {
-        Some(DecodedValue::Int32(n)) => *n,
+    let nsec = match s.get_field("nanoseconds") {
+        Some(PvField::Scalar(ScalarValue::Int(v))) => *v as u32,
+        Some(PvField::Scalar(ScalarValue::UInt(v))) => *v,
         _ => 0,
     };
-    // PVA time_t uses POSIX epoch (1970-01-01) directly
-    let unix_sec = sec;
-    let dt = chrono::DateTime::from_timestamp(unix_sec, nsec as u32);
+    let dt = chrono::DateTime::from_timestamp(sec, nsec);
     match dt {
         Some(dt) => {
             let local = dt.with_timezone(&chrono::Local);
@@ -407,56 +402,112 @@ fn format_timestamp(fields: &[(String, DecodedValue)]) -> String {
     }
 }
 
-fn format_scalar_value(v: &DecodedValue) -> String {
+fn format_value_inline(v: &PvField) -> String {
     match v {
-        DecodedValue::Float64(f) => {
+        PvField::Scalar(sv) => scalar_to_inline(sv),
+        PvField::ScalarArray(items) => {
+            let parts: Vec<String> = items.iter().map(scalar_to_inline).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        PvField::Null => String::new(),
+        other => format!("{other}"),
+    }
+}
+
+fn scalar_to_inline(v: &ScalarValue) -> String {
+    match v {
+        ScalarValue::Double(f) => {
             if f.fract() == 0.0 && f.abs() < 1e15 {
-                // pvxs prints "1" not "1.0" for integer-valued doubles
                 format!("{}", *f as i64)
             } else {
                 format!("{f}")
             }
         }
-        DecodedValue::Float32(f) => {
+        ScalarValue::Float(f) => {
             if f.fract() == 0.0 && f.abs() < 1e7 {
                 format!("{}", *f as i32)
             } else {
                 format!("{f}")
             }
         }
-        DecodedValue::String(s) => s.clone(),
-        DecodedValue::Boolean(b) => (if *b { "true" } else { "false" }).to_string(),
+        ScalarValue::String(s) => s.clone(),
+        ScalarValue::Boolean(b) => (if *b { "true" } else { "false" }).to_string(),
         other => format!("{other}"),
     }
 }
 
-fn format_value_inline(v: &DecodedValue) -> String {
+fn value_type_name(v: &PvField) -> &'static str {
     match v {
-        DecodedValue::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(|v| format_scalar_value(v)).collect();
-            format!("[{}]", items.join(", "))
-        }
-        DecodedValue::Structure(_) => String::new(), // handled by caller
-        other => format_scalar_value(other),
+        PvField::Scalar(sv) => scalar_type_name(sv.scalar_type()),
+        PvField::ScalarArray(_) => "array",
+        PvField::Structure(_) => "structure",
+        PvField::StructureArray(_) => "structure[]",
+        PvField::Union { .. } => "union",
+        PvField::UnionArray(_) => "union[]",
+        PvField::Variant(_) => "any",
+        PvField::VariantArray(_) => "any[]",
+        PvField::Null => "null",
     }
 }
 
-fn value_type_name(v: &DecodedValue) -> &'static str {
-    match v {
-        DecodedValue::Boolean(_) => "boolean",
-        DecodedValue::Int8(_) => "byte",
-        DecodedValue::Int16(_) => "short",
-        DecodedValue::Int32(_) => "int",
-        DecodedValue::Int64(_) => "long",
-        DecodedValue::UInt8(_) => "ubyte",
-        DecodedValue::UInt16(_) => "ushort",
-        DecodedValue::UInt32(_) => "uint",
-        DecodedValue::UInt64(_) => "ulong",
-        DecodedValue::Float32(_) => "float",
-        DecodedValue::Float64(_) => "double",
-        DecodedValue::String(_) => "string",
-        DecodedValue::Array(_) => "array",
-        DecodedValue::Structure(_) => "structure",
-        _ => "unknown",
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nt_scalar_double(value: f64, sec: i64, nsec: i32) -> (FieldDesc, PvField) {
+        let desc = FieldDesc::Structure {
+            struct_id: "epics:nt/NTScalar:1.0".into(),
+            fields: vec![
+                ("value".into(), FieldDesc::Scalar(ScalarType::Double)),
+                (
+                    "timeStamp".into(),
+                    FieldDesc::Structure {
+                        struct_id: "time_t".into(),
+                        fields: vec![
+                            ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+                            ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
+                            ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
+                        ],
+                    },
+                ),
+            ],
+        };
+        let mut s = PvStructure::new("epics:nt/NTScalar:1.0");
+        s.set("value", PvField::Scalar(ScalarValue::Double(value)));
+        let mut ts = PvStructure::new("time_t");
+        ts.set(
+            "secondsPastEpoch",
+            PvField::Scalar(ScalarValue::Long(sec)),
+        );
+        ts.set("nanoseconds", PvField::Scalar(ScalarValue::Int(nsec)));
+        ts.set("userTag", PvField::Scalar(ScalarValue::Int(0)));
+        s.set("timeStamp", PvField::Structure(ts));
+        (desc, PvField::Structure(s))
+    }
+
+    #[test]
+    fn nt_formatting_includes_value() {
+        let (desc, val) = nt_scalar_double(42.5, 0, 0);
+        let out = format_nt("MY:PV", &desc, &val);
+        assert!(out.contains("MY:PV"));
+        assert!(out.contains("42.5"));
+    }
+
+    #[test]
+    fn json_formatting_for_scalar_array() {
+        let v = PvField::ScalarArray(vec![ScalarValue::Int(1), ScalarValue::Int(2)]);
+        let out = format_json("X", &v);
+        assert_eq!(out, "X [1,2]\n");
+    }
+
+    #[test]
+    fn info_formatting_includes_struct_id() {
+        let desc = FieldDesc::Structure {
+            struct_id: "epics:nt/NTScalar:1.0".into(),
+            fields: vec![("value".into(), FieldDesc::Scalar(ScalarType::Double))],
+        };
+        let out = format_info(&desc);
+        assert!(out.contains("epics:nt/NTScalar:1.0"));
+        assert!(out.contains("double value"));
     }
 }

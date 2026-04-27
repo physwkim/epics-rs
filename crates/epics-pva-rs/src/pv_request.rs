@@ -60,6 +60,13 @@ pub fn build_pv_request_value_only(big_endian: bool) -> Vec<u8> {
     build(&["value"], order)
 }
 
+/// Build a pvRequest selecting an arbitrary list of top-level fields,
+/// equivalent to `field(<f1>,<f2>,...)`.
+pub fn build_pv_request_fields(fields: &[&str], big_endian: bool) -> Vec<u8> {
+    let order = if big_endian { ByteOrder::Big } else { ByteOrder::Little };
+    build(fields, order)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

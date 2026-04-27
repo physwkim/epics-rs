@@ -195,7 +195,16 @@ pub fn pv_field_to_epics(field: &PvField) -> Option<EpicsValue> {
                 )),
             }
         }
-        PvField::Structure(_) => None,
+        // Composite/union/variant values aren't directly representable as
+        // EpicsValue in the qsrv→record direction; only scalar/scalar-array
+        // fields flow back into the database.
+        PvField::Structure(_)
+        | PvField::StructureArray(_)
+        | PvField::Union { .. }
+        | PvField::UnionArray(_)
+        | PvField::Variant(_)
+        | PvField::VariantArray(_)
+        | PvField::Null => None,
     }
 }
 

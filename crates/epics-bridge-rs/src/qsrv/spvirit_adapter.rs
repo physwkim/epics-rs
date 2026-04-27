@@ -14,10 +14,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// spvirit-server is no longer a dependency — the native ChannelSource impl
+// below replaces the legacy PvStore impl. spvirit-codec / spvirit-types
+// imports are still used by NTNDArray plugin PV handling (registered via
+// NDPvaConfigure → `register_pva_pv`); those are scheduled for Phase 5.
+#[allow(unused_imports)]
 use spvirit_codec::spvd_decode::{
     DecodedValue, FieldDesc as SpvdFieldDesc, FieldType, StructureDesc, TypeCode,
 };
-use spvirit_server::PvStore;
+#[allow(unused_imports)]
 use spvirit_types::{NtPayload, PvValue, ScalarArrayValue, ScalarValue};
 use tokio::sync::{RwLock, mpsc};
 
@@ -119,95 +124,16 @@ impl QsrvPvStore {
     }
 }
 
-impl PvStore for QsrvPvStore {
-    fn has_pv(&self, name: &str) -> impl Future<Output = bool> + Send {
-        let provider = self.provider.clone();
-        let pva_pvs = self.pva_pvs.clone();
-        let name = name.to_string();
-        async move {
-            if pva_pvs.read().await.contains_key(&name) {
-                return true;
-            }
-            provider.channel_find(&name).await
-        }
-    }
 
-    fn get_snapshot(&self, name: &str) -> impl Future<Output = Option<NtPayload>> + Send {
-        let name_owned = name.to_string();
-        let pva_pvs = self.pva_pvs.clone();
-        async move {
-            // Check PVA plugin PVs first (NTNDArray etc.)
-            if let Some(handle) = pva_pvs.read().await.get(&name_owned) {
-                return handle.latest.lock().clone();
-            }
+// ── ChannelSource impl (native PvAccess server) ──────────────────────────
+//
+// In addition to the legacy spvirit `PvStore` impl above, expose the same
+// data via the native [`epics_pva_rs::server_native::ChannelSource`] trait.
+// This is the path used by `epics_pva_rs::server::PvaServer::run_with_source`
+// (no spvirit_server runtime involvement).
 
-            let channel = self.channel(&name_owned).await?;
-            let empty_request = PvStructure::new("");
-            match channel.get(&empty_request).await {
-                Ok(pv) => Some(pv_structure_to_nt_payload(&pv)),
-                Err(e) => {
-                    tracing::debug!("qsrv get_snapshot({name_owned}) failed: {e}");
-                    None
-                }
-            }
-        }
-    }
-
-    fn get_descriptor(&self, name: &str) -> impl Future<Output = Option<StructureDesc>> + Send {
-        let name_owned = name.to_string();
-        let pva_pvs = self.pva_pvs.clone();
-        async move {
-            // PVA plugin PVs: derive descriptor from snapshot or default NTNDArray schema
-            if let Some(handle) = pva_pvs.read().await.get(&name_owned) {
-                return Some(match *handle.latest.lock() {
-                    Some(ref payload) => spvirit_codec::spvd_encode::nt_payload_desc(payload),
-                    None => spvirit_codec::spvd_encode::nt_ndarray_desc_default(),
-                });
-            }
-
-            let channel = self.channel(&name_owned).await?;
-            match channel.get_field().await {
-                Ok(desc) => Some(epics_field_desc_to_structure_desc(&desc)),
-                Err(_) => {
-                    let empty_request = PvStructure::new("");
-                    match channel.get(&empty_request).await {
-                        Ok(pv) => Some(pv_structure_to_descriptor(&pv)),
-                        Err(_) => None,
-                    }
-                }
-            }
-        }
-    }
-
-    fn put_value(
-        &self,
-        name: &str,
-        value: &DecodedValue,
-    ) -> impl Future<Output = Result<Vec<(String, NtPayload)>, String>> + Send {
-        let name_owned = name.to_string();
-        let value_owned = value.clone();
-        async move {
-            let channel = self
-                .channel(&name_owned)
-                .await
-                .ok_or_else(|| format!("PV not found: {name_owned}"))?;
-
-            let pv = decoded_to_pv_structure(&value_owned, channel.channel_name());
-            channel.put(&pv).await.map_err(|e| e.to_string())?;
-
-            // The monitor bridge delivers follow-up notifications; the
-            // synchronous PUT response returns no inline changes.
-            Ok(Vec::new())
-        }
-    }
-
-    fn is_writable(&self, name: &str) -> impl Future<Output = bool> + Send {
-        let provider = self.provider.clone();
-        let name = name.to_string();
-        async move { provider.channel_find(&name).await }
-    }
-
-    fn list_pvs(&self) -> impl Future<Output = Vec<String>> + Send {
+impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
+    fn list_pvs(&self) -> impl std::future::Future<Output = Vec<String>> + Send {
         let provider = self.provider.clone();
         let pva_pvs = self.pva_pvs.clone();
         async move {
@@ -222,34 +148,94 @@ impl PvStore for QsrvPvStore {
         }
     }
 
+    fn has_pv(&self, name: &str) -> impl std::future::Future<Output = bool> + Send {
+        let provider = self.provider.clone();
+        let pva_pvs = self.pva_pvs.clone();
+        let name = name.to_string();
+        async move {
+            if pva_pvs.read().await.contains_key(&name) {
+                return true;
+            }
+            provider.channel_find(&name).await
+        }
+    }
+
+    fn get_introspection(
+        &self,
+        name: &str,
+    ) -> impl std::future::Future<Output = Option<epics_pva_rs::pvdata::FieldDesc>> + Send {
+        let name_owned = name.to_string();
+        async move {
+            let channel = self.channel(&name_owned).await?;
+            channel.get_field().await.ok()
+        }
+    }
+
+    fn get_value(
+        &self,
+        name: &str,
+    ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+        let name_owned = name.to_string();
+        async move {
+            let channel = self.channel(&name_owned).await?;
+            let empty_request = PvStructure::new("");
+            match channel.get(&empty_request).await {
+                Ok(pv) => Some(PvField::Structure(pv)),
+                Err(e) => {
+                    tracing::debug!("qsrv get_value({name_owned}) failed: {e}");
+                    None
+                }
+            }
+        }
+    }
+
+    fn put_value(
+        &self,
+        name: &str,
+        value: PvField,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let name_owned = name.to_string();
+        async move {
+            let channel = self
+                .channel(&name_owned)
+                .await
+                .ok_or_else(|| format!("PV not found: {name_owned}"))?;
+            let pv = match value {
+                PvField::Structure(s) => s,
+                other => {
+                    return Err(format!(
+                        "qsrv PUT expects a structure value, got {other}"
+                    ))
+                }
+            };
+            channel.put(&pv).await.map_err(|e| e.to_string())
+        }
+    }
+
+    fn is_writable(&self, name: &str) -> impl std::future::Future<Output = bool> + Send {
+        let provider = self.provider.clone();
+        let name = name.to_string();
+        async move { provider.channel_find(&name).await }
+    }
+
     fn subscribe(
         &self,
         name: &str,
-    ) -> impl Future<Output = Option<mpsc::Receiver<NtPayload>>> + Send {
+    ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send {
         let name_owned = name.to_string();
-        let pva_pvs = self.pva_pvs.clone();
         async move {
-            // PVA plugin PVs: register a subscriber channel
-            if let Some(handle) = pva_pvs.read().await.get(&name_owned) {
-                let (tx, rx) = mpsc::channel::<NtPayload>(16);
-                handle.subscribers.lock().push(tx);
-                return Some(rx);
-            }
-
             let channel = self.channel(&name_owned).await?;
-            let mut monitor = match channel.create_monitor().await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::debug!("qsrv subscribe({name_owned}) create_monitor: {e}");
-                    return None;
+            let mut monitor = channel.create_monitor().await.ok()?;
+            monitor.start().await.ok()?;
+            let (tx, rx) = mpsc::channel::<PvField>(64);
+            tokio::spawn(async move {
+                while let Some(snapshot) = monitor.poll().await {
+                    if tx.send(PvField::Structure(snapshot)).await.is_err() {
+                        break;
+                    }
                 }
-            };
-            if let Err(e) = monitor.start().await {
-                tracing::debug!("qsrv subscribe({name_owned}) start: {e}");
-                return None;
-            }
-            let (tx, rx) = mpsc::channel::<NtPayload>(64);
-            tokio::spawn(monitor_bridge_loop(monitor, tx, name_owned));
+                monitor.stop().await;
+            });
             Some(rx)
         }
     }
@@ -290,6 +276,18 @@ fn pv_field_to_pv_value(field: &PvField) -> PvValue {
             let (struct_id, fields) = pv_structure_to_generic_parts(nested);
             PvValue::Structure { struct_id, fields }
         }
+        // The native qsrv PV shapes don't currently emit composite/union/
+        // variant variants. Fall back to an empty structure so the spvirit
+        // adapter doesn't crash on a hypothetical case.
+        PvField::StructureArray(_)
+        | PvField::Union { .. }
+        | PvField::UnionArray(_)
+        | PvField::Variant(_)
+        | PvField::VariantArray(_)
+        | PvField::Null => PvValue::Structure {
+            struct_id: String::new(),
+            fields: Vec::new(),
+        },
     }
 }
 
@@ -487,6 +485,18 @@ fn epics_field_desc_to_field_type(desc: &epics_pva_rs::pvdata::FieldDesc) -> Fie
                     .collect(),
             })
         }
+        // Phase 1 expansion left these new variants unmapped — they require
+        // adding union/variant support to the spvirit FieldType, which is
+        // exactly what Phase 5 replaces. Fall back to an empty structure.
+        epics_pva_rs::pvdata::FieldDesc::StructureArray { .. }
+        | epics_pva_rs::pvdata::FieldDesc::Union { .. }
+        | epics_pva_rs::pvdata::FieldDesc::UnionArray { .. }
+        | epics_pva_rs::pvdata::FieldDesc::Variant
+        | epics_pva_rs::pvdata::FieldDesc::VariantArray
+        | epics_pva_rs::pvdata::FieldDesc::BoundedString(_) => FieldType::Structure(StructureDesc {
+            struct_id: None,
+            fields: Vec::new(),
+        }),
     }
 }
 
@@ -557,6 +567,18 @@ fn pv_field_to_field_type(field: &PvField) -> FieldType {
             Some(PvaScalarValue::String(_)) | None => FieldType::StringArray,
         },
         PvField::Structure(nested) => FieldType::Structure(pv_structure_to_descriptor(nested)),
+        // Composite shapes that this legacy adapter doesn't model — fall back
+        // to an empty structure. The native qsrv source (added in Phase 5)
+        // handles these cases properly.
+        PvField::StructureArray(_)
+        | PvField::Union { .. }
+        | PvField::UnionArray(_)
+        | PvField::Variant(_)
+        | PvField::VariantArray(_)
+        | PvField::Null => FieldType::Structure(StructureDesc {
+            struct_id: None,
+            fields: Vec::new(),
+        }),
     }
 }
 
@@ -721,7 +743,7 @@ pub async fn run_ca_pva_qsrv_ioc(
 
     let shell_commands = config.shell_commands;
     pva_server
-        .run_with_store_and_shell(store, move |shell| {
+        .run_with_source_and_shell(store, move |shell| {
             for cmd in shell_commands {
                 shell.register(cmd);
             }

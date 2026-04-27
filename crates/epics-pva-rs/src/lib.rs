@@ -14,6 +14,7 @@
 //! separated from the core IOC infrastructure in `epics-base-rs`.
 
 pub mod client;
+pub mod client_native;
 pub mod codec;
 pub mod error;
 pub mod format;
@@ -21,6 +22,7 @@ pub mod proto;
 pub mod pv_request;
 pub mod pvdata;
 pub mod server;
+pub mod server_native;
 
 pub use error::{PvaError, PvaResult};
 
