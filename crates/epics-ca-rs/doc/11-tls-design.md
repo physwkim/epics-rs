@@ -193,15 +193,21 @@ For an existing C-based facility:
 
 ## Status in this crate
 
-- `tls.rs` module: ✅ complete (helpers, config types, mTLS builders)
+- `tls.rs` module: ✅ complete (helpers, config types, mTLS builders, identity extraction)
 - `CaServerBuilder::with_tls()`: ✅ stores config
 - `CaClient::new_with_config(tls=...)`: ✅ accepts config
-- Transport-level stream wrapping: 🚧 follow-up (touches
-  `client/transport.rs::read_loop`, `client/transport.rs::write_loop`,
-  `client/transport.rs::connect_server`, plus the server-side
-  `tcp.rs::handle_client`)
-- mTLS identity extraction: 🚧 follow-up (after stream plumbing)
-- Port-based dispatch: 🚧 follow-up
+- Client transport stream wrapping: ✅ complete — `connect_server`
+  dispatches plaintext or `tokio_rustls::TlsStream` based on config;
+  `read_loop` / `write_loop` are now generic over `AsyncRead` /
+  `AsyncWrite`
+- mTLS identity extraction (`identity_from_cert`): ✅ complete —
+  prefers SAN dNSName, then SAN URI, then CN, falls back to SHA-256
+  fingerprint
+- Server transport stream wrapping: 🚧 follow-up — requires making
+  `tcp.rs::handle_client` generic over the stream type and updating
+  `server/monitor.rs::spawn_monitor_sender` (which holds a concrete
+  `Arc<Mutex<BufWriter<OwnedWriteHalf>>>`)
+- Port-based plaintext/TLS coexistence: 🚧 follow-up (server side)
 
 The current commit lays the foundation: stable API, cert/key loading
 helpers, and a documented design. Wiring the actual TLS handshake

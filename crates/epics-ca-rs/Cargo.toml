@@ -21,6 +21,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
 rustls-pki-types = { version = "1", optional = true }
+x509-parser = { version = "0.16", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [features]
 default = []
@@ -29,8 +31,15 @@ default = []
 # stack via the bare `metrics` and `tracing` facades.
 observability = ["dep:metrics-exporter-prometheus", "dep:tracing-subscriber"]
 # CA over TLS: encrypted TCP virtual circuits, optional mTLS for
-# authentication. Adds tokio-rustls + rustls-pemfile.
-tls = ["dep:tokio-rustls", "dep:rustls-pemfile", "dep:rustls-pki-types"]
+# authentication. Adds tokio-rustls + rustls-pemfile + x509-parser
+# (for SAN/CN extraction) + sha2 (fingerprint fallback).
+tls = [
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-pki-types",
+    "dep:x509-parser",
+    "dep:sha2",
+]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

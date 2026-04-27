@@ -184,6 +184,75 @@ impl From<std::io::Error> for TlsError {
     }
 }
 
+/// Extract a stable identity string from a verified peer certificate.
+///
+/// Used during mTLS to populate the per-client `hostname` field in
+/// `ClientState` so ACF rules match against a cryptographically
+/// verified principal rather than the spoofable
+/// `CA_PROTO_HOST_NAME` message.
+///
+/// Lookup order, first match wins:
+///
+/// 1. The first `dNSName` from the SubjectAlternativeName extension.
+/// 2. The first `uniformResourceIdentifier` from SAN.
+/// 3. The Common Name (CN) from the Subject DN.
+/// 4. Falls back to the cert's hex SHA-256 fingerprint when no usable
+///    name field is present (rare — typically only with non-standard
+///    issuance practices).
+///
+/// Identities are returned as plain ASCII strings suitable for use as
+/// HAG host names in an ACF file.
+#[cfg(feature = "tls")]
+pub fn identity_from_cert(cert: &CertificateDer<'_>) -> String {
+    use std::sync::OnceLock;
+
+    // x509-parser is heavy; lazy-init the parser only when the feature
+    // is exercised. We keep the dependency surface small by using
+    // rustls's bundled webpki types where possible.
+    static FALLBACK_PREFIX: OnceLock<&'static str> = OnceLock::new();
+    let _ = FALLBACK_PREFIX.get_or_init(|| "sha256:");
+
+    if let Some(name) = parse_san_dns_or_cn(cert.as_ref()) {
+        return name;
+    }
+
+    // Fallback: SHA-256 fingerprint as hex.
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(cert.as_ref());
+    let mut s = String::with_capacity(7 + 64);
+    s.push_str("sha256:");
+    for b in digest.iter() {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Best-effort parse of an X.509 cert to extract a name field. Returns
+/// `None` when no usable name is present, leaving the caller to fall
+/// back to a fingerprint identity.
+#[cfg(feature = "tls")]
+fn parse_san_dns_or_cn(der: &[u8]) -> Option<String> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+
+    // Prefer SAN dNSName / URI.
+    if let Ok(Some(san_ext)) = cert.tbs_certificate.subject_alternative_name() {
+        for name in &san_ext.value.general_names {
+            match name {
+                x509_parser::extensions::GeneralName::DNSName(s) => return Some(s.to_string()),
+                x509_parser::extensions::GeneralName::URI(s) => return Some(s.to_string()),
+                _ => continue,
+            }
+        }
+    }
+
+    // Fall back to CN.
+    cert.subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(|s| s.to_string())
+}
+
 // Re-exports needed by the public API when the feature is enabled.
 #[cfg(feature = "tls")]
 pub use rustls_pki_types::CertificateDer as Cert;

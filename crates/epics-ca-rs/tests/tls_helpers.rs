@@ -90,3 +90,29 @@ fn caclient_config_default_is_plaintext() {
     let cfg = epics_ca_rs::client::CaClientConfig::default();
     assert!(cfg.tls.is_none());
 }
+
+#[test]
+fn identity_from_cert_uses_san_dns() {
+    let cert =
+        rcgen::generate_simple_self_signed(vec!["operator.alice.example".into()]).expect("rcgen");
+    let der = cert.cert.der().clone();
+    let id = epics_ca_rs::tls::identity_from_cert(&der);
+    assert_eq!(id, "operator.alice.example");
+}
+
+#[test]
+fn identity_from_cert_falls_back_to_fingerprint_for_unnamed() {
+    // Cert with no SAN and an empty CN — rcgen normally adds CN; we
+    // exercise the fingerprint fallback by handcrafting params.
+    let mut params = rcgen::CertificateParams::default();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    let key_pair = rcgen::KeyPair::generate().expect("keypair");
+    let cert = params.self_signed(&key_pair).expect("self-signed");
+    let der = cert.der().clone();
+    let id = epics_ca_rs::tls::identity_from_cert(&der);
+    assert!(
+        id.starts_with("sha256:"),
+        "expected fingerprint fallback, got {id}"
+    );
+    assert_eq!(id.len(), 7 + 64); // "sha256:" + 32-byte hex
+}
