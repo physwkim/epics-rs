@@ -285,6 +285,12 @@ pub struct CaClientConfig {
     /// remains plaintext. Requires the `tls` cargo feature.
     #[cfg(feature = "experimental-rust-tls")]
     pub tls: Option<crate::tls::TlsConfig>,
+
+    /// Service-discovery configuration. When `Some`, the client
+    /// merges the addresses returned by every active backend into
+    /// its `EPICS_CA_ADDR_LIST` at startup. Falls back to the
+    /// `EPICS_CA_DISCOVERY` env var when `None`.
+    pub discovery: Option<crate::discovery::DiscoveryConfig>,
 }
 
 impl CaClient {
@@ -326,7 +332,36 @@ impl CaClient {
         // Run repeater registration in background — don't block client startup.
         epics_base_rs::runtime::task::spawn(async { repeater::ensure_repeater().await });
 
-        let addr_list = parse_addr_list()?;
+        let mut addr_list = parse_addr_list()?;
+
+        // Service discovery: explicit config wins; otherwise honour
+        // EPICS_CA_DISCOVERY env var. Result is merged with addr_list
+        // (deduped by SocketAddr).
+        let discovery_cfg = config
+            .discovery
+            .clone()
+            .or_else(crate::discovery::from_env);
+        if let Some(cfg) = discovery_cfg {
+            let backends = crate::discovery::build_backends(cfg);
+            let mut discovered: Vec<SocketAddr> = Vec::new();
+            for b in &backends {
+                for addr in b.discover().await {
+                    if !discovered.contains(&addr) {
+                        discovered.push(addr);
+                    }
+                }
+            }
+            if !discovered.is_empty() {
+                tracing::info!(count = discovered.len(),
+                    "discovered IOCs via service discovery: {:?}", discovered);
+            }
+            for addr in discovered {
+                if !addr_list.contains(&addr) {
+                    addr_list.push(addr);
+                }
+            }
+        }
+
         let nameserver_addrs = parse_nameserver_list();
 
         let (search_tx, search_rx) = mpsc::unbounded_channel();

@@ -34,6 +34,13 @@ pub struct CaServerBuilder {
     /// before the CA handshake runs.
     #[cfg(feature = "experimental-rust-tls")]
     tls: Option<crate::tls::TlsConfig>,
+    /// Optional mDNS instance name for service discovery. When set
+    /// (and `discovery` feature is enabled), the server announces
+    /// itself as `<instance>._epics-ca._tcp.local.` on the link-local
+    /// segment.
+    mdns_instance: Option<String>,
+    /// Extra TXT key=value pairs attached to the mDNS announce.
+    mdns_txt: Vec<(String, String)>,
 }
 
 impl CaServerBuilder {
@@ -45,7 +52,25 @@ impl CaServerBuilder {
             acf_path: None,
             #[cfg(feature = "experimental-rust-tls")]
             tls: None,
+            mdns_instance: None,
+            mdns_txt: Vec::new(),
         }
+    }
+
+    /// Announce this IOC via mDNS as
+    /// `<instance>._epics-ca._tcp.local.`. Requires the `discovery`
+    /// cargo feature; without it the call still compiles but emits a
+    /// warning at startup and announces nothing.
+    pub fn announce_mdns(mut self, instance: impl Into<String>) -> Self {
+        self.mdns_instance = Some(instance.into());
+        self
+    }
+
+    /// Attach a key=value pair to the mDNS announce TXT record.
+    /// Useful for site-wide metadata: `version`, `asg`, `owner`.
+    pub fn announce_txt(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.mdns_txt.push((key.into(), value.into()));
+        self
     }
 
     /// Enable CA over TLS using the supplied server-side configuration.
@@ -175,6 +200,8 @@ impl CaServerBuilder {
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "experimental-rust-tls")]
             tls,
+            mdns_instance: self.mdns_instance,
+            mdns_txt: self.mdns_txt,
         })
     }
 }
@@ -204,6 +231,10 @@ pub struct CaServer {
     /// verified peer identity for ACF rule matching.
     #[cfg(feature = "experimental-rust-tls")]
     tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+    /// mDNS instance name to announce as. None disables announce.
+    mdns_instance: Option<String>,
+    /// Extra TXT key=value pairs for the mDNS announce.
+    mdns_txt: Vec<(String, String)>,
 }
 
 impl CaServer {
@@ -232,6 +263,8 @@ impl CaServer {
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "experimental-rust-tls")]
             tls: None,
+            mdns_instance: None,
+            mdns_txt: Vec::new(),
         }
     }
 
@@ -480,6 +513,37 @@ impl CaServer {
             "CA server: UDP search on port {port}, TCP on port {tcp_port}, beacons → {} address(es)",
             udp_cfg.beacon_addrs.len()
         );
+
+        // mDNS announce: held for the lifetime of run(). Drops when
+        // the function returns, deregistering us from the network.
+        #[cfg(feature = "discovery")]
+        let _mdns = if let Some(ref instance) = self.mdns_instance {
+            match crate::discovery::MdnsBackend::announce_helper(
+                instance,
+                tcp_port,
+                self.mdns_txt.clone(),
+            ) {
+                Ok(announcer) => {
+                    tracing::info!(instance = %instance, port = tcp_port,
+                        "mDNS announce active");
+                    metrics::counter!("ca_server_mdns_announces_total").increment(1);
+                    Some(announcer)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "mDNS announce failed; continuing without it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(feature = "discovery"))]
+        if self.mdns_instance.is_some() {
+            tracing::warn!(
+                "mDNS announce requested via .announce_mdns() but built without `discovery` \
+                 cargo feature; ignoring"
+            );
+        }
 
         // Spawn UDP responder as its own task so its waker isn't multiplexed
         // through a select! branch (which can drop/replace wakers between polls

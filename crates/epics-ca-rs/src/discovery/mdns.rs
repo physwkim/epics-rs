@@ -151,6 +151,18 @@ impl Drop for MdnsAnnouncer {
     }
 }
 
+impl MdnsBackend {
+    /// Convenience entry point used by `CaServer::run()` so callers
+    /// don't need to import `MdnsAnnouncer`.
+    pub fn announce_helper(
+        instance: &str,
+        port: u16,
+        txt: Vec<(String, String)>,
+    ) -> Result<MdnsAnnouncer, mdns_sd::Error> {
+        MdnsAnnouncer::announce(instance, port, txt)
+    }
+}
+
 fn resolve_addresses(info: &ServiceInfo) -> Vec<SocketAddr> {
     let port = info.get_port();
     info.get_addresses_v4()
