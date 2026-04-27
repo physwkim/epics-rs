@@ -91,6 +91,10 @@ struct ClientState {
     tcp_port: u16,
     client_minor_version: u16,
     flow_control: Arc<FlowControlGate>,
+    /// One-shot flag — set when channels.len() crosses 90% of the
+    /// per-client cap. Prevents log spam on every subsequent
+    /// CREATE_CHAN once the warning has fired.
+    channel_limit_warned: bool,
 }
 
 impl ClientState {
@@ -106,6 +110,7 @@ impl ClientState {
             tcp_port,
             client_minor_version: 0,
             flow_control: Arc::new(FlowControlGate::default()),
+            channel_limit_warned: false,
         }
     }
 
@@ -383,7 +388,20 @@ async fn dispatch_message(
             }
 
             // DoS guard: refuse new channels once the per-client cap is hit.
-            if state.channels.len() >= max_channels_per_client() {
+            let cap = max_channels_per_client();
+            // Pre-warning at 90% — fired once per crossing, not once per
+            // CREATE_CHAN, to avoid log spam.
+            let warn_threshold = (cap * 9) / 10;
+            if !state.channel_limit_warned && state.channels.len() >= warn_threshold {
+                tracing::warn!(channels = state.channels.len(), cap,
+                    "approaching per-client channel limit (90%)");
+                metrics::counter!("ca_server_channel_limit_warnings_total").increment(1);
+                state.channel_limit_warned = true;
+            }
+            if state.channels.len() >= cap {
+                tracing::warn!(channels = state.channels.len(), cap,
+                    "rejecting CREATE_CHAN: per-client channel limit reached");
+                metrics::counter!("ca_server_channel_limit_rejects_total").increment(1);
                 let mut fail = CaHeader::new(CA_PROTO_CREATE_CH_FAIL);
                 fail.cid = hdr.cid;
                 let mut w = writer.lock().await;
