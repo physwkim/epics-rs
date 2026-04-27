@@ -7,7 +7,8 @@
 
 #![cfg(test)]
 
-use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
+use epics_pva_rs::nt::NTScalar;
+use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue, Value};
 
 fn nt_scalar_string_desc() -> FieldDesc {
     FieldDesc::Structure {
@@ -144,4 +145,52 @@ fn pvxs_name_lookup_at_each_level() {
     } else {
         panic!("alarm not a struct");
     }
+}
+
+// ── testAssign + mark/unmark via Value (pvxs testdata.cpp:52,144) ──
+//
+// pvxs's Value provides operator[]/from()/as<T>()/mark()/unmark()/
+// assign(). Our Value type ports the same patterns to typed methods.
+
+#[test]
+fn pvxs_value_set_and_get_with_coercion() {
+    // pvxs: val["value"] = 4u; val["alarm.severity"] = 1;
+    let mut v = Value::create_from(NTScalar::new(ScalarType::Int).build());
+    v.set("value", 4i32).unwrap();
+    v.set("alarm.severity", 1i32).unwrap();
+    assert_eq!(v.get_as::<i32>("value").unwrap(), 4);
+    assert_eq!(v.get_as::<i32>("alarm.severity").unwrap(), 1);
+    assert!(v.is_marked("value"));
+    assert!(v.is_marked("alarm.severity"));
+}
+
+#[test]
+fn pvxs_value_assign_copies_marked_fields() {
+    // pvxs: val1.assign(val2) — copies marked subset.
+    let mut a = Value::create_from(NTScalar::new(ScalarType::Int).build());
+    let mut b = Value::create_from(NTScalar::new(ScalarType::Int).build());
+    b.set("value", 4i32).unwrap();
+    b.set("alarm.severity", 1i32).unwrap();
+    a.assign(&b).unwrap();
+    assert_eq!(a.get_as::<i32>("value").unwrap(), 4);
+    assert!(a.is_marked("value"));
+    assert!(a.is_marked("alarm.severity"));
+}
+
+#[test]
+fn pvxs_value_unmark_then_isnt_marked() {
+    let mut v = Value::create_from(NTScalar::new(ScalarType::Int).build());
+    v.mark("value").unwrap();
+    assert!(v.is_marked("value"));
+    v.unmark("value").unwrap();
+    assert!(!v.is_marked("value"));
+}
+
+#[test]
+fn pvxs_value_iter_marked_returns_marked_paths() {
+    let mut v = Value::create_from(NTScalar::new(ScalarType::Int).build());
+    v.mark("value").unwrap();
+    v.mark("timeStamp.userTag").unwrap();
+    let marked = v.iter_marked();
+    assert_eq!(marked, vec!["value", "timeStamp.userTag"]);
 }
