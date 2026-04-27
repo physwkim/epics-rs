@@ -31,7 +31,10 @@ fn nt_scalar_string_desc() -> FieldDesc {
                 FieldDesc::Structure {
                     struct_id: "time_t".into(),
                     fields: vec![
-                        ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+                        (
+                            "secondsPastEpoch".into(),
+                            FieldDesc::Scalar(ScalarType::Long),
+                        ),
                         ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
                         ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
                     ],
@@ -67,7 +70,9 @@ fn pvxs_iter_struct_alarm_subtree() {
     let alarm_bit = nt.bit_for_path("alarm").unwrap();
     // alarm bit + 3 leaves = 4 bits inhabited (matches pvxs "mark alarm sub-struct" case)
     let alarm = match &nt {
-        FieldDesc::Structure { fields, .. } => fields.iter().find(|(n, _)| n == "alarm").unwrap().1.clone(),
+        FieldDesc::Structure { fields, .. } => {
+            fields.iter().find(|(n, _)| n == "alarm").unwrap().1.clone()
+        }
         _ => unreachable!(),
     };
     assert_eq!(alarm_bit, 2);

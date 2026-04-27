@@ -343,19 +343,15 @@ async fn run_nameserver_connection(
     let max_backoff = Duration::from_secs(30);
 
     loop {
-        let stream = match tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(addr),
-        )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            _ => {
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
-                continue;
-            }
-        };
+        let stream =
+            match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+                Ok(Ok(s)) => s,
+                _ => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                    continue;
+                }
+            };
         let _ = stream.set_nodelay(true);
         backoff = Duration::from_secs(1);
 
@@ -515,7 +511,8 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
                 if !was_open && state.breakers.is_open(server_addr) {
                     tracing::warn!(server = %server_addr, "circuit breaker tripped OPEN");
                     metrics::counter!("ca_client_circuit_breaker_open_total",
-                        "server" => server_addr.to_string()).increment(1);
+                        "server" => server_addr.to_string())
+                    .increment(1);
                 }
             }
         }
@@ -617,7 +614,8 @@ fn handle_udp_response(
                             .or_insert_with(RttEstimator::new)
                             .update(sample);
                         metrics::histogram!("ca_client_search_rtt_seconds",
-                            "server" => server_addr.to_string()).record(sample);
+                            "server" => server_addr.to_string())
+                        .record(sample);
                     }
 
                     state.budget.responded_this_window += 1;

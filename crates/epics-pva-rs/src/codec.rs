@@ -10,8 +10,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::proto::{
-    encode_size_into, encode_string_into, ip_to_bytes, ByteOrder, Command, PvaHeader, QosFlags,
-    Status, WriteExt,
+    ByteOrder, Command, PvaHeader, QosFlags, Status, WriteExt, encode_size_into,
+    encode_string_into, ip_to_bytes,
 };
 
 // Public constants (kept for backward compatibility with downstream callers).
@@ -170,12 +170,7 @@ impl PvaCodec {
     }
 
     /// Subsequent pipeline-ack message: subcmd `0x80` + ack count.
-    pub fn build_monitor_ack(
-        &self,
-        server_channel_id: u32,
-        ioid: u32,
-        ack_count: u32,
-    ) -> Vec<u8> {
+    pub fn build_monitor_ack(&self, server_channel_id: u32, ioid: u32, ack_count: u32) -> Vec<u8> {
         let order = self.order();
         let extra = match order {
             ByteOrder::Big => ack_count.to_be_bytes(),

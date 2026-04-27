@@ -32,9 +32,9 @@ use std::sync::Arc;
 #[cfg(feature = "experimental-rust-tls")]
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 #[cfg(feature = "experimental-rust-tls")]
-use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-#[cfg(feature = "experimental-rust-tls")]
 pub use tokio_rustls::rustls::ServerConfig;
+#[cfg(feature = "experimental-rust-tls")]
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 #[cfg(feature = "experimental-rust-tls")]
 pub mod ca_secure;
@@ -337,4 +337,3 @@ pub use tokio_rustls::rustls::RootCertStore as Roots;
 mod rustls {
     pub use tokio_rustls::rustls::*;
 }
-

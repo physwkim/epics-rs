@@ -38,9 +38,7 @@ fn assert_hex(actual: &[u8], expected_hex: &str, label: &str) {
     let got = hex(actual);
     let want = expected_hex.replace(' ', "");
     if got != want {
-        panic!(
-            "{label}:\n  got:  {got}\n  want: {want}\n  diff at first mismatch byte:\n",
-        );
+        panic!("{label}:\n  got:  {got}\n  want: {want}\n  diff at first mismatch byte:\n",);
     }
 }
 
@@ -57,11 +55,7 @@ fn version_minimal() {
     let mut h = CaHeader::new(CA_PROTO_VERSION);
     h.count = 13;
     let bytes = h.to_bytes();
-    assert_hex(
-        &bytes,
-        "0000 0000 0000 000d 00000000 00000000",
-        "VERSION",
-    );
+    assert_hex(&bytes, "0000 0000 0000 000d 00000000 00000000", "VERSION");
 }
 
 #[test]

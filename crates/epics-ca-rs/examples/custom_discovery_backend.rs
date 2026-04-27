@@ -117,9 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pv_name = std::env::args().nth(1).unwrap_or_else(|| "TEST:PV".into());
 
     // Build a config with all three custom backends installed.
-    let (push_backend, push_tx) = PushBackend::new(vec![
-        "10.0.0.10:5064".parse()?,
-    ]);
+    let (push_backend, push_tx) = PushBackend::new(vec!["10.0.0.10:5064".parse()?]);
 
     let config = CaClientConfig {
         extra_backends: vec![

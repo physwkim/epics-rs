@@ -28,13 +28,10 @@ use tokio::time::timeout;
 use tracing::debug;
 
 use crate::error::{PvaError, PvaResult};
-use crate::proto::{
-    encode_size_into, encode_string_into, ByteOrder, Command, ControlCommand, PvaHeader, Status,
-    WriteExt, PVA_VERSION,
-};
+use crate::proto::{ByteOrder, Command, ControlCommand, PvaHeader, WriteExt, encode_string_into};
 
 use super::decode::{
-    decode_connection_validated, decode_connection_validation_request, try_parse_frame, Frame,
+    Frame, decode_connection_validated, decode_connection_validation_request, try_parse_frame,
 };
 
 /// Maximum reasonable application-frame size we'll buffer (8 MB).
@@ -255,8 +252,12 @@ pub fn build_client_connection_validation(
         encode_string_into(host, order, &mut payload);
     }
 
-    let header =
-        PvaHeader::application(false, order, Command::ConnectionValidation.code(), payload.len() as u32);
+    let header = PvaHeader::application(
+        false,
+        order,
+        Command::ConnectionValidation.code(),
+        payload.len() as u32,
+    );
     let mut out = Vec::with_capacity(PvaHeader::SIZE + payload.len());
     header.write_into(&mut out);
     out.extend_from_slice(&payload);
@@ -287,19 +288,23 @@ mod tests {
     #[test]
     fn validation_reply_anonymous_no_authnz_block() {
         let with_ca = build_client_connection_validation(
-            ByteOrder::Little, 87_040, 32_767, 0, "ca", "u", "h",
+            ByteOrder::Little,
+            87_040,
+            32_767,
+            0,
+            "ca",
+            "u",
+            "h",
         );
         let with_anon = build_client_connection_validation(
-            ByteOrder::Little, 87_040, 32_767, 0, "anonymous", "u", "h",
+            ByteOrder::Little,
+            87_040,
+            32_767,
+            0,
+            "anonymous",
+            "u",
+            "h",
         );
         assert!(with_ca.len() > with_anon.len());
     }
 }
-
-#[allow(unused_imports)]
-use crate::proto::HeaderFlags;
-
-// Status is referenced by the doc comment example in handshake; suppress
-// unused warning when no error path is hit at compile time.
-#[allow(dead_code)]
-fn _status_marker_for_docs(_s: Status) {}

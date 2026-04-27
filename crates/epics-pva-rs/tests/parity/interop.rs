@@ -13,6 +13,7 @@
 //! self-skips (with a tracing message) so the matrix degrades gracefully.
 
 #![cfg(test)]
+#![allow(clippy::manual_async_fn, clippy::approx_constant)]
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -100,10 +101,8 @@ async fn rust_client_to_pvxs_softiocpvx_get() {
     let mut child = cmd.spawn().expect("spawn softIocPVX");
 
     // Wait until the TCP port is actually listening (with cap).
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let mut ready = false;
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -120,10 +119,7 @@ async fn rust_client_to_pvxs_softiocpvx_get() {
 
     // Native client GET against the pvxs IOC.
     use epics_pva_rs::client_native::context::PvaClient;
-    let addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let addr = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(addr)
@@ -169,10 +165,10 @@ async fn pvxs_pvget_to_rust_server_get() {
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::{Mutex, mpsc};
 
     use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
-    use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+    use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
     #[derive(Clone)]
     struct Source {
@@ -197,10 +193,7 @@ async fn pvxs_pvget_to_rust_server_get() {
                 })
             }
         }
-        fn get_value(
-            &self,
-            _: &str,
-        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+        fn get_value(&self, _: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
             let v = self.v.clone();
             async move {
                 let val = *v.lock().await;
@@ -247,10 +240,7 @@ async fn pvxs_pvget_to_rust_server_get() {
     // Run pvxs `pvget` against our server. We bypass UDP search by
     // forcing EPICS_PVA_ADDR_LIST.
     let output = TokioCommand::new(&pvget)
-        .env(
-            "EPICS_PVA_ADDR_LIST",
-            format!("127.0.0.1:{}", port + 1),
-        )
+        .env("EPICS_PVA_ADDR_LIST", format!("127.0.0.1:{}", port + 1))
         .env("EPICS_PVA_AUTO_ADDR_LIST", "NO")
         .arg("-w")
         .arg("3")
@@ -298,7 +288,7 @@ async fn rust_client_pvput_to_pvxs_softiocpvx() {
     let _ = udp;
     let mut child = TokioCommand::new(&softioc)
         .env("EPICS_PVA_SERVER_PORT", port.to_string())
-        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port + 1).to_string())
         .arg("-S")
         .arg("-d")
         .arg(dbfile.path())
@@ -308,10 +298,8 @@ async fn rust_client_pvput_to_pvxs_softiocpvx() {
         .spawn()
         .unwrap();
 
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if std::net::TcpStream::connect(server_addr).is_ok() {
@@ -327,13 +315,10 @@ async fn rust_client_pvput_to_pvxs_softiocpvx() {
         .build();
 
     // PUT a value
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        client.pvput("INTEROP:OUT", "37.5"),
-    )
-    .await
-    .expect("pvput timeout")
-    .expect("pvput failed");
+    tokio::time::timeout(Duration::from_secs(5), client.pvput("INTEROP:OUT", "37.5"))
+        .await
+        .expect("pvput timeout")
+        .expect("pvput failed");
 
     // GET back to confirm
     let v = tokio::time::timeout(Duration::from_secs(5), client.pvget("INTEROP:OUT"))
@@ -362,14 +347,14 @@ async fn pvxs_pvxget_to_rust_server_ntndarray() {
     let pvxget = find_pvxs_bin("pvxget").unwrap();
 
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::{Mutex, mpsc};
 
     use epics_pva_rs::nt::nd_array::{
-        nt_nd_array_desc, nt_nd_array_value, NdAlarm, NdArrayBuffer, NdAttribute, NdCodec,
-        NdDimension, NdTimeStamp, NtNdArray,
+        NdAlarm, NdArrayBuffer, NdAttribute, NdCodec, NdDimension, NdTimeStamp, NtNdArray,
+        nt_nd_array_desc, nt_nd_array_value,
     };
     use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarValue};
-    use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+    use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
     /// Source serving a single 4x4 ubyte NTNDArray with a known pattern.
     #[derive(Clone)]
@@ -391,10 +376,7 @@ async fn pvxs_pvxget_to_rust_server_ntndarray() {
         ) -> impl std::future::Future<Output = Option<FieldDesc>> + Send {
             async { Some(nt_nd_array_desc()) }
         }
-        fn get_value(
-            &self,
-            _: &str,
-        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+        fn get_value(&self, _: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
             let uid = self.unique_id.clone();
             async move {
                 let mut guard = uid.lock().await;
@@ -511,15 +493,15 @@ async fn pvxs_pvxget_to_rust_server_ntndarray() {
 #[ignore]
 async fn rust_client_to_rust_server_ntndarray_full_roundtrip() {
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::mpsc;
 
     use epics_pva_rs::client_native::context::PvaClient;
     use epics_pva_rs::nt::nd_array::{
-        nt_nd_array_desc, nt_nd_array_value, NdAlarm, NdArrayBuffer, NdAttribute, NdCodec,
-        NdDimension, NdTimeStamp, NtNdArray,
+        NdAlarm, NdArrayBuffer, NdAttribute, NdCodec, NdDimension, NdTimeStamp, NtNdArray,
+        nt_nd_array_desc, nt_nd_array_value,
     };
     use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarValue};
-    use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+    use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
     #[derive(Clone)]
     struct ImageSource {}
@@ -537,10 +519,7 @@ async fn rust_client_to_rust_server_ntndarray_full_roundtrip() {
         ) -> impl std::future::Future<Output = Option<FieldDesc>> + Send {
             async { Some(nt_nd_array_desc()) }
         }
-        fn get_value(
-            &self,
-            _: &str,
-        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+        fn get_value(&self, _: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
             async {
                 // 1024-element int32 array with simple ramp values.
                 let nt = NtNdArray {
@@ -601,10 +580,8 @@ async fn rust_client_to_rust_server_ntndarray_full_roundtrip() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Native client retrieves the NTNDArray, decode union value back.
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(server_addr)
@@ -628,7 +605,10 @@ async fn rust_client_to_rust_server_ntndarray_full_roundtrip() {
             variant_name,
             value,
         }) => {
-            assert_eq!(*selector, 5, "expected intValue selector (5), got {selector}");
+            assert_eq!(
+                *selector, 5,
+                "expected intValue selector (5), got {selector}"
+            );
             assert_eq!(variant_name, "intValue");
             match &**value {
                 PvField::ScalarArray(items) => {
@@ -699,10 +679,10 @@ async fn pvxs_pvxcall_to_rust_server_rpc() {
     let pvxcall = find_pvxs_bin("pvxcall").unwrap();
 
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::{Mutex, mpsc};
 
     use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
-    use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+    use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
     /// RPC service: takes `{ a: double, b: double }` and returns
     /// `{ result: double }` where result = a + b.
@@ -733,10 +713,7 @@ async fn pvxs_pvxcall_to_rust_server_rpc() {
                 })
             }
         }
-        fn get_value(
-            &self,
-            _: &str,
-        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+        fn get_value(&self, _: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
             async { None }
         }
         fn put_value(
@@ -760,9 +737,8 @@ async fn pvxs_pvxcall_to_rust_server_rpc() {
             _name: &str,
             _request_desc: FieldDesc,
             request_value: PvField,
-        ) -> impl std::future::Future<
-            Output = Result<(FieldDesc, PvField), String>,
-        > + Send {
+        ) -> impl std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send
+        {
             async move {
                 let mut a = 0.0f64;
                 let mut b = 0.0f64;
@@ -779,10 +755,8 @@ async fn pvxs_pvxcall_to_rust_server_rpc() {
                     fields: vec![("result".into(), FieldDesc::Scalar(ScalarType::Double))],
                 };
                 let mut s = PvStructure::new("");
-                s.fields.push((
-                    "result".into(),
-                    PvField::Scalar(ScalarValue::Double(a + b)),
-                ));
+                s.fields
+                    .push(("result".into(), PvField::Scalar(ScalarValue::Double(a + b))));
                 Ok((result_desc, PvField::Structure(s)))
             }
         }
@@ -850,7 +824,7 @@ async fn rust_client_ntscalar_array_get_from_pvxs() {
     let _ = udp;
     let mut child = TokioCommand::new(&softioc)
         .env("EPICS_PVA_SERVER_PORT", port.to_string())
-        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port + 1).to_string())
         .arg("-S")
         .arg("-d")
         .arg(dbfile.path())
@@ -859,10 +833,8 @@ async fn rust_client_ntscalar_array_get_from_pvxs() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if std::net::TcpStream::connect(server_addr).is_ok() {
@@ -934,7 +906,7 @@ record(bo, "INTEROP:BIN") {
     let _ = udp;
     let mut child = TokioCommand::new(&softioc)
         .env("EPICS_PVA_SERVER_PORT", port.to_string())
-        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port + 1).to_string())
         .arg("-S")
         .arg("-d")
         .arg(dbfile.path())
@@ -943,10 +915,8 @@ record(bo, "INTEROP:BIN") {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if std::net::TcpStream::connect(server_addr).is_ok() {
@@ -1027,7 +997,7 @@ async fn rust_client_ntenum_from_pvxs_mbbo() {
     let _ = udp;
     let mut child = TokioCommand::new(&softioc)
         .env("EPICS_PVA_SERVER_PORT", port.to_string())
-        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port + 1).to_string())
         .arg("-S")
         .arg("-d")
         .arg(dbfile.path())
@@ -1036,10 +1006,8 @@ async fn rust_client_ntenum_from_pvxs_mbbo() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if std::net::TcpStream::connect(server_addr).is_ok() {
@@ -1106,7 +1074,7 @@ async fn rust_client_pvmonitor_pvxs_softiocpvx_via_pvxput() {
     let _ = udp;
     let mut child = TokioCommand::new(&softioc)
         .env("EPICS_PVA_SERVER_PORT", port.to_string())
-        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port + 1).to_string())
         .arg("-S")
         .arg("-d")
         .arg(dbfile.path())
@@ -1115,10 +1083,8 @@ async fn rust_client_pvmonitor_pvxs_softiocpvx_via_pvxput() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if std::net::TcpStream::connect(server_addr).is_ok() {
@@ -1174,7 +1140,10 @@ async fn rust_client_pvmonitor_pvxs_softiocpvx_via_pvxput() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let got = received.lock().clone();
     eprintln!("monitor got: {got:?}");
-    assert!(got.contains(&4.0), "monitor did not receive final value 4.0; got {got:?}");
+    assert!(
+        got.contains(&4.0),
+        "monitor did not receive final value 4.0; got {got:?}"
+    );
 
     mon_handle.abort();
 }

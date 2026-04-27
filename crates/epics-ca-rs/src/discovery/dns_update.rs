@@ -29,12 +29,12 @@ use std::time::Duration;
 use base64::Engine;
 use hickory_client::client::{AsyncClient, ClientHandle, Signer};
 use hickory_client::error::ClientError;
-use hickory_client::rr::{Name, RData, Record};
 use hickory_client::rr::rdata::{SRV, TXT};
+use hickory_client::rr::{Name, RData, Record};
 use hickory_client::tcp::TcpClientStream;
 use hickory_proto::iocompat::AsyncIoTokioAsStd;
-use hickory_proto::rr::dnssec::tsig::TSigner;
 use hickory_proto::rr::dnssec::rdata::tsig::TsigAlgorithm;
+use hickory_proto::rr::dnssec::tsig::TSigner;
 use tokio::net::TcpStream as TokioTcpStream;
 
 /// Algorithms supported by the TSIG signer. Mirrors RFC 4635.
@@ -112,12 +112,15 @@ impl TsigKey {
                 secret = Some(bytes);
             }
         }
-        let name = name
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing 'key' line"))?;
-        let algorithm = algorithm
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing 'algorithm'"))?;
-        let secret = secret
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing 'secret'"))?;
+        let name = name.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing 'key' line")
+        })?;
+        let algorithm = algorithm.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing 'algorithm'")
+        })?;
+        let secret = secret.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing 'secret'")
+        })?;
         Ok(Self {
             name,
             algorithm,
@@ -238,11 +241,10 @@ enum UpdateOp {
 }
 
 async fn send_update(reg: &DnsRegistration, op: UpdateOp) -> Result<(), ClientError> {
-    let zone = Name::from_str(&reg.zone)
-        .map_err(|e| ClientError::from(format!("bad zone: {e}")))?;
+    let zone =
+        Name::from_str(&reg.zone).map_err(|e| ClientError::from(format!("bad zone: {e}")))?;
     let svc_type = parse_or_err(&format!("_epics-ca._tcp.{}", reg.zone))?;
-    let instance_fqdn =
-        parse_or_err(&format!("{}._epics-ca._tcp.{}", reg.instance, reg.zone))?;
+    let instance_fqdn = parse_or_err(&format!("{}._epics-ca._tcp.{}", reg.instance, reg.zone))?;
     let host_fqdn = if reg.host.ends_with('.') {
         parse_or_err(&reg.host)?
     } else {
@@ -250,8 +252,7 @@ async fn send_update(reg: &DnsRegistration, op: UpdateOp) -> Result<(), ClientEr
     };
 
     // Connect to the DNS server. TCP because UPDATE messages can grow.
-    let (stream, sender) =
-        TcpClientStream::<AsyncIoTokioAsStd<TokioTcpStream>>::new(reg.server);
+    let (stream, sender) = TcpClientStream::<AsyncIoTokioAsStd<TokioTcpStream>>::new(reg.server);
 
     let signer: Option<Arc<Signer>> = match &reg.tsig {
         Some(key) => {
@@ -277,11 +278,7 @@ async fn send_update(reg: &DnsRegistration, op: UpdateOp) -> Result<(), ClientEr
     let srv = Record::from_rdata(instance_fqdn.clone(), ttl, srv_rdata);
 
     // TXT record
-    let txt_strs: Vec<String> = reg
-        .txt
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let txt_strs: Vec<String> = reg.txt.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let txt_rdata = RData::TXT(TXT::new(txt_strs));
     let txt = Record::from_rdata(instance_fqdn.clone(), ttl, txt_rdata);
 
@@ -294,13 +291,10 @@ async fn send_update(reg: &DnsRegistration, op: UpdateOp) -> Result<(), ClientEr
             // Use append() with must_exist=false — replaces if present,
             // creates otherwise. RFC 2136 leaves create vs update up to
             // the server; append-with-may-exist works for both.
-            client
-                .append(srv, zone.clone(), false)
-                .await
-                .map_err(|e| {
-                    tracing::debug!(error = %e, "SRV append failed");
-                    e
-                })?;
+            client.append(srv, zone.clone(), false).await.map_err(|e| {
+                tracing::debug!(error = %e, "SRV append failed");
+                e
+            })?;
             client.append(txt, zone.clone(), false).await?;
             client.append(ptr, zone, false).await?;
         }

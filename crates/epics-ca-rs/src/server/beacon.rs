@@ -28,7 +28,9 @@ pub async fn run_beacon_emitter(
     beacon_addrs: Vec<SocketAddr>,
     max_period: Duration,
     reset: Arc<Notify>,
-    #[cfg(feature = "cap-tokens")] signer: Option<Arc<crate::server::signed_beacon::SignedBeaconEmitter>>,
+    #[cfg(feature = "cap-tokens")] signer: Option<
+        Arc<crate::server::signed_beacon::SignedBeaconEmitter>,
+    >,
 ) -> CaResult<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;

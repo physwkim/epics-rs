@@ -180,10 +180,7 @@ pub fn list_broadcast_addresses(port: u16) -> Vec<SocketAddr> {
         }
     }
     // Always include limited broadcast as a fallback.
-    out.push(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::BROADCAST),
-        port,
-    ));
+    out.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), port));
     out
 }
 
@@ -214,8 +211,10 @@ mod tests {
     #[test]
     fn list_broadcast_addresses_includes_limited_broadcast() {
         let bcasts = list_broadcast_addresses(5076);
-        assert!(bcasts
-            .iter()
-            .any(|a| a.ip() == IpAddr::V4(Ipv4Addr::BROADCAST)));
+        assert!(
+            bcasts
+                .iter()
+                .any(|a| a.ip() == IpAddr::V4(Ipv4Addr::BROADCAST))
+        );
     }
 }

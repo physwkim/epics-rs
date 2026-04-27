@@ -44,9 +44,7 @@
 //!   display_t display
 //! ```
 
-use crate::pvdata::{
-    FieldDesc, PvField, PvStructure, ScalarType, ScalarValue, UnionItem, VariantValue,
-};
+use crate::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue, VariantValue};
 
 /// Per-array data buffer. Caller chooses one variant; the builder produces
 /// the corresponding union selector.
@@ -241,7 +239,10 @@ fn time_t_desc() -> FieldDesc {
     FieldDesc::Structure {
         struct_id: "time_t".into(),
         fields: vec![
-            ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+            (
+                "secondsPastEpoch".into(),
+                FieldDesc::Scalar(ScalarType::Long),
+            ),
             ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
             ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
         ],
@@ -302,17 +303,38 @@ pub fn value_union_desc() -> FieldDesc {
     FieldDesc::Union {
         struct_id: String::new(),
         variants: vec![
-            ("booleanValue".into(), FieldDesc::ScalarArray(ScalarType::Boolean)),
+            (
+                "booleanValue".into(),
+                FieldDesc::ScalarArray(ScalarType::Boolean),
+            ),
             ("byteValue".into(), FieldDesc::ScalarArray(ScalarType::Byte)),
-            ("ubyteValue".into(), FieldDesc::ScalarArray(ScalarType::UByte)),
-            ("shortValue".into(), FieldDesc::ScalarArray(ScalarType::Short)),
-            ("ushortValue".into(), FieldDesc::ScalarArray(ScalarType::UShort)),
+            (
+                "ubyteValue".into(),
+                FieldDesc::ScalarArray(ScalarType::UByte),
+            ),
+            (
+                "shortValue".into(),
+                FieldDesc::ScalarArray(ScalarType::Short),
+            ),
+            (
+                "ushortValue".into(),
+                FieldDesc::ScalarArray(ScalarType::UShort),
+            ),
             ("intValue".into(), FieldDesc::ScalarArray(ScalarType::Int)),
             ("uintValue".into(), FieldDesc::ScalarArray(ScalarType::UInt)),
             ("longValue".into(), FieldDesc::ScalarArray(ScalarType::Long)),
-            ("ulongValue".into(), FieldDesc::ScalarArray(ScalarType::ULong)),
-            ("floatValue".into(), FieldDesc::ScalarArray(ScalarType::Float)),
-            ("doubleValue".into(), FieldDesc::ScalarArray(ScalarType::Double)),
+            (
+                "ulongValue".into(),
+                FieldDesc::ScalarArray(ScalarType::ULong),
+            ),
+            (
+                "floatValue".into(),
+                FieldDesc::ScalarArray(ScalarType::Float),
+            ),
+            (
+                "doubleValue".into(),
+                FieldDesc::ScalarArray(ScalarType::Double),
+            ),
         ],
     }
 }
@@ -324,7 +346,10 @@ pub fn nt_nd_array_desc() -> FieldDesc {
             ("value".into(), value_union_desc()),
             ("codec".into(), codec_desc()),
             ("compressedSize".into(), FieldDesc::Scalar(ScalarType::Long)),
-            ("uncompressedSize".into(), FieldDesc::Scalar(ScalarType::Long)),
+            (
+                "uncompressedSize".into(),
+                FieldDesc::Scalar(ScalarType::Long),
+            ),
             ("dimension".into(), dimension_desc()),
             ("uniqueId".into(), FieldDesc::Scalar(ScalarType::Int)),
             ("dataTimeStamp".into(), time_t_desc()),
@@ -341,8 +366,12 @@ pub fn nt_nd_array_desc() -> FieldDesc {
 
 fn alarm_value(a: &NdAlarm) -> PvField {
     let mut s = PvStructure::new("alarm_t");
-    s.fields.push(("severity".into(), PvField::Scalar(ScalarValue::Int(a.severity))));
-    s.fields.push(("status".into(), PvField::Scalar(ScalarValue::Int(a.status))));
+    s.fields.push((
+        "severity".into(),
+        PvField::Scalar(ScalarValue::Int(a.severity)),
+    ));
+    s.fields
+        .push(("status".into(), PvField::Scalar(ScalarValue::Int(a.status))));
     s.fields.push((
         "message".into(),
         PvField::Scalar(ScalarValue::String(a.message.clone())),
@@ -360,18 +389,31 @@ fn time_t_value(t: &NdTimeStamp) -> PvField {
         "nanoseconds".into(),
         PvField::Scalar(ScalarValue::Int(t.nanoseconds)),
     ));
-    s.fields
-        .push(("userTag".into(), PvField::Scalar(ScalarValue::Int(t.user_tag))));
+    s.fields.push((
+        "userTag".into(),
+        PvField::Scalar(ScalarValue::Int(t.user_tag)),
+    ));
     PvField::Structure(s)
 }
 
 fn empty_display() -> PvField {
     let mut s = PvStructure::new("display_t");
-    s.fields.push(("limitLow".into(), PvField::Scalar(ScalarValue::Double(0.0))));
-    s.fields.push(("limitHigh".into(), PvField::Scalar(ScalarValue::Double(0.0))));
-    s.fields.push(("description".into(), PvField::Scalar(ScalarValue::String(String::new()))));
-    s.fields.push(("units".into(), PvField::Scalar(ScalarValue::String(String::new()))));
-    s.fields.push(("precision".into(), PvField::Scalar(ScalarValue::Int(0))));
+    s.fields
+        .push(("limitLow".into(), PvField::Scalar(ScalarValue::Double(0.0))));
+    s.fields.push((
+        "limitHigh".into(),
+        PvField::Scalar(ScalarValue::Double(0.0)),
+    ));
+    s.fields.push((
+        "description".into(),
+        PvField::Scalar(ScalarValue::String(String::new())),
+    ));
+    s.fields.push((
+        "units".into(),
+        PvField::Scalar(ScalarValue::String(String::new())),
+    ));
+    s.fields
+        .push(("precision".into(), PvField::Scalar(ScalarValue::Int(0))));
     PvField::Structure(s)
 }
 
@@ -380,11 +422,22 @@ fn dimension_value(dims: &[NdDimension]) -> PvField {
         dims.iter()
             .map(|d| {
                 let mut s = PvStructure::new(String::new().as_str());
-                s.fields.push(("size".into(), PvField::Scalar(ScalarValue::Int(d.size))));
-                s.fields.push(("offset".into(), PvField::Scalar(ScalarValue::Int(d.offset))));
-                s.fields.push(("fullSize".into(), PvField::Scalar(ScalarValue::Int(d.full_size))));
-                s.fields.push(("binning".into(), PvField::Scalar(ScalarValue::Int(d.binning))));
-                s.fields.push(("reverse".into(), PvField::Scalar(ScalarValue::Boolean(d.reverse))));
+                s.fields
+                    .push(("size".into(), PvField::Scalar(ScalarValue::Int(d.size))));
+                s.fields
+                    .push(("offset".into(), PvField::Scalar(ScalarValue::Int(d.offset))));
+                s.fields.push((
+                    "fullSize".into(),
+                    PvField::Scalar(ScalarValue::Int(d.full_size)),
+                ));
+                s.fields.push((
+                    "binning".into(),
+                    PvField::Scalar(ScalarValue::Int(d.binning)),
+                ));
+                s.fields.push((
+                    "reverse".into(),
+                    PvField::Scalar(ScalarValue::Boolean(d.reverse)),
+                ));
                 s
             })
             .collect(),
@@ -397,7 +450,10 @@ fn attribute_value(attrs: &[NdAttribute]) -> PvField {
             .iter()
             .map(|a| {
                 let mut s = PvStructure::new("epics:nt/NTAttribute:1.0");
-                s.fields.push(("name".into(), PvField::Scalar(ScalarValue::String(a.name.clone()))));
+                s.fields.push((
+                    "name".into(),
+                    PvField::Scalar(ScalarValue::String(a.name.clone())),
+                ));
                 s.fields.push((
                     "value".into(),
                     PvField::Variant(Box::new(VariantValue {
@@ -409,8 +465,14 @@ fn attribute_value(attrs: &[NdAttribute]) -> PvField {
                     "descriptor".into(),
                     PvField::Scalar(ScalarValue::String(a.descriptor.clone())),
                 ));
-                s.fields.push(("sourceType".into(), PvField::Scalar(ScalarValue::Int(a.source_type))));
-                s.fields.push(("source".into(), PvField::Scalar(ScalarValue::String(a.source.clone()))));
+                s.fields.push((
+                    "sourceType".into(),
+                    PvField::Scalar(ScalarValue::Int(a.source_type)),
+                ));
+                s.fields.push((
+                    "source".into(),
+                    PvField::Scalar(ScalarValue::String(a.source.clone())),
+                ));
                 s
             })
             .collect(),
@@ -436,8 +498,10 @@ fn scalar_kind(v: &ScalarValue) -> ScalarType {
 
 fn codec_value(c: &NdCodec) -> PvField {
     let mut s = PvStructure::new("codec_t");
-    s.fields
-        .push(("name".into(), PvField::Scalar(ScalarValue::String(c.name.clone()))));
+    s.fields.push((
+        "name".into(),
+        PvField::Scalar(ScalarValue::String(c.name.clone())),
+    ));
     let parameters = match &c.parameters {
         Some(v) => PvField::Variant(Box::new(v.clone())),
         None => PvField::Variant(Box::new(VariantValue {
@@ -470,16 +534,23 @@ pub fn nt_nd_array_value(nt: &NtNdArray) -> PvField {
         "uncompressedSize".into(),
         PvField::Scalar(ScalarValue::Long(nt.uncompressed_size)),
     ));
-    s.fields.push(("dimension".into(), dimension_value(&nt.dimension)));
-    s.fields.push(("uniqueId".into(), PvField::Scalar(ScalarValue::Int(nt.unique_id))));
-    s.fields.push(("dataTimeStamp".into(), time_t_value(&nt.data_time_stamp)));
-    s.fields.push(("attribute".into(), attribute_value(&nt.attribute)));
+    s.fields
+        .push(("dimension".into(), dimension_value(&nt.dimension)));
+    s.fields.push((
+        "uniqueId".into(),
+        PvField::Scalar(ScalarValue::Int(nt.unique_id)),
+    ));
+    s.fields
+        .push(("dataTimeStamp".into(), time_t_value(&nt.data_time_stamp)));
+    s.fields
+        .push(("attribute".into(), attribute_value(&nt.attribute)));
     s.fields.push((
         "descriptor".into(),
         PvField::Scalar(ScalarValue::String(nt.descriptor.clone())),
     ));
     s.fields.push(("alarm".into(), alarm_value(&nt.alarm)));
-    s.fields.push(("timeStamp".into(), time_t_value(&nt.time_stamp)));
+    s.fields
+        .push(("timeStamp".into(), time_t_value(&nt.time_stamp)));
     s.fields.push(("display".into(), empty_display()));
     let _ = value_desc;
     PvField::Structure(s)

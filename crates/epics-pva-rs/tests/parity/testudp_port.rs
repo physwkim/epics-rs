@@ -11,7 +11,7 @@
 use std::io::Cursor;
 
 use epics_pva_rs::proto::{
-    decode_size, decode_string, ip_from_bytes, ByteOrder, Command, PvaHeader, ReadExt,
+    ByteOrder, Command, PvaHeader, ReadExt, decode_size, decode_string, ip_from_bytes,
 };
 
 // ── testBeacon (pvxs testudp.cpp:25) ───────────────────────────────
@@ -24,18 +24,57 @@ use epics_pva_rs::proto::{
 fn build_beacon_bytes(be: bool) -> Vec<u8> {
     let mut msg: Vec<u8> = vec![
         // header (filled below)
-        0xCA, 2, 0, Command::Beacon.code(),
-        0, 0, 0, 0, // length
+        0xCA,
+        2,
+        0,
+        Command::Beacon.code(),
+        0,
+        0,
+        0,
+        0, // length
         // GUID 0x01..0x0c
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
         // unused/ignored: 4 bytes
-        0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
         // server addr (IPv4 in IPv6-mapped form ::ffff:0.0.0.0)
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0xff,
+        0xff,
+        0,
+        0,
+        0,
+        0,
         // port placeholder
-        0, 0,
+        0,
+        0,
         // protocol "tcp"
-        3, b't', b'c', b'p',
+        3,
+        b't',
+        b'c',
+        b'p',
     ];
     let total = msg.len();
     let payload_len = total - 8;
@@ -118,9 +157,13 @@ fn pvxs_beacon_truncated_returns_none() {
 // frame.
 
 fn build_search_bytes(be: bool, names: &[&str]) -> Vec<u8> {
-    use epics_pva_rs::proto::{encode_size_into, encode_string_into, WriteExt};
+    use epics_pva_rs::proto::{WriteExt, encode_size_into, encode_string_into};
 
-    let order = if be { ByteOrder::Big } else { ByteOrder::Little };
+    let order = if be {
+        ByteOrder::Big
+    } else {
+        ByteOrder::Little
+    };
 
     let mut payload: Vec<u8> = Vec::new();
     payload.put_u32(0x12345678, order); // search seq

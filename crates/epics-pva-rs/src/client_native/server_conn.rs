@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,12 +34,12 @@ use tracing::{debug, warn};
 
 use crate::error::{PvaError, PvaResult};
 use crate::proto::{
-    encode_string_into, ByteOrder, Command, ControlCommand, HeaderFlags, PvaHeader, Status,
-    WriteExt,
+    ByteOrder, Command, ControlCommand, HeaderFlags, PvaHeader, Status, WriteExt,
+    encode_string_into,
 };
 
 use super::decode::{
-    decode_connection_validated, decode_connection_validation_request, try_parse_frame, Frame,
+    Frame, decode_connection_validated, decode_connection_validation_request, try_parse_frame,
 };
 
 /// How often we send heartbeat ECHO_REQUEST.
@@ -140,12 +140,11 @@ impl ServerConn {
     async fn run_handshake_and_spawn(
         target: SocketAddr,
         mut reader: DynRead,
-        mut writer: DynWrite,
+        writer: DynWrite,
         user: &str,
         host: &str,
         op_timeout: Duration,
     ) -> PvaResult<Arc<Self>> {
-
         // Step 1+2: read handshake frames until we get CONNECTION_VALIDATION.
         let mut rx_buf: Vec<u8> = Vec::with_capacity(8192);
         let (byte_order, _server_buf, _server_reg, auth_methods) =
@@ -440,11 +439,7 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-async fn handle_control_frame(
-    frame: &Frame,
-    writer_tx: &mpsc::Sender<Vec<u8>>,
-    order: ByteOrder,
-) {
+async fn handle_control_frame(frame: &Frame, writer_tx: &mpsc::Sender<Vec<u8>>, order: ByteOrder) {
     if frame.header.command == ControlCommand::EchoRequest.code() {
         // Server pinged us — bounce back.
         let resp = PvaHeader::control(
@@ -481,7 +476,6 @@ fn route_frame(frame: Frame, router: &Arc<Mutex<Router>>) {
         if let Some(tx) = router_guard.by_ioid.get(&ioid).cloned() {
             drop(router_guard);
             let _ = tx.send(frame);
-            return;
         }
     }
     // Otherwise: drop silently. (Beacons/SearchResponse are handled

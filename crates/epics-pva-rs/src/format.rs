@@ -70,14 +70,22 @@ fn write_info_field(out: &mut String, name: &str, desc: &FieldDesc, depth: usize
     let indent = "    ".repeat(depth);
     match desc {
         FieldDesc::Structure { struct_id, fields } => {
-            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            let id = if struct_id.is_empty() {
+                "structure"
+            } else {
+                struct_id
+            };
             let _ = writeln!(out, "{indent}{id} {name}");
             for (n, c) in fields {
                 write_info_field(out, n, c, depth + 1);
             }
         }
         FieldDesc::StructureArray { struct_id, fields } => {
-            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            let id = if struct_id.is_empty() {
+                "structure"
+            } else {
+                struct_id
+            };
             let _ = writeln!(out, "{indent}{id}[] {name}");
             let inner_indent = "    ".repeat(depth + 1);
             let _ = writeln!(out, "{inner_indent}{id}");
@@ -168,17 +176,15 @@ pub fn format_raw(pv_name: &str, desc: &FieldDesc, value: &PvField) -> String {
     out
 }
 
-fn write_raw_field(
-    out: &mut String,
-    name: &str,
-    desc: &FieldDesc,
-    value: &PvField,
-    depth: usize,
-) {
+fn write_raw_field(out: &mut String, name: &str, desc: &FieldDesc, value: &PvField, depth: usize) {
     let indent = "    ".repeat(depth);
     match (desc, value) {
         (FieldDesc::Structure { struct_id, fields }, PvField::Structure(s)) => {
-            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            let id = if struct_id.is_empty() {
+                "structure"
+            } else {
+                struct_id
+            };
             if struct_id == "time_t" {
                 let ts_str = format_timestamp(s);
                 let _ = writeln!(out, "{indent}{id} {name} {ts_str}");
@@ -195,7 +201,11 @@ fn write_raw_field(
             }
         }
         (FieldDesc::StructureArray { struct_id, fields }, PvField::StructureArray(items)) => {
-            let id = if struct_id.is_empty() { "structure" } else { struct_id };
+            let id = if struct_id.is_empty() {
+                "structure"
+            } else {
+                struct_id
+            };
             let _ = writeln!(out, "{indent}{id}[] {name}");
             for s in items {
                 let _ = writeln!(out, "{indent}    {id} ");
@@ -206,7 +216,14 @@ fn write_raw_field(
                 }
             }
         }
-        (FieldDesc::Union { .. }, PvField::Union { variant_name, value, .. }) => {
+        (
+            FieldDesc::Union { .. },
+            PvField::Union {
+                variant_name,
+                value,
+                ..
+            },
+        ) => {
             // Show selected variant on the same line as `union`.
             let _ = writeln!(
                 out,
@@ -332,10 +349,7 @@ fn structure_to_json(s: &PvStructure) -> String {
 
 fn scalar_to_json(v: &ScalarValue) -> String {
     match v {
-        ScalarValue::String(s) => format!(
-            "\"{}\"",
-            s.replace('\\', "\\\\").replace('"', "\\\"")
-        ),
+        ScalarValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         ScalarValue::Float(f) => {
             if f.fract() == 0.0 {
                 format!("{f:.1}")
@@ -464,7 +478,10 @@ mod tests {
                     FieldDesc::Structure {
                         struct_id: "time_t".into(),
                         fields: vec![
-                            ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+                            (
+                                "secondsPastEpoch".into(),
+                                FieldDesc::Scalar(ScalarType::Long),
+                            ),
                             ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
                             ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
                         ],
@@ -475,10 +492,7 @@ mod tests {
         let mut s = PvStructure::new("epics:nt/NTScalar:1.0");
         s.set("value", PvField::Scalar(ScalarValue::Double(value)));
         let mut ts = PvStructure::new("time_t");
-        ts.set(
-            "secondsPastEpoch",
-            PvField::Scalar(ScalarValue::Long(sec)),
-        );
+        ts.set("secondsPastEpoch", PvField::Scalar(ScalarValue::Long(sec)));
         ts.set("nanoseconds", PvField::Scalar(ScalarValue::Int(nsec)));
         ts.set("userTag", PvField::Scalar(ScalarValue::Int(0)));
         s.set("timeStamp", PvField::Structure(ts));

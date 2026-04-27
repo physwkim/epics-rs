@@ -141,9 +141,15 @@ impl NTScalar {
                         ("active".into(), FieldDesc::Scalar(ScalarType::Boolean)),
                         ("lowAlarmLimit".into(), FieldDesc::Scalar(self.value_type)),
                         ("lowWarningLimit".into(), FieldDesc::Scalar(self.value_type)),
-                        ("highWarningLimit".into(), FieldDesc::Scalar(self.value_type)),
+                        (
+                            "highWarningLimit".into(),
+                            FieldDesc::Scalar(self.value_type),
+                        ),
                         ("highAlarmLimit".into(), FieldDesc::Scalar(self.value_type)),
-                        ("lowAlarmSeverity".into(), FieldDesc::Scalar(ScalarType::Int)),
+                        (
+                            "lowAlarmSeverity".into(),
+                            FieldDesc::Scalar(ScalarType::Int),
+                        ),
                         (
                             "lowWarningSeverity".into(),
                             FieldDesc::Scalar(ScalarType::Int),
@@ -250,8 +256,7 @@ mod tests {
                 fields: subfields, ..
             } = display
             {
-                let names: Vec<&str> =
-                    subfields.iter().map(|(n, _)| n.as_str()).collect();
+                let names: Vec<&str> = subfields.iter().map(|(n, _)| n.as_str()).collect();
                 assert!(!names.contains(&"limitLow"));
                 assert!(names.contains(&"description"));
                 assert!(names.contains(&"units"));

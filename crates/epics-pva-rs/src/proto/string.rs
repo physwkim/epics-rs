@@ -25,7 +25,10 @@ pub fn encode_string_into(value: &str, order: ByteOrder, out: &mut Vec<u8>) {
 }
 
 /// Decode a string. `Ok(None)` indicates the null marker (`0xFF` size byte).
-pub fn decode_string(cur: &mut Cursor<&[u8]>, order: ByteOrder) -> Result<Option<String>, DecodeError> {
+pub fn decode_string(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+) -> Result<Option<String>, DecodeError> {
     let len = match decode_size(cur, order)? {
         Some(n) => n as usize,
         None => return Ok(None),
@@ -53,7 +56,10 @@ mod tests {
             let buf = encode_string(original, order);
             assert_eq!(buf[0] as usize, original.len());
             let mut cur = Cursor::new(buf.as_slice());
-            assert_eq!(decode_string(&mut cur, order).unwrap().as_deref(), Some(original));
+            assert_eq!(
+                decode_string(&mut cur, order).unwrap().as_deref(),
+                Some(original)
+            );
         }
     }
 
@@ -61,10 +67,12 @@ mod tests {
     fn utf8_round_trip() {
         let original = "한글: pvAccess 🎉";
         let buf = encode_string(original, ByteOrder::Little);
-        assert_eq!(buf[0] as usize, original.as_bytes().len());
+        assert_eq!(buf[0] as usize, original.len());
         let mut cur = Cursor::new(buf.as_slice());
         assert_eq!(
-            decode_string(&mut cur, ByteOrder::Little).unwrap().as_deref(),
+            decode_string(&mut cur, ByteOrder::Little)
+                .unwrap()
+                .as_deref(),
             Some(original)
         );
     }
@@ -77,7 +85,9 @@ mod tests {
         assert_eq!(buf.len(), 5 + 300);
         let mut cur = Cursor::new(buf.as_slice());
         assert_eq!(
-            decode_string(&mut cur, ByteOrder::Little).unwrap().as_deref(),
+            decode_string(&mut cur, ByteOrder::Little)
+                .unwrap()
+                .as_deref(),
             Some(original.as_str())
         );
     }

@@ -88,10 +88,7 @@ fn pvxs_nt_table_columns_int_string_string() {
             .iter()
             .find_map(|(n, d)| if n == "value" { Some(d) } else { None })
             .expect("value");
-        if let FieldDesc::Structure {
-            fields: cols, ..
-        } = value
-        {
+        if let FieldDesc::Structure { fields: cols, .. } = value {
             // pvxs: value.A int32_t[], value.B string[]
             let by_name: std::collections::HashMap<&str, &FieldDesc> =
                 cols.iter().map(|(n, d)| (n.as_str(), d)).collect();

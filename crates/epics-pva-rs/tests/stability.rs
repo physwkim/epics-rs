@@ -18,16 +18,18 @@
 //! - **P8 channel coalescing** — multiple concurrent pvget on the same PV
 //!   share a single channel/connection.
 
+#![allow(clippy::manual_async_fn)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use epics_pva_rs::client_native::beacon_throttle::BeaconTracker;
 use epics_pva_rs::client_native::context::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
-use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
 // ── A tiny in-memory ChannelSource we can pump events into ───────────
 
@@ -131,10 +133,7 @@ impl ChannelSource for MemSource {
             }
         }
     }
-    fn get_value(
-        &self,
-        name: &str,
-    ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+    fn get_value(&self, name: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
         let inner = self.inner.clone();
         let name = name.to_string();
         async move { inner.state.lock().await.values.get(&name).cloned() }
@@ -147,7 +146,12 @@ impl ChannelSource for MemSource {
         let inner = self.inner.clone();
         let name = name.to_string();
         async move {
-            inner.state.lock().await.values.insert(name.clone(), value.clone());
+            inner
+                .state
+                .lock()
+                .await
+                .values
+                .insert(name.clone(), value.clone());
             let mut subs = inner.subs.lock().await;
             if let Some(list) = subs.get_mut(&name) {
                 list.retain(|tx| tx.try_send(value.clone()).is_ok());
@@ -293,10 +297,10 @@ async fn p5_monitor_pipeline_does_not_drop() {
         async move {
             let _ = client
                 .pvmonitor("STAB:MON", move |value| {
-                    if let PvField::Structure(s) = value {
-                        if let Some(ScalarValue::Double(v)) = s.get_value() {
-                            received_cb.lock().push(*v);
-                        }
+                    if let PvField::Structure(s) = value
+                        && let Some(ScalarValue::Double(v)) = s.get_value()
+                    {
+                        received_cb.lock().push(*v);
                     }
                 })
                 .await;
@@ -320,7 +324,7 @@ async fn p5_monitor_pipeline_does_not_drop() {
     assert!(!got.is_empty(), "monitor received nothing");
     let last = *got.last().unwrap();
     assert!(
-        last >= 1.0 && last <= 10.0,
+        (1.0..=10.0).contains(&last),
         "monitor delivered out-of-range value {last}"
     );
 
@@ -341,9 +345,7 @@ async fn p8_channel_coalesces_concurrent_pvget() {
     let mut handles = Vec::new();
     for _ in 0..10 {
         let client = client.clone();
-        handles.push(tokio::spawn(async move {
-            client.pvget("STAB:COAL").await
-        }));
+        handles.push(tokio::spawn(async move { client.pvget("STAB:COAL").await }));
     }
     for h in handles {
         let v = tokio::time::timeout(Duration::from_secs(3), h)

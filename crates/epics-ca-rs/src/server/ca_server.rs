@@ -228,9 +228,7 @@ impl CaServerBuilder {
         let acf = Arc::new(tokio::sync::RwLock::new(self.acf));
         #[cfg(feature = "experimental-rust-tls")]
         let tls = self.tls.and_then(|t| match t {
-            crate::tls::TlsConfig::Server(arc) => {
-                Some(Arc::new(std::sync::RwLock::new(arc)))
-            }
+            crate::tls::TlsConfig::Server(arc) => Some(Arc::new(std::sync::RwLock::new(arc))),
             crate::tls::TlsConfig::Client(_) => {
                 tracing::warn!("client-side TlsConfig passed to CaServer; ignoring");
                 None
@@ -366,8 +364,7 @@ impl CaServer {
         match path {
             Some(p) => self.reload_acf_from(&p).await,
             None => Err(CaError::InvalidValue(
-                "no ACF source path registered; use reload_acf_from() with an explicit path"
-                    .into(),
+                "no ACF source path registered; use reload_acf_from() with an explicit path".into(),
             )),
         }
     }
@@ -687,8 +684,7 @@ impl CaServer {
                         }
                     };
                 if sigterm.recv().await.is_some() {
-                    tracing::info!(grace_secs = grace,
-                        "SIGTERM received; entering drain mode");
+                    tracing::info!(grace_secs = grace, "SIGTERM received; entering drain mode");
                     drain.store(true, std::sync::atomic::Ordering::Release);
                     metrics::counter!("ca_server_drain_total").increment(1);
                     tokio::time::sleep(std::time::Duration::from_secs(grace)).await;
@@ -791,8 +787,8 @@ impl CaServer {
                     let path = acf_path_clone
                         .as_ref()
                         .ok_or("no ACF source path registered")?;
-                    let content = std::fs::read_to_string(path)
-                        .map_err(|e| format!("read {path}: {e}"))?;
+                    let content =
+                        std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
                     let cfg = access_security::parse_acf(&content)
                         .map_err(|e| format!("parse {path}: {e}"))?;
                     // Avoid awaiting inside the closure — spawn a one-shot
@@ -811,10 +807,7 @@ impl CaServer {
             #[cfg(feature = "experimental-rust-tls")]
             let state = if let (Some(slot), Some(paths)) = (
                 self.tls.clone(),
-                self.tls_paths
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone()),
+                self.tls_paths.lock().ok().and_then(|g| g.clone()),
             ) {
                 let paths = std::sync::Arc::new(paths);
                 let reload_tls_fn: Arc<dyn Fn() -> Result<(), String> + Send + Sync> =
@@ -979,7 +972,9 @@ fn audit_from_env() -> Option<crate::audit::AuditLogger> {
     }
     if let Some(val) = epics_base_rs::runtime::env::get("EPICS_CAS_AUDIT") {
         if val.eq_ignore_ascii_case("stderr") {
-            return Some(crate::audit::AuditLogger::new(crate::audit::AuditSink::Stderr));
+            return Some(crate::audit::AuditLogger::new(
+                crate::audit::AuditSink::Stderr,
+            ));
         }
     }
     None
@@ -989,8 +984,7 @@ fn audit_from_env() -> Option<crate::audit::AuditLogger> {
 /// `EPICS_CAS_INTROSPECTION_ADDR=<host>:<port>` enables it; defaults
 /// off.
 fn introspection_from_env() -> Option<std::net::SocketAddr> {
-    epics_base_rs::runtime::env::get("EPICS_CAS_INTROSPECTION_ADDR")
-        .and_then(|s| s.parse().ok())
+    epics_base_rs::runtime::env::get("EPICS_CAS_INTROSPECTION_ADDR").and_then(|s| s.parse().ok())
 }
 
 /// Drain grace seconds from the env. Default 30 — long enough for a

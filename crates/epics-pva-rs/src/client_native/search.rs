@@ -4,12 +4,12 @@
 //! request and reading the SEARCH_RESPONSE. Honours the standard EPICS
 //! environment variables:
 //!
-//! - `EPICS_PVA_ADDR_LIST`        — comma/whitespace-separated address list
-//! - `EPICS_PVA_AUTO_ADDR_LIST`   — `YES`/`NO` (default `YES`); add discovered
-//!                                  broadcast addresses
-//! - `EPICS_PVA_BROADCAST_PORT`   — UDP port to send to (default 5076)
-//! - `EPICS_PVA_SERVER_PORT`      — TCP port the server listens on (5075).
-//!                                  Used as the response port.
+//! - `EPICS_PVA_ADDR_LIST` — comma/whitespace-separated address list
+//! - `EPICS_PVA_AUTO_ADDR_LIST` — `YES`/`NO` (default `YES`); add discovered
+//!   broadcast addresses
+//! - `EPICS_PVA_BROADCAST_PORT` — UDP port to send to (default 5076)
+//! - `EPICS_PVA_SERVER_PORT` — TCP port the server listens on (5075).
+//!   Used as the response port.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
@@ -23,7 +23,7 @@ use tracing::debug;
 use crate::codec::PvaCodec;
 use crate::error::{PvaError, PvaResult};
 
-use super::decode::{decode_search_response, try_parse_frame, SearchResponse};
+use super::decode::{SearchResponse, decode_search_response, try_parse_frame};
 
 /// Parse `EPICS_PVA_ADDR_LIST` style strings into a list of IPs/SocketAddrs.
 pub fn parse_addr_list(env: &str) -> Vec<SocketAddr> {
@@ -74,7 +74,7 @@ pub fn build_search_targets(extra: &[SocketAddr]) -> Vec<SocketAddr> {
     let mut targets: Vec<SocketAddr> = Vec::new();
     let mut seen = HashSet::new();
 
-    let mut push = |addr: SocketAddr, targets: &mut Vec<SocketAddr>, seen: &mut HashSet<SocketAddr>| {
+    let push = |addr: SocketAddr, targets: &mut Vec<SocketAddr>, seen: &mut HashSet<SocketAddr>| {
         if seen.insert(addr) {
             targets.push(addr);
         }
@@ -158,7 +158,10 @@ pub async fn search(pv_name: &str, total_timeout: Duration) -> PvaResult<SocketA
         }
 
         let now = Instant::now();
-        let backoff = std::cmp::min(Duration::from_millis(100 << attempt.min(5)), Duration::from_secs(2));
+        let backoff = std::cmp::min(
+            Duration::from_millis(100 << attempt.min(5)),
+            Duration::from_secs(2),
+        );
         let next_send = now + backoff;
         let wait = std::cmp::min(next_send, deadline).saturating_duration_since(now);
 

@@ -28,11 +28,11 @@ use crate::codec::PvaCodec;
 use crate::error::{PvaError, PvaResult};
 use crate::proto::{BitSet, ByteOrder, Command, PvaHeader, QosFlags, WriteExt};
 use crate::pv_request::{build_pv_request_fields, build_pv_request_value_only};
-use crate::pvdata::encode::{decode_pv_field, encode_pv_field, encode_type_desc};
+use crate::pvdata::encode::{encode_pv_field, encode_type_desc};
 use crate::pvdata::{FieldDesc, PvField, PvStructure, ScalarValue};
 
 use super::channel::Channel;
-use super::decode::{decode_op_response, decode_op_response_cached, OpResponse};
+use super::decode::{OpResponse, decode_op_response, decode_op_response_cached};
 
 static NEXT_IOID: AtomicU32 = AtomicU32::new(1);
 fn alloc_ioid() -> u32 {
@@ -208,7 +208,10 @@ where
         let (server, sid) = match channel.ensure_active().await {
             Ok(p) => p,
             Err(e) => {
-                if matches!(channel.current_state(), super::channel::ChannelState::Closed) {
+                if matches!(
+                    channel.current_state(),
+                    super::channel::ChannelState::Closed
+                ) {
                     return Ok(());
                 }
                 debug!(pv = %channel.pv_name, err = %e, "monitor reconnect failed; retrying in 500ms");
@@ -229,7 +232,10 @@ where
             Err(MonitorEnd::ChannelClosed) => return Ok(()),
             Err(MonitorEnd::ConnectionLost) => {
                 debug!(pv = %channel.pv_name, "monitor lost connection; will retry");
-                if matches!(channel.current_state(), super::channel::ChannelState::Closed) {
+                if matches!(
+                    channel.current_state(),
+                    super::channel::ChannelState::Closed
+                ) {
                     return Ok(());
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -240,6 +246,7 @@ where
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum MonitorEnd {
     ChannelClosed,
     ConnectionLost,
@@ -276,10 +283,7 @@ where
         .send(init_req)
         .await
         .map_err(|_| MonitorEnd::ConnectionLost)?;
-    let init_frame = stream
-        .recv()
-        .await
-        .ok_or(MonitorEnd::ConnectionLost)?;
+    let init_frame = stream.recv().await.ok_or(MonitorEnd::ConnectionLost)?;
     let cache = server.type_cache();
     let init = match decode_op_response_cached(&init_frame, None, &mut cache.lock()) {
         Ok(OpResponse::Init(i)) => i,
@@ -459,7 +463,11 @@ fn build_put_value(desc: &FieldDesc, value_str: &str) -> PvaResult<PvField> {
             .map_err(PvaError::InvalidValue),
         FieldDesc::ScalarArray(st) => {
             let mut items = Vec::new();
-            for tok in value_str.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            for tok in value_str
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 items.push(ScalarValue::parse(*st, tok).map_err(PvaError::InvalidValue)?);
             }
             Ok(PvField::ScalarArray(items))

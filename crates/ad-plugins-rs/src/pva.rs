@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use epics_pva_rs::nt::nd_array::{
-    nt_nd_array_value, NdAlarm, NdArrayBuffer, NdAttribute, NdCodec, NdDimension, NdTimeStamp,
-    NtNdArray,
+    NdAlarm, NdArrayBuffer, NdAttribute, NdCodec, NdDimension, NdTimeStamp, NtNdArray,
+    nt_nd_array_value,
 };
 use epics_pva_rs::pvdata::{PvField, ScalarValue};
 

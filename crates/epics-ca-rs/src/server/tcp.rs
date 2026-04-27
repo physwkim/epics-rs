@@ -108,10 +108,7 @@ struct ClientState {
 }
 
 impl ClientState {
-    fn new(
-        acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
-        tcp_port: u16,
-    ) -> Self {
+    fn new(acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>, tcp_port: u16) -> Self {
         Self {
             channels: HashMap::new(),
             subscriptions: HashMap::new(),
@@ -202,6 +199,7 @@ impl ClientState {
 ///
 /// Notifies `beacon_reset` on each client connect/disconnect so the beacon
 /// emitter restarts its fast beacon cycle (matching C EPICS behavior).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tcp_listener(
     db: Arc<PvDatabase>,
     port: u16,
@@ -399,7 +397,10 @@ where
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
                 // Inactivity timeout — close the connection.
-                eprintln!("CA server: client idle for {}s, closing", inactivity.as_secs());
+                eprintln!(
+                    "CA server: client idle for {}s, closing",
+                    inactivity.as_secs()
+                );
                 break;
             }
         };
@@ -516,11 +517,9 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
             // EPICS_CAS_USE_HOST_NAMES (default NO) controls whether we
             // trust the client-supplied hostname for ACF matching. When NO,
             // the peer IP set during accept() is authoritative.
-            let trust_client_hostname = epics_base_rs::runtime::env::get_or(
-                "EPICS_CAS_USE_HOST_NAMES",
-                "NO",
-            )
-            .eq_ignore_ascii_case("YES");
+            let trust_client_hostname =
+                epics_base_rs::runtime::env::get_or("EPICS_CAS_USE_HOST_NAMES", "NO")
+                    .eq_ignore_ascii_case("YES");
             if trust_client_hostname {
                 let end = payload
                     .iter()
@@ -556,14 +555,20 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
             // CREATE_CHAN, to avoid log spam.
             let warn_threshold = (cap * 9) / 10;
             if !state.channel_limit_warned && state.channels.len() >= warn_threshold {
-                tracing::warn!(channels = state.channels.len(), cap,
-                    "approaching per-client channel limit (90%)");
+                tracing::warn!(
+                    channels = state.channels.len(),
+                    cap,
+                    "approaching per-client channel limit (90%)"
+                );
                 metrics::counter!("ca_server_channel_limit_warnings_total").increment(1);
                 state.channel_limit_warned = true;
             }
             if state.channels.len() >= cap {
-                tracing::warn!(channels = state.channels.len(), cap,
-                    "rejecting CREATE_CHAN: per-client channel limit reached");
+                tracing::warn!(
+                    channels = state.channels.len(),
+                    cap,
+                    "rejecting CREATE_CHAN: per-client channel limit reached"
+                );
                 metrics::counter!("ca_server_channel_limit_rejects_total").increment(1);
                 let mut fail = CaHeader::new(CA_PROTO_CREATE_CH_FAIL);
                 fail.cid = hdr.cid;

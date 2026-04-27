@@ -16,8 +16,8 @@ use tracing::debug;
 
 use crate::error::{PvaError, PvaResult};
 use crate::proto::{
-    decode_size, decode_string, encode_size_into, encode_string_into, ip_to_bytes, ByteOrder,
-    Command, PvaHeader, ReadExt, WriteExt,
+    ByteOrder, Command, PvaHeader, ReadExt, WriteExt, decode_size, decode_string,
+    encode_string_into, ip_to_bytes,
 };
 
 use super::source::DynSource;
@@ -77,6 +77,7 @@ pub async fn run_udp_responder_proto(
 /// `destinations` is empty AND `auto_beacon` is true, beacons fan out
 /// to per-NIC broadcasts (via [`crate::config::env::list_broadcast_addresses`]).
 /// When `destinations` is non-empty, exactly those addresses are used.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_udp_responder_with_config(
     source: DynSource,
     udp_port: u16,
@@ -102,11 +103,15 @@ pub async fn run_udp_responder_with_config(
         // Final fallback: limited broadcast.
         vec![format!("255.255.255.255:{}", udp_port).parse().unwrap()]
     };
-    debug!(?beacon_destinations, ?beacon_period, "beacon emitter config");
+    debug!(
+        ?beacon_destinations,
+        ?beacon_period,
+        "beacon emitter config"
+    );
 
     let beacon_socket = socket.clone();
     let beacon_guid = guid;
-    let beacon = tokio::spawn(async move {
+    let _beacon = tokio::spawn(async move {
         let mut tick = interval(beacon_period);
         loop {
             tick.tick().await;
@@ -150,7 +155,7 @@ pub async fn run_udp_responder_with_config(
 
     #[allow(unreachable_code)]
     {
-        beacon.abort();
+        _beacon.abort();
         Ok(())
     }
 }
@@ -176,7 +181,12 @@ fn build_search_response_proto(
     for &cid in cids {
         payload.put_u32(cid, order);
     }
-    let header = PvaHeader::application(true, order, Command::SearchResponse.code(), payload.len() as u32);
+    let header = PvaHeader::application(
+        true,
+        order,
+        Command::SearchResponse.code(),
+        payload.len() as u32,
+    );
     let mut out = Vec::new();
     header.write_into(&mut out);
     out.extend_from_slice(&payload);
@@ -205,8 +215,7 @@ fn build_beacon(guid: [u8; 12], tcp_port: u16, order: ByteOrder) -> Vec<u8> {
     payload.put_u16(tcp_port, order);
     encode_string_into("tcp", order, &mut payload);
     payload.put_u8(0xFF); // null serverStatus marker (matches pvxs)
-    let header =
-        PvaHeader::application(true, order, Command::Beacon.code(), payload.len() as u32);
+    let header = PvaHeader::application(true, order, Command::Beacon.code(), payload.len() as u32);
     let mut out = Vec::new();
     header.write_into(&mut out);
     out.extend_from_slice(&payload);

@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use epics_pva_rs::client_native::context::PvaClient;
 use epics_pva_rs::proto::ByteOrder;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
-use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
 #[derive(Clone)]
 struct UInt32Source;
@@ -90,10 +90,8 @@ async fn run_endian_case(server_be: bool) {
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(server_addr)

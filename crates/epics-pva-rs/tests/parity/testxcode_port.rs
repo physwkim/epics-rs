@@ -8,7 +8,7 @@
 
 use std::io::Cursor;
 
-use epics_pva_rs::proto::{decode_string, encode_string, BitSet, ByteOrder};
+use epics_pva_rs::proto::{BitSet, ByteOrder, decode_string, encode_string};
 use epics_pva_rs::pvdata::encode::{
     encode_pv_field, encode_pv_field_with_bitset, encode_type_desc,
 };
@@ -107,8 +107,7 @@ fn nt_scalar_uint32_value() -> PvField {
         .push(("nanoseconds".into(), PvField::Scalar(ScalarValue::Int(0))));
     ts.fields
         .push(("userTag".into(), PvField::Scalar(ScalarValue::Int(0))));
-    s.fields
-        .push(("timeStamp".into(), PvField::Structure(ts)));
+    s.fields.push(("timeStamp".into(), PvField::Structure(ts)));
     PvField::Structure(s)
 }
 
@@ -195,9 +194,7 @@ fn pvxs_serialize_valid_alarm_message_and_nanoseconds() {
                 if let PvField::Structure(alarm) = v {
                     for (n2, v2) in &mut alarm.fields {
                         if n2 == "message" {
-                            *v2 = PvField::Scalar(ScalarValue::String(
-                                "hello world".to_string(),
-                            ));
+                            *v2 = PvField::Scalar(ScalarValue::String("hello world".to_string()));
                         }
                     }
                 }
@@ -240,8 +237,8 @@ fn pvxs_descriptor_nt_scalar_uint32_round_trip() {
 
     // Decode back.
     let mut cur = Cursor::new(buf.as_slice());
-    let decoded = epics_pva_rs::pvdata::encode::decode_type_desc(&mut cur, ByteOrder::Big)
-        .expect("decode");
+    let decoded =
+        epics_pva_rs::pvdata::encode::decode_type_desc(&mut cur, ByteOrder::Big).expect("decode");
 
     // Quick structural identity check via Display.
     assert_eq!(format!("{decoded}"), format!("{desc}"));
@@ -519,15 +516,15 @@ fn pvxs_serialize_union_choice_b_string() {
 
 #[test]
 fn pvxs_typestore_empty_request_define_then_lookup_LE() {
-    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+    use epics_pva_rs::pvdata::encode::{TypeCache, decode_type_desc_cached};
 
     // First message: \xfd\x02\x00 \x80 \x00 \x00 = "define slot 0x0002 as
     // empty struct (no id, 0 fields)". LE byte order for u16 key.
     let msg1: &[u8] = b"\xfd\x02\x00\x80\x00\x00";
     let mut cache = TypeCache::new();
     let mut cur = Cursor::new(msg1);
-    let desc = decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache)
-        .expect("decode 0xFD");
+    let desc =
+        decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache).expect("decode 0xFD");
     if let FieldDesc::Structure {
         ref struct_id,
         ref fields,
@@ -544,27 +541,26 @@ fn pvxs_typestore_empty_request_define_then_lookup_LE() {
     // Second message: \xfe\x02\x00 = "look up slot 0x0002".
     let msg2: &[u8] = b"\xfe\x02\x00";
     let mut cur = Cursor::new(msg2);
-    let desc2 = decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache)
-        .expect("decode 0xFE");
+    let desc2 =
+        decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache).expect("decode 0xFE");
     assert_eq!(format!("{desc2}"), format!("{desc}"));
     assert_eq!(cur.position() as usize, msg2.len());
 }
 
 #[test]
 fn pvxs_typestore_lookup_miss_errors() {
-    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+    use epics_pva_rs::pvdata::encode::{TypeCache, decode_type_desc_cached};
 
     let msg: &[u8] = b"\xfe\x05\x00";
     let mut cache = TypeCache::new();
     let mut cur = Cursor::new(msg);
-    let err =
-        decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache).unwrap_err();
+    let err = decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache).unwrap_err();
     assert!(format!("{err:?}").contains("typecache miss"));
 }
 
 #[test]
 fn pvxs_typestore_be_byte_order_for_key() {
-    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+    use epics_pva_rs::pvdata::encode::{TypeCache, decode_type_desc_cached};
 
     // Big-endian key: 0xFD 0x00 0x07 ... means slot 0x0007.
     let msg: Vec<u8> = vec![0xFD, 0x00, 0x07, 0x80, 0x00, 0x00];
@@ -576,7 +572,7 @@ fn pvxs_typestore_be_byte_order_for_key() {
 
 #[test]
 fn pvxs_typestore_define_then_lookup_in_same_buffer() {
-    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+    use epics_pva_rs::pvdata::encode::{TypeCache, decode_type_desc_cached};
 
     // Concatenate define + lookup in one stream.
     let mut combined = Vec::new();
@@ -629,8 +625,8 @@ fn pvxs_bad_field_name_round_trips() {
     // + size(8) "in-valid" + 0x26 (UInt scalar)
     let wire: &[u8] = b"\x80\x00\x01\x08in-valid\x26";
     let mut cur = Cursor::new(wire);
-    let desc = epics_pva_rs::pvdata::encode::decode_type_desc(&mut cur, ByteOrder::Big)
-        .expect("decode");
+    let desc =
+        epics_pva_rs::pvdata::encode::decode_type_desc(&mut cur, ByteOrder::Big).expect("decode");
     if let FieldDesc::Structure {
         ref struct_id,
         ref fields,
@@ -657,7 +653,10 @@ fn time_t_desc() -> FieldDesc {
     FieldDesc::Structure {
         struct_id: "time_t".into(),
         fields: vec![
-            ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+            (
+                "secondsPastEpoch".into(),
+                FieldDesc::Scalar(ScalarType::Long),
+            ),
             ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
             ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
         ],
@@ -670,14 +669,10 @@ fn time_t_value(seconds: i64) -> PvField {
         "secondsPastEpoch".into(),
         PvField::Scalar(ScalarValue::Long(seconds)),
     ));
-    s.fields.push((
-        "nanoseconds".into(),
-        PvField::Scalar(ScalarValue::Int(0)),
-    ));
-    s.fields.push((
-        "userTag".into(),
-        PvField::Scalar(ScalarValue::Int(0)),
-    ));
+    s.fields
+        .push(("nanoseconds".into(), PvField::Scalar(ScalarValue::Int(0))));
+    s.fields
+        .push(("userTag".into(), PvField::Scalar(ScalarValue::Int(0))));
     PvField::Structure(s)
 }
 
@@ -701,8 +696,7 @@ fn pvxs_partial_xcode_time_t_full_value() {
     let value = time_t_value(0x10203040);
     let mut buf = Vec::new();
     encode_pv_field(&value, &desc, ByteOrder::Big, &mut buf);
-    let expected: &[u8] =
-        b"\x00\x00\x00\x00\x10\x20\x30\x40\x00\x00\x00\x00\x00\x00\x00\x00";
+    let expected: &[u8] = b"\x00\x00\x00\x00\x10\x20\x30\x40\x00\x00\x00\x00\x00\x00\x00\x00";
     assert_eq!(buf, expected);
 }
 
@@ -762,8 +756,7 @@ fn struct_with_array_value(scalar_type: ScalarType) -> FieldDesc {
 
 fn struct_with_array_value_filled(items: Vec<ScalarValue>) -> PvField {
     let mut s = PvStructure::new("");
-    s.fields
-        .push(("value".into(), PvField::ScalarArray(items)));
+    s.fields.push(("value".into(), PvField::ScalarArray(items)));
     PvField::Structure(s)
 }
 
@@ -805,16 +798,16 @@ fn pvxs_array_uint32_empty() {
     // pvxs: testArrayXCodeT<uint32_t>("\x01\x02\x00", {});
     let wire = encode_array_valid(ScalarType::UInt, vec![]);
     assert_eq!(wire, b"\x01\x02\x00");
-    assert_eq!(decode_array_valid(ScalarType::UInt, &wire), Vec::<ScalarValue>::new());
+    assert_eq!(
+        decode_array_valid(ScalarType::UInt, &wire),
+        Vec::<ScalarValue>::new()
+    );
 }
 
 #[test]
 fn pvxs_array_uint32_single() {
     // pvxs: "\x01\x02\x01\x12\x34\x56\x78", {0x12345678}
-    let wire = encode_array_valid(
-        ScalarType::UInt,
-        vec![ScalarValue::UInt(0x12345678)],
-    );
+    let wire = encode_array_valid(ScalarType::UInt, vec![ScalarValue::UInt(0x12345678)]);
     assert_eq!(wire, b"\x01\x02\x01\x12\x34\x56\x78");
     let decoded = decode_array_valid(ScalarType::UInt, &wire);
     assert_eq!(decoded, vec![ScalarValue::UInt(0x12345678)]);
@@ -838,10 +831,7 @@ fn pvxs_array_uint16_two_values() {
 #[test]
 fn pvxs_array_double_one_point_zero() {
     // pvxs: testArrayXCodeT<double>("\x01\x02\x01?\xf0\x00\x00\x00\x00\x00\x00", {1.0});
-    let wire = encode_array_valid(
-        ScalarType::Double,
-        vec![ScalarValue::Double(1.0)],
-    );
+    let wire = encode_array_valid(ScalarType::Double, vec![ScalarValue::Double(1.0)]);
     let mut expected = Vec::new();
     expected.extend_from_slice(b"\x01\x02\x01");
     expected.extend_from_slice(&1.0_f64.to_be_bytes());
@@ -900,9 +890,7 @@ fn pvxs_partial_decode_value_only_keeps_alarm_default() {
         }
         // alarm sub-structure must default-initialise.
         if let Some(PvField::Structure(alarm)) = s.get_field("alarm") {
-            if let Some(PvField::Scalar(ScalarValue::Int(sev))) =
-                alarm.get_field("severity")
-            {
+            if let Some(PvField::Scalar(ScalarValue::Int(sev))) = alarm.get_field("severity") {
                 assert_eq!(*sev, 0);
             }
         }

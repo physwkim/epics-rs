@@ -227,6 +227,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn parse_scalar() {
         assert_eq!(
             ScalarValue::parse(ScalarType::Double, "3.14").unwrap(),

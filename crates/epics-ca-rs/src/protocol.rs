@@ -131,7 +131,10 @@ pub const fn eca_severity(status: u32) -> u32 {
 /// Human-readable text for an ECA status, mirroring libca `ca_message`.
 pub fn eca_message(status: u32) -> &'static str {
     let msg_no = eca_msg_no(status) as usize;
-    ECA_MESSAGE_TEXT.get(msg_no).copied().unwrap_or("Unknown ECA status")
+    ECA_MESSAGE_TEXT
+        .get(msg_no)
+        .copied()
+        .unwrap_or("Unknown ECA status")
 }
 
 /// Strings copied verbatim from `epics-base/modules/ca/src/client/access.cpp`

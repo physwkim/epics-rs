@@ -87,7 +87,7 @@ pub fn spawn_softioc(db_content: &str) -> Option<ManagedIoc> {
     let tcp_port = free_tcp_port();
 
     let mut cmd = Command::new("softIoc");
-    cmd.arg("-S")  // No interactive shell — keeps softIoc happy without a TTY
+    cmd.arg("-S") // No interactive shell — keeps softIoc happy without a TTY
         .arg("-d")
         .arg(&db_path)
         .env("EPICS_CAS_INTF_ADDR_LIST", "127.0.0.1")

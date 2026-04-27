@@ -7,14 +7,14 @@
 #![cfg(feature = "discovery")]
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::sync::mpsc;
 
-use super::{Backend, DiscoveryEvent, CA_SERVICE_TYPE};
+use super::{Backend, CA_SERVICE_TYPE, DiscoveryEvent};
 
 /// Suffix appended to `CA_SERVICE_TYPE` for mDNS browse/announce.
 /// `mdns-sd` requires the trailing `.local.` for link-local domain.
@@ -27,6 +27,7 @@ const MDNS_TYPE: &str = "_epics-ca._tcp.local.";
 /// snapshot (for `discover()`) and a subscriber channel (for
 /// `subscribe()`).
 pub struct MdnsBackend {
+    #[allow(dead_code)]
     daemon: ServiceDaemon,
     snapshot: Arc<Mutex<Vec<SocketAddr>>>,
     event_rx: Mutex<Option<mpsc::UnboundedReceiver<DiscoveryEvent>>>,

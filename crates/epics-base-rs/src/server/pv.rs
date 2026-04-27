@@ -80,7 +80,10 @@ impl ProcessVariable {
         subs.retain(|sub| !sub.tx.is_closed());
         for sub in subs.iter() {
             let snapshot = Snapshot::new(value.clone(), 0, 0, crate::runtime::time::now_wall());
-            let event = MonitorEvent { snapshot, origin: 0 };
+            let event = MonitorEvent {
+                snapshot,
+                origin: 0,
+            };
             if sub.tx.try_send(event.clone()).is_err() {
                 // Queue full — overwrite any prior pending overflow with
                 // the newest event. The consumer will pick it up via

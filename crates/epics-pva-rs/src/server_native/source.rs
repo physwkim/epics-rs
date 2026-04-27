@@ -101,11 +101,7 @@ pub trait ChannelSourceObj: Send + Sync {
         request_desc: FieldDesc,
         request_value: PvField,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send + 'a>,
     >;
 }
 
@@ -137,8 +133,7 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
         &'a self,
         name: &'a str,
         value: PvField,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(<Self as ChannelSource>::put_value(self, name, value))
     }
     fn is_writable<'a>(
@@ -161,11 +156,7 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
         request_desc: FieldDesc,
         request_value: PvField,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send + 'a>,
     > {
         Box::pin(<Self as ChannelSource>::rpc(
             self,

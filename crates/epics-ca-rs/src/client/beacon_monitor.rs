@@ -47,6 +47,7 @@ pub(crate) async fn run_beacon_monitor(coord_tx: mpsc::UnboundedSender<CoordRequ
 /// verified for the same (server, beacon_id) within the
 /// `max_age_secs` window.
 #[cfg(feature = "cap-tokens")]
+#[allow(dead_code)]
 pub(crate) async fn run_beacon_monitor_with_verifier(
     coord_tx: mpsc::UnboundedSender<CoordRequest>,
     verifier: std::sync::Arc<crate::server::signed_beacon::SignedBeaconVerifier>,
@@ -150,8 +151,7 @@ async fn run_beacon_monitor_inner(
             // entries every iteration to keep the map bounded.
             #[cfg(feature = "cap-tokens")]
             if let Some(ref v) = verifier {
-                let max_age =
-                    std::time::Duration::from_secs(v.max_age_secs.max(1));
+                let max_age = std::time::Duration::from_secs(v.max_age_secs.max(1));
                 let now = std::time::Instant::now();
                 verified_tuples.retain(|_, t| now.duration_since(*t) <= max_age);
                 let key = (hdr.available, hdr.count, hdr.cid);

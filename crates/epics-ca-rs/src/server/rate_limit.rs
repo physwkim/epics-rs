@@ -14,7 +14,9 @@
 //! atomic load + one branch when rate limiting is disabled.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 /// Token bucket. `capacity` is the max burst; `refill_per_sec` is the
 /// long-term sustainable rate. Both are configured at construction
@@ -54,6 +56,7 @@ impl RateLimiter {
     /// Try to draw one token. Returns `Ok(())` when a token was
     /// available (or rate limiting is disabled), `Err(())` when the
     /// bucket is empty.
+    #[allow(clippy::result_unit_err)]
     pub fn try_acquire(&self) -> Result<(), ()> {
         if !self.enabled() {
             return Ok(());
@@ -122,7 +125,7 @@ impl RateLimiter {
 
 /// Configuration loaded from the environment. The defaults disable
 /// rate limiting.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RateLimitConfig {
     /// Steady-state rate (msgs/sec). Zero disables.
     pub msgs_per_sec: u64,
@@ -133,16 +136,6 @@ pub struct RateLimitConfig {
     pub strike_threshold: u32,
 }
 
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            msgs_per_sec: 0,
-            burst: 0,
-            strike_threshold: 0,
-        }
-    }
-}
-
 impl RateLimitConfig {
     pub fn from_env() -> Self {
         let msgs_per_sec = epics_base_rs::runtime::env::get("EPICS_CAS_RATE_LIMIT_MSGS_PER_SEC")
@@ -150,7 +143,11 @@ impl RateLimitConfig {
             .unwrap_or(0);
         let burst = epics_base_rs::runtime::env::get("EPICS_CAS_RATE_LIMIT_BURST")
             .and_then(|s| s.parse().ok())
-            .unwrap_or(if msgs_per_sec > 0 { msgs_per_sec * 4 } else { 0 });
+            .unwrap_or(if msgs_per_sec > 0 {
+                msgs_per_sec * 4
+            } else {
+                0
+            });
         let strike_threshold = epics_base_rs::runtime::env::get("EPICS_CAS_RATE_LIMIT_STRIKES")
             .and_then(|s| s.parse().ok())
             .unwrap_or(100);

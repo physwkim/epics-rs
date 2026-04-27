@@ -57,9 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let host = match args.host {
         Some(h) => h,
-        None => std::env::var("EPICS_CAS_INTROSPECTION_ADDR").map_err(|_| {
-            "no --host and EPICS_CAS_INTROSPECTION_ADDR is unset"
-        })?,
+        None => std::env::var("EPICS_CAS_INTROSPECTION_ADDR")
+            .map_err(|_| "no --host and EPICS_CAS_INTROSPECTION_ADDR is unset")?,
     };
     let (method, path) = match args.cmd {
         Cmd::Healthz => ("GET", "/healthz"),

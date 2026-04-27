@@ -38,11 +38,7 @@ fn which(name: &str) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 /// Start the C softIoc with one PV. Returns child + port. softIoc
@@ -94,11 +90,7 @@ fn run_caget(port: u16, pv: &str) -> Option<String> {
     let mut parts = stdout.split_whitespace();
     let _pv = parts.next();
     let value = parts.collect::<Vec<_>>().join(" ");
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 /// Run caput against the given port. Returns success.
@@ -122,6 +114,7 @@ fn run_caput(port: u16, pv: &str, value: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(dead_code)]
 trait DefaultExt {
     fn unwrap_or_default(self) -> String;
 }
@@ -147,6 +140,7 @@ fn free_port_pair() -> (u16, u16) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
+#[allow(clippy::approx_constant)]
 async fn caget_double_matches_libca() {
     let Some(_) = libca_paths() else {
         eprintln!("skipping: libca not on PATH");

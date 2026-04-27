@@ -25,12 +25,10 @@
 
 use std::io::Cursor;
 
-use super::{
-    FieldDesc, PvField, PvStructure, ScalarType, ScalarValue, UnionItem, VariantValue,
-};
+use super::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue, UnionItem, VariantValue};
 use crate::proto::{
-    decode_size, decode_string, encode_size_into, encode_string_into, ByteOrder, DecodeError,
-    ReadExt, WriteExt,
+    ByteOrder, DecodeError, ReadExt, WriteExt, decode_size, decode_string, encode_size_into,
+    encode_string_into,
 };
 
 const TAG_STRUCTURE: u8 = 0x80;
@@ -373,15 +371,6 @@ pub fn decode_type_desc_cached(
     }
 }
 
-fn decode_structure_body(
-    cur: &mut Cursor<&[u8]>,
-    order: ByteOrder,
-    is_array: bool,
-) -> Result<FieldDesc, DecodeError> {
-    let mut empty = TypeCache::new();
-    decode_structure_body_cached(cur, order, is_array, &mut empty)
-}
-
 fn decode_structure_body_cached(
     cur: &mut Cursor<&[u8]>,
     order: ByteOrder,
@@ -401,15 +390,6 @@ fn decode_structure_body_cached(
     } else {
         FieldDesc::Structure { struct_id, fields }
     })
-}
-
-fn decode_union_body(
-    cur: &mut Cursor<&[u8]>,
-    order: ByteOrder,
-    is_array: bool,
-) -> Result<FieldDesc, DecodeError> {
-    let mut empty = TypeCache::new();
-    decode_union_body_cached(cur, order, is_array, &mut empty)
 }
 
 fn decode_union_body_cached(
@@ -475,9 +455,7 @@ pub fn decode_scalar_value(
         ScalarType::ULong => ScalarValue::ULong(cur.get_u64(order)?),
         ScalarType::Float => ScalarValue::Float(cur.get_f32(order)?),
         ScalarType::Double => ScalarValue::Double(cur.get_f64(order)?),
-        ScalarType::String => {
-            ScalarValue::String(decode_string(cur, order)?.unwrap_or_default())
-        }
+        ScalarType::String => ScalarValue::String(decode_string(cur, order)?.unwrap_or_default()),
     })
 }
 
@@ -515,7 +493,12 @@ pub fn encode_pv_field(value: &PvField, desc: &FieldDesc, order: ByteOrder, out:
                 encode_pv_field(&PvField::Structure(s.clone()), &element_desc, order, out);
             }
         }
-        (FieldDesc::Union { variants, .. }, PvField::Union { selector, value, .. }) => {
+        (
+            FieldDesc::Union { variants, .. },
+            PvField::Union {
+                selector, value, ..
+            },
+        ) => {
             // Union: selector (Size) followed by the chosen variant's value.
             // -1 → null marker (0xFF).
             if *selector < 0 {
@@ -953,6 +936,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn scalar_value_round_trip() {
         for v in [
             ScalarValue::Boolean(true),
@@ -990,7 +974,10 @@ mod tests {
         let desc = FieldDesc::Union {
             struct_id: String::new(),
             variants: vec![
-                ("doubleValue".into(), FieldDesc::ScalarArray(ScalarType::Double)),
+                (
+                    "doubleValue".into(),
+                    FieldDesc::ScalarArray(ScalarType::Double),
+                ),
                 ("intValue".into(), FieldDesc::ScalarArray(ScalarType::Int)),
             ],
         };
@@ -1029,10 +1016,7 @@ mod tests {
         let mut alarm = PvStructure::new("alarm_t");
         alarm.set("severity", PvField::Scalar(ScalarValue::Int(0)));
         alarm.set("status", PvField::Scalar(ScalarValue::Int(0)));
-        alarm.set(
-            "message",
-            PvField::Scalar(ScalarValue::String("OK".into())),
-        );
+        alarm.set("message", PvField::Scalar(ScalarValue::String("OK".into())));
         s.set("alarm", PvField::Structure(alarm));
 
         let value = PvField::Structure(s);

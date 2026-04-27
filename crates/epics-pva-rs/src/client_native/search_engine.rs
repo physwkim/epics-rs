@@ -27,13 +27,11 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::codec::PvaCodec;
 use crate::error::{PvaError, PvaResult};
-use crate::proto::{
-    decode_size, decode_string, ip_from_bytes, ByteOrder, Command, PvaHeader, ReadExt,
-};
+use crate::proto::{Command, PvaHeader, ReadExt, decode_size, decode_string, ip_from_bytes};
 
 use super::beacon_throttle::BeaconTracker;
 use super::decode::{decode_search_response, try_parse_frame};
@@ -64,10 +62,7 @@ pub enum SearchCommand {
     /// Notify the engine that we observed a beacon — used by external code
     /// (e.g. when running an embedded server in the same process) to feed
     /// beacons into the throttle without binding the multicast port.
-    BeaconObserved {
-        server: SocketAddr,
-        guid: [u8; 12],
-    },
+    BeaconObserved { server: SocketAddr, guid: [u8; 12] },
     /// Subscribe to discovery events. The returned receiver yields a
     /// `Discovered` for every beacon that observation logic regards as a
     /// new server (first-seen GUID) or a re-observed-after-restart GUID.
@@ -81,10 +76,7 @@ pub enum SearchCommand {
 pub enum Discovered {
     /// A beacon arrived for a (server, guid) pair we hadn't seen before,
     /// or a known server reported a different GUID (i.e. restarted).
-    Online {
-        server: SocketAddr,
-        guid: [u8; 12],
-    },
+    Online { server: SocketAddr, guid: [u8; 12] },
     // Reserved for future expansion: pvxs has Discovered::Timeout when
     // a server stops emitting beacons. We don't track that yet.
 }

@@ -13,7 +13,6 @@ use tokio::sync::{RwLock, mpsc};
 
 use epics_pva_rs::pvdata::{PvField, PvStructure};
 
-use super::group::AnyMonitor;
 use super::provider::{AnyChannel, BridgeProvider, Channel, ChannelProvider, PvaMonitor};
 
 /// Handle for a PVA plugin PV: latest snapshot + subscriber list.
@@ -110,7 +109,6 @@ impl QsrvPvStore {
     }
 }
 
-
 // ── ChannelSource impl (native PvAccess server) ──────────────────────────
 //
 // In addition to the legacy spvirit `PvStore` impl above, expose the same
@@ -157,10 +155,7 @@ impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
         }
     }
 
-    fn get_value(
-        &self,
-        name: &str,
-    ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+    fn get_value(&self, name: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
         let name_owned = name.to_string();
         async move {
             let channel = self.channel(&name_owned).await?;
@@ -188,11 +183,7 @@ impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
                 .ok_or_else(|| format!("PV not found: {name_owned}"))?;
             let pv = match value {
                 PvField::Structure(s) => s,
-                other => {
-                    return Err(format!(
-                        "qsrv PUT expects a structure value, got {other}"
-                    ))
-                }
+                other => return Err(format!("qsrv PUT expects a structure value, got {other}")),
             };
             channel.put(&pv).await.map_err(|e| e.to_string())
         }
@@ -312,6 +303,7 @@ mod tests {
     #[tokio::test]
     async fn has_pv_falls_through_to_provider() {
         use epics_base_rs::server::database::PvDatabase;
+        use epics_pva_rs::server_native::ChannelSource;
         let db = Arc::new(PvDatabase::new());
         db.add_pv("TEST:X", epics_base_rs::types::EpicsValue::Double(1.0))
             .await;

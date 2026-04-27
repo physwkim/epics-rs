@@ -72,12 +72,8 @@ fn build_mtls_configs_succeeds() {
 
     // Server requires clients with certs from the client CA pool.
     let client_ca_roots = tls::load_root_store(client_cert_file.path()).unwrap();
-    let _server = tls::TlsConfig::server_mtls_from_pem(
-        server_chain,
-        server_key,
-        client_ca_roots,
-    )
-    .expect("server mtls config");
+    let _server = tls::TlsConfig::server_mtls_from_pem(server_chain, server_key, client_ca_roots)
+        .expect("server mtls config");
 
     // Client trusts the server CA pool and presents its own cert.
     let server_ca_roots = tls::load_root_store(server_cert_file.path()).unwrap();

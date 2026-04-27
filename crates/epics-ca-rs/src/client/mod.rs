@@ -346,10 +346,7 @@ impl CaClient {
         // EPICS_CA_DISCOVERY env var. Custom `extra_backends` are then
         // appended. Results are merged with addr_list (deduped by
         // SocketAddr).
-        let discovery_cfg = config
-            .discovery
-            .clone()
-            .or_else(crate::discovery::from_env);
+        let discovery_cfg = config.discovery.clone().or_else(crate::discovery::from_env);
         let mut backends: Vec<Box<dyn crate::discovery::Backend>> = match discovery_cfg {
             Some(cfg) => crate::discovery::build_backends(cfg),
             None => Vec::new(),
@@ -365,8 +362,11 @@ impl CaClient {
                 }
             }
             if !discovered.is_empty() {
-                tracing::info!(count = discovered.len(),
-                    "discovered IOCs via service discovery: {:?}", discovered);
+                tracing::info!(
+                    count = discovered.len(),
+                    "discovered IOCs via service discovery: {:?}",
+                    discovered
+                );
             }
             for addr in discovered {
                 if !addr_list.contains(&addr) {
@@ -1568,7 +1568,8 @@ fn handle_disconnect(
             affected = affected_cids.len(),
             "disconnect: scheduling reconnect for affected channels"
         );
-        metrics::counter!("ca_client_disconnections_total", "server" => server_addr.to_string()).increment(1);
+        metrics::counter!("ca_client_disconnections_total", "server" => server_addr.to_string())
+            .increment(1);
         metrics::gauge!("ca_client_channels_connected").decrement(affected_cids.len() as f64);
     }
     // Clean up stale server_channels entries so beacon anomaly

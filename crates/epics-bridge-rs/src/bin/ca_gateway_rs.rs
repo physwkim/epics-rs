@@ -106,15 +106,15 @@ struct Args {
 }
 
 #[cfg(feature = "ca-gateway-tls")]
-fn build_tls(args: &Args) -> Result<Option<std::sync::Arc<epics_ca_rs::tls::ServerConfig>>, String> {
+fn build_tls(
+    args: &Args,
+) -> Result<Option<std::sync::Arc<epics_ca_rs::tls::ServerConfig>>, String> {
     use epics_ca_rs::tls::{TlsConfig, load_certs, load_private_key, load_root_store};
     let (cert_path, key_path) = match (&args.tls_cert, &args.tls_key) {
         (Some(c), Some(k)) => (c, k),
         (None, None) => return Ok(None),
         _ => {
-            return Err(
-                "--tls-cert and --tls-key must both be set or both unset".into(),
-            );
+            return Err("--tls-cert and --tls-key must both be set or both unset".into());
         }
     };
     let chain = load_certs(cert_path.to_str().unwrap_or_default())

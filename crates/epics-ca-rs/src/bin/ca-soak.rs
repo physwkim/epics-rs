@@ -101,10 +101,10 @@ async fn main() {
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                if let Some(deadline) = stop_at {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
+                if let Some(deadline) = stop_at
+                    && Instant::now() >= deadline
+                {
+                    break;
                 }
             }
             let _ = pv_for_read; // keep PV name alive for any future logging
@@ -124,10 +124,7 @@ async fn main() {
                 let mut counter: i32 = 0;
                 loop {
                     counter = counter.wrapping_add(1);
-                    match ch_for_write
-                        .put(&EpicsValue::Long(counter))
-                        .await
-                    {
+                    match ch_for_write.put(&EpicsValue::Long(counter)).await {
                         Ok(()) => {
                             writes.fetch_add(1, Ordering::Relaxed);
                         }
@@ -136,10 +133,10 @@ async fn main() {
                         }
                     }
                     tokio::time::sleep(interval).await;
-                    if let Some(deadline) = stop_at {
-                        if Instant::now() >= deadline {
-                            break;
-                        }
+                    if let Some(deadline) = stop_at
+                        && Instant::now() >= deadline
+                    {
+                        break;
                     }
                 }
             }));
@@ -181,10 +178,10 @@ async fn main() {
                     snap.dropped_monitors,
                     snap.beacon_anomalies,
                 );
-                if let Some(deadline) = stop_at {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
+                if let Some(deadline) = stop_at
+                    && Instant::now() >= deadline
+                {
+                    break;
                 }
             }
             _ = &mut interrupted => {

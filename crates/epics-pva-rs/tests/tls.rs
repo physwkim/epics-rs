@@ -7,18 +7,20 @@
 //! acceptor in `server_native::tcp` actually shake hands and exchange
 //! frames.
 
+#![allow(clippy::manual_async_fn)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use epics_pva_rs::auth::{TlsClientConfig, TlsServerConfig};
 use epics_pva_rs::client_native::context::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
-use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
 // Generate a self-signed cert + matching key pair for tests.
 fn generate_self_signed() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
@@ -161,10 +163,8 @@ async fn tls_client_to_tls_server_full_handshake() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Client targeting the TLS server explicitly.
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        tcp,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), tcp);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(server_addr)

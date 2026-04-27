@@ -29,7 +29,9 @@ pub fn ip_from_bytes(addr: &[u8; 16]) -> Option<IpAddr> {
         return None;
     }
     if addr[0..10].iter().all(|&b| b == 0) && addr[10] == 0xFF && addr[11] == 0xFF {
-        return Some(IpAddr::V4(Ipv4Addr::new(addr[12], addr[13], addr[14], addr[15])));
+        return Some(IpAddr::V4(Ipv4Addr::new(
+            addr[12], addr[13], addr[14], addr[15],
+        )));
     }
     Some(IpAddr::V6(Ipv6Addr::from(*addr)))
 }

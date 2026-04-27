@@ -202,7 +202,10 @@ mod tests {
                     FieldDesc::Structure {
                         struct_id: "time_t".into(),
                         fields: vec![
-                            ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+                            (
+                                "secondsPastEpoch".into(),
+                                FieldDesc::Scalar(ScalarType::Long),
+                            ),
                             ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
                             ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
                         ],
@@ -251,7 +254,10 @@ mod tests {
         let u = FieldDesc::Union {
             struct_id: String::new(),
             variants: vec![
-                ("doubleValue".into(), FieldDesc::ScalarArray(ScalarType::Double)),
+                (
+                    "doubleValue".into(),
+                    FieldDesc::ScalarArray(ScalarType::Double),
+                ),
                 ("intValue".into(), FieldDesc::ScalarArray(ScalarType::Int)),
             ],
         };

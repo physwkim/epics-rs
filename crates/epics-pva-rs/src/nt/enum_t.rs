@@ -67,7 +67,8 @@ impl NTEnum {
         value
             .fields
             .push(("choices".into(), PvField::ScalarArray(choices_arr)));
-        root.fields.push(("value".into(), PvField::Structure(value)));
+        root.fields
+            .push(("value".into(), PvField::Structure(value)));
         root.fields.push(("alarm".into(), alarm_default()));
         root.fields.push(("timeStamp".into(), time_default()));
         let mut display = PvStructure::new("");
@@ -103,9 +104,7 @@ mod tests {
 
     #[test]
     fn nt_enum_with_choices_populates_value() {
-        let v = NTEnum::new()
-            .with_choices(["off", "on", "fault"])
-            .create();
+        let v = NTEnum::new().with_choices(["off", "on", "fault"]).create();
         if let PvField::Structure(root) = v {
             if let Some(PvField::Structure(value)) = root.get_field("value") {
                 if let Some(PvField::ScalarArray(arr)) = value.get_field("choices") {

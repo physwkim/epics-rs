@@ -45,9 +45,7 @@ pub fn init_tracing() -> bool {
 ///
 /// Returns the exporter's drop guard. Drop it to stop the listener.
 #[cfg(feature = "observability")]
-pub fn serve_prometheus(
-    addr: SocketAddr,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn serve_prometheus(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     PrometheusBuilder::new()
         .with_http_listener(addr)
         .install()?;
@@ -64,9 +62,7 @@ pub fn init_tracing() -> bool {
 
 /// Stub when the feature is disabled.
 #[cfg(not(feature = "observability"))]
-pub fn serve_prometheus(
-    _addr: SocketAddr,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn serve_prometheus(_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("epics-ca-rs built without `observability` feature".into())
 }
 
@@ -96,7 +92,10 @@ pub fn init_otlp(
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
         .with_endpoint(endpoint);
-    let resource = Resource::new(vec![KeyValue::new("service.name", service_name.to_string())]);
+    let resource = Resource::new(vec![KeyValue::new(
+        "service.name",
+        service_name.to_string(),
+    )]);
     let tracer_provider = opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(exporter)
@@ -131,20 +130,18 @@ pub fn init_otlp(
 /// configured (so callers can chain into the regular `init_tracing`
 /// fallback).
 #[cfg(feature = "otlp")]
-pub fn init_otlp_from_env(
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+pub fn init_otlp_from_env() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let endpoint = match std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(false),
     };
-    let service_name = std::env::var("OTEL_SERVICE_NAME")
-        .unwrap_or_else(|_| "epics-ca-rs".to_string());
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "epics-ca-rs".to_string());
     init_otlp(&endpoint, &service_name)?;
     Ok(true)
 }
 
 #[cfg(not(feature = "otlp"))]
-pub fn init_otlp_from_env(
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+pub fn init_otlp_from_env() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(false)
 }

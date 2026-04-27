@@ -86,6 +86,7 @@ impl CircuitBreaker {
         }
     }
 
+    #[allow(dead_code)]
     pub fn state(&self) -> BreakerState {
         self.state
     }
@@ -191,6 +192,7 @@ impl CircuitBreakerRegistry {
         }
     }
 
+    #[allow(dead_code)]
     pub fn states(&self) -> impl Iterator<Item = (SocketAddr, BreakerState)> + '_ {
         self.breakers.iter().map(|(addr, b)| (*addr, b.state))
     }

@@ -69,11 +69,10 @@ impl NTURI {
         }
         let mut query = PvStructure::new("");
         for a in &self.args {
-            query
-                .fields
-                .push((a.name.clone(), default_for(&a.desc)));
+            query.fields.push((a.name.clone(), default_for(&a.desc)));
         }
-        root.fields.push(("query".into(), PvField::Structure(query)));
+        root.fields
+            .push(("query".into(), PvField::Structure(query)));
         PvField::Structure(root)
     }
 }
@@ -88,12 +87,10 @@ fn default_for(desc: &FieldDesc) -> PvField {
     match desc {
         FieldDesc::Scalar(t) => PvField::Scalar(default_scalar(*t)),
         FieldDesc::ScalarArray(_) => PvField::ScalarArray(Vec::new()),
-        FieldDesc::Variant => {
-            PvField::Variant(Box::new(crate::pvdata::VariantValue {
-                desc: None,
-                value: PvField::Null,
-            }))
-        }
+        FieldDesc::Variant => PvField::Variant(Box::new(crate::pvdata::VariantValue {
+            desc: None,
+            value: PvField::Null,
+        })),
         _ => PvField::Null,
     }
 }

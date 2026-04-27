@@ -199,10 +199,10 @@ async fn rust_client_handles_softioc_restart() {
     // Reconnection should complete within ~10s (reconnect lane backoff).
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if let Ok((_, value)) = ch.get_with_timeout(Duration::from_secs(2)).await {
-                if (value.to_f64().unwrap_or(0.0) - 42.0).abs() < 0.001 {
-                    return;
-                }
+            if let Ok((_, value)) = ch.get_with_timeout(Duration::from_secs(2)).await
+                && (value.to_f64().unwrap_or(0.0) - 42.0).abs() < 0.001
+            {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

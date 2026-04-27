@@ -48,9 +48,9 @@ mod inner {
         let args = Args::parse();
 
         observability::init_tracing();
-        if let Err(e) = observability::serve_prometheus(
-            args.metrics_addr.parse().expect("metrics addr"),
-        ) {
+        if let Err(e) =
+            observability::serve_prometheus(args.metrics_addr.parse().expect("metrics addr"))
+        {
             tracing::error!("failed to start prometheus exporter: {e}");
             std::process::exit(1);
         }
@@ -67,15 +67,20 @@ mod inner {
         let mut tasks = Vec::new();
         for pv_name in args.pvs.clone() {
             let ch = client.create_channel(&pv_name);
-            ch.wait_connected(Duration::from_secs(10)).await.expect("connect");
+            ch.wait_connected(Duration::from_secs(10))
+                .await
+                .expect("connect");
             let mut mon = ch.subscribe().await.expect("subscribe");
-            tasks.push(tokio::spawn(async move {
-                while let Some(_) = mon.recv().await {}
-            }));
+            tasks.push(tokio::spawn(
+                async move { while mon.recv().await.is_some() {} },
+            ));
 
             if args.writes_per_sec > 0 {
                 let writer_ch = client.create_channel(&pv_name);
-                writer_ch.wait_connected(Duration::from_secs(10)).await.expect("writer");
+                writer_ch
+                    .wait_connected(Duration::from_secs(10))
+                    .await
+                    .expect("writer");
                 let writes = writes_done.clone();
                 let interval = Duration::from_secs_f64(1.0 / args.writes_per_sec as f64);
                 tasks.push(tokio::spawn(async move {
@@ -86,8 +91,10 @@ mod inner {
                             writes.fetch_add(1, Ordering::Relaxed);
                         }
                         tokio::time::sleep(interval).await;
-                        if let Some(deadline) = stop_at {
-                            if Instant::now() >= deadline { break; }
+                        if let Some(deadline) = stop_at
+                            && Instant::now() >= deadline
+                        {
+                            break;
                         }
                     }
                 }));
@@ -99,7 +106,9 @@ mod inner {
         } else {
             let _ = tokio::signal::ctrl_c().await;
         }
-        for t in &tasks { t.abort(); }
+        for t in &tasks {
+            t.abort();
+        }
         tracing::info!(
             writes = writes_done.load(Ordering::Relaxed),
             "soak complete; final diagnostics:\n{}",

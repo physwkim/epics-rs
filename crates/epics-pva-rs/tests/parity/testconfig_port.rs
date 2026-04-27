@@ -93,9 +93,11 @@ fn pvxs_broadcast_addresses_includes_limited_broadcast() {
     // Even on a host with no usable NIC, list_broadcast_addresses
     // always includes 255.255.255.255 as a fallback.
     let bcasts = env::list_broadcast_addresses(5076);
-    assert!(bcasts.iter().any(|a| {
-        format!("{}", a.ip()) == "255.255.255.255" && a.port() == 5076
-    }));
+    assert!(
+        bcasts
+            .iter()
+            .any(|a| { format!("{}", a.ip()) == "255.255.255.255" && a.port() == 5076 })
+    );
 }
 
 #[test]

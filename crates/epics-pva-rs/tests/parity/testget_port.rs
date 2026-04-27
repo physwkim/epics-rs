@@ -7,16 +7,14 @@
 
 #![cfg(test)]
 
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use epics_pva_rs::client_native::context::PvaClient;
 use epics_pva_rs::nt::NTScalar;
-use epics_pva_rs::server_native::{
-    run_pva_server, PvaServerConfig, SharedPV, SharedSource,
-};
 use epics_pva_rs::pvdata::ScalarType;
+use epics_pva_rs::server_native::{PvaServerConfig, SharedPV, SharedSource, run_pva_server};
 
 static NEXT_PORT: AtomicU16 = AtomicU16::new(34000);
 fn alloc_port_pair() -> (u16, u16) {
@@ -34,7 +32,10 @@ async fn pvxs_connect_onconnect_fires_after_server_start() {
     };
 
     let pv = SharedPV::new();
-    pv.open(NTScalar::new(ScalarType::Int).build(), NTScalar::new(ScalarType::Int).create());
+    pv.open(
+        NTScalar::new(ScalarType::Int).build(),
+        NTScalar::new(ScalarType::Int).create(),
+    );
     let src = Arc::new(SharedSource::new());
     src.add("mailbox", pv);
 
@@ -43,10 +44,8 @@ async fn pvxs_connect_onconnect_fires_after_server_start() {
     });
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(server_addr)

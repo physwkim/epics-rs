@@ -21,11 +21,11 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use tokio::process::{Child, Command as TokioCommand};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use epics_pva_rs::client_native::context::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
-use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
 fn pvxs_home() -> Option<PathBuf> {
     std::env::var("PVXS_HOME").ok().map(PathBuf::from)
@@ -86,10 +86,8 @@ async fn spawn_pvxs_softioc(
         .spawn()
         .unwrap();
     // Wait for TCP listen.
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if std::net::TcpStream::connect(server_addr).is_ok() {
@@ -115,10 +113,8 @@ async fn rust_client_auto_reconnect_to_pvxs_softiocpvx() {
     let (mut child1, dbfile) = spawn_pvxs_softioc(&softioc_bin, db, port, udp).await;
     let _killer1 = ChildKiller(&mut child1);
 
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(server_addr)
@@ -169,10 +165,8 @@ async fn rust_client_monitor_survives_pvxs_restart() {
 
     let (mut child1, _dbfile1) = spawn_pvxs_softioc(&softioc_bin, db, port, udp).await;
 
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(server_addr)
@@ -280,10 +274,8 @@ async fn rust_client_idle_keepalive_with_pvxs() {
     let (mut child, _dbfile) = spawn_pvxs_softioc(&softioc_bin, db, port, udp).await;
     let _killer = ChildKiller(&mut child);
 
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     let client = PvaClient::builder()
         .timeout(Duration::from_secs(3))
         .server_addr(server_addr)
@@ -349,10 +341,7 @@ async fn pvxs_pvxget_against_rust_server_under_burst_load() {
                 })
             }
         }
-        fn get_value(
-            &self,
-            _: &str,
-        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+        fn get_value(&self, _: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
             let n = self.n.clone();
             async move {
                 let mut g = n.lock().await;

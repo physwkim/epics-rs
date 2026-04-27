@@ -150,10 +150,7 @@ pub async fn run_introspection(
     }
 }
 
-async fn handle_request(
-    stream: TcpStream,
-    state: Arc<IntrospectionState>,
-) -> std::io::Result<()> {
+async fn handle_request(stream: TcpStream, state: Arc<IntrospectionState>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).await? == 0 {
@@ -179,7 +176,9 @@ async fn handle_request(
         ("GET", "/clients") => (200, render_clients(&state).await),
         ("GET", "/queues") => (200, render_queues(&state)),
         ("POST", "/drain") => {
-            state.drain.store(true, std::sync::atomic::Ordering::Release);
+            state
+                .drain
+                .store(true, std::sync::atomic::Ordering::Release);
             metrics::counter!("ca_server_drain_total").increment(1);
             (200, "{\"drain\":true}".to_string())
         }
@@ -188,20 +187,14 @@ async fn handle_request(
                 Ok(()) => (200, "{\"reload_acf\":\"ok\"}".to_string()),
                 Err(e) => (500, format!("{{\"error\":\"{}\"}}", escape_json(&e))),
             },
-            None => (
-                501,
-                "{\"error\":\"reload_acf not configured\"}".to_string(),
-            ),
+            None => (501, "{\"error\":\"reload_acf not configured\"}".to_string()),
         },
         ("POST", "/reload-tls") => match &state.reload_tls {
             Some(f) => match f() {
                 Ok(()) => (200, "{\"reload_tls\":\"ok\"}".to_string()),
                 Err(e) => (500, format!("{{\"error\":\"{}\"}}", escape_json(&e))),
             },
-            None => (
-                501,
-                "{\"error\":\"reload_tls not configured\"}".to_string(),
-            ),
+            None => (501, "{\"error\":\"reload_tls not configured\"}".to_string()),
         },
         ("GET", _) | ("POST", _) => (404, "{\"error\":\"not_found\"}".to_string()),
         _ => return write_response(reader.into_inner(), 405, "Method Not Allowed", "").await,

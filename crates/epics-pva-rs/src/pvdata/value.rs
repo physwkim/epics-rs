@@ -160,7 +160,9 @@ impl Value {
             .desc
             .bit_for_path(path)
             .ok_or_else(|| ValueError::NoField(path.into()))?;
-        let target_type = self.scalar_type_at(path).ok_or_else(|| ValueError::NoField(path.into()))?;
+        let target_type = self
+            .scalar_type_at(path)
+            .ok_or_else(|| ValueError::NoField(path.into()))?;
         let new_scalar = v
             .into_scalar(target_type)
             .map_err(|()| ValueError::NoConvert {
@@ -183,7 +185,7 @@ impl Value {
                 continue;
             }
             // copy value (best-effort coercion via ScalarValue passthrough)
-            if let Some(sv) = other.lookup_scalar(&path).ok() {
+            if let Ok(sv) = other.lookup_scalar(&path) {
                 let target = self.scalar_type_at(&path).unwrap_or(ScalarType::String);
                 let coerced = match coerce_scalar(&sv, target) {
                     Some(s) => s,
@@ -206,9 +208,7 @@ impl Value {
     /// Iterate immediate-children paths (depth 1).
     pub fn iter_children(&self) -> Vec<String> {
         match &*self.desc {
-            FieldDesc::Structure { fields, .. } => {
-                fields.iter().map(|(n, _)| n.clone()).collect()
-            }
+            FieldDesc::Structure { fields, .. } => fields.iter().map(|(n, _)| n.clone()).collect(),
             _ => Vec::new(),
         }
     }
@@ -309,12 +309,10 @@ fn default_for(desc: &FieldDesc) -> PvField {
     match desc {
         FieldDesc::Scalar(t) => PvField::Scalar(default_scalar(*t)),
         FieldDesc::ScalarArray(_) => PvField::ScalarArray(Vec::new()),
-        FieldDesc::Variant => {
-            PvField::Variant(Box::new(crate::pvdata::VariantValue {
-                desc: None,
-                value: PvField::Null,
-            }))
-        }
+        FieldDesc::Variant => PvField::Variant(Box::new(crate::pvdata::VariantValue {
+            desc: None,
+            value: PvField::Null,
+        })),
         FieldDesc::VariantArray => PvField::VariantArray(Vec::new()),
         FieldDesc::BoundedString(_) => PvField::Scalar(ScalarValue::String(String::new())),
         FieldDesc::Structure { struct_id, fields } => {
@@ -325,7 +323,10 @@ fn default_for(desc: &FieldDesc) -> PvField {
             PvField::Structure(s)
         }
         FieldDesc::StructureArray { .. } => PvField::StructureArray(Vec::new()),
-        FieldDesc::Union { struct_id, variants } => {
+        FieldDesc::Union {
+            struct_id,
+            variants,
+        } => {
             let _ = struct_id;
             // pvxs default: null union
             let _ = variants;
@@ -441,12 +442,14 @@ fn coerce_scalar(sv: &ScalarValue, target: ScalarType) -> Option<ScalarValue> {
 // ── from/into conversion traits ──────────────────────────────────────────
 
 /// Trait for typed reads via [`Value::get_as`].
+#[allow(clippy::result_unit_err)]
 pub trait FromScalarValue: Sized {
     fn from_scalar(sv: ScalarValue) -> Result<Self, ()>;
 }
 
 /// Trait for typed writes via [`Value::set`]. Implementors convert
 /// themselves into the descriptor's target scalar type.
+#[allow(clippy::result_unit_err)]
 pub trait IntoScalarValue {
     fn into_scalar(self, target: ScalarType) -> Result<ScalarValue, ()>;
 }

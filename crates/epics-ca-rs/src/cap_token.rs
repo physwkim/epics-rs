@@ -111,12 +111,10 @@ impl TokenIssuer {
             exp: now + ttl_secs,
             iss: self.iss_id.clone(),
         };
-        let payload =
-            serde_json::to_vec(&claims).expect("TokenClaims serializes infallibly");
+        let payload = serde_json::to_vec(&claims).expect("TokenClaims serializes infallibly");
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&payload);
         let sig: Signature = self.key.sign(payload_b64.as_bytes());
-        let sig_b64 =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
         format!("cap:{payload_b64}.{sig_b64}")
     }
 
@@ -169,7 +167,9 @@ impl TokenVerifier {
     }
 
     pub fn verify(&self, token: &str) -> Result<TokenClaims, TokenError> {
-        let body = token.strip_prefix("cap:").ok_or(TokenError::MissingPrefix)?;
+        let body = token
+            .strip_prefix("cap:")
+            .ok_or(TokenError::MissingPrefix)?;
         let (payload_b64, sig_b64) = body.split_once('.').ok_or(TokenError::Malformed)?;
         let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(sig_b64)
@@ -183,8 +183,8 @@ impl TokenVerifier {
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_b64)
             .map_err(|e| TokenError::Base64(e.to_string()))?;
-        let claims: TokenClaims = serde_json::from_slice(&payload_bytes)
-            .map_err(|e| TokenError::Json(e.to_string()))?;
+        let claims: TokenClaims =
+            serde_json::from_slice(&payload_bytes).map_err(|e| TokenError::Json(e.to_string()))?;
         let key = self
             .keys
             .get(&claims.iss)

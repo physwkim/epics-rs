@@ -14,7 +14,7 @@ use epics_base_rs::server::scan::ScanScheduler;
 use epics_base_rs::server::{access_security, autosave, iocsh};
 use epics_base_rs::types::EpicsValue;
 
-use crate::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+use crate::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
 use super::native_source::PvDatabaseSource;
 

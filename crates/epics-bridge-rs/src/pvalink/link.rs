@@ -38,6 +38,7 @@ pub struct PvaLink {
     /// Latest received value (INP only — None until first event).
     latest: Arc<Mutex<Option<PvField>>>,
     /// Subscriber channel for record-side notification (INP monitor mode).
+    #[allow(dead_code)]
     notify_tx: Option<mpsc::Sender<PvField>>,
 }
 
@@ -46,9 +47,7 @@ impl PvaLink {
     ///
     /// For INP+monitor links, this also spawns a background monitor task.
     pub async fn open(config: PvaLinkConfig) -> PvaLinkResult<Self> {
-        let client = PvaClient::builder()
-            .timeout(Duration::from_secs(5))
-            .build();
+        let client = PvaClient::builder().timeout(Duration::from_secs(5)).build();
 
         let latest = Arc::new(Mutex::new(None));
         let mut notify_tx = None;
@@ -90,10 +89,10 @@ impl PvaLink {
         if matches!(self.config.direction, LinkDirection::Out) {
             return Err(PvaLinkError::NotReadable);
         }
-        if self.config.monitor {
-            if let Some(v) = self.latest.lock().clone() {
-                return Ok(extract_field(&v, &self.config.field));
-            }
+        if self.config.monitor
+            && let Some(v) = self.latest.lock().clone()
+        {
+            return Ok(extract_field(&v, &self.config.field));
         }
         let result = self.client.pvget_full(&self.config.pv_name).await?;
         Ok(extract_field(&result.value, &self.config.field))
@@ -123,10 +122,7 @@ fn extract_field(root: &PvField, path: &str) -> PvField {
     let mut cursor = root.clone();
     for segment in path.split('.') {
         cursor = match cursor {
-            PvField::Structure(s) => s
-                .get_field(segment)
-                .cloned()
-                .unwrap_or(PvField::Null),
+            PvField::Structure(s) => s.get_field(segment).cloned().unwrap_or(PvField::Null),
             other => return other,
         };
     }
@@ -192,12 +188,10 @@ mod tests {
             .fields
             .push(("severity".into(), PvField::Scalar(ScalarValue::Int(2))));
         let mut root = PvStructure::new("epics:nt/NTScalar:1.0");
-        root.fields.push(("alarm".into(), PvField::Structure(alarm)));
+        root.fields
+            .push(("alarm".into(), PvField::Structure(alarm)));
         let value = extract_field(&PvField::Structure(root), "alarm.severity");
-        assert!(matches!(
-            value,
-            PvField::Scalar(ScalarValue::Int(2))
-        ));
+        assert!(matches!(value, PvField::Scalar(ScalarValue::Int(2))));
     }
 
     #[test]

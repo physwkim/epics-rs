@@ -45,10 +45,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RecordedEvent::ClientConnect { .. } => "client_connect",
             RecordedEvent::ClientDisconnect { .. } => "client_disconnect",
         };
-        if let Some(ref f) = filter {
-            if f != kind {
-                return;
-            }
+        if let Some(ref f) = filter
+            && f != kind
+        {
+            return;
         }
         println!("{}", ev.to_json());
     })

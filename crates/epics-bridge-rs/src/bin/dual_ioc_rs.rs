@@ -209,10 +209,7 @@ async fn main() -> ExitCode {
     }
 }
 
-fn format_join(
-    which: &str,
-    r: Result<CaResult<()>, tokio::task::JoinError>,
-) -> Result<(), String> {
+fn format_join(which: &str, r: Result<CaResult<()>, tokio::task::JoinError>) -> Result<(), String> {
     match r {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(format!("{which} server exited: {e}")),

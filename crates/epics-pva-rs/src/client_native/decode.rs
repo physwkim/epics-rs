@@ -9,10 +9,9 @@ use std::net::SocketAddr;
 
 use crate::error::{PvaError, PvaResult};
 use crate::proto::{
-    decode_size, decode_string, ip_from_bytes, BitSet, ByteOrder, Command, ControlCommand,
-    HeaderFlags, PvaHeader, ReadExt, Status,
+    BitSet, ByteOrder, Command, ControlCommand, HeaderFlags, PvaHeader, ReadExt, Status,
+    decode_size, decode_string, ip_from_bytes,
 };
-use crate::pvdata::encode::{decode_field_desc, decode_pv_field};
 use crate::pvdata::{FieldDesc, PvField};
 
 /// One framed PVA message, with header already parsed and payload sliced out.
@@ -81,18 +80,28 @@ pub fn decode_search_response(frame: &Frame) -> PvaResult<SearchResponse> {
     let order = frame.order();
     let mut cur = frame.cursor();
     let mut guid = [0u8; 12];
-    let bytes = cur.get_bytes(12).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let bytes = cur
+        .get_bytes(12)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     guid.copy_from_slice(&bytes);
-    let seq = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let addr_bytes = cur.get_bytes(16).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let seq = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let addr_bytes = cur
+        .get_bytes(16)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let mut addr = [0u8; 16];
     addr.copy_from_slice(&addr_bytes);
-    let port = cur.get_u16(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let port = cur
+        .get_u16(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let protocol = decode_string(&mut cur, order)
         .map_err(|e| PvaError::Decode(e.to_string()))?
         .unwrap_or_default();
     let found = cur.get_u8().map_err(|e| PvaError::Decode(e.to_string()))? != 0;
-    let count = cur.get_u16(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let count = cur
+        .get_u16(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let mut cids = Vec::with_capacity(count as usize);
     for _ in 0..count {
         cids.push(
@@ -101,9 +110,8 @@ pub fn decode_search_response(frame: &Frame) -> PvaResult<SearchResponse> {
         );
     }
 
-    let ip = ip_from_bytes(&addr).ok_or_else(|| {
-        PvaError::Protocol("search response unspecified address".to_string())
-    })?;
+    let ip = ip_from_bytes(&addr)
+        .ok_or_else(|| PvaError::Protocol("search response unspecified address".to_string()))?;
     let server_addr = SocketAddr::new(ip, port);
 
     Ok(SearchResponse {
@@ -128,7 +136,9 @@ pub struct ConnectionValidationRequest {
     pub auth_methods: Vec<String>,
 }
 
-pub fn decode_connection_validation_request(frame: &Frame) -> PvaResult<ConnectionValidationRequest> {
+pub fn decode_connection_validation_request(
+    frame: &Frame,
+) -> PvaResult<ConnectionValidationRequest> {
     if frame.header.command != Command::ConnectionValidation.code() {
         return Err(PvaError::Protocol(format!(
             "expected ConnectionValidation (1), got {}",
@@ -137,10 +147,12 @@ pub fn decode_connection_validation_request(frame: &Frame) -> PvaResult<Connecti
     }
     let order = frame.order();
     let mut cur = frame.cursor();
-    let server_buffer_size =
-        cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let server_registry_size =
-        cur.get_u16(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let server_buffer_size = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let server_registry_size = cur
+        .get_u16(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let count = decode_size(&mut cur, order)
         .map_err(|e| PvaError::Decode(e.to_string()))?
         .unwrap_or(0) as usize;
@@ -192,8 +204,12 @@ pub fn decode_create_channel_response(frame: &Frame) -> PvaResult<CreateChannelR
     }
     let order = frame.order();
     let mut cur = frame.cursor();
-    let cid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let sid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let cid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let sid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let status = Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
     Ok(CreateChannelResponse { cid, sid, status })
 }
@@ -262,9 +278,8 @@ pub fn decode_op_response_cached(
     introspection: Option<&FieldDesc>,
     type_cache: &mut crate::pvdata::encode::TypeCache,
 ) -> PvaResult<OpResponse> {
-    let cmd = Command::from_code(frame.header.command).ok_or_else(|| {
-        PvaError::Protocol(format!("unknown command {}", frame.header.command))
-    })?;
+    let cmd = Command::from_code(frame.header.command)
+        .ok_or_else(|| PvaError::Protocol(format!("unknown command {}", frame.header.command)))?;
     if !matches!(
         cmd,
         Command::Get | Command::Put | Command::Monitor | Command::Rpc
@@ -281,8 +296,8 @@ pub fn decode_op_response_cached(
 
     if subcmd & 0x08 != 0 {
         // INIT phase
-        let status = Status::decode(&mut cur, order)
-            .map_err(|e| PvaError::Decode(e.to_string()))?;
+        let status =
+            Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
         if !status.is_success() {
             return Ok(OpResponse::Init(OpInitResponse {
                 ioid,
@@ -296,9 +311,8 @@ pub fn decode_op_response_cached(
         // pvxs and pvAccessJava emit `0x80 + structure-body` directly OR
         // `0xFD + key + body` to populate the per-connection cache.
         // `decode_type_desc_cached` handles both.
-        let intro =
-            crate::pvdata::encode::decode_type_desc_cached(&mut cur, order, type_cache)
-                .map_err(|e| PvaError::Decode(e.to_string()))?;
+        let intro = crate::pvdata::encode::decode_type_desc_cached(&mut cur, order, type_cache)
+            .map_err(|e| PvaError::Decode(e.to_string()))?;
         return Ok(OpResponse::Init(OpInitResponse {
             ioid,
             subcmd,
@@ -310,8 +324,8 @@ pub fn decode_op_response_cached(
 
     // PUT done: ioid + subcmd + status only (no value).
     if cmd == Command::Put {
-        let status = Status::decode(&mut cur, order)
-            .map_err(|e| PvaError::Decode(e.to_string()))?;
+        let status =
+            Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
         return Ok(OpResponse::Status(OpStatusResponse {
             ioid,
             subcmd,
@@ -329,16 +343,10 @@ pub fn decode_op_response_cached(
     } else {
         Status::ok()
     };
-    let changed = BitSet::decode(&mut cur, order)
-        .map_err(|e| PvaError::Decode(e.to_string()))?;
-    let value = crate::pvdata::encode::decode_pv_field_with_bitset(
-        intro,
-        &changed,
-        0,
-        &mut cur,
-        order,
-    )
-    .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let changed = BitSet::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let value =
+        crate::pvdata::encode::decode_pv_field_with_bitset(intro, &changed, 0, &mut cur, order)
+            .map_err(|e| PvaError::Decode(e.to_string()))?;
     Ok(OpResponse::Data(OpDataResponse {
         ioid,
         subcmd,
@@ -366,9 +374,10 @@ pub fn decode_get_field_response(frame: &Frame) -> PvaResult<GetFieldResponse> {
     }
     let order = frame.order();
     let mut cur = frame.cursor();
-    let ioid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let status = Status::decode(&mut cur, order)
+    let ioid = cur
+        .get_u32(order)
         .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let status = Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
     if !status.is_success() {
         return Ok(GetFieldResponse {
             ioid,
@@ -389,8 +398,7 @@ pub fn decode_get_field_response(frame: &Frame) -> PvaResult<GetFieldResponse> {
 
 /// True iff this header is the SET_BYTE_ORDER control message.
 pub fn is_set_byte_order(header: &PvaHeader) -> bool {
-    header.flags.is_control()
-        && header.command == ControlCommand::SetByteOrder.code()
+    header.flags.is_control() && header.command == ControlCommand::SetByteOrder.code()
 }
 
 /// True iff the header is a server-direction frame.
@@ -424,7 +432,12 @@ mod tests {
         payload.put_u32(7, order); // cid
         payload.put_u32(42, order); // sid
         Status::ok().write_into(order, &mut payload);
-        let header = PvaHeader::application(true, order, Command::CreateChannel.code(), payload.len() as u32);
+        let header = PvaHeader::application(
+            true,
+            order,
+            Command::CreateChannel.code(),
+            payload.len() as u32,
+        );
         let mut frame_bytes = Vec::new();
         header.write_into(&mut frame_bytes);
         frame_bytes.extend_from_slice(&payload);
@@ -456,12 +469,7 @@ mod tests {
         // No leading 0x80 because encode_type_desc already starts with it.
         payload.extend_from_slice(&intro_bytes);
 
-        let header = PvaHeader::application(
-            true,
-            order,
-            Command::Get.code(),
-            payload.len() as u32,
-        );
+        let header = PvaHeader::application(true, order, Command::Get.code(), payload.len() as u32);
         let mut frame_bytes = Vec::new();
         header.write_into(&mut frame_bytes);
         frame_bytes.extend_from_slice(&payload);

@@ -10,11 +10,7 @@ async fn reload_acf_swaps_in_new_rules() {
     let acf_path = dir.path().join("test.acf");
 
     // Initial ACF — DEFAULT group denies write.
-    std::fs::write(
-        &acf_path,
-        "ASG(DEFAULT) { RULE(1, READ) }",
-    )
-    .expect("write acf v1");
+    std::fs::write(&acf_path, "ASG(DEFAULT) { RULE(1, READ) }").expect("write acf v1");
 
     let server = CaServer::builder()
         .pv("HOT:VAL", epics_base_rs::types::EpicsValue::Long(0))
@@ -31,26 +27,20 @@ async fn reload_acf_swaps_in_new_rules() {
     );
 
     // Rewrite the file with a permissive policy.
-    std::fs::write(
-        &acf_path,
-        "ASG(DEFAULT) { RULE(1, WRITE) }",
-    )
-    .expect("write acf v2");
+    std::fs::write(&acf_path, "ASG(DEFAULT) { RULE(1, WRITE) }").expect("write acf v2");
 
     // reload_acf must succeed and not panic.
     server.reload_acf().await.expect("reload");
 
     // No source path → reload_acf_from must work but reload_acf would
     // fail on a server constructed without acf_file.
-    let bare = CaServer::from_parts(
-        server.database().clone(),
-        0,
-        None,
-        None,
-        None,
-    );
+    let bare = CaServer::from_parts(server.database().clone(), 0, None, None, None);
     assert!(bare.reload_acf().await.is_err());
-    assert!(bare.reload_acf_from(acf_path.to_str().unwrap()).await.is_ok());
+    assert!(
+        bare.reload_acf_from(acf_path.to_str().unwrap())
+            .await
+            .is_ok()
+    );
 
     // Now this server's source path is set.
     assert!(bare.acf_source_path().is_some());

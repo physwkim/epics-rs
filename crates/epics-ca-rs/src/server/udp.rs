@@ -192,7 +192,8 @@ fn local_ip_for(remote: SocketAddr) -> Ipv4Addr {
 struct UdpRateLimiter {
     enabled: bool,
     cap_per_sec: u32,
-    counts: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (std::time::Instant, u32)>>,
+    counts:
+        std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (std::time::Instant, u32)>>,
 }
 
 impl UdpRateLimiter {
@@ -214,9 +215,7 @@ impl UdpRateLimiter {
         let ip = src.ip();
         let now = std::time::Instant::now();
         let mut counts = self.counts.lock().unwrap();
-        let entry = counts
-            .entry(ip)
-            .or_insert((now, 0));
+        let entry = counts.entry(ip).or_insert((now, 0));
         if now.duration_since(entry.0) >= std::time::Duration::from_secs(1) {
             entry.0 = now;
             entry.1 = 0;

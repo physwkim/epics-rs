@@ -23,23 +23,23 @@ mod r#static;
 
 pub use r#static::StaticBackend;
 
-#[cfg(feature = "discovery")]
-mod mdns;
+#[cfg(feature = "discovery-dns-update")]
+mod dns_update;
 #[cfg(feature = "discovery")]
 mod dnssd;
 #[cfg(feature = "discovery")]
+mod mdns;
+#[cfg(feature = "discovery")]
 mod zone;
-#[cfg(feature = "discovery-dns-update")]
-mod dns_update;
 
+#[cfg(feature = "discovery-dns-update")]
+pub use dns_update::{DnsRegistration, DnsUpdater, TsigAlgo, TsigKey};
 #[cfg(feature = "discovery")]
 pub use dnssd::DnsSdBackend;
 #[cfg(feature = "discovery")]
 pub use mdns::MdnsBackend;
 #[cfg(feature = "discovery")]
 pub use zone::ZoneSnippet;
-#[cfg(feature = "discovery-dns-update")]
-pub use dns_update::{DnsRegistration, DnsUpdater, TsigAlgo, TsigKey};
 
 /// Standard CA service type. Used by both mDNS announces and DNS-SD
 /// PTR records. Format `_<name>._<proto>` per RFC 6763 §4.1.
@@ -68,15 +68,9 @@ pub trait Backend: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum DiscoveryEvent {
     /// A new IOC just came online.
-    Added {
-        instance: String,
-        addr: SocketAddr,
-    },
+    Added { instance: String, addr: SocketAddr },
     /// An IOC is no longer reachable.
-    Removed {
-        instance: String,
-        addr: SocketAddr,
-    },
+    Removed { instance: String, addr: SocketAddr },
 }
 
 /// What the operator/library author asked for via configuration.
@@ -102,9 +96,7 @@ pub enum DiscoveryConfig {
 pub fn build_backends(cfg: DiscoveryConfig) -> Vec<Box<dyn Backend>> {
     match cfg {
         DiscoveryConfig::Static(addrs) => vec![Box::new(StaticBackend::new(addrs))],
-        DiscoveryConfig::Composite(items) => {
-            items.into_iter().flat_map(build_backends).collect()
-        }
+        DiscoveryConfig::Composite(items) => items.into_iter().flat_map(build_backends).collect(),
         #[cfg(feature = "discovery")]
         DiscoveryConfig::Mdns => match mdns::MdnsBackend::new() {
             Ok(b) => vec![Box::new(b)],
@@ -173,15 +165,14 @@ fn parse_token(tok: &str) -> Option<DiscoveryConfig> {
         #[cfg(not(feature = "discovery"))]
         {
             let _ = zone;
-            tracing::warn!("EPICS_CA_DISCOVERY=dnssd:* ignored — built without `discovery` feature");
+            tracing::warn!(
+                "EPICS_CA_DISCOVERY=dnssd:* ignored — built without `discovery` feature"
+            );
             return None;
         }
     }
     if let Some(rest) = tok.strip_prefix("static:") {
-        let addrs: Vec<SocketAddr> = rest
-            .split(',')
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let addrs: Vec<SocketAddr> = rest.split(',').filter_map(|s| s.parse().ok()).collect();
         if addrs.is_empty() {
             tracing::warn!(token = %tok, "EPICS_CA_DISCOVERY static: parsed no addresses");
             return None;

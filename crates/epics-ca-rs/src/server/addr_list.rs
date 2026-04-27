@@ -183,7 +183,10 @@ mod tests {
     #[test]
     fn parse_ipv4_list_drops_garbage() {
         let v = parse_ipv4_list("1.2.3.4 not-an-ip 5.6.7.8");
-        assert_eq!(v, vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)]);
+        assert_eq!(
+            v,
+            vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)]
+        );
     }
 
     #[test]

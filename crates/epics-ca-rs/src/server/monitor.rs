@@ -95,7 +95,10 @@ where
                 };
                 event = coalesced;
             }
-            if send_event(data_type, sub_id, &event, &writer).await.is_err() {
+            if send_event(data_type, sub_id, &event, &writer)
+                .await
+                .is_err()
+            {
                 break;
             }
         }

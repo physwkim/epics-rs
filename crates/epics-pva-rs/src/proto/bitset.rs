@@ -34,14 +34,14 @@ impl BitSet {
     /// Build a BitSet large enough to hold `nbits` and pre-fill nothing.
     pub fn with_capacity(nbits: usize) -> Self {
         Self {
-            bytes: Vec::with_capacity((nbits + 7) / 8),
+            bytes: Vec::with_capacity(nbits.div_ceil(8)),
         }
     }
 
     /// All bits in `0..nbits` set. Used for "first monitor event" delta where
     /// the entire structure is new.
     pub fn all_set(nbits: usize) -> Self {
-        let nbytes = (nbits + 7) / 8;
+        let nbytes = nbits.div_ceil(8);
         let mut bytes = vec![0xFFu8; nbytes];
         // Mask the unused high bits in the final byte.
         let extra = nbytes * 8 - nbits;

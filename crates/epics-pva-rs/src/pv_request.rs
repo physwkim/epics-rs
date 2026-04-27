@@ -16,8 +16,8 @@
 //! caller need not append anything after the body.
 
 use crate::proto::ByteOrder;
-use crate::pvdata::encode::encode_type_desc;
 use crate::pvdata::FieldDesc;
+use crate::pvdata::encode::encode_type_desc;
 
 /// Build a pvRequest selecting `fields` at the top level of "field(...)".
 fn build(fields: &[&str], order: ByteOrder) -> Vec<u8> {
@@ -50,20 +50,32 @@ fn build(fields: &[&str], order: ByteOrder) -> Vec<u8> {
 
 /// Build the standard pvRequest: `field(value,alarm,timeStamp)`.
 pub fn build_pv_request(big_endian: bool) -> Vec<u8> {
-    let order = if big_endian { ByteOrder::Big } else { ByteOrder::Little };
+    let order = if big_endian {
+        ByteOrder::Big
+    } else {
+        ByteOrder::Little
+    };
     build(&["value", "alarm", "timeStamp"], order)
 }
 
 /// Build a minimal pvRequest for PUT: `field(value)`.
 pub fn build_pv_request_value_only(big_endian: bool) -> Vec<u8> {
-    let order = if big_endian { ByteOrder::Big } else { ByteOrder::Little };
+    let order = if big_endian {
+        ByteOrder::Big
+    } else {
+        ByteOrder::Little
+    };
     build(&["value"], order)
 }
 
 /// Build a pvRequest selecting an arbitrary list of top-level fields,
 /// equivalent to `field(<f1>,<f2>,...)`.
 pub fn build_pv_request_fields(fields: &[&str], big_endian: bool) -> Vec<u8> {
-    let order = if big_endian { ByteOrder::Big } else { ByteOrder::Little };
+    let order = if big_endian {
+        ByteOrder::Big
+    } else {
+        ByteOrder::Little
+    };
     build(fields, order)
 }
 
@@ -241,13 +253,17 @@ impl PvRequestExpr {
                 fields: build_nested(&self.fields),
             }
         };
-        let mut top_fields: Vec<(String, FieldDesc)> =
-            vec![("field".to_string(), inner)];
+        let mut top_fields: Vec<(String, FieldDesc)> = vec![("field".to_string(), inner)];
         if !self.record_options.is_empty() {
             let opts: Vec<(String, FieldDesc)> = self
                 .record_options
                 .iter()
-                .map(|(k, _v)| (k.clone(), FieldDesc::Scalar(crate::pvdata::ScalarType::String)))
+                .map(|(k, _v)| {
+                    (
+                        k.clone(),
+                        FieldDesc::Scalar(crate::pvdata::ScalarType::String),
+                    )
+                })
                 .collect();
             top_fields.push((
                 "record".to_string(),
@@ -461,10 +477,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_field_list(
-        &mut self,
-        out: &mut PvRequestExpr,
-    ) -> Result<(), PvRequestParseError> {
+    fn parse_field_list(&mut self, out: &mut PvRequestExpr) -> Result<(), PvRequestParseError> {
         loop {
             let tok = self.lex()?;
             match tok {
@@ -486,10 +499,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_options(
-        &mut self,
-        out: &mut PvRequestExpr,
-    ) -> Result<(), PvRequestParseError> {
+    fn parse_options(&mut self, out: &mut PvRequestExpr) -> Result<(), PvRequestParseError> {
         loop {
             let tok = self.lex()?;
             match tok {

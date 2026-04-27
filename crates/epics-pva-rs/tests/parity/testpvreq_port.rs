@@ -6,7 +6,7 @@
 #![cfg(test)]
 
 use epics_pva_rs::proto::BitSet;
-use epics_pva_rs::pv_request::{request_to_mask, RequestMaskError};
+use epics_pva_rs::pv_request::{RequestMaskError, request_to_mask};
 use epics_pva_rs::pvdata::{FieldDesc, ScalarType};
 
 /// Returns true iff `marked` and `mask` share at least one set bit.
@@ -38,7 +38,10 @@ fn nt_scalar_string() -> FieldDesc {
                 FieldDesc::Structure {
                     struct_id: "time_t".into(),
                     fields: vec![
-                        ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+                        (
+                            "secondsPastEpoch".into(),
+                            FieldDesc::Scalar(ScalarType::Long),
+                        ),
                         ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
                         ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
                     ],
@@ -291,9 +294,8 @@ fn pvxs_parse_field_value() {
 fn pvxs_parse_multiple_field_calls_accumulate() {
     use epics_pva_rs::pv_request::PvRequestExpr;
     // pvxs: "field(foo)field(bar.baz)record[abc=xyz]record[pipeline=true]"
-    let expr =
-        PvRequestExpr::parse("field(foo)field(bar.baz)record[abc=xyz]record[pipeline=true]")
-            .expect("parse");
+    let expr = PvRequestExpr::parse("field(foo)field(bar.baz)record[abc=xyz]record[pipeline=true]")
+        .expect("parse");
     assert_eq!(expr.fields, vec!["foo".to_string(), "bar.baz".to_string()]);
     assert_eq!(
         expr.record_options,
@@ -309,8 +311,7 @@ fn pvxs_parse_field_with_comma_list() {
     use epics_pva_rs::pv_request::PvRequestExpr;
     // pvxs: "field(foo,bar.baz)record[abc=xyz,pipeline=true]"
     let expr =
-        PvRequestExpr::parse("field(foo,bar.baz)record[abc=xyz,pipeline=true]")
-            .expect("parse");
+        PvRequestExpr::parse("field(foo,bar.baz)record[abc=xyz,pipeline=true]").expect("parse");
     assert_eq!(expr.fields, vec!["foo".to_string(), "bar.baz".to_string()]);
     assert_eq!(
         expr.record_options,

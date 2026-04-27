@@ -60,21 +60,16 @@
 #![cfg(feature = "experimental-rust-tls")]
 
 /// Wire-level TLS negotiation mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TlsMode {
     /// Rust-only experimental TLS — entire TCP stream is TLS from
     /// byte zero. Currently the only fully-implemented mode.
+    #[default]
     RustOnly,
     /// Placeholder for `epics-base` 7 ca-secure interop. The
     /// handshake is defined here but defers to `RustOnly` until the
     /// upstream spec is stable.
     CaSecureDraft,
-}
-
-impl Default for TlsMode {
-    fn default() -> Self {
-        Self::RustOnly
-    }
 }
 
 impl TlsMode {

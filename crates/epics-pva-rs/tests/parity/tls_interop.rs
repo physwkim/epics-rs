@@ -23,11 +23,11 @@ use std::time::Duration;
 use rustls::{ServerConfig, ServerConnection};
 
 use tokio::process::{Child, Command as TokioCommand};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use epics_pva_rs::auth::TlsServerConfig;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
-use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
 
 fn pvxs_home() -> Option<PathBuf> {
     std::env::var("PVXS_HOME").ok().map(PathBuf::from)
@@ -184,8 +184,8 @@ async fn pvxs_pvxget_to_rust_tls_server() {
     // Convert server1.p12 → PEM bundle for our Rust server.
     let work_dir = tempfile::tempdir().expect("tmpdir");
     let server_p12 = certs_dir.join("server1.p12");
-    let server_pem = p12_to_pem_bundle(&server_p12, work_dir.path(), "server1")
-        .expect("p12 → pem conversion");
+    let server_pem =
+        p12_to_pem_bundle(&server_p12, work_dir.path(), "server1").expect("p12 → pem conversion");
 
     // Build server-side TLS config from the PEM bundle.
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -237,10 +237,7 @@ async fn pvxs_pvxget_to_rust_tls_server() {
     // pvxget then opens a TLS connection to that port using its
     // KEYCHAIN cert.
     let output = TokioCommand::new(&pvxget_bin)
-        .env(
-            "EPICS_PVA_ADDR_LIST",
-            format!("127.0.0.1:{}", port + 1),
-        )
+        .env("EPICS_PVA_ADDR_LIST", format!("127.0.0.1:{}", port + 1))
         .env("EPICS_PVA_AUTO_ADDR_LIST", "NO")
         .env("EPICS_PVA_TLS_KEYCHAIN", &client_p12)
         .arg("-w")
@@ -287,8 +284,8 @@ async fn rust_tls_client_to_pvxs_softioc_tls() {
     // Convert ca.p12 to a CA bundle so our client trusts pvxs's chain.
     let work_dir = tempfile::tempdir().expect("tmpdir");
     let ca_p12 = certs_dir.join("ca.p12");
-    let ca_bundle = p12_to_pem_bundle(&ca_p12, work_dir.path(), "ca")
-        .expect("p12 → pem conversion");
+    let ca_bundle =
+        p12_to_pem_bundle(&ca_p12, work_dir.path(), "ca").expect("p12 → pem conversion");
 
     // Spawn pvxs softIocPVX with TLS-only.
     let dbfile = tempfile::NamedTempFile::new().unwrap();

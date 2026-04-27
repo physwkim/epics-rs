@@ -3,12 +3,12 @@
 //! Enabled via the `EPICS_CA_RS_CHAOS` env var, which is parsed once
 //! at process start. Format: comma-separated `kind:value` pairs.
 //!
-//! - `drop:<percent>`  — randomly drop bytes-pending-on-read events
-//!                       at the given percentage (0–100)
-//! - `stall:<millis>`  — sleep this many ms before completing each
-//!                       read
+//! - `drop:<percent>` — randomly drop bytes-pending-on-read events
+//!   at the given percentage (0–100)
+//! - `stall:<millis>` — sleep this many ms before completing each
+//!   read
 //! - `reorder:<percent>` — reorder pairs of consecutive frames
-//! - `seed:<u64>`      — make the RNG deterministic for repeatable runs
+//! - `seed:<u64>` — make the RNG deterministic for repeatable runs
 //!
 //! Examples:
 //! ```bash
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 /// Parsed chaos configuration. `enabled == false` makes every method
 /// a fast no-op.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ChaosConfig {
     pub enabled: bool,
     pub drop_pct: u8,
@@ -39,22 +39,12 @@ pub struct ChaosConfig {
     pub seed: u64,
 }
 
-impl Default for ChaosConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            drop_pct: 0,
-            reorder_pct: 0,
-            stall: Duration::ZERO,
-            seed: 0,
-        }
-    }
-}
-
 impl ChaosConfig {
     fn from_env_str(s: &str) -> Self {
-        let mut cfg = Self::default();
-        cfg.enabled = !s.trim().is_empty();
+        let mut cfg = Self {
+            enabled: !s.trim().is_empty(),
+            ..Self::default()
+        };
         for tok in s.split(',') {
             let tok = tok.trim();
             if tok.is_empty() {
@@ -96,12 +86,12 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Resolve the global chaos config, parsing the env once.
 pub fn config() -> &'static ChaosConfig {
-    CONFIG.get_or_init(|| {
-        match epics_base_rs::runtime::env::get("EPICS_CA_RS_CHAOS") {
+    CONFIG.get_or_init(
+        || match epics_base_rs::runtime::env::get("EPICS_CA_RS_CHAOS") {
             Some(s) => ChaosConfig::from_env_str(&s),
             None => ChaosConfig::default(),
-        }
-    })
+        },
+    )
 }
 
 /// Cheap "is anything injected?" check. Single atomic load.

@@ -107,7 +107,11 @@ struct Args {
     dns_update_ttl: u64,
 
     /// Keepalive refresh interval in seconds (default: 30).
-    #[arg(long = "dns-update-keepalive", value_name = "SECONDS", default_value_t = 30)]
+    #[arg(
+        long = "dns-update-keepalive",
+        value_name = "SECONDS",
+        default_value_t = 30
+    )]
     dns_update_keepalive: u64,
 }
 
@@ -302,10 +306,9 @@ async fn main() -> CaResult<()> {
                 let key = epics_ca_rs::tls::load_private_key(key_path)?;
                 let tls = if let Some(ref ca_path) = args.tls_client_ca {
                     let roots = epics_ca_rs::tls::load_root_store(ca_path)?;
-                    epics_ca_rs::tls::TlsConfig::server_mtls_from_pem(chain, key, roots)
-                        .map_err(|e| {
-                            epics_base_rs::error::CaError::InvalidValue(format!("TLS: {e}"))
-                        })?
+                    epics_ca_rs::tls::TlsConfig::server_mtls_from_pem(chain, key, roots).map_err(
+                        |e| epics_base_rs::error::CaError::InvalidValue(format!("TLS: {e}")),
+                    )?
                 } else {
                     epics_ca_rs::tls::TlsConfig::server_from_pem(chain, key).map_err(|e| {
                         epics_base_rs::error::CaError::InvalidValue(format!("TLS: {e}"))
@@ -363,15 +366,14 @@ async fn main() -> CaResult<()> {
                 .unwrap()
                 .parse()
                 .map_err(|e| {
-                    epics_base_rs::error::CaError::InvalidValue(format!(
-                        "--dns-update-server: {e}"
-                    ))
+                    epics_base_rs::error::CaError::InvalidValue(format!("--dns-update-server: {e}"))
                 })?;
             let host = args.dns_update_host.clone().unwrap_or_else(|| {
                 // Fallback: $HOSTNAME env var, then /etc/hostname, then "localhost".
                 // We avoid pulling in a `hostname` crate just for this; users with
                 // exotic hostname sources can pass --dns-update-host explicitly.
-                std::env::var("HOSTNAME").ok()
+                std::env::var("HOSTNAME")
+                    .ok()
                     .or_else(|| {
                         std::fs::read_to_string("/etc/hostname")
                             .ok()
@@ -382,12 +384,11 @@ async fn main() -> CaResult<()> {
             });
             let tsig = match args.dns_update_tsig_key.as_ref() {
                 Some(path) => Some(
-                    epics_ca_rs::discovery::TsigKey::from_bind_file(path)
-                        .map_err(|e| {
-                            epics_base_rs::error::CaError::InvalidValue(format!(
-                                "--dns-update-tsig-key: {e}"
-                            ))
-                        })?,
+                    epics_ca_rs::discovery::TsigKey::from_bind_file(path).map_err(|e| {
+                        epics_base_rs::error::CaError::InvalidValue(format!(
+                            "--dns-update-tsig-key: {e}"
+                        ))
+                    })?,
                 ),
                 None => None,
             };

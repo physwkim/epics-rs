@@ -12,7 +12,7 @@ use crate::client_native::context::PvGetResult; // not used; kept for re-export 
 use crate::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
 use crate::server_native::ChannelSource;
 
-use epics_base_rs::server::database::{parse_pv_name, PvDatabase, PvEntry};
+use epics_base_rs::server::database::{PvDatabase, PvEntry, parse_pv_name};
 use epics_base_rs::server::snapshot::Snapshot;
 use epics_base_rs::types::EpicsValue;
 
@@ -76,7 +76,8 @@ fn snapshot_to_pv_field(snap: &Snapshot) -> PvField {
     s.fields.push(("display".into(), build_display(snap)));
     if !is_array {
         s.fields.push(("control".into(), build_control(snap)));
-        s.fields.push(("valueAlarm".into(), build_value_alarm(snap)));
+        s.fields
+            .push(("valueAlarm".into(), build_value_alarm(snap)));
     }
     PvField::Structure(s)
 }
@@ -133,7 +134,10 @@ fn timestamp_desc() -> FieldDesc {
     FieldDesc::Structure {
         struct_id: "time_t".into(),
         fields: vec![
-            ("secondsPastEpoch".into(), FieldDesc::Scalar(ScalarType::Long)),
+            (
+                "secondsPastEpoch".into(),
+                FieldDesc::Scalar(ScalarType::Long),
+            ),
             ("nanoseconds".into(), FieldDesc::Scalar(ScalarType::Int)),
             ("userTag".into(), FieldDesc::Scalar(ScalarType::Int)),
         ],
@@ -169,14 +173,38 @@ fn value_alarm_desc() -> FieldDesc {
         struct_id: "valueAlarm_t".into(),
         fields: vec![
             ("active".into(), FieldDesc::Scalar(ScalarType::Boolean)),
-            ("lowAlarmLimit".into(), FieldDesc::Scalar(ScalarType::Double)),
-            ("lowWarningLimit".into(), FieldDesc::Scalar(ScalarType::Double)),
-            ("highWarningLimit".into(), FieldDesc::Scalar(ScalarType::Double)),
-            ("highAlarmLimit".into(), FieldDesc::Scalar(ScalarType::Double)),
-            ("lowAlarmSeverity".into(), FieldDesc::Scalar(ScalarType::Int)),
-            ("lowWarningSeverity".into(), FieldDesc::Scalar(ScalarType::Int)),
-            ("highWarningSeverity".into(), FieldDesc::Scalar(ScalarType::Int)),
-            ("highAlarmSeverity".into(), FieldDesc::Scalar(ScalarType::Int)),
+            (
+                "lowAlarmLimit".into(),
+                FieldDesc::Scalar(ScalarType::Double),
+            ),
+            (
+                "lowWarningLimit".into(),
+                FieldDesc::Scalar(ScalarType::Double),
+            ),
+            (
+                "highWarningLimit".into(),
+                FieldDesc::Scalar(ScalarType::Double),
+            ),
+            (
+                "highAlarmLimit".into(),
+                FieldDesc::Scalar(ScalarType::Double),
+            ),
+            (
+                "lowAlarmSeverity".into(),
+                FieldDesc::Scalar(ScalarType::Int),
+            ),
+            (
+                "lowWarningSeverity".into(),
+                FieldDesc::Scalar(ScalarType::Int),
+            ),
+            (
+                "highWarningSeverity".into(),
+                FieldDesc::Scalar(ScalarType::Int),
+            ),
+            (
+                "highAlarmSeverity".into(),
+                FieldDesc::Scalar(ScalarType::Int),
+            ),
             ("hysteresis".into(), FieldDesc::Scalar(ScalarType::UByte)),
         ],
     }
@@ -184,10 +212,14 @@ fn value_alarm_desc() -> FieldDesc {
 
 fn build_alarm(snap: &Snapshot) -> PvField {
     let mut a = PvStructure::new("alarm_t");
-    a.fields
-        .push(("severity".into(), PvField::Scalar(ScalarValue::Int(snap.alarm.severity as i32))));
-    a.fields
-        .push(("status".into(), PvField::Scalar(ScalarValue::Int(snap.alarm.status as i32))));
+    a.fields.push((
+        "severity".into(),
+        PvField::Scalar(ScalarValue::Int(snap.alarm.severity as i32)),
+    ));
+    a.fields.push((
+        "status".into(),
+        PvField::Scalar(ScalarValue::Int(snap.alarm.status as i32)),
+    ));
     a.fields.push((
         "message".into(),
         PvField::Scalar(ScalarValue::String(String::new())),
@@ -226,11 +258,18 @@ fn build_display(snap: &Snapshot) -> PvField {
     } else {
         (0.0, 0.0, String::new(), String::new(), 0)
     };
-    d.fields.push(("limitLow".into(), PvField::Scalar(ScalarValue::Double(lo))));
-    d.fields.push(("limitHigh".into(), PvField::Scalar(ScalarValue::Double(hi))));
-    d.fields.push(("description".into(), PvField::Scalar(ScalarValue::String(desc))));
-    d.fields.push(("units".into(), PvField::Scalar(ScalarValue::String(units))));
-    d.fields.push(("precision".into(), PvField::Scalar(ScalarValue::Int(prec))));
+    d.fields
+        .push(("limitLow".into(), PvField::Scalar(ScalarValue::Double(lo))));
+    d.fields
+        .push(("limitHigh".into(), PvField::Scalar(ScalarValue::Double(hi))));
+    d.fields.push((
+        "description".into(),
+        PvField::Scalar(ScalarValue::String(desc)),
+    ));
+    d.fields
+        .push(("units".into(), PvField::Scalar(ScalarValue::String(units))));
+    d.fields
+        .push(("precision".into(), PvField::Scalar(ScalarValue::Int(prec))));
     PvField::Structure(d)
 }
 
@@ -241,17 +280,29 @@ fn build_control(snap: &Snapshot) -> PvField {
     } else {
         (0.0, 0.0)
     };
-    c.fields.push(("limitLow".into(), PvField::Scalar(ScalarValue::Double(lo))));
-    c.fields.push(("limitHigh".into(), PvField::Scalar(ScalarValue::Double(hi))));
-    c.fields.push(("minStep".into(), PvField::Scalar(ScalarValue::Double(0.0))));
+    c.fields
+        .push(("limitLow".into(), PvField::Scalar(ScalarValue::Double(lo))));
+    c.fields
+        .push(("limitHigh".into(), PvField::Scalar(ScalarValue::Double(hi))));
+    c.fields
+        .push(("minStep".into(), PvField::Scalar(ScalarValue::Double(0.0))));
     PvField::Structure(c)
 }
 
 fn build_value_alarm(_snap: &Snapshot) -> PvField {
     let mut v = PvStructure::new("valueAlarm_t");
-    v.fields.push(("active".into(), PvField::Scalar(ScalarValue::Boolean(false))));
-    for name in ["lowAlarmLimit", "lowWarningLimit", "highWarningLimit", "highAlarmLimit"] {
-        v.fields.push((name.into(), PvField::Scalar(ScalarValue::Double(0.0))));
+    v.fields.push((
+        "active".into(),
+        PvField::Scalar(ScalarValue::Boolean(false)),
+    ));
+    for name in [
+        "lowAlarmLimit",
+        "lowWarningLimit",
+        "highWarningLimit",
+        "highAlarmLimit",
+    ] {
+        v.fields
+            .push((name.into(), PvField::Scalar(ScalarValue::Double(0.0))));
     }
     for name in [
         "lowAlarmSeverity",
@@ -259,9 +310,11 @@ fn build_value_alarm(_snap: &Snapshot) -> PvField {
         "highWarningSeverity",
         "highAlarmSeverity",
     ] {
-        v.fields.push((name.into(), PvField::Scalar(ScalarValue::Int(0))));
+        v.fields
+            .push((name.into(), PvField::Scalar(ScalarValue::Int(0))));
     }
-    v.fields.push(("hysteresis".into(), PvField::Scalar(ScalarValue::UByte(0))));
+    v.fields
+        .push(("hysteresis".into(), PvField::Scalar(ScalarValue::UByte(0))));
     PvField::Structure(v)
 }
 
@@ -306,10 +359,7 @@ impl ChannelSource for PvDatabaseSource {
         }
     }
 
-    fn get_value(
-        &self,
-        name: &str,
-    ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+    fn get_value(&self, name: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
         let db = self.db.clone();
         let name = name.to_string();
         async move {
@@ -391,22 +441,31 @@ fn pv_field_to_epics(field: &PvField) -> Option<EpicsValue> {
         PvField::Scalar(sv) => Some(scalar_to_epics(sv)),
         PvField::ScalarArray(items) if !items.is_empty() => match &items[0] {
             ScalarValue::Double(_) => Some(EpicsValue::DoubleArray(
-                items.iter().filter_map(|v| match v {
-                    ScalarValue::Double(x) => Some(*x),
-                    _ => None,
-                }).collect(),
+                items
+                    .iter()
+                    .filter_map(|v| match v {
+                        ScalarValue::Double(x) => Some(*x),
+                        _ => None,
+                    })
+                    .collect(),
             )),
             ScalarValue::Int(_) => Some(EpicsValue::LongArray(
-                items.iter().filter_map(|v| match v {
-                    ScalarValue::Int(x) => Some(*x),
-                    _ => None,
-                }).collect(),
+                items
+                    .iter()
+                    .filter_map(|v| match v {
+                        ScalarValue::Int(x) => Some(*x),
+                        _ => None,
+                    })
+                    .collect(),
             )),
             ScalarValue::Float(_) => Some(EpicsValue::FloatArray(
-                items.iter().filter_map(|v| match v {
-                    ScalarValue::Float(x) => Some(*x),
-                    _ => None,
-                }).collect(),
+                items
+                    .iter()
+                    .filter_map(|v| match v {
+                        ScalarValue::Float(x) => Some(*x),
+                        _ => None,
+                    })
+                    .collect(),
             )),
             _ => None,
         },

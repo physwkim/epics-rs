@@ -235,7 +235,8 @@ fn json_field_f64(line: &str, key: &str) -> Option<f64> {
     let needle = format!("\"{key}\":");
     let start = line.find(&needle)? + needle.len();
     let rest = &line[start..];
-    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+')
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+')
         .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
@@ -295,7 +296,9 @@ mod tests {
         drop(rec);
 
         let mut seen: Vec<RecordedEvent> = Vec::new();
-        let n = replay(&path, false, |ev| seen.push(ev.clone())).await.unwrap();
+        let n = replay(&path, false, |ev| seen.push(ev.clone()))
+            .await
+            .unwrap();
         assert_eq!(n, 2);
         assert!(matches!(seen[0], RecordedEvent::BeaconRecv { .. }));
         assert!(matches!(seen[1], RecordedEvent::ClientConnect { .. }));

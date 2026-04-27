@@ -6,13 +6,15 @@ use tracing::debug;
 
 use crate::codec::PvaCodec;
 use crate::error::{PvaError, PvaResult};
-use crate::proto::{ByteOrder, BitSet, Command, PvaHeader, QosFlags, Status, WriteExt};
-use crate::pv_request::{build_pv_request, build_pv_request_value_only};
-use crate::pvdata::encode::{decode_pv_field, encode_pv_field};
+use crate::proto::{BitSet, ByteOrder, Command, PvaHeader, QosFlags, WriteExt};
+use crate::pv_request::build_pv_request_value_only;
+use crate::pvdata::encode::encode_pv_field;
 use crate::pvdata::{FieldDesc, PvField, PvStructure, ScalarValue};
 
 use super::conn::Connection;
-use super::decode::{decode_create_channel_response, decode_get_field_response, decode_op_response, OpResponse};
+use super::decode::{
+    OpResponse, decode_create_channel_response, decode_get_field_response, decode_op_response,
+};
 
 static NEXT_IOID: AtomicU32 = AtomicU32::new(1);
 static NEXT_CID: AtomicU32 = AtomicU32::new(1);
@@ -48,7 +50,10 @@ pub async fn create_channel(conn: &mut Connection, name: &str) -> PvaResult<Chan
             resp.status
         )));
     }
-    Ok(ChannelIds { cid: resp.cid, sid: resp.sid })
+    Ok(ChannelIds {
+        cid: resp.cid,
+        sid: resp.sid,
+    })
 }
 
 /// Run a GET. Returns the introspection (so callers can format) plus the
@@ -70,7 +75,10 @@ pub async fn op_get(
         build_pv_request_no_fields(matches!(conn.byte_order, ByteOrder::Big))
     } else {
         // Build a structure-shape pvRequest selecting just the requested fields.
-        crate::pv_request::build_pv_request_fields(fields, matches!(conn.byte_order, ByteOrder::Big))
+        crate::pv_request::build_pv_request_fields(
+            fields,
+            matches!(conn.byte_order, ByteOrder::Big),
+        )
     };
 
     // INIT
@@ -82,7 +90,7 @@ pub async fn op_get(
         other => {
             return Err(PvaError::Protocol(format!(
                 "expected GET INIT response, got {other:?}"
-            )))
+            )));
         }
     };
     if !init.status.is_success() {
@@ -102,7 +110,7 @@ pub async fn op_get(
         other => {
             return Err(PvaError::Protocol(format!(
                 "expected GET data response, got {other:?}"
-            )))
+            )));
         }
     };
     if !data.status.is_success() {
@@ -120,11 +128,7 @@ pub async fn op_get(
 }
 
 /// Run a PUT.
-pub async fn op_put(
-    conn: &mut Connection,
-    channel: ChannelIds,
-    value_str: &str,
-) -> PvaResult<()> {
+pub async fn op_put(conn: &mut Connection, channel: ChannelIds, value_str: &str) -> PvaResult<()> {
     let codec = PvaCodec {
         big_endian: matches!(conn.byte_order, ByteOrder::Big),
     };
@@ -140,7 +144,7 @@ pub async fn op_put(
         other => {
             return Err(PvaError::Protocol(format!(
                 "expected PUT INIT response, got {other:?}"
-            )))
+            )));
         }
     };
     if !init.status.is_success() {
@@ -171,7 +175,8 @@ pub async fn op_put(
     changed.write_into(order, &mut data_payload);
     encode_pv_field(&value, &intro, order, &mut data_payload);
 
-    let header = PvaHeader::application(false, order, Command::Put.code(), data_payload.len() as u32);
+    let header =
+        PvaHeader::application(false, order, Command::Put.code(), data_payload.len() as u32);
     let mut frame_bytes = Vec::with_capacity(PvaHeader::SIZE + data_payload.len());
     header.write_into(&mut frame_bytes);
     frame_bytes.extend_from_slice(&data_payload);
@@ -184,14 +189,11 @@ pub async fn op_put(
         other => {
             return Err(PvaError::Protocol(format!(
                 "expected PUT done, got {other:?}"
-            )))
+            )));
         }
     };
     if !done.status.is_success() {
-        return Err(PvaError::Protocol(format!(
-            "PUT failed: {:?}",
-            done.status
-        )));
+        return Err(PvaError::Protocol(format!("PUT failed: {:?}", done.status)));
     }
 
     let destroy = codec.build_destroy_request(channel.sid, ioid);
@@ -214,7 +216,10 @@ pub async fn op_monitor<F: FnMut(&FieldDesc, &PvField)>(
     let pv_req = if fields.is_empty() {
         build_pv_request_no_fields(matches!(conn.byte_order, ByteOrder::Big))
     } else {
-        crate::pv_request::build_pv_request_fields(fields, matches!(conn.byte_order, ByteOrder::Big))
+        crate::pv_request::build_pv_request_fields(
+            fields,
+            matches!(conn.byte_order, ByteOrder::Big),
+        )
     };
     let init_req = codec.build_monitor_init(channel.sid, ioid, &pv_req);
     conn.send(&init_req).await?;
@@ -224,7 +229,7 @@ pub async fn op_monitor<F: FnMut(&FieldDesc, &PvField)>(
         other => {
             return Err(PvaError::Protocol(format!(
                 "expected MONITOR INIT, got {other:?}"
-            )))
+            )));
         }
     };
     let intro = init.introspection;
@@ -314,8 +319,7 @@ pub async fn op_rpc(
     p.put_u32(ioid, order);
     p.put_u8(QosFlags::INIT);
     p.extend_from_slice(&pv_req);
-    let init_header =
-        PvaHeader::application(false, order, Command::Rpc.code(), p.len() as u32);
+    let init_header = PvaHeader::application(false, order, Command::Rpc.code(), p.len() as u32);
     let mut init_bytes = Vec::with_capacity(8 + p.len());
     init_header.write_into(&mut init_bytes);
     init_bytes.extend_from_slice(&p);
@@ -328,7 +332,7 @@ pub async fn op_rpc(
         other => {
             return Err(PvaError::Protocol(format!(
                 "expected RPC INIT response, got {other:?}"
-            )))
+            )));
         }
     };
     if !init_resp.status.is_success() {
@@ -347,12 +351,8 @@ pub async fn op_rpc(
     data_payload.put_u32(ioid, order);
     data_payload.put_u8(0x00);
     encode_pv_field(request_value, request_desc, order, &mut data_payload);
-    let data_header = PvaHeader::application(
-        false,
-        order,
-        Command::Rpc.code(),
-        data_payload.len() as u32,
-    );
+    let data_header =
+        PvaHeader::application(false, order, Command::Rpc.code(), data_payload.len() as u32);
     let mut data_bytes = Vec::with_capacity(8 + data_payload.len());
     data_header.write_into(&mut data_bytes);
     data_bytes.extend_from_slice(&data_payload);
@@ -405,7 +405,11 @@ fn build_put_value(desc: &FieldDesc, value_str: &str) -> PvaResult<PvField> {
         FieldDesc::ScalarArray(st) => {
             // CSV
             let mut items = Vec::new();
-            for tok in value_str.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            for tok in value_str
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 let v = ScalarValue::parse(*st, tok).map_err(PvaError::InvalidValue)?;
                 items.push(v);
             }
@@ -415,10 +419,13 @@ fn build_put_value(desc: &FieldDesc, value_str: &str) -> PvaResult<PvField> {
             let mut s = PvStructure::new(struct_id);
             for (name, child) in fields {
                 if name == "value" {
-                    s.fields.push((name.clone(), build_put_value(child, value_str)?));
-                } else {
                     s.fields
-                        .push((name.clone(), crate::pvdata::encode::default_value_for(child)));
+                        .push((name.clone(), build_put_value(child, value_str)?));
+                } else {
+                    s.fields.push((
+                        name.clone(),
+                        crate::pvdata::encode::default_value_for(child),
+                    ));
                 }
             }
             Ok(PvField::Structure(s))

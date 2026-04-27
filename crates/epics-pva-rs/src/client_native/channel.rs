@@ -257,10 +257,9 @@ impl Channel {
             None => {
                 self.set_state(ChannelState::Searching);
                 match &self.resolver {
-                    Resolver::Search(engine) => engine
-                        .find_all(&self.pv_name)
-                        .await
-                        .unwrap_or_default(),
+                    Resolver::Search(engine) => {
+                        engine.find_all(&self.pv_name).await.unwrap_or_default()
+                    }
                     Resolver::Direct(addr) => vec![*addr],
                 }
             }
@@ -286,8 +285,7 @@ impl Channel {
                 Ok(server) => match self.do_create_channel(&server).await {
                     Ok(sid) => {
                         // Stash remaining candidates as alternatives.
-                        let leftovers: Vec<_> =
-                            candidates.iter().skip(idx + 1).copied().collect();
+                        let leftovers: Vec<_> = candidates.iter().skip(idx + 1).copied().collect();
                         *self.alternatives.lock() = leftovers;
                         self.set_state(ChannelState::Active {
                             server: server.clone(),
@@ -311,8 +309,8 @@ impl Channel {
     }
 
     async fn do_create_channel(&self, server: &Arc<ServerConn>) -> PvaResult<u32> {
-        use crate::codec::PvaCodec;
         use super::decode::decode_create_channel_response;
+        use crate::codec::PvaCodec;
 
         let big_endian = matches!(server.byte_order, crate::proto::ByteOrder::Big);
         let codec = PvaCodec { big_endian };

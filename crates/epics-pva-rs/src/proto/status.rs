@@ -146,7 +146,10 @@ mod tests {
         let buf = Status::ok().encode(ByteOrder::Little);
         assert_eq!(buf, vec![0xFF]);
         let mut cur = Cursor::new(buf.as_slice());
-        assert_eq!(Status::decode(&mut cur, ByteOrder::Little).unwrap(), Status::OkNoMsg);
+        assert_eq!(
+            Status::decode(&mut cur, ByteOrder::Little).unwrap(),
+            Status::OkNoMsg
+        );
     }
 
     #[test]

@@ -45,10 +45,8 @@ async fn dump_pvxs_get_init_response_bytes() {
         .spawn()
         .unwrap();
 
-    let server_addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let server_addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if std::net::TcpStream::connect(server_addr).is_ok() {
@@ -148,7 +146,11 @@ fn hex_dump(data: &[u8]) -> String {
         }
         out.push_str("|");
         for &b in chunk {
-            out.push(if (0x20..0x7f).contains(&b) { b as char } else { '.' });
+            out.push(if (0x20..0x7f).contains(&b) {
+                b as char
+            } else {
+                '.'
+            });
         }
         out.push_str("|\n");
     }

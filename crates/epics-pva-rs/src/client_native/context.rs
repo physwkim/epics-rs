@@ -23,11 +23,11 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 
-use crate::error::{PvaError, PvaResult};
+use crate::error::PvaResult;
 use crate::pvdata::{FieldDesc, PvField};
 
 use super::channel::{Channel, ConnectionPool};
-use super::ops_v2::{op_get, op_monitor, op_put, op_rpc, DEFAULT_PIPELINE_SIZE};
+use super::ops_v2::{DEFAULT_PIPELINE_SIZE, op_get, op_monitor, op_put, op_rpc};
 use super::search_engine::SearchEngine;
 
 #[derive(Debug, Clone)]
@@ -104,8 +104,12 @@ impl PvaClientBuilder {
             inner: Arc::new(ClientInner {
                 timeout: self.timeout,
                 server_addr: self.server_addr,
-                user: self.user.unwrap_or_else(super::super::auth::authnz_default_user),
-                host: self.host.unwrap_or_else(super::super::auth::authnz_default_host),
+                user: self
+                    .user
+                    .unwrap_or_else(super::super::auth::authnz_default_user),
+                host: self
+                    .host
+                    .unwrap_or_else(super::super::auth::authnz_default_host),
                 pipeline_size: self.pipeline_size,
                 pool,
                 channels: RwLock::new(HashMap::new()),
@@ -160,8 +164,10 @@ impl PvaClient {
     /// Backwards-compatible: targets a specific TCP port (UDP ignored —
     /// search uses the standard port machinery).
     pub fn with_ports(_udp_port: u16, tcp_port: u16) -> Self {
-        let server_addr =
-            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), tcp_port);
+        let server_addr = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            tcp_port,
+        );
         Self::builder().server_addr(server_addr).build()
     }
 

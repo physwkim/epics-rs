@@ -11,32 +11,31 @@
 //! Channel state is kept per-connection (a `HashMap<sid, ChannelState>`).
 
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::net::TcpListener;
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::interval;
 use tracing::{debug, error, warn};
 
-use crate::client_native::decode::{try_parse_frame, Frame};
+use crate::client_native::decode::{Frame, try_parse_frame};
 use crate::error::{PvaError, PvaResult};
 use crate::proto::{
-    encode_size_into, encode_string_into, BitSet, ByteOrder, Command, ControlCommand, PvaHeader,
-    Status, WriteExt, PVA_VERSION,
+    BitSet, ByteOrder, Command, ControlCommand, PVA_VERSION, PvaHeader, Status, WriteExt,
+    encode_size_into, encode_string_into,
 };
 use crate::pvdata::encode::{
-    decode_pv_field, decode_type_desc, encode_pv_field, encode_type_desc,
-    encode_type_desc_cached, EncodeTypeCache,
+    EncodeTypeCache, decode_pv_field, decode_type_desc, encode_pv_field, encode_type_desc,
+    encode_type_desc_cached,
 };
 use crate::pvdata::{FieldDesc, PvField};
 
-use super::source::DynSource;
 use super::runtime::PvaServerConfig;
+use super::source::DynSource;
 
 static NEXT_SID: AtomicU32 = AtomicU32::new(1);
 fn alloc_sid() -> u32 {
@@ -44,6 +43,7 @@ fn alloc_sid() -> u32 {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ChannelState {
     name: String,
     cid: u32,
@@ -54,6 +54,7 @@ struct ChannelState {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct OpState {
     intro: FieldDesc,
     kind: OpKind,
@@ -93,8 +94,7 @@ pub async fn run_tcp_server(
                     active.fetch_sub(1, Ordering::SeqCst);
                     warn!(
                         ?peer,
-                        "rejecting connection: max_connections={}",
-                        config.max_connections
+                        "rejecting connection: max_connections={}", config.max_connections
                     );
                     drop(stream);
                     continue;
@@ -109,14 +109,7 @@ pub async fn run_tcp_server(
                         Some(a) => match a.accept(stream).await {
                             Ok(tls_stream) => {
                                 let (r, w) = tokio::io::split(tls_stream);
-                                handle_connection_io(
-                                    src,
-                                    Box::new(r),
-                                    Box::new(w),
-                                    peer,
-                                    cfg,
-                                )
-                                .await
+                                handle_connection_io(src, Box::new(r), Box::new(w), peer, cfg).await
                             }
                             Err(e) => {
                                 debug!(?peer, "TLS handshake failed: {e}");
@@ -125,8 +118,7 @@ pub async fn run_tcp_server(
                         },
                         None => {
                             let (r, w) = stream.into_split();
-                            handle_connection_io(src, Box::new(r), Box::new(w), peer, cfg)
-                                .await
+                            handle_connection_io(src, Box::new(r), Box::new(w), peer, cfg).await
                         }
                     };
                     if let Err(e) = result {
@@ -168,7 +160,7 @@ async fn handle_connection_io(
     let last_rx_hb = last_rx.clone();
     let writer_hb = writer.clone();
     let order_hb = config.wire_byte_order;
-    let hb_handle = tokio::spawn(async move {
+    let _hb_handle = tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(15));
         tick.tick().await;
         loop {
@@ -199,11 +191,21 @@ async fn handle_connection_io(
         h.write_into(&mut buf);
         buf
     };
-    writer.lock().await.write_all(&set_bo).await.map_err(PvaError::Io)?;
+    writer
+        .lock()
+        .await
+        .write_all(&set_bo)
+        .await
+        .map_err(PvaError::Io)?;
 
     // Step 2: send CONNECTION_VALIDATION request (server → client).
     let val_req = build_server_connection_validation(order, 87_040, 32_767, &["ca", "anonymous"]);
-    writer.lock().await.write_all(&val_req).await.map_err(PvaError::Io)?;
+    writer
+        .lock()
+        .await
+        .write_all(&val_req)
+        .await
+        .map_err(PvaError::Io)?;
 
     // Step 3+: drive the read loop.
     let mut rx_buf: Vec<u8> = Vec::with_capacity(8192);
@@ -230,7 +232,12 @@ async fn handle_connection_io(
                     frame.header.payload_length,
                 );
                 h.write_into(&mut buf);
-                writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+                writer
+                    .lock()
+                    .await
+                    .write_all(&buf)
+                    .await
+                    .map_err(PvaError::Io)?;
             }
             continue;
         }
@@ -251,7 +258,12 @@ async fn handle_connection_io(
                 let mut buf = Vec::new();
                 h.write_into(&mut buf);
                 buf.extend_from_slice(&payload);
-                writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+                writer
+                    .lock()
+                    .await
+                    .write_all(&buf)
+                    .await
+                    .map_err(PvaError::Io)?;
                 handshake_complete = true;
                 continue;
             } else {
@@ -265,7 +277,10 @@ async fn handle_connection_io(
         match Command::from_code(frame.header.command) {
             Some(Command::CreateChannel) => {
                 if channels.len() >= config.max_channels_per_connection {
-                    warn!(?peer, "rejecting CREATE_CHANNEL: per-connection limit reached");
+                    warn!(
+                        ?peer,
+                        "rejecting CREATE_CHANNEL: per-connection limit reached"
+                    );
                     // Reject by sending an error CreateChannel response with cid=u32::MAX.
                     let mut payload = Vec::new();
                     payload.put_u32(u32::MAX, order);
@@ -281,7 +296,12 @@ async fn handle_connection_io(
                     let mut buf = Vec::new();
                     h.write_into(&mut buf);
                     buf.extend_from_slice(&payload);
-                    writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+                    writer
+                        .lock()
+                        .await
+                        .write_all(&buf)
+                        .await
+                        .map_err(PvaError::Io)?;
                     continue;
                 }
                 handle_create_channel(&source, &frame, &writer, &mut channels, order).await?;
@@ -358,7 +378,12 @@ async fn handle_connection_io(
                 );
                 h.write_into(&mut buf);
                 buf.extend_from_slice(&frame.payload);
-                writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+                writer
+                    .lock()
+                    .await
+                    .write_all(&buf)
+                    .await
+                    .map_err(PvaError::Io)?;
             }
             _ => {
                 // Unhandled — keep going.
@@ -413,7 +438,12 @@ fn build_server_connection_validation(
     for m in auth_methods {
         encode_string_into(m, order, &mut payload);
     }
-    let h = PvaHeader::application(true, order, Command::ConnectionValidation.code(), payload.len() as u32);
+    let h = PvaHeader::application(
+        true,
+        order,
+        Command::ConnectionValidation.code(),
+        payload.len() as u32,
+    );
     let mut out = Vec::new();
     h.write_into(&mut out);
     out.extend_from_slice(&payload);
@@ -428,8 +458,12 @@ async fn handle_create_channel(
     order: ByteOrder,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
-    let _count = cur.get_u16(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let cid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let _count = cur
+        .get_u16(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let cid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let name = crate::proto::decode_string(&mut cur, order)
         .map_err(|e| PvaError::Decode(e.to_string()))?
         .unwrap_or_default();
@@ -448,7 +482,12 @@ async fn handle_create_channel(
         let mut buf = Vec::new();
         h.write_into(&mut buf);
         buf.extend_from_slice(&payload);
-        writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+        writer
+            .lock()
+            .await
+            .write_all(&buf)
+            .await
+            .map_err(PvaError::Io)?;
         return Ok(());
     }
 
@@ -470,12 +509,21 @@ async fn handle_create_channel(
     payload.put_u32(sid, order);
     Status::ok().write_into(order, &mut payload);
     // Access rights byte (omitted — pvxs accepts none).
-    let h =
-        PvaHeader::application(true, order, Command::CreateChannel.code(), payload.len() as u32);
+    let h = PvaHeader::application(
+        true,
+        order,
+        Command::CreateChannel.code(),
+        payload.len() as u32,
+    );
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+    writer
+        .lock()
+        .await
+        .write_all(&buf)
+        .await
+        .map_err(PvaError::Io)?;
     Ok(())
 }
 
@@ -486,8 +534,12 @@ async fn handle_destroy_channel(
     order: ByteOrder,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
-    let sid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let cid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let sid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let cid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     channels.remove(&sid);
     let mut payload = Vec::new();
     payload.put_u32(sid, order);
@@ -501,7 +553,12 @@ async fn handle_destroy_channel(
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+    writer
+        .lock()
+        .await
+        .write_all(&buf)
+        .await
+        .map_err(PvaError::Io)?;
     Ok(())
 }
 
@@ -518,6 +575,7 @@ fn handle_destroy_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_op(
     source: &DynSource,
     frame: &Frame,
@@ -529,8 +587,12 @@ async fn handle_op(
     encode_cache: &mut EncodeTypeCache,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
-    let sid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let ioid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let sid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let ioid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let subcmd = cur.get_u8().map_err(|e| PvaError::Decode(e.to_string()))?;
 
     let ch = match channels.get_mut(&sid) {
@@ -545,14 +607,7 @@ async fn handle_op(
     if subcmd & 0x08 != 0 {
         // INIT — read pvRequest (we ignore filtering details; we always send
         // back the full introspection).
-        let intro = ch
-            .introspection
-            .clone()
-            .or_else(|| {
-                // Sometimes intro wasn't fetched yet; resolve lazily.
-                None
-            })
-            .unwrap_or_else(|| FieldDesc::Variant);
+        let intro = ch.introspection.clone().unwrap_or(FieldDesc::Variant);
 
         // Drain pvRequest bytes (decode just to advance cursor — ignore result).
         let _ = decode_type_desc(&mut cur, order);
@@ -583,7 +638,12 @@ async fn handle_op(
         let mut buf = Vec::new();
         h.write_into(&mut buf);
         buf.extend_from_slice(&payload);
-        writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+        writer
+            .lock()
+            .await
+            .write_all(&buf)
+            .await
+            .map_err(PvaError::Io)?;
         return Ok(());
     }
 
@@ -618,12 +678,17 @@ async fn handle_op(
             let mut buf = Vec::new();
             h.write_into(&mut buf);
             buf.extend_from_slice(&payload);
-            writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+            writer
+                .lock()
+                .await
+                .write_all(&buf)
+                .await
+                .map_err(PvaError::Io)?;
         }
         OpKind::Put => {
             // Read bitset (which fields client is putting) + value.
-            let _changed = BitSet::decode(&mut cur, order)
-                .map_err(|e| PvaError::Decode(e.to_string()))?;
+            let _changed =
+                BitSet::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
             let value = decode_pv_field(&intro, &mut cur, order)
                 .map_err(|e| PvaError::Decode(e.to_string()))?;
             let pv_name = ch.name.clone();
@@ -640,16 +705,19 @@ async fn handle_op(
             let mut buf = Vec::new();
             h.write_into(&mut buf);
             buf.extend_from_slice(&payload);
-            writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+            writer
+                .lock()
+                .await
+                .write_all(&buf)
+                .await
+                .map_err(PvaError::Io)?;
         }
         OpKind::Monitor => {
             // MONITOR_START / pipeline-ack uses subcmd 0x40 in the
             // formal spec, 0x80 in pvxs/spvirit byte-parity (legacy
             // "pipeline" subcmd). Either signals "start emitting / ack
             // window". Also treat plain 0x00 as "start" for compatibility.
-            let is_start_or_ack = subcmd & 0x40 != 0
-                || subcmd & 0x80 != 0
-                || subcmd == 0x00;
+            let is_start_or_ack = subcmd & 0x40 != 0 || subcmd & 0x80 != 0 || subcmd == 0x00;
             // Only spawn the subscriber task once per ioid.
             let already_running = ch
                 .ops
@@ -738,7 +806,12 @@ async fn handle_op(
             let mut buf = Vec::new();
             h.write_into(&mut buf);
             buf.extend_from_slice(&payload);
-            writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+            writer
+                .lock()
+                .await
+                .write_all(&buf)
+                .await
+                .map_err(PvaError::Io)?;
         }
     }
     Ok(())
@@ -752,8 +825,12 @@ async fn handle_get_field(
     order: ByteOrder,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
-    let sid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
-    let ioid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    let sid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let ioid = cur
+        .get_u32(order)
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
     let _sub = crate::proto::decode_string(&mut cur, order)
         .map_err(|e| PvaError::Decode(e.to_string()))?;
 
@@ -781,7 +858,12 @@ async fn handle_get_field(
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+    writer
+        .lock()
+        .await
+        .write_all(&buf)
+        .await
+        .map_err(PvaError::Io)?;
     Ok(())
 }
 
@@ -806,7 +888,12 @@ async fn send_op_error(
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+    writer
+        .lock()
+        .await
+        .write_all(&buf)
+        .await
+        .map_err(PvaError::Io)?;
     Ok(())
 }
 

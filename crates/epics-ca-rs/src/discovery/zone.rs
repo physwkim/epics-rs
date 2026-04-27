@@ -29,12 +29,7 @@ impl ZoneSnippet {
     /// Register an IOC instance. `name` is the unique service-instance
     /// name (e.g. "motor-ioc"), `host` is a hostname A record on the
     /// same zone (e.g. "motor-host"), `port` is the CA TCP port.
-    pub fn instance(
-        mut self,
-        name: impl Into<String>,
-        host: impl Into<String>,
-        port: u16,
-    ) -> Self {
+    pub fn instance(mut self, name: impl Into<String>, host: impl Into<String>, port: u16) -> Self {
         self.instances.push(Instance {
             name: name.into(),
             host: host.into(),

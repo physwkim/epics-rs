@@ -50,8 +50,7 @@ async fn pvxs_discover_no_event_for_repeated_same_guid() {
     // Second observation with same GUID: no new event (BeaconTracker
     // returns false, so we don't notify subscribers).
     engine.observe_beacon(server, guid).await;
-    let second =
-        tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+    let second = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
     assert!(
         second.is_err(),
         "expected no second event for same guid, got {second:?}"

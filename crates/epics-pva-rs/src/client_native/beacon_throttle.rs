@@ -61,10 +61,7 @@ impl BeaconTracker {
                 entry.last_seen = now;
                 if entry.guid == guid {
                     // Same server, same incarnation — pass-through.
-                    let allow = match entry.suppress_until {
-                        Some(deadline) if now < deadline => false,
-                        _ => true,
-                    };
+                    let allow = !matches!(entry.suppress_until, Some(deadline) if now < deadline);
                     if allow {
                         entry.suppress_until = None;
                     }

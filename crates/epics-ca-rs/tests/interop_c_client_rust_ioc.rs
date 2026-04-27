@@ -147,7 +147,10 @@ fn c_cainfo_describes_rust_ioc_channel() {
         .expect("cainfo");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("TEST:AI"), "cainfo output: {text}");
-    assert!(text.contains("State:") || text.contains("Connected"), "cainfo output: {text}");
+    assert!(
+        text.contains("State:") || text.contains("Connected"),
+        "cainfo output: {text}"
+    );
 }
 
 #[test]
@@ -193,4 +196,3 @@ fn pyepics_caget_via_libca_against_rust_ioc() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("42"), "pyepics output: {text}");
 }
-

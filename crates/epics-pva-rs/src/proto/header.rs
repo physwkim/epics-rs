@@ -139,7 +139,9 @@ impl PvaHeader {
     pub fn decode(cur: &mut Cursor<&[u8]>) -> Result<Self, DecodeError> {
         let magic = cur.get_u8()?;
         if magic != MAGIC {
-            return Err(DecodeError(format!("bad magic 0x{magic:02X}, expected 0xCA")));
+            return Err(DecodeError(format!(
+                "bad magic 0x{magic:02X}, expected 0xCA"
+            )));
         }
         let version = cur.get_u8()?;
         let flags = HeaderFlags(cur.get_u8()?);
@@ -174,10 +176,7 @@ mod tests {
         let h = PvaHeader::application(true, ByteOrder::Big, 4, 0x100);
         let bytes = h.encode();
         // flags = 0x40 (server) | 0x80 (BE) = 0xC0
-        assert_eq!(
-            bytes,
-            [MAGIC, PVA_VERSION, 0xC0, 4, 0x00, 0x00, 0x01, 0x00]
-        );
+        assert_eq!(bytes, [MAGIC, PVA_VERSION, 0xC0, 4, 0x00, 0x00, 0x01, 0x00]);
         let mut cur = Cursor::new(bytes.as_slice());
         assert_eq!(PvaHeader::decode(&mut cur).unwrap(), h);
     }

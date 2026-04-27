@@ -146,7 +146,7 @@ proptest! {
     fn pad_string_invariants(s in "[\\x20-\\x7e]{0,200}") {
         let padded = pad_string(&s);
         prop_assert_eq!(padded.len() % 8, 0);
-        prop_assert!(padded.len() >= s.len() + 1); // at least one terminator
+        prop_assert!(padded.len() > s.len()); // at least one terminator
         prop_assert_eq!(&padded[..s.len()], s.as_bytes());
         prop_assert_eq!(padded[s.len()], 0u8);
     }
