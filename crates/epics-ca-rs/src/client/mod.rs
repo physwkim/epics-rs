@@ -289,6 +289,12 @@ pub struct CaClientConfig {
 
 impl CaClient {
     pub async fn new() -> CaResult<Self> {
+        Self::new_with_config(CaClientConfig::default()).await
+    }
+
+    /// Create a client with explicit configuration. Currently the only
+    /// knob is `tls`; future fields will follow the same pattern.
+    pub async fn new_with_config(config: CaClientConfig) -> CaResult<Self> {
         // Run repeater registration in background — don't block client startup.
         epics_base_rs::runtime::task::spawn(async { repeater::ensure_repeater().await });
 
@@ -310,10 +316,33 @@ impl CaClient {
             search_resp_tx,
         ));
 
-        let transport_task = epics_base_rs::runtime::task::spawn(transport::run_transport_manager(
-            transport_rx,
-            transport_evt_tx,
-        ));
+        #[cfg(feature = "tls")]
+        let tls_arc = config.tls.as_ref().and_then(|t| match t {
+            crate::tls::TlsConfig::Client(arc) => Some(arc.clone()),
+            crate::tls::TlsConfig::Server(_) => {
+                tracing::warn!("server-side TlsConfig passed to CaClient; ignoring");
+                None
+            }
+        });
+
+        let transport_task = {
+            #[cfg(feature = "tls")]
+            {
+                epics_base_rs::runtime::task::spawn(transport::run_transport_manager(
+                    transport_rx,
+                    transport_evt_tx,
+                    tls_arc,
+                ))
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                let _ = &config; // suppress unused
+                epics_base_rs::runtime::task::spawn(transport::run_transport_manager(
+                    transport_rx,
+                    transport_evt_tx,
+                ))
+            }
+        };
 
         let diagnostics = Arc::new(CaDiagnostics::default());
 

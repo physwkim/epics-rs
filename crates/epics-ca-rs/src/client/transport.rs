@@ -1,15 +1,23 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use epics_base_rs::runtime::sync::mpsc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::channel::AccessRights;
 use crate::protocol::*;
 
 use super::types::{TransportCommand, TransportEvent};
+
+/// Optional client-side TLS handshaker. `None` means plaintext.
+/// Behind the `tls` feature so default builds carry zero TLS code.
+#[cfg(feature = "tls")]
+type TlsConnector = tokio_rustls::TlsConnector;
+#[cfg(feature = "tls")]
+type ClientTlsConfig = Arc<tokio_rustls::rustls::ClientConfig>;
 
 /// Timeout for echo response before declaring connection dead (matches C EPICS CA_ECHO_TIMEOUT).
 const ECHO_TIMEOUT_SECS: u64 = 5;
@@ -44,8 +52,11 @@ struct ServerConnection {
 pub(crate) async fn run_transport_manager(
     mut command_rx: mpsc::UnboundedReceiver<TransportCommand>,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
+    #[cfg(feature = "tls")] tls: Option<ClientTlsConfig>,
 ) {
     let mut connections: HashMap<SocketAddr, ServerConnection> = HashMap::new();
+    #[cfg(feature = "tls")]
+    let tls = tls;
 
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
@@ -56,7 +67,17 @@ pub(crate) async fn run_transport_manager(
             } => {
                 // Ensure we have a connection to this server
                 if !connections.contains_key(&server_addr) {
-                    match connect_server(server_addr, event_tx.clone()).await {
+                    let result = {
+                        #[cfg(feature = "tls")]
+                        {
+                            connect_server(server_addr, event_tx.clone(), tls.as_ref()).await
+                        }
+                        #[cfg(not(feature = "tls"))]
+                        {
+                            connect_server(server_addr, event_tx.clone()).await
+                        }
+                    };
+                    match result {
                         Some(conn) => {
                             connections.insert(server_addr, conn);
                         }
@@ -79,7 +100,17 @@ pub(crate) async fn run_transport_manager(
                         old._read_task.abort();
                         old._write_task.abort();
                     }
-                    match connect_server(server_addr, event_tx.clone()).await {
+                    let result = {
+                        #[cfg(feature = "tls")]
+                        {
+                            connect_server(server_addr, event_tx.clone(), tls.as_ref()).await
+                        }
+                        #[cfg(not(feature = "tls"))]
+                        {
+                            connect_server(server_addr, event_tx.clone()).await
+                        }
+                    };
+                    match result {
                         Some(conn) => {
                             connections.insert(server_addr, conn);
                         }
@@ -283,6 +314,7 @@ fn send_frame(
 async fn connect_server(
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
+    #[cfg(feature = "tls")] tls: Option<&ClientTlsConfig>,
 ) -> Option<ServerConnection> {
     tracing::debug!(server = %server_addr, "establishing TCP virtual circuit");
     let stream = match tokio::time::timeout(
@@ -315,25 +347,22 @@ async fn connect_server(
         let _ = sock.set_tcp_keepalive(&keepalive);
     }
 
-    let (reader, write_half) = stream.into_split();
     let (write_tx, write_rx) = mpsc::unbounded_channel();
     let pending_frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let echo_probe = std::sync::Arc::new(tokio::sync::Notify::new());
 
-    // Build initial handshake as a single frame (VERSION + HOST + CLIENT)
+    // Build initial CA handshake (VERSION + HOST + CLIENT) — same on
+    // both plaintext and TLS paths.
     let mut handshake = Vec::new();
-
     let mut version_hdr = CaHeader::new(CA_PROTO_VERSION);
     version_hdr.count = CA_MINOR_VERSION;
     handshake.extend_from_slice(&version_hdr.to_bytes());
-
     let hostname = epics_base_rs::runtime::env::hostname();
     let host_payload = pad_string(&hostname);
     let mut host_hdr = CaHeader::new(CA_PROTO_HOST_NAME);
     host_hdr.postsize = host_payload.len() as u16;
     handshake.extend_from_slice(&host_hdr.to_bytes());
     handshake.extend_from_slice(&host_payload);
-
     let username = epics_base_rs::runtime::env::get("USER")
         .or_else(|| epics_base_rs::runtime::env::get("USERNAME"))
         .unwrap_or_else(|| "unknown".to_string());
@@ -342,24 +371,86 @@ async fn connect_server(
     user_hdr.postsize = user_payload.len() as u16;
     handshake.extend_from_slice(&user_hdr.to_bytes());
     handshake.extend_from_slice(&user_payload);
-
     pending_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = write_tx.send(handshake);
 
-    let write_task = epics_base_rs::runtime::task::spawn(write_loop(
-        write_half,
-        write_rx,
-        server_addr,
-        event_tx.clone(),
-        pending_frames.clone(),
-    ));
-    let read_task = epics_base_rs::runtime::task::spawn(read_loop(
-        reader,
-        server_addr,
-        event_tx,
-        write_tx.clone(),
-        echo_probe.clone(),
-    ));
+    // Spawn read/write tasks. The TLS path wraps the TCP stream in a
+    // `tokio_rustls::TlsStream` first; the plaintext path splits the
+    // raw TcpStream. Both feed identical-shape generic loops.
+    #[cfg(feature = "tls")]
+    let (read_task, write_task) = if let Some(tls_cfg) = tls {
+        let server_name = match tokio_rustls::rustls::pki_types::ServerName::try_from(
+            server_addr.ip().to_string(),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(server = %server_addr, error = %e, "invalid TLS server name");
+                return None;
+            }
+        };
+        let connector = TlsConnector::from(tls_cfg.clone());
+        let tls_stream = match connector.connect(server_name, stream).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(server = %server_addr, error = %e, "TLS handshake failed");
+                return None;
+            }
+        };
+        tracing::debug!(server = %server_addr, "TLS handshake complete");
+        let (reader, writer) = tokio::io::split(tls_stream);
+        let write_task = epics_base_rs::runtime::task::spawn(write_loop(
+            writer,
+            write_rx,
+            server_addr,
+            event_tx.clone(),
+            pending_frames.clone(),
+        ));
+        let read_task = epics_base_rs::runtime::task::spawn(read_loop(
+            reader,
+            server_addr,
+            event_tx,
+            write_tx.clone(),
+            echo_probe.clone(),
+        ));
+        (read_task, write_task)
+    } else {
+        let (reader, writer) = stream.into_split();
+        let write_task = epics_base_rs::runtime::task::spawn(write_loop(
+            writer,
+            write_rx,
+            server_addr,
+            event_tx.clone(),
+            pending_frames.clone(),
+        ));
+        let read_task = epics_base_rs::runtime::task::spawn(read_loop(
+            reader,
+            server_addr,
+            event_tx,
+            write_tx.clone(),
+            echo_probe.clone(),
+        ));
+        (read_task, write_task)
+    };
+
+    #[cfg(not(feature = "tls"))]
+    let (read_task, write_task) = {
+        let (reader, writer) = stream.into_split();
+        let write_task = epics_base_rs::runtime::task::spawn(write_loop(
+            writer,
+            write_rx,
+            server_addr,
+            event_tx.clone(),
+            pending_frames.clone(),
+        ));
+        let read_task = epics_base_rs::runtime::task::spawn(read_loop(
+            reader,
+            server_addr,
+            event_tx,
+            write_tx.clone(),
+            echo_probe.clone(),
+        ));
+        (read_task, write_task)
+    };
 
     Some(ServerConnection {
         write_tx,
@@ -370,8 +461,8 @@ async fn connect_server(
     })
 }
 
-async fn write_loop(
-    mut writer: tokio::net::tcp::OwnedWriteHalf,
+async fn write_loop<W: AsyncWrite + Unpin + Send + 'static>(
+    mut writer: W,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
@@ -408,8 +499,8 @@ async fn write_loop(
     }
 }
 
-async fn read_loop(
-    mut reader: tokio::net::tcp::OwnedReadHalf,
+async fn read_loop<R: AsyncRead + Unpin + Send + 'static>(
+    mut reader: R,
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
     write_tx: mpsc::UnboundedSender<Vec<u8>>,
