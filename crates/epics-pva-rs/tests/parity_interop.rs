@@ -9,3 +9,5 @@ mod interop;
 mod wire_dump;
 #[path = "parity/tls_interop.rs"]
 mod tls_interop;
+#[path = "parity/stability_interop.rs"]
+mod stability_interop;

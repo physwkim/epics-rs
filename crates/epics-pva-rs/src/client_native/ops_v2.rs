@@ -203,7 +203,17 @@ where
     let fields_owned: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
 
     loop {
-        let (server, sid) = channel.ensure_active().await?;
+        let (server, sid) = match channel.ensure_active().await {
+            Ok(p) => p,
+            Err(e) => {
+                if matches!(channel.current_state(), super::channel::ChannelState::Closed) {
+                    return Ok(());
+                }
+                debug!(pv = %channel.pv_name, err = %e, "monitor reconnect failed; retrying in 500ms");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
+        };
         match run_monitor_loop(
             server.clone(),
             sid,
@@ -213,16 +223,14 @@ where
         )
         .await
         {
-            Ok(()) => return Ok(()), // monitor finished cleanly (server sent FINISH)
+            Ok(()) => return Ok(()),
             Err(MonitorEnd::ChannelClosed) => return Ok(()),
             Err(MonitorEnd::ConnectionLost) => {
-                // Wait for channel to either die-permanently or reconnect.
-                debug!(pv_name = %channel.pv_name, "monitor lost connection; waiting for reconnect");
-                channel.wait_until_inactive().await;
+                debug!(pv = %channel.pv_name, "monitor lost connection; will retry");
                 if matches!(channel.current_state(), super::channel::ChannelState::Closed) {
                     return Ok(());
                 }
-                // Loop will call ensure_active() again.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
             Err(MonitorEnd::Fatal(e)) => return Err(e),
         }

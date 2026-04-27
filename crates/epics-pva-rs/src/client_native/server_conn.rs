@@ -237,6 +237,14 @@ impl ServerConn {
             }
             alive_reader.store(false, Ordering::SeqCst);
             cancel_reader.cancel();
+            // Drain the router — drops all per-ioid senders so any
+            // outstanding `stream.recv().await` (e.g. monitor loops)
+            // wakes with `None` and can react to the disconnect.
+            {
+                let mut guard = router_reader.lock();
+                guard.by_ioid.clear();
+                guard.by_cid.clear();
+            }
         });
 
         // Heartbeat task
