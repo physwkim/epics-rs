@@ -18,14 +18,20 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::{Child, Command};
+use tokio::process::{Child, Command as TokioCommand};
 
 /// Find a pvxs binary by name. Returns `None` when the file isn't found.
 fn find_pvxs_bin(name: &str) -> Option<PathBuf> {
     if let Ok(home) = std::env::var("PVXS_HOME") {
         let home = PathBuf::from(home);
-        for sub in &["bundle/usr/local/bin", "bin"] {
-            let p = home.join(sub).join(name);
+        // Check standard EPICS layouts: O.<host>/, bin/<host>/, bin/, ...
+        let host = std::env::var("EPICS_HOST_ARCH").unwrap_or_else(|_| "darwin-aarch64".into());
+        for sub in &[
+            format!("bin/{}", host),
+            "bundle/usr/local/bin".into(),
+            "bin".into(),
+        ] {
+            let p = home.join(sub.as_str()).join(name);
             if p.is_file() {
                 return Some(p);
             }
@@ -58,7 +64,7 @@ fn pvxs_available(names: &[&str]) -> bool {
 #[tokio::test]
 #[ignore]
 async fn rust_client_to_pvxs_softiocpvx_get() {
-    if !pvxs_available(&["softIocPVX", "pvget"]) {
+    if !pvxs_available(&["softIocPVX", "pvxget"]) {
         eprintln!("pvxs not found; set PVXS_HOME and rerun");
         return;
     }
@@ -76,20 +82,36 @@ async fn rust_client_to_pvxs_softiocpvx_get() {
     let port = 25075u16;
     let udp = 25076u16;
 
-    let mut cmd = Command::new(&softioc);
+    let mut cmd = TokioCommand::new(&softioc);
     cmd.env("EPICS_PVA_SERVER_PORT", port.to_string())
         .env("EPICS_PVA_BROADCAST_PORT", udp.to_string())
+        .arg("-S") // no interactive shell — required so softIocPVX exits cleanly
         .arg("-d")
         .arg(dbfile.path())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().expect("spawn softIocPVX");
-    let _killer = ChildKiller(&mut child);
 
-    // Give the IOC time to start.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Wait until the TCP port is actually listening (with cap).
+    let server_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    );
+    let mut ready = false;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::net::TcpStream::connect(server_addr).is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let _ = child.start_kill();
+        panic!("softIocPVX did not bind {port} within 3s");
+    }
+    let _killer = ChildKiller(&mut child);
 
     // Native client GET against the pvxs IOC.
     use epics_pva_rs::client_native::context::PvaClient;
@@ -102,23 +124,43 @@ async fn rust_client_to_pvxs_softiocpvx_get() {
         .server_addr(addr)
         .build();
 
-    let v = tokio::time::timeout(Duration::from_secs(5), client.pvget("INTEROP:VAL"))
+    // First diagnose: get the introspection alone (GET_FIELD).
+    let intro = tokio::time::timeout(Duration::from_secs(5), client.pvinfo("INTEROP:VAL"))
         .await
-        .expect("pvget timeout")
-        .expect("pvget failed");
+        .expect("pvinfo timeout")
+        .expect("pvinfo failed");
+    eprintln!("INTROSPECTION:\n{intro}");
 
-    eprintln!("INTEROP got: {v}");
-    assert!(matches!(v, epics_pva_rs::pvdata::PvField::Structure(_)));
+    // Then full GET with explicit value-only field filter.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.pvget_fields("INTEROP:VAL", &["value"]),
+    )
+    .await
+    .expect("pvget timeout")
+    .expect("pvget failed");
+
+    eprintln!("INTEROP got: {}", result.value);
+    match &result.value {
+        epics_pva_rs::pvdata::PvField::Structure(s) => {
+            assert!(
+                s.struct_id.starts_with("epics:nt/NTScalar"),
+                "struct_id: {}",
+                s.struct_id
+            );
+        }
+        other => panic!("expected NTScalar, got {other:?}"),
+    }
 }
 
 #[tokio::test]
 #[ignore]
 async fn pvxs_pvget_to_rust_server_get() {
-    if !pvxs_available(&["pvget"]) {
+    if !pvxs_available(&["pvxget"]) {
         eprintln!("pvxs pvget not found; set PVXS_HOME and rerun");
         return;
     }
-    let pvget = find_pvxs_bin("pvget").unwrap();
+    let pvget = find_pvxs_bin("pvxget").unwrap();
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -199,7 +241,7 @@ async fn pvxs_pvget_to_rust_server_get() {
 
     // Run pvxs `pvget` against our server. We bypass UDP search by
     // forcing EPICS_PVA_ADDR_LIST.
-    let output = Command::new(&pvget)
+    let output = TokioCommand::new(&pvget)
         .env(
             "EPICS_PVA_ADDR_LIST",
             format!("127.0.0.1:{}", port + 1),
@@ -228,4 +270,171 @@ impl<'a> Drop for ChildKiller<'a> {
     fn drop(&mut self) {
         let _ = self.0.start_kill();
     }
+}
+
+// ── Additional interop scenarios ──────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn rust_client_pvput_to_pvxs_softiocpvx() {
+    if !pvxs_available(&["softIocPVX"]) {
+        return;
+    }
+    let softioc = find_pvxs_bin("softIocPVX").unwrap();
+
+    let dbfile = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        dbfile.path(),
+        "record(ao, \"INTEROP:OUT\") { field(VAL, \"0\") }\n",
+    )
+    .unwrap();
+
+    let port = 26075u16;
+    let mut child = TokioCommand::new(&softioc)
+        .env("EPICS_PVA_SERVER_PORT", port.to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", "26076")
+        .arg("-S")
+        .arg("-d")
+        .arg(dbfile.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let server_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    );
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::net::TcpStream::connect(server_addr).is_ok() {
+            break;
+        }
+    }
+    let _killer = ChildKiller(&mut child);
+
+    use epics_pva_rs::client_native::context::PvaClient;
+    let client = PvaClient::builder()
+        .timeout(Duration::from_secs(3))
+        .server_addr(server_addr)
+        .build();
+
+    // PUT a value
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        client.pvput("INTEROP:OUT", "37.5"),
+    )
+    .await
+    .expect("pvput timeout")
+    .expect("pvput failed");
+
+    // GET back to confirm
+    let v = tokio::time::timeout(Duration::from_secs(5), client.pvget("INTEROP:OUT"))
+        .await
+        .expect("pvget timeout")
+        .expect("pvget failed");
+
+    if let epics_pva_rs::pvdata::PvField::Structure(s) = v {
+        match s.get_value() {
+            Some(epics_pva_rs::pvdata::ScalarValue::Double(d)) => {
+                assert!((d - 37.5).abs() < 1e-6, "got {d}");
+            }
+            other => panic!("expected double, got {other:?}"),
+        }
+    } else {
+        panic!("expected NTScalar");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn rust_client_pvmonitor_pvxs_softiocpvx_via_pvxput() {
+    if !pvxs_available(&["softIocPVX", "pvxput"]) {
+        return;
+    }
+    let softioc = find_pvxs_bin("softIocPVX").unwrap();
+    let pvxput = find_pvxs_bin("pvxput").unwrap();
+
+    let dbfile = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        dbfile.path(),
+        "record(ao, \"INTEROP:MON\") { field(VAL, \"1.0\") }\n",
+    )
+    .unwrap();
+
+    let port = 27075u16;
+    let mut child = TokioCommand::new(&softioc)
+        .env("EPICS_PVA_SERVER_PORT", port.to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", "27076")
+        .arg("-S")
+        .arg("-d")
+        .arg(dbfile.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    );
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::net::TcpStream::connect(server_addr).is_ok() {
+            break;
+        }
+    }
+    let _killer = ChildKiller(&mut child);
+
+    use epics_pva_rs::client_native::context::PvaClient;
+    use epics_pva_rs::pvdata::{PvField, ScalarValue};
+    let client = PvaClient::builder()
+        .timeout(Duration::from_secs(3))
+        .server_addr(server_addr)
+        .build();
+
+    let received = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<f64>::new()));
+    let recv_cb = received.clone();
+
+    let mon_handle = tokio::spawn({
+        let client = client.clone();
+        async move {
+            let _ = client
+                .pvmonitor("INTEROP:MON", move |value| {
+                    if let PvField::Structure(s) = value {
+                        if let Some(ScalarValue::Double(d)) = s.get_value() {
+                            recv_cb.lock().push(*d);
+                        }
+                    }
+                })
+                .await;
+        }
+    });
+
+    // Wait for initial snapshot.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Drive pvxput from outside to update the value.
+    for v in &[2.0_f64, 3.0, 4.0] {
+        let out = TokioCommand::new(&pvxput)
+            .env("EPICS_PVA_ADDR_LIST", format!("127.0.0.1:27076"))
+            .env("EPICS_PVA_AUTO_ADDR_LIST", "NO")
+            .arg("-w")
+            .arg("3")
+            .arg("INTEROP:MON")
+            .arg(format!("{v}"))
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "pvxput failed: {:?}", out);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let got = received.lock().clone();
+    eprintln!("monitor got: {got:?}");
+    assert!(got.contains(&4.0), "monitor did not receive final value 4.0; got {got:?}");
+
+    mon_handle.abort();
 }

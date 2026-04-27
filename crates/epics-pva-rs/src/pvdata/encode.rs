@@ -340,7 +340,79 @@ pub fn encode_pv_field(value: &PvField, desc: &FieldDesc, order: ByteOrder, out:
     }
 }
 
-/// Decode a `PvField` matching `desc`.
+/// Decode a `PvField` matching `desc`, consulting `bitset` to know which
+/// fields are actually present on the wire.
+///
+/// pvxs / pvData encode only the fields whose bit (or whose descendants'
+/// bits) is set; the rest are omitted entirely. Callers that want
+/// "everything is present" semantics can pass a fully-set bitset of size
+/// `desc.total_bits()`.
+///
+/// `bit_offset` is the bit position assigned to `desc` in the parent's
+/// bitset numbering scheme — pvData spec §5.4 depth-first.
+pub fn decode_pv_field_with_bitset(
+    desc: &FieldDesc,
+    bitset: &crate::proto::BitSet,
+    bit_offset: usize,
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+) -> Result<PvField, DecodeError> {
+    // Helper: true iff the bit at `pos` is set, OR any descendant of
+    // a structure starting at `pos` (with `desc_local`) is set.
+    fn any_descendant_set(
+        bitset: &crate::proto::BitSet,
+        pos: usize,
+        desc_local: &FieldDesc,
+    ) -> bool {
+        let total = desc_local.total_bits();
+        for i in 0..total {
+            if bitset.get(pos + i) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The bit at `bit_offset` represents this descriptor itself.
+    // For Structure, recurse into children. For scalar/leaf, decode iff
+    // the bit is set.
+    match desc {
+        FieldDesc::Scalar(_)
+        | FieldDesc::ScalarArray(_)
+        | FieldDesc::Variant
+        | FieldDesc::VariantArray
+        | FieldDesc::BoundedString(_)
+        | FieldDesc::Union { .. }
+        | FieldDesc::UnionArray { .. }
+        | FieldDesc::StructureArray { .. } => {
+            if bitset.get(bit_offset) {
+                decode_pv_field(desc, cur, order)
+            } else {
+                Ok(default_value_for(desc))
+            }
+        }
+        FieldDesc::Structure { struct_id, fields } => {
+            // The root struct is "present" if its own bit OR any descendant
+            // is set. If neither, return a default-filled structure.
+            if !any_descendant_set(bitset, bit_offset, desc) {
+                return Ok(default_value_for(desc));
+            }
+            let mut s = PvStructure::new(struct_id);
+            // First child bit = root bit + 1.
+            let mut child_bit = bit_offset + 1;
+            for (name, child) in fields {
+                let v = decode_pv_field_with_bitset(child, bitset, child_bit, cur, order)?;
+                s.fields.push((name.clone(), v));
+                child_bit += child.total_bits();
+            }
+            Ok(PvField::Structure(s))
+        }
+    }
+}
+
+/// Decode a `PvField` matching `desc` — assumes every field is present
+/// on the wire (i.e. bitset is "all bits set"). Used for cases like
+/// CONNECTION_VALIDATION authnz where there's no bitset.
 pub fn decode_pv_field(
     desc: &FieldDesc,
     cur: &mut Cursor<&[u8]>,

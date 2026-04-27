@@ -313,8 +313,14 @@ pub fn decode_op_response(
     };
     let changed = BitSet::decode(&mut cur, order)
         .map_err(|e| PvaError::Decode(e.to_string()))?;
-    let value = decode_pv_field(intro, &mut cur, order)
-        .map_err(|e| PvaError::Decode(e.to_string()))?;
+    let value = crate::pvdata::encode::decode_pv_field_with_bitset(
+        intro,
+        &changed,
+        0,
+        &mut cur,
+        order,
+    )
+    .map_err(|e| PvaError::Decode(e.to_string()))?;
     Ok(OpResponse::Data(OpDataResponse {
         ioid,
         subcmd,

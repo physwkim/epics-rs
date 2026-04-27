@@ -5,3 +5,5 @@
 
 #[path = "parity/interop.rs"]
 mod interop;
+#[path = "parity/wire_dump.rs"]
+mod wire_dump;

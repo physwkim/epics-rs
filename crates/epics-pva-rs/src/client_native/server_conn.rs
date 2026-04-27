@@ -495,6 +495,9 @@ fn build_client_connection_validation(
     payload.put_u16(qos, order);
     encode_string_into(auth, order, &mut payload);
 
+    // pvxs always reads a Variant payload after the auth method string —
+    // even for "anonymous". Send the null-variant marker (0xFF) for
+    // anonymous, or an inline structure with user/host for "ca".
     if auth == "ca" {
         // Variant tag (0xFD) + inline AuthZ structure carrying user+host.
         payload.put_u8(0xFD);
@@ -510,6 +513,9 @@ fn build_client_connection_validation(
         payload.put_u8(0x60);
         encode_string_into(user, order, &mut payload);
         encode_string_into(host, order, &mut payload);
+    } else {
+        // Null variant — pvxs `readVariant` returns `Value()` for 0xFF.
+        payload.put_u8(0xFF);
     }
 
     let h = PvaHeader::application(

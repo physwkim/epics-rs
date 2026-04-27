@@ -313,7 +313,7 @@ where
                 callback(&intro, &d.value);
                 events_since_ack += 1;
                 if pipeline_size > 0 && events_since_ack >= pipeline_size {
-                    let ack = codec.build_monitor_start(sid, ioid, events_since_ack);
+                    let ack = codec.build_monitor_ack(sid, ioid, events_since_ack);
                     if server.send(ack).await.is_err() {
                         server.unregister_ioid(ioid);
                         return Err(MonitorEnd::ConnectionLost);

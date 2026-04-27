@@ -157,13 +157,30 @@ impl PvaCodec {
         pipeline_size: u32,
     ) -> Vec<u8> {
         let order = self.order();
+        // pvxs `servermon.cpp` uses subcmd `0x44` (0x40 START | 0x04 PROCESS)
+        // for the initial START, optionally followed by the pipeline window
+        // size. Plain `0x40` works equivalently when no pipelining is
+        // requested; we always send the 4-byte window for consistency.
         let extra = match order {
             ByteOrder::Big => pipeline_size.to_be_bytes(),
             ByteOrder::Little => pipeline_size.to_le_bytes(),
         };
-        // 0x80 here is the legacy "pipeline ack" subcmd. Some pvxs builds
-        // accept a plain MONITOR_START (0x40) without the pipeline word; we
-        // keep the legacy form for spvirit byte-parity.
+        let p = Self::op_payload(server_channel_id, ioid, 0x44, &extra, order);
+        self.frame(false, CMD_MONITOR, p)
+    }
+
+    /// Subsequent pipeline-ack message: subcmd `0x80` + ack count.
+    pub fn build_monitor_ack(
+        &self,
+        server_channel_id: u32,
+        ioid: u32,
+        ack_count: u32,
+    ) -> Vec<u8> {
+        let order = self.order();
+        let extra = match order {
+            ByteOrder::Big => ack_count.to_be_bytes(),
+            ByteOrder::Little => ack_count.to_le_bytes(),
+        };
         let p = Self::op_payload(server_channel_id, ioid, 0x80, &extra, order);
         self.frame(false, CMD_MONITOR, p)
     }
