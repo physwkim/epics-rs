@@ -32,6 +32,34 @@ struct BeaconState {
 const REREGISTER_INTERVAL: Duration = Duration::from_secs(300);
 
 pub(crate) async fn run_beacon_monitor(coord_tx: mpsc::UnboundedSender<CoordRequest>) {
+    run_beacon_monitor_inner(
+        coord_tx,
+        #[cfg(feature = "cap-tokens")]
+        None,
+    )
+    .await;
+}
+
+/// Variant that gates beacon acceptance on a [`SignedBeaconVerifier`].
+/// When `verifier` is `Some(...)`, the monitor only forwards beacons
+/// to the search engine after a valid companion datagram (cmmd=0xCAFE,
+/// see [`crate::server::signed_beacon`]) has been received and
+/// verified for the same (server, beacon_id) within the
+/// `max_age_secs` window.
+#[cfg(feature = "cap-tokens")]
+pub(crate) async fn run_beacon_monitor_with_verifier(
+    coord_tx: mpsc::UnboundedSender<CoordRequest>,
+    verifier: std::sync::Arc<crate::server::signed_beacon::SignedBeaconVerifier>,
+) {
+    run_beacon_monitor_inner(coord_tx, Some(verifier)).await;
+}
+
+async fn run_beacon_monitor_inner(
+    coord_tx: mpsc::UnboundedSender<CoordRequest>,
+    #[cfg(feature = "cap-tokens")] verifier: Option<
+        std::sync::Arc<crate::server::signed_beacon::SignedBeaconVerifier>,
+    >,
+) {
     // Bind a dedicated UDP socket for beacon reception.
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
@@ -48,6 +76,12 @@ pub(crate) async fn run_beacon_monitor(coord_tx: mpsc::UnboundedSender<CoordRequ
         }
     }
 
+    // When `verifier` is set, this map remembers which
+    // (server_ip, server_port, beacon_id) tuples have been
+    // authenticated by a recent companion datagram. Beacons whose
+    // tuple isn't here within `max_age_secs` get dropped.
+    #[cfg(feature = "cap-tokens")]
+    let mut verified_tuples: HashMap<(u32, u16, u32), std::time::Instant> = HashMap::new();
     let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
     // Beacons are 16 B but the repeater may concatenate VERSION + RSRV_IS_UP
     // and forward client-noop traffic. Use 4 KB so chained datagrams are
@@ -81,9 +115,52 @@ pub(crate) async fn run_beacon_monitor(coord_tx: mpsc::UnboundedSender<CoordRequ
             let frame_len = (CaHeader::SIZE + payload_padded).max(CaHeader::SIZE);
             offset += frame_len;
 
+            // Signed-beacon companion (cmmd=0xCAFE, cap-tokens
+            // feature). Verify the signature and stash the tuple as
+            // "authenticated" so the matching beacon is acceptable.
+            #[cfg(feature = "cap-tokens")]
+            if hdr.cmmd == crate::server::signed_beacon::CA_PROTO_RSRV_BEACON_SIG {
+                if let Some(ref v) = verifier {
+                    let frame = &buf[offset.saturating_sub(frame_len)..offset.min(len)];
+                    match v.verify(frame) {
+                        Ok((ip, port, beacon_id)) => {
+                            verified_tuples
+                                .insert((ip, port, beacon_id), std::time::Instant::now());
+                            metrics::counter!("ca_client_signed_beacon_verified_total")
+                                .increment(1);
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = ?e,
+                                "signed beacon companion failed verification");
+                            metrics::counter!("ca_client_signed_beacon_failures_total")
+                                .increment(1);
+                        }
+                    }
+                }
+                continue;
+            }
+
             if hdr.cmmd != CA_PROTO_RSRV_IS_UP {
                 continue;
             }
+
+            // Verifier policy: drop unauthenticated beacons. The
+            // companion can arrive ~simultaneously; we check against
+            // the verified-tuple set populated above. GC stale
+            // entries every iteration to keep the map bounded.
+            #[cfg(feature = "cap-tokens")]
+            if let Some(ref v) = verifier {
+                let max_age =
+                    std::time::Duration::from_secs(v.max_age_secs.max(1));
+                let now = std::time::Instant::now();
+                verified_tuples.retain(|_, t| now.duration_since(*t) <= max_age);
+                let key = (hdr.available, hdr.count, hdr.cid);
+                if !verified_tuples.contains_key(&key) {
+                    metrics::counter!("ca_client_unsigned_beacon_drops_total").increment(1);
+                    continue;
+                }
+            }
+
             handle_beacon(hdr, &mut servers, &coord_tx);
         }
     }
