@@ -355,6 +355,343 @@ async fn rust_client_pvput_to_pvxs_softiocpvx() {
 
 #[tokio::test]
 #[ignore]
+async fn pvxs_pvxget_to_rust_server_ntndarray() {
+    if !pvxs_available(&["pvxget"]) {
+        return;
+    }
+    let pvxget = find_pvxs_bin("pvxget").unwrap();
+
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    use epics_pva_rs::nt::nd_array::{
+        nt_nd_array_desc, nt_nd_array_value, NdAlarm, NdArrayBuffer, NdAttribute, NdCodec,
+        NdDimension, NdTimeStamp, NtNdArray,
+    };
+    use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarValue};
+    use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+
+    /// Source serving a single 4x4 ubyte NTNDArray with a known pattern.
+    #[derive(Clone)]
+    struct ImageSource {
+        unique_id: Arc<Mutex<i32>>,
+    }
+
+    impl ChannelSource for ImageSource {
+        fn list_pvs(&self) -> impl std::future::Future<Output = Vec<String>> + Send {
+            async { vec!["IMG:RAW".into()] }
+        }
+        fn has_pv(&self, n: &str) -> impl std::future::Future<Output = bool> + Send {
+            let n = n.to_string();
+            async move { n == "IMG:RAW" }
+        }
+        fn get_introspection(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<FieldDesc>> + Send {
+            async { Some(nt_nd_array_desc()) }
+        }
+        fn get_value(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+            let uid = self.unique_id.clone();
+            async move {
+                let mut guard = uid.lock().await;
+                *guard += 1;
+                let id = *guard;
+                drop(guard);
+
+                // 4x4 ubyte image with values 0..15.
+                let nt = NtNdArray {
+                    value: NdArrayBuffer::UByte((0u8..16).collect()),
+                    codec: NdCodec::default(),
+                    compressed_size: 16,
+                    uncompressed_size: 16,
+                    dimension: vec![
+                        NdDimension {
+                            size: 4,
+                            full_size: 4,
+                            binning: 1,
+                            ..NdDimension::default()
+                        },
+                        NdDimension {
+                            size: 4,
+                            full_size: 4,
+                            binning: 1,
+                            ..NdDimension::default()
+                        },
+                    ],
+                    unique_id: id,
+                    data_time_stamp: NdTimeStamp::default(),
+                    attribute: vec![NdAttribute {
+                        name: "ColorMode".into(),
+                        value: ScalarValue::Int(0),
+                        descriptor: "Mono".into(),
+                        source_type: 0,
+                        source: "driver".into(),
+                    }],
+                    descriptor: String::new(),
+                    alarm: NdAlarm {
+                        message: "NO_ALARM".into(),
+                        ..NdAlarm::default()
+                    },
+                    time_stamp: NdTimeStamp::default(),
+                };
+                Some(nt_nd_array_value(&nt))
+            }
+        }
+        fn put_value(
+            &self,
+            _: &str,
+            _: PvField,
+        ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+            async { Err("read-only".into()) }
+        }
+        fn is_writable(&self, _: &str) -> impl std::future::Future<Output = bool> + Send {
+            async { false }
+        }
+        fn subscribe(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send {
+            async { None }
+        }
+    }
+
+    let (port, udp) = alloc_port_pair();
+    let source = Arc::new(ImageSource {
+        unique_id: Arc::new(Mutex::new(0)),
+    });
+    let cfg = PvaServerConfig {
+        tcp_port: port,
+        udp_port: udp,
+        ..Default::default()
+    };
+    let h = tokio::spawn(async move {
+        let _ = run_pva_server(source, cfg).await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // pvxget against our NTNDArray-serving rust server.
+    let output = TokioCommand::new(&pvxget)
+        .env("EPICS_PVA_ADDR_LIST", format!("127.0.0.1:{}", port + 1))
+        .env("EPICS_PVA_AUTO_ADDR_LIST", "NO")
+        .arg("-w")
+        .arg("3")
+        .arg("IMG:RAW")
+        .output()
+        .await
+        .expect("pvxget run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("pvxget stdout:\n{stdout}");
+    if !output.status.success() {
+        panic!("pvxget failed: stdout=\n{stdout}\nstderr=\n{stderr}");
+    }
+    // Verify pvxs successfully decoded our NTNDArray.
+    assert!(
+        stdout.contains("epics:nt/NTNDArray:1.0"),
+        "pvxget didn't recognize NTNDArray, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("uniqueId"),
+        "pvxget output missing uniqueId, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("dimension"),
+        "pvxget output missing dimension, got:\n{stdout}"
+    );
+
+    h.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn rust_client_to_rust_server_ntndarray_full_roundtrip() {
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    use epics_pva_rs::client_native::context::PvaClient;
+    use epics_pva_rs::nt::nd_array::{
+        nt_nd_array_desc, nt_nd_array_value, NdAlarm, NdArrayBuffer, NdAttribute, NdCodec,
+        NdDimension, NdTimeStamp, NtNdArray,
+    };
+    use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarValue};
+    use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+
+    #[derive(Clone)]
+    struct ImageSource {}
+    impl ChannelSource for ImageSource {
+        fn list_pvs(&self) -> impl std::future::Future<Output = Vec<String>> + Send {
+            async { vec!["IMG:INT".into()] }
+        }
+        fn has_pv(&self, n: &str) -> impl std::future::Future<Output = bool> + Send {
+            let n = n.to_string();
+            async move { n == "IMG:INT" }
+        }
+        fn get_introspection(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<FieldDesc>> + Send {
+            async { Some(nt_nd_array_desc()) }
+        }
+        fn get_value(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+            async {
+                // 1024-element int32 array with simple ramp values.
+                let nt = NtNdArray {
+                    value: NdArrayBuffer::Int((0i32..1024).collect()),
+                    codec: NdCodec::default(),
+                    compressed_size: 4096,
+                    uncompressed_size: 4096,
+                    dimension: vec![NdDimension {
+                        size: 1024,
+                        full_size: 1024,
+                        binning: 1,
+                        ..NdDimension::default()
+                    }],
+                    unique_id: 42,
+                    data_time_stamp: NdTimeStamp::default(),
+                    attribute: vec![NdAttribute {
+                        name: "Test".into(),
+                        value: ScalarValue::Double(3.14),
+                        descriptor: "test attr".into(),
+                        source_type: 1,
+                        source: "fake".into(),
+                    }],
+                    descriptor: "ramp".into(),
+                    alarm: NdAlarm::default(),
+                    time_stamp: NdTimeStamp::default(),
+                };
+                Some(nt_nd_array_value(&nt))
+            }
+        }
+        fn put_value(
+            &self,
+            _: &str,
+            _: PvField,
+        ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+            async { Err("read-only".into()) }
+        }
+        fn is_writable(&self, _: &str) -> impl std::future::Future<Output = bool> + Send {
+            async { false }
+        }
+        fn subscribe(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send {
+            async { None }
+        }
+    }
+
+    let (port, udp) = alloc_port_pair();
+    let source = Arc::new(ImageSource {});
+    let cfg = PvaServerConfig {
+        tcp_port: port,
+        udp_port: udp,
+        ..Default::default()
+    };
+    let h = tokio::spawn(async move {
+        let _ = run_pva_server(source, cfg).await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Native client retrieves the NTNDArray, decode union value back.
+    let server_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    );
+    let client = PvaClient::builder()
+        .timeout(Duration::from_secs(3))
+        .server_addr(server_addr)
+        .build();
+
+    let v = tokio::time::timeout(Duration::from_secs(5), client.pvget("IMG:INT"))
+        .await
+        .expect("pvget timeout")
+        .expect("pvget failed");
+
+    let s = match &v {
+        PvField::Structure(s) => s,
+        other => panic!("expected structure, got {other:?}"),
+    };
+    assert_eq!(s.struct_id, "epics:nt/NTNDArray:1.0");
+
+    // Drill into value union.
+    match s.get_field("value") {
+        Some(PvField::Union {
+            selector,
+            variant_name,
+            value,
+        }) => {
+            assert_eq!(*selector, 5, "expected intValue selector (5), got {selector}");
+            assert_eq!(variant_name, "intValue");
+            match &**value {
+                PvField::ScalarArray(items) => {
+                    assert_eq!(items.len(), 1024, "expected 1024 elements");
+                    if let ScalarValue::Int(n) = items[0] {
+                        assert_eq!(n, 0);
+                    }
+                    if let ScalarValue::Int(n) = items[1023] {
+                        assert_eq!(n, 1023);
+                    }
+                }
+                other => panic!("expected ScalarArray, got {other:?}"),
+            }
+        }
+        other => panic!("expected Union, got {other:?}"),
+    }
+
+    // uniqueId
+    if let Some(PvField::Scalar(ScalarValue::Int(uid))) = s.get_field("uniqueId") {
+        assert_eq!(*uid, 42);
+    } else {
+        panic!("missing uniqueId");
+    }
+
+    // dimension is a structure-array
+    match s.get_field("dimension") {
+        Some(PvField::StructureArray(dims)) => {
+            assert_eq!(dims.len(), 1);
+            if let Some(PvField::Scalar(ScalarValue::Int(sz))) = dims[0].get_field("size") {
+                assert_eq!(*sz, 1024);
+            } else {
+                panic!("dim[0].size missing");
+            }
+        }
+        other => panic!("expected StructureArray for dimension, got {other:?}"),
+    }
+
+    // attribute is a structure-array of NTAttribute
+    match s.get_field("attribute") {
+        Some(PvField::StructureArray(attrs)) => {
+            assert_eq!(attrs.len(), 1);
+            if let Some(PvField::Scalar(ScalarValue::String(name))) = attrs[0].get_field("name") {
+                assert_eq!(name, "Test");
+            }
+            // value is a Variant carrying Double(3.14)
+            match attrs[0].get_field("value") {
+                Some(PvField::Variant(v)) => match &v.value {
+                    PvField::Scalar(ScalarValue::Double(d)) => {
+                        assert!((d - 3.14).abs() < 1e-6, "got {d}")
+                    }
+                    other => panic!("variant value: {other:?}"),
+                },
+                other => panic!("expected Variant attribute value, got {other:?}"),
+            }
+        }
+        other => panic!("expected StructureArray for attribute, got {other:?}"),
+    }
+
+    h.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn pvxs_pvxcall_to_rust_server_rpc() {
     if !pvxs_available(&["pvxcall"]) {
         return;
