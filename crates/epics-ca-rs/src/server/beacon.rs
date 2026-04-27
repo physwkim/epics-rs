@@ -7,14 +7,6 @@ use tokio::sync::Notify;
 use crate::protocol::*;
 use epics_base_rs::error::CaResult;
 
-// Note on signed beacons: the cap_token module provides the Ed25519
-// signing primitives, but wire-level beacon authentication is
-// deferred. Spoof-resistance requires (a) a side-channel signed
-// companion datagram or postsize TLV, (b) a keypair distribution
-// channel, and (c) verifier integration into client beacon_monitor.
-// The crypto foundation is in place; tracker for the wire integration
-// lives in TODO_FOLLOWUPS.md.
-//
 /// Run the beacon emitter. Broadcasts CA_PROTO_RSRV_IS_UP at exponentially
 /// increasing intervals (starting at 20ms, doubling up to `max_period`).
 ///
@@ -25,11 +17,18 @@ use epics_base_rs::error::CaResult;
 /// When `reset` is notified (e.g. on TCP connect/disconnect), the interval
 /// resets to the initial 20ms, matching C EPICS behavior. This lets clients
 /// detect server state changes quickly via beacon anomaly detection.
+///
+/// `signer` is an opt-in Ed25519 [`signed_beacon::SignedBeaconEmitter`]
+/// that emits a companion datagram immediately after each beacon so
+/// clients with a configured keyring can authenticate the server
+/// identity. C clients ignore the companion (unknown command); the
+/// regular beacon stream is unchanged.
 pub async fn run_beacon_emitter(
     server_port: u16,
     beacon_addrs: Vec<SocketAddr>,
     max_period: Duration,
     reset: Arc<Notify>,
+    #[cfg(feature = "cap-tokens")] signer: Option<Arc<crate::server::signed_beacon::SignedBeaconEmitter>>,
 ) -> CaResult<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
@@ -79,6 +78,14 @@ pub async fn run_beacon_emitter(
 
         for addr in &beacon_addrs {
             let _ = socket.send_to(&bytes, addr).await;
+        }
+
+        // Signed-beacon companion: send a separate Ed25519-signed
+        // datagram so clients with a configured keyring can verify
+        // server identity. Same destinations.
+        #[cfg(feature = "cap-tokens")]
+        if let Some(ref s) = signer {
+            s.emit(server_ip, server_port, beacon_id).await;
         }
 
         beacon_id = beacon_id.wrapping_add(1);

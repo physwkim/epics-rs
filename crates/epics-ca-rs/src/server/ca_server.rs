@@ -762,6 +762,8 @@ impl CaServer {
                 udp_cfg.beacon_addrs.clone(),
                 udp_cfg.beacon_period,
                 beacon_reset,
+                #[cfg(feature = "cap-tokens")]
+                None,
             ) => {
                 eprintln!("Beacon emitter exited: {r:?}");
                 r

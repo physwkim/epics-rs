@@ -1,0 +1,219 @@
+//! Golden-file regression tests for the CA wire format.
+//!
+//! Each test fixes the byte-for-byte encoding of a representative
+//! message. If the encoder ever drifts (an alignment fix gone wrong, a
+//! field reordered, an endian flip), these tests turn red before
+//! anything reaches a real IOC.
+//!
+//! The hex strings below are constructed from first principles
+//! against the CA v4.13 wire format documented in
+//! `crates/epics-ca-rs/doc/02-wire-protocol.md`. They are NOT
+//! captured from libca/rsrv; that infrastructure (a live capture
+//! harness with a softioc fixture) is a separate project. Any future
+//! captured fixtures supersede these — when they disagree, the
+//! captured ones win.
+//!
+//! All multi-byte integers are big-endian. Header layout (16 bytes):
+//!
+//! ```text
+//! offset  size  field
+//!     0     2   cmmd
+//!     2     2   postsize
+//!     4     2   data_type
+//!     6     2   count
+//!     8     4   cid (param1)
+//!    12     4   available (param2)
+//! ```
+
+use epics_ca_rs::protocol::{
+    CA_PROTO_CREATE_CHAN, CA_PROTO_EVENT_ADD, CA_PROTO_READ_NOTIFY, CA_PROTO_RSRV_IS_UP,
+    CA_PROTO_SEARCH, CA_PROTO_VERSION, CaHeader,
+};
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn assert_hex(actual: &[u8], expected_hex: &str, label: &str) {
+    let got = hex(actual);
+    let want = expected_hex.replace(' ', "");
+    if got != want {
+        panic!(
+            "{label}:\n  got:  {got}\n  want: {want}\n  diff at first mismatch byte:\n",
+        );
+    }
+}
+
+#[test]
+fn version_minimal() {
+    // CA_PROTO_VERSION (0x0000), no payload, priority 0, minor 13.
+    // bytes:
+    //   00 00  cmmd = 0
+    //   00 00  postsize = 0
+    //   00 00  priority (data_type) = 0
+    //   00 0d  minor version = 13
+    //   00 00 00 00  cid
+    //   00 00 00 00  available
+    let mut h = CaHeader::new(CA_PROTO_VERSION);
+    h.count = 13;
+    let bytes = h.to_bytes();
+    assert_hex(
+        &bytes,
+        "0000 0000 0000 000d 00000000 00000000",
+        "VERSION",
+    );
+}
+
+#[test]
+fn search_request() {
+    // CA_PROTO_SEARCH (0x0006). Reply flag = 5 (DO_REPLY), version 13,
+    // cid = 0x12345678, padded payload "MOTOR:VAL\0" (10 bytes →
+    // padded to 16).
+    let pv_name = b"MOTOR:VAL";
+    let mut padded = Vec::new();
+    padded.extend_from_slice(pv_name);
+    padded.push(0); // null terminator
+    while padded.len() % 8 != 0 {
+        padded.push(0);
+    }
+    let postsize: u16 = padded.len() as u16; // 16
+    let mut h = CaHeader::new(CA_PROTO_SEARCH);
+    h.postsize = postsize;
+    h.data_type = 5; // DO_REPLY
+    h.count = 13; // minor version
+    h.cid = 0x1234_5678;
+    h.available = 0x1234_5678;
+    let mut bytes = h.to_bytes().to_vec();
+    bytes.extend_from_slice(&padded);
+    // 0006   cmmd = 6
+    // 0010   postsize = 16
+    // 0005   DO_REPLY
+    // 000d   minor 13
+    // 12345678 cid
+    // 12345678 available
+    // 4d4f 544f 523a 5641 4c00 0000 0000 0000  "MOTOR:VAL\0\0\0\0\0\0\0"
+    assert_hex(
+        &bytes,
+        "0006 0010 0005 000d 12345678 12345678 \
+         4d4f544f523a56414c00000000000000",
+        "SEARCH",
+    );
+}
+
+#[test]
+fn create_chan_response_dimensions() {
+    // CA_PROTO_CREATE_CHAN (0x0012) reply: data_type = DBR_DOUBLE (6),
+    // count=1, cid=0x55, sid=0x77.
+    let mut h = CaHeader::new(CA_PROTO_CREATE_CHAN);
+    h.data_type = 6; // DBR_DOUBLE
+    h.count = 1;
+    h.cid = 0x55;
+    h.available = 0x77; // sid
+    let bytes = h.to_bytes();
+    assert_hex(
+        &bytes,
+        "0012 0000 0006 0001 00000055 00000077",
+        "CREATE_CHAN",
+    );
+}
+
+#[test]
+fn read_notify_response_header_no_payload() {
+    // CA_PROTO_READ_NOTIFY (0x000F): reply with eca=0x01 (NORMAL),
+    // ioid=0xABCD, data_type=DBR_DOUBLE, count=1.
+    let mut h = CaHeader::new(CA_PROTO_READ_NOTIFY);
+    h.postsize = 8; // one DBR_DOUBLE
+    h.data_type = 6;
+    h.count = 1;
+    h.cid = 1; // ECA_NORMAL on the wire
+    h.available = 0xABCD;
+    let bytes = h.to_bytes();
+    assert_hex(
+        &bytes,
+        "000f 0008 0006 0001 00000001 0000abcd",
+        "READ_NOTIFY",
+    );
+}
+
+#[test]
+fn event_add_request_header() {
+    // CA_PROTO_EVENT_ADD (0x0001): subscribe with sid=0x10, sub_id=0x20,
+    // data_type=DBR_TIME_DOUBLE (20), count=1, mask=value+alarm
+    // (1+2=3). Payload: 12-byte SubscriptionRequest = 4 floats (low,
+    // high, to) zeroed + u16 mask + u16 padding.
+    let mut h = CaHeader::new(CA_PROTO_EVENT_ADD);
+    h.postsize = 16;
+    h.data_type = 20; // DBR_TIME_DOUBLE
+    h.count = 1;
+    h.cid = 0x10; // sid
+    h.available = 0x20; // sub_id
+    let mut bytes = h.to_bytes().to_vec();
+    // payload: low_f32, high_f32, to_f32, mask u16, pad u16
+    bytes.extend_from_slice(&0f32.to_be_bytes());
+    bytes.extend_from_slice(&0f32.to_be_bytes());
+    bytes.extend_from_slice(&0f32.to_be_bytes());
+    bytes.extend_from_slice(&3u16.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+    assert_hex(
+        &bytes,
+        "0001 0010 0014 0001 00000010 00000020 \
+         00000000 00000000 00000000 0003 0000",
+        "EVENT_ADD",
+    );
+}
+
+#[test]
+fn rsrv_is_up_beacon() {
+    // CA_PROTO_RSRV_IS_UP (0x000D): minor=13, port=5064, beacon_id=42,
+    // server_ip = 10.0.0.5 → 0x0a000005.
+    let mut h = CaHeader::new(CA_PROTO_RSRV_IS_UP);
+    h.data_type = 13;
+    h.count = 5064;
+    h.cid = 42;
+    h.available = 0x0a00_0005;
+    let bytes = h.to_bytes();
+    assert_hex(
+        &bytes,
+        "000d 0000 000d 13c8 0000002a 0a000005",
+        "RSRV_IS_UP",
+    );
+}
+
+#[test]
+fn extended_header_for_large_payload() {
+    // When postsize > 0xFFFE OR count > 0xFFFF, the header switches to
+    // extended form: postsize=0xFFFF, count=0, then 8 trailing bytes
+    // (extended_postsize u32 + extended_count u32). Total 24 bytes.
+    let mut h = CaHeader::new(CA_PROTO_READ_NOTIFY);
+    h.set_payload_size(0x10_0000, 100_000); // 1 MiB, 100k elements
+    h.cid = 1;
+    h.available = 0xDEAD;
+    let bytes = h.to_bytes_extended();
+    assert_hex(
+        &bytes,
+        "000f ffff 0000 0000 00000001 0000dead \
+         00100000 000186a0",
+        "READ_NOTIFY extended",
+    );
+}
+
+#[test]
+fn header_round_trip_through_decoder() {
+    // Sanity: every test fixture above must round-trip through the
+    // decoder. Picks one each from short and extended forms.
+    let mut h = CaHeader::new(CA_PROTO_VERSION);
+    h.count = 13;
+    let bytes = h.to_bytes();
+    let (decoded, size) = CaHeader::from_bytes_extended(&bytes).unwrap();
+    assert_eq!(size, CaHeader::SIZE);
+    assert_eq!(decoded.cmmd, h.cmmd);
+    assert_eq!(decoded.count, h.count);
+
+    let mut h2 = CaHeader::new(CA_PROTO_READ_NOTIFY);
+    h2.set_payload_size(0x10_0000, 100_000);
+    let bytes2 = h2.to_bytes_extended();
+    let (decoded2, size2) = CaHeader::from_bytes_extended(&bytes2).unwrap();
+    assert_eq!(size2, 24);
+    assert_eq!(decoded2.actual_postsize(), 0x10_0000);
+    assert_eq!(decoded2.actual_count(), 100_000);
+}
