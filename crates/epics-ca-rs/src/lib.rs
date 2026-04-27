@@ -21,6 +21,7 @@ pub mod discovery;
 pub mod observability;
 pub mod protocol;
 pub mod repeater;
+pub mod replay;
 pub mod server;
 pub mod tls;
 

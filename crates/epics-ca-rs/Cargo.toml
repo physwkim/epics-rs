@@ -122,6 +122,10 @@ name = "softioc-rs"
 path = "src/bin/softioc-rs.rs"
 
 [[bin]]
+name = "ca-replay-rs"
+path = "src/bin/ca-replay-rs.rs"
+
+[[bin]]
 name = "ca-soak"
 path = "src/bin/ca-soak.rs"
 
