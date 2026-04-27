@@ -24,6 +24,7 @@ the crate or trying to understand a runtime issue. End-user usage
 | [`09-libca-parity.md`](09-libca-parity.md) | Parity matrix vs `epics-base` libca / rsrv |
 | [`10-observability.md`](10-observability.md) | tracing events, metrics schema, exporter integrations |
 | [`11-tls-design.md`](11-tls-design.md) | CA over TLS (encryption + mTLS auth), design and migration plan |
+| [`12-discovery.md`](12-discovery.md) | Service discovery via mDNS + DNS-SD, BIND zone setup, custom backends |
 | [`../TESTING.md`](../TESTING.md) | How to run unit, interop, stress, and soak tests |
 | [`../STABILITY_PLAN.md`](../../../Documents/STABILITY_PLAN.md) | (Out-of-tree) the plan that tracked the P1–P12 stability work |
 

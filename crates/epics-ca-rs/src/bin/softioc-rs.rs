@@ -58,6 +58,19 @@ struct Args {
     /// cert from this trust pool are rejected.
     #[arg(long = "tls-client-ca", value_name = "PEM_FILE")]
     tls_client_ca: Option<String>,
+
+    /// Announce this IOC via mDNS as `<INSTANCE>._epics-ca._tcp.local.`
+    /// so clients on the same LAN can discover it without manual
+    /// `EPICS_CA_ADDR_LIST` configuration. Requires building with
+    /// --features discovery; otherwise the flag is rejected.
+    #[arg(long = "mdns", value_name = "INSTANCE")]
+    mdns: Option<String>,
+
+    /// Repeatable: extra TXT key=value pair attached to the mDNS
+    /// announce. Use for site metadata like `version=4.13` or
+    /// `asg=BEAM`. Ignored unless --mdns is set.
+    #[arg(long = "mdns-txt", value_name = "KEY=VALUE")]
+    mdns_txt: Vec<String>,
 }
 
 fn is_type_keyword(s: &str) -> bool {
@@ -275,6 +288,20 @@ async fn main() -> CaResult<()> {
         return Err(epics_base_rs::error::CaError::InvalidValue(
             "TLS flags require building with --features experimental-rust-tls".into(),
         ));
+    }
+
+    // mDNS announce. The discovery feature is required to actually
+    // emit packets; without it we keep the field for diagnostics and
+    // the server logs a warning at startup.
+    if let Some(ref instance) = args.mdns {
+        builder = builder.announce_mdns(instance);
+        for kv in &args.mdns_txt {
+            if let Some((k, v)) = kv.split_once('=') {
+                builder = builder.announce_txt(k, v);
+            } else {
+                eprintln!("warning: --mdns-txt expects KEY=VALUE, got {kv:?}; skipping");
+            }
+        }
     }
 
     let server = builder.build().await?;
