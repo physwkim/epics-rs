@@ -1,0 +1,119 @@
+//! PVA variable-length size encoding.
+//!
+//! See pvxs `pvaproto.h` `to_wire(Size)` / `from_wire(Size)`:
+//!
+//! - 0..=253       → single byte
+//! - 254..=u32::MAX → 0xFE prefix + u32
+//! - null marker   → 0xFF (used by nullable strings / unselected variant)
+//!
+//! For lengths 254..=2³¹-1 spvirit and pvxs both encode as `0xFE` + 4-byte
+//! native u32; the wire format is byte-exact when both peers use the same
+//! [`ByteOrder`].
+
+use std::io::Cursor;
+
+use super::buffer::{ByteOrder, DecodeError, ReadExt, WriteExt};
+
+/// Wire byte that signals "null / undefined size" — used by nullable strings.
+pub const NULL_MARKER: u8 = 0xFF;
+
+/// Wire byte that signals "extended (32-bit) size follows".
+pub const EXTENDED_MARKER: u8 = 0xFE;
+
+/// Encode a non-null size. Returns a freshly allocated `Vec`.
+pub fn encode_size(value: u32, order: ByteOrder) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_size_into(value, order, &mut out);
+    out
+}
+
+/// Encode a non-null size into an existing buffer.
+pub fn encode_size_into(value: u32, order: ByteOrder, out: &mut Vec<u8>) {
+    if value < 254 {
+        out.push(value as u8);
+    } else {
+        out.push(EXTENDED_MARKER);
+        out.put_u32(value, order);
+    }
+}
+
+/// Decode the next size from `cur`.
+///
+/// Returns `Ok(None)` for the explicit null marker (`0xFF`), `Ok(Some(n))`
+/// otherwise.
+pub fn decode_size(cur: &mut Cursor<&[u8]>, order: ByteOrder) -> Result<Option<u32>, DecodeError> {
+    let b = cur.get_u8()?;
+    match b {
+        NULL_MARKER => Ok(None),
+        EXTENDED_MARKER => {
+            let v = cur.get_u32(order)?;
+            Ok(Some(v))
+        }
+        other => Ok(Some(other as u32)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(value: u32, order: ByteOrder) {
+        let buf = encode_size(value, order);
+        let mut cur = Cursor::new(buf.as_slice());
+        assert_eq!(decode_size(&mut cur, order).unwrap(), Some(value));
+        // All bytes consumed
+        assert_eq!(cur.remaining(), 0);
+    }
+
+    #[test]
+    fn small_sizes_single_byte() {
+        for v in [0u32, 1, 127, 253] {
+            for order in [ByteOrder::Little, ByteOrder::Big] {
+                let buf = encode_size(v, order);
+                assert_eq!(buf.len(), 1, "value={v} should be single-byte");
+                assert_eq!(buf[0], v as u8);
+                roundtrip(v, order);
+            }
+        }
+    }
+
+    #[test]
+    fn extended_size_le() {
+        let buf = encode_size(254, ByteOrder::Little);
+        assert_eq!(buf, vec![0xFE, 0xFE, 0x00, 0x00, 0x00]);
+        let buf = encode_size(0x1_0000, ByteOrder::Little);
+        assert_eq!(buf, vec![0xFE, 0x00, 0x00, 0x01, 0x00]);
+        roundtrip(0x1_0000, ByteOrder::Little);
+    }
+
+    #[test]
+    fn extended_size_be() {
+        let buf = encode_size(0x1_0000, ByteOrder::Big);
+        assert_eq!(buf, vec![0xFE, 0x00, 0x01, 0x00, 0x00]);
+        roundtrip(0x1_0000, ByteOrder::Big);
+    }
+
+    #[test]
+    fn null_marker_decodes_to_none() {
+        let buf = vec![NULL_MARKER];
+        let mut cur = Cursor::new(buf.as_slice());
+        assert_eq!(decode_size(&mut cur, ByteOrder::Little).unwrap(), None);
+    }
+
+    #[test]
+    fn matches_spvirit_encoding() {
+        // Cross-check exact byte sequences against spvirit::encode_common::encode_size.
+        // Confirmed by reading the spvirit source: 0 → [0x00], 253 → [0xFD],
+        // 254 → [0xFE,0xFE,0x00,0x00,0x00] (LE) / [0xFE,0x00,0x00,0x00,0xFE] (BE).
+        assert_eq!(encode_size(0, ByteOrder::Little), vec![0x00]);
+        assert_eq!(encode_size(253, ByteOrder::Little), vec![0xFD]);
+        assert_eq!(
+            encode_size(254, ByteOrder::Little),
+            vec![0xFE, 0xFE, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            encode_size(254, ByteOrder::Big),
+            vec![0xFE, 0x00, 0x00, 0x00, 0xFE]
+        );
+    }
+}

@@ -1,6 +1,9 @@
+//! Scalar type tag and runtime value enum.
+
 use std::fmt;
 
-/// PVA scalar types (wire encoding uses typeCodeLUT mapping, not these ordinals directly)
+/// PVA scalar types. The wire encoding uses the type-code lookup table from
+/// pvData (`FieldCreateFactory.cpp`), not the enum's discriminant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ScalarType {
@@ -19,7 +22,7 @@ pub enum ScalarType {
 }
 
 impl ScalarType {
-    /// Wire type code (from C++ typeCodeLUT in FieldCreateFactory.cpp)
+    /// Wire type code (from C++ typeCodeLUT in FieldCreateFactory.cpp).
     pub fn type_code(self) -> u8 {
         match self {
             Self::Boolean => 0x00,
@@ -37,7 +40,7 @@ impl ScalarType {
         }
     }
 
-    /// Decode from wire type code
+    /// Decode from wire type code.
     pub fn from_type_code(code: u8) -> Option<Self> {
         match code {
             0x00 => Some(Self::Boolean),
@@ -56,12 +59,12 @@ impl ScalarType {
         }
     }
 
-    /// Scalar array type code (scalar code | 0x08)
+    /// Scalar array type code (`scalar_code | 0x08`).
     pub fn array_type_code(self) -> u8 {
         self.type_code() | 0x08
     }
 
-    /// Decode scalar type from array type code
+    /// Decode scalar type from an array type code.
     pub fn from_array_type_code(code: u8) -> Option<Self> {
         if code & 0x08 != 0 {
             Self::from_type_code(code & !0x08)
@@ -90,7 +93,7 @@ impl fmt::Display for ScalarType {
     }
 }
 
-/// Runtime scalar value
+/// Runtime scalar value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
     Boolean(bool),
@@ -144,7 +147,7 @@ impl ScalarValue {
         }
     }
 
-    /// Parse a string into a ScalarValue of the given type
+    /// Parse a string into a `ScalarValue` of the given type.
     pub fn parse(scalar_type: ScalarType, s: &str) -> Result<Self, String> {
         match scalar_type {
             ScalarType::Boolean => match s {
@@ -173,152 +176,52 @@ impl ScalarValue {
     }
 }
 
-/// Runtime PV field value (recursive)
-#[derive(Debug, Clone)]
-pub enum PvField {
-    Scalar(ScalarValue),
-    ScalarArray(Vec<ScalarValue>),
-    Structure(PvStructure),
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl fmt::Display for PvField {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Scalar(v) => write!(f, "{v}"),
-            Self::ScalarArray(arr) => {
-                write!(f, "[")?;
-                for (i, v) in arr.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{v}")?;
-                }
-                write!(f, "]")
-            }
-            Self::Structure(s) => write!(f, "{s}"),
-        }
-    }
-}
-
-/// A PVA structure with ordered named fields
-#[derive(Debug, Clone)]
-pub struct PvStructure {
-    pub struct_id: String,
-    pub fields: Vec<(String, PvField)>,
-}
-
-impl PvStructure {
-    pub fn new(struct_id: &str) -> Self {
-        Self {
-            struct_id: struct_id.to_string(),
-            fields: Vec::new(),
+    #[test]
+    fn scalar_type_round_trip() {
+        for st in [
+            ScalarType::Boolean,
+            ScalarType::Byte,
+            ScalarType::Short,
+            ScalarType::Int,
+            ScalarType::Long,
+            ScalarType::UByte,
+            ScalarType::UShort,
+            ScalarType::UInt,
+            ScalarType::ULong,
+            ScalarType::Float,
+            ScalarType::Double,
+            ScalarType::String,
+        ] {
+            assert_eq!(ScalarType::from_type_code(st.type_code()), Some(st));
         }
     }
 
-    pub fn get_field(&self, name: &str) -> Option<&PvField> {
-        self.fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    #[test]
+    fn array_codes_have_array_bit() {
+        assert_eq!(ScalarType::Double.array_type_code(), 0x4B);
+        assert_eq!(ScalarType::String.array_type_code(), 0x68);
+        assert_eq!(
+            ScalarType::from_array_type_code(0x4B),
+            Some(ScalarType::Double)
+        );
+        // Non-array codes should reject
+        assert_eq!(ScalarType::from_array_type_code(0x43), None);
     }
 
-    pub fn get_value(&self) -> Option<&ScalarValue> {
-        match self.get_field("value")? {
-            PvField::Scalar(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    pub fn get_alarm(&self) -> Option<&PvStructure> {
-        match self.get_field("alarm")? {
-            PvField::Structure(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn get_timestamp(&self) -> Option<&PvStructure> {
-        match self.get_field("timeStamp")? {
-            PvField::Structure(s) => Some(s),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for PvStructure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // For display, just show the value field if it exists (NTScalar-like)
-        if let Some(val) = self.get_value() {
-            write!(f, "{val}")
-        } else {
-            write!(f, "structure {} {{", self.struct_id)?;
-            for (name, field) in &self.fields {
-                write!(f, " {name}={field}")?;
-            }
-            write!(f, " }}")
-        }
-    }
-}
-
-/// Description of a field's type (for introspection, no values)
-#[derive(Debug, Clone)]
-pub enum FieldDesc {
-    Scalar(ScalarType),
-    ScalarArray(ScalarType),
-    Structure {
-        struct_id: String,
-        fields: Vec<(String, FieldDesc)>,
-    },
-}
-
-impl FieldDesc {
-    /// Get the scalar type of a "value" field in a structure
-    pub fn value_scalar_type(&self) -> Option<ScalarType> {
-        match self {
-            FieldDesc::Structure { fields, .. } => {
-                for (name, desc) in fields {
-                    if name == "value" {
-                        if let FieldDesc::Scalar(st) = desc {
-                            return Some(*st);
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    /// Get the number of fields (for structures)
-    pub fn field_count(&self) -> usize {
-        match self {
-            FieldDesc::Structure { fields, .. } => fields.len(),
-            _ => 0,
-        }
-    }
-}
-
-impl fmt::Display for FieldDesc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_indent(f, 0)
-    }
-}
-
-impl FieldDesc {
-    fn fmt_indent(&self, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
-        let pad = "    ".repeat(indent);
-        match self {
-            FieldDesc::Scalar(st) => write!(f, "{st}"),
-            FieldDesc::ScalarArray(st) => write!(f, "{st}[]"),
-            FieldDesc::Structure { struct_id, fields } => {
-                if struct_id.is_empty() {
-                    writeln!(f, "structure")?;
-                } else {
-                    writeln!(f, "structure {struct_id}")?;
-                }
-                for (name, desc) in fields {
-                    write!(f, "{pad}    {name}: ")?;
-                    desc.fmt_indent(f, indent + 1)?;
-                    writeln!(f)?;
-                }
-                Ok(())
-            }
-        }
+    #[test]
+    fn parse_scalar() {
+        assert_eq!(
+            ScalarValue::parse(ScalarType::Double, "3.14").unwrap(),
+            ScalarValue::Double(3.14)
+        );
+        assert_eq!(
+            ScalarValue::parse(ScalarType::Boolean, "true").unwrap(),
+            ScalarValue::Boolean(true)
+        );
+        assert!(ScalarValue::parse(ScalarType::Int, "abc").is_err());
     }
 }
