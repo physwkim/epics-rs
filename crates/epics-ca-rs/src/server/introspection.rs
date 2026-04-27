@@ -50,6 +50,9 @@ pub struct IntrospectionState {
     /// Hook for POST /reload-acf. None when the server has no ACF
     /// source path registered.
     pub reload_acf: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    /// Hook for POST /reload-tls. None when the server has no TLS
+    /// source paths registered.
+    pub reload_tls: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
 }
 
 impl IntrospectionState {
@@ -66,6 +69,7 @@ impl IntrospectionState {
             rate_limit_burst: 0,
             drain: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reload_acf: None,
+            reload_tls: None,
         })
     }
 
@@ -85,6 +89,15 @@ impl IntrospectionState {
     ) -> Arc<Self> {
         let inner = Arc::get_mut(&mut self).expect("with_reload_acf on shared Arc");
         inner.reload_acf = Some(f);
+        self
+    }
+
+    pub fn with_reload_tls(
+        mut self: Arc<Self>,
+        f: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Arc<Self> {
+        let inner = Arc::get_mut(&mut self).expect("with_reload_tls on shared Arc");
+        inner.reload_tls = Some(f);
         self
     }
 
@@ -178,6 +191,16 @@ async fn handle_request(
             None => (
                 501,
                 "{\"error\":\"reload_acf not configured\"}".to_string(),
+            ),
+        },
+        ("POST", "/reload-tls") => match &state.reload_tls {
+            Some(f) => match f() {
+                Ok(()) => (200, "{\"reload_tls\":\"ok\"}".to_string()),
+                Err(e) => (500, format!("{{\"error\":\"{}\"}}", escape_json(&e))),
+            },
+            None => (
+                501,
+                "{\"error\":\"reload_tls not configured\"}".to_string(),
             ),
         },
         ("GET", _) | ("POST", _) => (404, "{\"error\":\"not_found\"}".to_string()),

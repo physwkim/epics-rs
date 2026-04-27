@@ -211,7 +211,9 @@ pub async fn run_tcp_listener(
     conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
     audit: Option<crate::audit::AuditLogger>,
     drain: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(feature = "experimental-rust-tls")] tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+    #[cfg(feature = "experimental-rust-tls")] tls: Option<
+        Arc<std::sync::RwLock<Arc<tokio_rustls::rustls::ServerConfig>>>,
+    >,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -250,10 +252,16 @@ pub async fn run_tcp_listener(
         }
         let conn_events = conn_events.clone();
         let audit = audit.clone();
+        // Read the latest server config under the RwLock so a
+        // concurrent reload_tls() takes effect for the *next* accept
+        // without restarting the listener. Cheap read lock — only
+        // contended against rare reload write locks.
         #[cfg(feature = "experimental-rust-tls")]
-        let tls_acceptor = tls
-            .clone()
-            .map(tokio_rustls::TlsAcceptor::from);
+        let tls_acceptor = tls.as_ref().and_then(|slot| {
+            slot.read()
+                .ok()
+                .map(|guard| tokio_rustls::TlsAcceptor::from(guard.clone()))
+        });
 
         // Enable OS-level TCP keepalive on accepted socket so half-open
         // connections (e.g. NAT timeout, gateway down) are detected within

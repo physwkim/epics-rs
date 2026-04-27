@@ -228,7 +228,9 @@ impl CaServerBuilder {
         let acf = Arc::new(tokio::sync::RwLock::new(self.acf));
         #[cfg(feature = "experimental-rust-tls")]
         let tls = self.tls.and_then(|t| match t {
-            crate::tls::TlsConfig::Server(arc) => Some(arc),
+            crate::tls::TlsConfig::Server(arc) => {
+                Some(Arc::new(std::sync::RwLock::new(arc)))
+            }
             crate::tls::TlsConfig::Client(_) => {
                 tracing::warn!("client-side TlsConfig passed to CaServer; ignoring");
                 None
@@ -245,6 +247,8 @@ impl CaServerBuilder {
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "experimental-rust-tls")]
             tls,
+            #[cfg(feature = "experimental-rust-tls")]
+            tls_paths: std::sync::Mutex::new(tls_paths_from_env()),
             mdns_instance: self.mdns_instance,
             mdns_txt: self.mdns_txt,
             #[cfg(feature = "discovery-dns-update")]
@@ -279,8 +283,17 @@ pub struct CaServer {
     /// are wrapped in a `tokio_rustls::server::TlsStream` before the
     /// CA handshake runs. mTLS configurations additionally extract a
     /// verified peer identity for ACF rule matching.
+    ///
+    /// Wrapped in `RwLock<Arc<...>>` (rather than just `Arc<...>`) so
+    /// `reload_tls()` can swap the active config in place — accepted
+    /// connections see the new config without restarting the listener.
     #[cfg(feature = "experimental-rust-tls")]
-    tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+    tls: Option<Arc<std::sync::RwLock<Arc<tokio_rustls::rustls::ServerConfig>>>>,
+    /// Retained cert/key paths so `reload_tls()` knows what to re-read.
+    /// None when TLS was supplied via `with_tls(config)` rather than
+    /// path-based env config.
+    #[cfg(feature = "experimental-rust-tls")]
+    tls_paths: std::sync::Mutex<Option<TlsPaths>>,
     /// mDNS instance name to announce as. None disables announce.
     mdns_instance: Option<String>,
     /// Extra TXT key=value pairs for the mDNS announce.
@@ -323,6 +336,8 @@ impl CaServer {
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "experimental-rust-tls")]
             tls: None,
+            #[cfg(feature = "experimental-rust-tls")]
+            tls_paths: std::sync::Mutex::new(tls_paths_from_env()),
             mdns_instance: None,
             mdns_txt: Vec::new(),
             #[cfg(feature = "discovery-dns-update")]
@@ -390,7 +405,67 @@ impl CaServer {
     /// Idempotent; replaces any previously set config.
     #[cfg(feature = "experimental-rust-tls")]
     pub fn set_tls(&mut self, tls: Arc<tokio_rustls::rustls::ServerConfig>) {
-        self.tls = Some(tls);
+        self.tls = Some(Arc::new(std::sync::RwLock::new(tls)));
+    }
+
+    /// Record the cert/key/client-CA paths for later `reload_tls()`.
+    /// Builders that load via env (`tls_paths_from_env`) populate this
+    /// automatically; call this only when overriding programmatically.
+    #[cfg(feature = "experimental-rust-tls")]
+    pub fn set_tls_paths(&self, paths: TlsPaths) {
+        if let Ok(mut g) = self.tls_paths.lock() {
+            *g = Some(paths);
+        }
+    }
+
+    /// Re-read the cert/key files registered via env or
+    /// `set_tls_paths`, build a fresh `ServerConfig`, and atomically
+    /// swap it in. New TCP accepts use the fresh config immediately;
+    /// already-handshaked connections keep their negotiated session
+    /// until they close. The most common use is rotating certs
+    /// before expiry without restarting the IOC.
+    ///
+    /// Errors if no `tls_paths` is registered or the new files don't
+    /// load. The active config is left untouched on error.
+    #[cfg(feature = "experimental-rust-tls")]
+    pub fn reload_tls(&self) -> Result<(), String> {
+        let paths = {
+            let g = self.tls_paths.lock().map_err(|e| e.to_string())?;
+            g.clone()
+        };
+        let paths = paths.ok_or_else(|| "no TLS source paths registered".to_string())?;
+        let chain = crate::tls::load_certs(&paths.cert)
+            .map_err(|e| format!("loading {}: {e}", paths.cert))?;
+        let key = crate::tls::load_private_key(&paths.key)
+            .map_err(|e| format!("loading {}: {e}", paths.key))?;
+        let cfg = match paths.client_ca.as_ref() {
+            Some(ca) => {
+                let roots = crate::tls::load_root_store(ca)
+                    .map_err(|e| format!("loading client CA {ca}: {e}"))?;
+                crate::tls::TlsConfig::server_mtls_from_pem(chain, key, roots)
+                    .map_err(|e| format!("mTLS server build: {e}"))?
+            }
+            None => crate::tls::TlsConfig::server_from_pem(chain, key)
+                .map_err(|e| format!("TLS server build: {e}"))?,
+        };
+        let new_arc = match cfg {
+            crate::tls::TlsConfig::Server(arc) => arc,
+            crate::tls::TlsConfig::Client(_) => {
+                return Err("expected server TlsConfig".into());
+            }
+        };
+        let slot = self
+            .tls
+            .as_ref()
+            .ok_or_else(|| "TLS was never enabled on this server".to_string())?;
+        match slot.write() {
+            Ok(mut w) => {
+                *w = new_arc;
+                metrics::counter!("ca_server_tls_reload_total").increment(1);
+                Ok(())
+            }
+            Err(e) => Err(format!("tls slot poisoned: {e}")),
+        }
     }
 
     /// Subscribe to connection lifecycle events. Returns a broadcast
@@ -526,9 +601,11 @@ impl CaServer {
         let conn_events = self.conn_events.clone();
         #[cfg(feature = "experimental-rust-tls")]
         let tls = match self.tls.clone() {
-            Some(cfg) => Some(cfg),
+            Some(slot) => Some(slot),
             None => match crate::tls::server_from_env() {
-                Ok(Some(crate::tls::TlsConfig::Server(arc))) => Some(arc),
+                Ok(Some(crate::tls::TlsConfig::Server(arc))) => {
+                    Some(Arc::new(std::sync::RwLock::new(arc)))
+                }
                 Ok(Some(crate::tls::TlsConfig::Client(_))) => {
                     tracing::warn!("client-side TlsConfig produced by server_from_env; ignoring");
                     None
@@ -727,6 +804,53 @@ impl CaServer {
                     Ok(())
                 });
             let state = state.with_reload_acf(reload_fn);
+
+            // POST /reload-tls hook: re-read the cert/key paths and
+            // swap the inner ServerConfig Arc atomically. Available
+            // only when the server has TLS enabled and source paths.
+            #[cfg(feature = "experimental-rust-tls")]
+            let state = if let (Some(slot), Some(paths)) = (
+                self.tls.clone(),
+                self.tls_paths
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone()),
+            ) {
+                let paths = std::sync::Arc::new(paths);
+                let reload_tls_fn: Arc<dyn Fn() -> Result<(), String> + Send + Sync> =
+                    Arc::new(move || -> Result<(), String> {
+                        let chain = crate::tls::load_certs(&paths.cert)
+                            .map_err(|e| format!("loading {}: {e}", paths.cert))?;
+                        let key = crate::tls::load_private_key(&paths.key)
+                            .map_err(|e| format!("loading {}: {e}", paths.key))?;
+                        let cfg = match paths.client_ca.as_ref() {
+                            Some(ca) => {
+                                let roots = crate::tls::load_root_store(ca)
+                                    .map_err(|e| format!("loading {ca}: {e}"))?;
+                                crate::tls::TlsConfig::server_mtls_from_pem(chain, key, roots)
+                                    .map_err(|e| format!("mTLS build: {e}"))?
+                            }
+                            None => crate::tls::TlsConfig::server_from_pem(chain, key)
+                                .map_err(|e| format!("TLS build: {e}"))?,
+                        };
+                        let new_arc = match cfg {
+                            crate::tls::TlsConfig::Server(arc) => arc,
+                            crate::tls::TlsConfig::Client(_) => {
+                                return Err("expected server TlsConfig".into());
+                            }
+                        };
+                        let mut w = slot
+                            .write()
+                            .map_err(|e| format!("tls slot poisoned: {e}"))?;
+                        *w = new_arc;
+                        metrics::counter!("ca_server_tls_reload_total").increment(1);
+                        Ok(())
+                    });
+                state.with_reload_tls(reload_tls_fn)
+            } else {
+                state
+            };
+
             let st = state.clone();
             Some(epics_base_rs::runtime::task::spawn(async move {
                 if let Err(e) = crate::server::introspection::run_introspection(addr, st).await {
@@ -799,6 +923,29 @@ impl CaServer {
         }
         result
     }
+}
+
+/// Cert / key / optional-client-CA paths retained on the server so
+/// `reload_tls()` can re-read them. Used internally; populated from
+/// the env-var path or via the (currently unused) builder hook.
+#[cfg(feature = "experimental-rust-tls")]
+#[derive(Debug, Clone)]
+pub struct TlsPaths {
+    pub cert: String,
+    pub key: String,
+    pub client_ca: Option<String>,
+}
+
+#[cfg(feature = "experimental-rust-tls")]
+fn tls_paths_from_env() -> Option<TlsPaths> {
+    let cert = epics_base_rs::runtime::env::get("EPICS_CAS_TLS_CERT_FILE")?;
+    let key = epics_base_rs::runtime::env::get("EPICS_CAS_TLS_KEY_FILE")?;
+    let client_ca = epics_base_rs::runtime::env::get("EPICS_CAS_TLS_CLIENT_CA_FILE");
+    Some(TlsPaths {
+        cert,
+        key,
+        client_ca,
+    })
 }
 
 /// Resolve an audit logger from environment variables. The default

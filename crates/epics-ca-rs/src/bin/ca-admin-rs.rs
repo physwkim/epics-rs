@@ -47,6 +47,9 @@ enum Cmd {
     Drain,
     /// POST /reload-acf — re-read the ACF source path.
     ReloadAcf,
+    /// POST /reload-tls — re-read the TLS cert/key paths and swap
+    /// the active config atomically. Useful before cert expiry.
+    ReloadTls,
 }
 
 #[tokio::main]
@@ -65,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Queues => ("GET", "/queues"),
         Cmd::Drain => ("POST", "/drain"),
         Cmd::ReloadAcf => ("POST", "/reload-acf"),
+        Cmd::ReloadTls => ("POST", "/reload-tls"),
     };
 
     let timeout = Duration::from_secs(args.timeout);
