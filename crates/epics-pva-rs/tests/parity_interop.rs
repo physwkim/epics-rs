@@ -23,3 +23,5 @@ mod testpvreq_port;
 mod testtype_port;
 #[path = "parity/testdata_port.rs"]
 mod testdata_port;
+#[path = "parity/testconfig_port.rs"]
+mod testconfig_port;
