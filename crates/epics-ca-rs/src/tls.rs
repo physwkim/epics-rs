@@ -22,21 +22,21 @@
 //! See `doc/11-tls-design.md` for the wire-level negotiation,
 //! coexistence with plaintext peers, and migration guidance.
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 use std::io;
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 use std::path::Path;
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 use std::sync::Arc;
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
 
 /// CA-over-TLS configuration. Wraps `rustls` ClientConfig/ServerConfig
 /// with the conventions used by the CA TLS feature.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 #[derive(Clone)]
 pub enum TlsConfig {
     /// Server-side TLS configuration. Used by `CaServer::with_tls`.
@@ -45,7 +45,7 @@ pub enum TlsConfig {
     Client(Arc<ClientConfig>),
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 impl TlsConfig {
     /// Build a server config for TLS-only (no client cert verification).
     /// `cert_chain_pem` should be the server certificate chain (leaf
@@ -110,7 +110,7 @@ impl TlsConfig {
 }
 
 /// Helper: load a PEM-encoded certificate chain from a file.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 pub fn load_certs(path: impl AsRef<Path>) -> io::Result<Vec<CertificateDer<'static>>> {
     let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
     rustls_pemfile::certs(&mut reader).collect::<io::Result<Vec<_>>>()
@@ -118,7 +118,7 @@ pub fn load_certs(path: impl AsRef<Path>) -> io::Result<Vec<CertificateDer<'stat
 
 /// Helper: load a PEM-encoded private key from a file. Tries PKCS#8,
 /// PKCS#1 (RSA), and SEC1 (EC) sequentially; returns the first match.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 pub fn load_private_key(path: impl AsRef<Path>) -> io::Result<PrivateKeyDer<'static>> {
     let mut reader = std::io::BufReader::new(std::fs::File::open(&path)?);
     if let Some(key) = rustls_pemfile::pkcs8_private_keys(&mut reader)
@@ -149,7 +149,7 @@ pub fn load_private_key(path: impl AsRef<Path>) -> io::Result<PrivateKeyDer<'sta
 
 /// Helper: build a `RootCertStore` from a PEM file containing one or
 /// more CA certificates.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 pub fn load_root_store(path: impl AsRef<Path>) -> io::Result<RootCertStore> {
     let mut store = RootCertStore::empty();
     for cert in load_certs(path)? {
@@ -158,6 +158,73 @@ pub fn load_root_store(path: impl AsRef<Path>) -> io::Result<RootCertStore> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     }
     Ok(store)
+}
+
+/// Build a server-side `TlsConfig` from environment variables.
+///
+/// Variables (all paths PEM-encoded):
+/// - `EPICS_CAS_TLS_CERT_FILE`        — server certificate chain (required)
+/// - `EPICS_CAS_TLS_KEY_FILE`         — server private key (required)
+/// - `EPICS_CAS_TLS_CLIENT_CA_FILE`   — client CA bundle (optional → mTLS)
+///
+/// Returns `Ok(None)` when neither cert nor key is set (TLS disabled).
+/// Returns `Err` when one is set without the other, or when files are
+/// unreadable / invalid.
+#[cfg(feature = "experimental-rust-tls")]
+pub fn server_from_env() -> Result<Option<TlsConfig>, TlsError> {
+    let cert_path = epics_base_rs::runtime::env::get("EPICS_CAS_TLS_CERT_FILE");
+    let key_path = epics_base_rs::runtime::env::get("EPICS_CAS_TLS_KEY_FILE");
+    let client_ca_path = epics_base_rs::runtime::env::get("EPICS_CAS_TLS_CLIENT_CA_FILE");
+
+    match (cert_path, key_path) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => {
+            let chain = load_certs(&cert)?;
+            let priv_key = load_private_key(&key)?;
+            let cfg = if let Some(client_ca) = client_ca_path {
+                let roots = load_root_store(&client_ca)?;
+                TlsConfig::server_mtls_from_pem(chain, priv_key, roots)?
+            } else {
+                TlsConfig::server_from_pem(chain, priv_key)?
+            };
+            Ok(Some(cfg))
+        }
+        _ => Err(TlsError::Build(
+            "EPICS_CAS_TLS_CERT_FILE and EPICS_CAS_TLS_KEY_FILE must both be set or both unset"
+                .into(),
+        )),
+    }
+}
+
+/// Build a client-side `TlsConfig` from environment variables.
+///
+/// Variables (all paths PEM-encoded):
+/// - `EPICS_CA_TLS_ROOTS_FILE`    — server cert authority bundle (required)
+/// - `EPICS_CA_TLS_CLIENT_CERT`   — client certificate (optional → mTLS)
+/// - `EPICS_CA_TLS_CLIENT_KEY`    — client private key (required when CERT is set)
+///
+/// Returns `Ok(None)` when `EPICS_CA_TLS_ROOTS_FILE` is unset (TLS disabled).
+#[cfg(feature = "experimental-rust-tls")]
+pub fn client_from_env() -> Result<Option<TlsConfig>, TlsError> {
+    let Some(roots_path) = epics_base_rs::runtime::env::get("EPICS_CA_TLS_ROOTS_FILE") else {
+        return Ok(None);
+    };
+    let roots = load_root_store(&roots_path)?;
+    let client_cert = epics_base_rs::runtime::env::get("EPICS_CA_TLS_CLIENT_CERT");
+    let client_key = epics_base_rs::runtime::env::get("EPICS_CA_TLS_CLIENT_KEY");
+
+    match (client_cert, client_key) {
+        (None, None) => Ok(Some(TlsConfig::client_from_roots(roots))),
+        (Some(cert), Some(key)) => {
+            let chain = load_certs(&cert)?;
+            let priv_key = load_private_key(&key)?;
+            Ok(Some(TlsConfig::client_mtls(roots, chain, priv_key)?))
+        }
+        _ => Err(TlsError::Build(
+            "EPICS_CA_TLS_CLIENT_CERT and EPICS_CA_TLS_CLIENT_KEY must both be set or both unset"
+                .into(),
+        )),
+    }
 }
 
 /// Errors returned by TLS configuration helpers.
@@ -202,7 +269,7 @@ impl From<std::io::Error> for TlsError {
 ///
 /// Identities are returned as plain ASCII strings suitable for use as
 /// HAG host names in an ACF file.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 pub fn identity_from_cert(cert: &CertificateDer<'_>) -> String {
     use std::sync::OnceLock;
 
@@ -230,7 +297,7 @@ pub fn identity_from_cert(cert: &CertificateDer<'_>) -> String {
 /// Best-effort parse of an X.509 cert to extract a name field. Returns
 /// `None` when no usable name is present, leaving the caller to fall
 /// back to a fingerprint identity.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 fn parse_san_dns_or_cn(der: &[u8]) -> Option<String> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
 
@@ -254,14 +321,14 @@ fn parse_san_dns_or_cn(der: &[u8]) -> Option<String> {
 }
 
 // Re-exports needed by the public API when the feature is enabled.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 pub use rustls_pki_types::CertificateDer as Cert;
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 pub use rustls_pki_types::PrivateKeyDer as Key;
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 pub use tokio_rustls::rustls::RootCertStore as Roots;
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 mod rustls {
     pub use tokio_rustls::rustls::*;
 }

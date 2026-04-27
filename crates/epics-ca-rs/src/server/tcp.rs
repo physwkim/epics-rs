@@ -177,7 +177,7 @@ pub async fn run_tcp_listener(
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
     conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
-    #[cfg(feature = "tls")] tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+    #[cfg(feature = "experimental-rust-tls")] tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -202,7 +202,7 @@ pub async fn run_tcp_listener(
             let _ = tx.send(ServerConnectionEvent::Connected(peer));
         }
         let conn_events = conn_events.clone();
-        #[cfg(feature = "tls")]
+        #[cfg(feature = "experimental-rust-tls")]
         let tls_acceptor = tls
             .clone()
             .map(tokio_rustls::TlsAcceptor::from);
@@ -225,7 +225,7 @@ pub async fn run_tcp_listener(
             // stream in a TlsAcceptor handshake. The client cert (if
             // any) is harvested afterwards for mTLS identity.
             let result: CaResult<()> = {
-                #[cfg(feature = "tls")]
+                #[cfg(feature = "experimental-rust-tls")]
                 {
                     if let Some(acceptor) = tls_acceptor {
                         match acceptor.accept(stream).await {
@@ -255,7 +255,7 @@ pub async fn run_tcp_listener(
                         handle_client(stream, peer, db, acf, actual_port, None).await
                     }
                 }
-                #[cfg(not(feature = "tls"))]
+                #[cfg(not(feature = "experimental-rust-tls"))]
                 {
                     handle_client(stream, peer, db, acf, actual_port, None).await
                 }

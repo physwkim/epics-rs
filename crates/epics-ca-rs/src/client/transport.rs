@@ -14,9 +14,9 @@ use super::types::{TransportCommand, TransportEvent};
 
 /// Optional client-side TLS handshaker. `None` means plaintext.
 /// Behind the `tls` feature so default builds carry zero TLS code.
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 type TlsConnector = tokio_rustls::TlsConnector;
-#[cfg(feature = "tls")]
+#[cfg(feature = "experimental-rust-tls")]
 type ClientTlsConfig = Arc<tokio_rustls::rustls::ClientConfig>;
 
 /// Timeout for echo response before declaring connection dead (matches C EPICS CA_ECHO_TIMEOUT).
@@ -52,10 +52,10 @@ struct ServerConnection {
 pub(crate) async fn run_transport_manager(
     mut command_rx: mpsc::UnboundedReceiver<TransportCommand>,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
-    #[cfg(feature = "tls")] tls: Option<ClientTlsConfig>,
+    #[cfg(feature = "experimental-rust-tls")] tls: Option<ClientTlsConfig>,
 ) {
     let mut connections: HashMap<SocketAddr, ServerConnection> = HashMap::new();
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "experimental-rust-tls")]
     let tls = tls;
 
     while let Some(cmd) = command_rx.recv().await {
@@ -68,11 +68,11 @@ pub(crate) async fn run_transport_manager(
                 // Ensure we have a connection to this server
                 if !connections.contains_key(&server_addr) {
                     let result = {
-                        #[cfg(feature = "tls")]
+                        #[cfg(feature = "experimental-rust-tls")]
                         {
                             connect_server(server_addr, event_tx.clone(), tls.as_ref()).await
                         }
-                        #[cfg(not(feature = "tls"))]
+                        #[cfg(not(feature = "experimental-rust-tls"))]
                         {
                             connect_server(server_addr, event_tx.clone()).await
                         }
@@ -101,11 +101,11 @@ pub(crate) async fn run_transport_manager(
                         old._write_task.abort();
                     }
                     let result = {
-                        #[cfg(feature = "tls")]
+                        #[cfg(feature = "experimental-rust-tls")]
                         {
                             connect_server(server_addr, event_tx.clone(), tls.as_ref()).await
                         }
-                        #[cfg(not(feature = "tls"))]
+                        #[cfg(not(feature = "experimental-rust-tls"))]
                         {
                             connect_server(server_addr, event_tx.clone()).await
                         }
@@ -314,7 +314,7 @@ fn send_frame(
 async fn connect_server(
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
-    #[cfg(feature = "tls")] tls: Option<&ClientTlsConfig>,
+    #[cfg(feature = "experimental-rust-tls")] tls: Option<&ClientTlsConfig>,
 ) -> Option<ServerConnection> {
     tracing::debug!(server = %server_addr, "establishing TCP virtual circuit");
     let stream = match tokio::time::timeout(
@@ -377,7 +377,7 @@ async fn connect_server(
     // Spawn read/write tasks. The TLS path wraps the TCP stream in a
     // `tokio_rustls::TlsStream` first; the plaintext path splits the
     // raw TcpStream. Both feed identical-shape generic loops.
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "experimental-rust-tls")]
     let (read_task, write_task) = if let Some(tls_cfg) = tls {
         let server_name = match tokio_rustls::rustls::pki_types::ServerName::try_from(
             server_addr.ip().to_string(),
@@ -432,7 +432,7 @@ async fn connect_server(
         (read_task, write_task)
     };
 
-    #[cfg(not(feature = "tls"))]
+    #[cfg(not(feature = "experimental-rust-tls"))]
     let (read_task, write_task) = {
         let (reader, writer) = stream.into_split();
         let write_task = epics_base_rs::runtime::task::spawn(write_loop(

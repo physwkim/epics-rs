@@ -1,4 +1,28 @@
-# 11 — CA over TLS (design)
+# 11 — CA over TLS (experimental, Rust-only)
+
+> ⚠️ **EXPERIMENTAL — RUST-ONLY EXTENSION**
+>
+> CA-over-TLS in `epics-ca-rs` is **not part of the EPICS Channel
+> Access specification**. Enabling it makes your IOC unreachable from
+> all standard EPICS tooling — `caget`, `caput`, `camonitor`, `cainfo`,
+> EDM, MEDM, CSS/Phoebus, pyepics, p4p (any pyepics-based program) —
+> because libca and rsrv have no TLS support.
+>
+> **For production traffic encryption, prefer network-layer solutions:
+> IPSec, WireGuard, or your site VPN.** They protect every EPICS
+> message (TCP virtual circuits, UDP search, beacons) transparently
+> and don't break interop. CA-over-TLS only secures TCP and only
+> between two epics-ca-rs peers.
+>
+> This feature exists for two narrow use cases:
+>
+> 1. Closed Rust-only deployments where the operator controls both
+>    ends of every CA conversation.
+> 2. As a foundation for **future epics-base 7 `ca-secure` wire
+>    compatibility** — that work has not yet been done; the wire
+>    format here is currently Rust-only.
+
+## Background
 
 EPICS CA was designed in the late 1980s for trusted LANs. PV names
 and values traverse the wire in plaintext; ACF rules trust the
@@ -14,7 +38,121 @@ play nicely with TLS, and treating them as public is a deliberate
 design choice).
 
 This document describes the design. The runtime API is in
-[`tls.rs`](../src/tls.rs) and is gated behind the `tls` cargo feature.
+[`tls.rs`](../src/tls.rs) and is gated behind the
+`experimental-rust-tls` cargo feature.
+
+## Configuration
+
+### Cargo feature
+
+```toml
+# Cargo.toml
+[dependencies]
+epics-ca-rs = { version = "0.9", features = ["experimental-rust-tls"] }
+```
+
+The feature name `experimental-rust-tls` is deliberately verbose to
+prevent operators from enabling it under the impression that it's a
+standard EPICS option.
+
+### Server: environment variables (operational)
+
+```bash
+EPICS_CAS_TLS_CERT_FILE=/etc/epics/server.crt        # required
+EPICS_CAS_TLS_KEY_FILE=/etc/epics/server.key         # required
+EPICS_CAS_TLS_CLIENT_CA_FILE=/etc/epics/clients.pem  # optional → mTLS
+softioc-rs --pv MOTOR:X:VAL:double:0.0
+```
+
+Both `CERT_FILE` and `KEY_FILE` must be set (or both unset). Setting
+only one is a startup error. Adding `CLIENT_CA_FILE` enables mTLS:
+the server requires every client to present a certificate signed by
+that CA bundle, and the cert's identity (SAN dNSName / SAN URI / CN
+/ SHA-256 fingerprint, in that order) becomes the ACF hostname.
+
+### Server: CLI flags (override env)
+
+```bash
+softioc-rs \
+    --pv MOTOR:X:VAL:double:0.0 \
+    --tls-cert /etc/epics/server.crt \
+    --tls-key  /etc/epics/server.key \
+    --tls-client-ca /etc/epics/clients.pem    # optional, enables mTLS
+```
+
+CLI flags take precedence over env vars. Without the
+`experimental-rust-tls` feature, passing any `--tls-*` flag is an
+error.
+
+### Server: programmatic API
+
+```rust
+use epics_ca_rs::server::CaServer;
+use epics_ca_rs::tls::{TlsConfig, load_certs, load_private_key};
+
+let cert = load_certs("server.crt")?;
+let key  = load_private_key("server.key")?;
+let tls  = TlsConfig::server_from_pem(cert, key)?;
+
+let server = CaServer::builder()
+    .pv("MOTOR:X:VAL", value)
+    .with_tls(tls)        // overrides env
+    .build().await?;
+
+server.run().await?;
+```
+
+When the server starts with TLS active it logs a multi-line warning
+to draw attention to the non-standard nature.
+
+### Client: environment variables
+
+```bash
+EPICS_CA_TLS_ROOTS_FILE=/etc/epics/server-ca.pem    # required (server CA bundle)
+EPICS_CA_TLS_CLIENT_CERT=/etc/epics/me.crt          # optional → mTLS
+EPICS_CA_TLS_CLIENT_KEY=/etc/epics/me.key           # required when CERT is set
+caget-rs MOTOR:X:VAL
+```
+
+`CaClient::new()` reads these automatically. `CaClient::new_with_config(...)`
+takes precedence (the explicit code path).
+
+### Client: programmatic API
+
+```rust
+use epics_ca_rs::client::{CaClient, CaClientConfig};
+use epics_ca_rs::tls::{TlsConfig, load_root_store};
+
+let roots = load_root_store("server-ca.pem")?;
+let tls   = TlsConfig::client_from_roots(roots);
+
+let client = CaClient::new_with_config(CaClientConfig {
+    tls: Some(tls),
+}).await?;
+```
+
+### Disabling
+
+To disable TLS again:
+
+- **Build-time**: drop the `experimental-rust-tls` feature.
+- **Runtime (server)**: unset all `EPICS_CAS_TLS_*` env vars and don't
+  pass `--tls-*` flags. The server falls back to plaintext.
+- **Runtime (client)**: unset `EPICS_CA_TLS_ROOTS_FILE`. Without it,
+  the client doesn't attempt TLS regardless of what the server offers.
+
+## Goals
+
+1. **Encrypt** TCP-borne CA traffic so neither values nor write
+   commands are observable on the wire.
+2. **Authenticate** clients via certificates (mTLS) so ACF rules can
+   key on a verifiable identity instead of the spoofable
+   `CA_PROTO_HOST_NAME` message.
+3. **Coexist** with plaintext peers — a TLS-enabled IOC must still
+   answer non-TLS clients (and vice versa) on a separate port.
+4. **No protocol changes** — once the TLS handshake completes, the
+   CA wire format is identical. libca-aware tools that link our TLS
+   stack should work unchanged.
 
 ## Goals
 

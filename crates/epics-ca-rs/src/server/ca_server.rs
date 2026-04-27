@@ -32,7 +32,7 @@ pub struct CaServerBuilder {
     /// Optional CA-over-TLS configuration. When set, accepted TCP
     /// connections are wrapped in a `tokio_rustls::server::TlsStream`
     /// before the CA handshake runs.
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "experimental-rust-tls")]
     tls: Option<crate::tls::TlsConfig>,
 }
 
@@ -43,14 +43,14 @@ impl CaServerBuilder {
             port: CA_SERVER_PORT,
             acf: None,
             acf_path: None,
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "experimental-rust-tls")]
             tls: None,
         }
     }
 
     /// Enable CA over TLS using the supplied server-side configuration.
     /// Built with the `tls` cargo feature.
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "experimental-rust-tls")]
     pub fn with_tls(mut self, tls: crate::tls::TlsConfig) -> Self {
         self.tls = Some(tls);
         self
@@ -156,7 +156,7 @@ impl CaServerBuilder {
     pub async fn build(self) -> CaResult<CaServer> {
         let (db, autosave_config) = self.ioc.build().await?;
         let acf = Arc::new(tokio::sync::RwLock::new(self.acf));
-        #[cfg(feature = "tls")]
+        #[cfg(feature = "experimental-rust-tls")]
         let tls = self.tls.and_then(|t| match t {
             crate::tls::TlsConfig::Server(arc) => Some(arc),
             crate::tls::TlsConfig::Client(_) => {
@@ -173,7 +173,7 @@ impl CaServerBuilder {
             autosave_manager: None,
             conn_events: None,
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "experimental-rust-tls")]
             tls,
         })
     }
@@ -202,7 +202,7 @@ pub struct CaServer {
     /// are wrapped in a `tokio_rustls::server::TlsStream` before the
     /// CA handshake runs. mTLS configurations additionally extract a
     /// verified peer identity for ACF rule matching.
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "experimental-rust-tls")]
     tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 }
 
@@ -230,7 +230,7 @@ impl CaServer {
             autosave_manager,
             conn_events: None,
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "experimental-rust-tls")]
             tls: None,
         }
     }
@@ -417,10 +417,37 @@ impl CaServer {
         let beacon_reset_tcp = beacon_reset.clone();
 
         let conn_events = self.conn_events.clone();
-        #[cfg(feature = "tls")]
-        let tls = self.tls.clone();
+        #[cfg(feature = "experimental-rust-tls")]
+        let tls = match self.tls.clone() {
+            Some(cfg) => Some(cfg),
+            None => match crate::tls::server_from_env() {
+                Ok(Some(crate::tls::TlsConfig::Server(arc))) => Some(arc),
+                Ok(Some(crate::tls::TlsConfig::Client(_))) => {
+                    tracing::warn!("client-side TlsConfig produced by server_from_env; ignoring");
+                    None
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!(error = %e,
+                        "EPICS_CAS_TLS_* configuration is invalid; starting in plaintext mode");
+                    None
+                }
+            },
+        };
+        #[cfg(feature = "experimental-rust-tls")]
+        if tls.is_some() {
+            tracing::warn!(
+                "═══════════════════════════════════════════════════════════════════════\n  \
+                 CA-over-TLS ENABLED — non-standard, Rust-only extension.\n  \
+                 C tools (caget/caput/camonitor/EDM/MEDM/CSS) and pyepics CANNOT connect.\n  \
+                 For interoperable encryption use network-layer (IPSec/WireGuard/VPN).\n  \
+                 See doc/11-tls-design.md for rationale.\n  \
+                 ═══════════════════════════════════════════════════════════════════════"
+            );
+            metrics::counter!("ca_server_tls_enabled_total").increment(1);
+        }
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "experimental-rust-tls")]
             {
                 tcp::run_tcp_listener(
                     db_tcp,
@@ -433,7 +460,7 @@ impl CaServer {
                 )
                 .await
             }
-            #[cfg(not(feature = "tls"))]
+            #[cfg(not(feature = "experimental-rust-tls"))]
             {
                 tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp, conn_events)
                     .await

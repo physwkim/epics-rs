@@ -283,18 +283,46 @@ pub struct CaClientConfig {
     /// negotiated by the transport manager is wrapped in a
     /// `tokio_rustls::TlsStream` before the CA handshake. UDP search
     /// remains plaintext. Requires the `tls` cargo feature.
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "experimental-rust-tls")]
     pub tls: Option<crate::tls::TlsConfig>,
 }
 
 impl CaClient {
     pub async fn new() -> CaResult<Self> {
-        Self::new_with_config(CaClientConfig::default()).await
+        // Default constructor: pick up TLS config from environment when
+        // `EPICS_CA_TLS_ROOTS_FILE` etc. are set, otherwise plaintext.
+        // `new_with_config(CaClientConfig::default())` skips this.
+        #[cfg(feature = "experimental-rust-tls")]
+        let cfg = {
+            let mut c = CaClientConfig::default();
+            match crate::tls::client_from_env() {
+                Ok(Some(tls)) => c.tls = Some(tls),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e,
+                        "EPICS_CA_TLS_* configuration is invalid; using plaintext");
+                }
+            }
+            c
+        };
+        #[cfg(not(feature = "experimental-rust-tls"))]
+        let cfg = CaClientConfig::default();
+        Self::new_with_config(cfg).await
     }
 
     /// Create a client with explicit configuration. Currently the only
     /// knob is `tls`; future fields will follow the same pattern.
     pub async fn new_with_config(config: CaClientConfig) -> CaResult<Self> {
+        #[cfg(feature = "experimental-rust-tls")]
+        if config.tls.is_some() {
+            tracing::warn!(
+                "═══════════════════════════════════════════════════════════════════════\n  \
+                 CA client TLS ENABLED — non-standard, Rust-only extension.\n  \
+                 Cannot connect to C softIoc, EDM, MEDM, CSS, or pyepics-based tools.\n  \
+                 See doc/11-tls-design.md for rationale.\n  \
+                 ═══════════════════════════════════════════════════════════════════════"
+            );
+        }
         // Run repeater registration in background — don't block client startup.
         epics_base_rs::runtime::task::spawn(async { repeater::ensure_repeater().await });
 
@@ -316,7 +344,7 @@ impl CaClient {
             search_resp_tx,
         ));
 
-        #[cfg(feature = "tls")]
+        #[cfg(feature = "experimental-rust-tls")]
         let tls_arc = config.tls.as_ref().and_then(|t| match t {
             crate::tls::TlsConfig::Client(arc) => Some(arc.clone()),
             crate::tls::TlsConfig::Server(_) => {
@@ -326,7 +354,7 @@ impl CaClient {
         });
 
         let transport_task = {
-            #[cfg(feature = "tls")]
+            #[cfg(feature = "experimental-rust-tls")]
             {
                 epics_base_rs::runtime::task::spawn(transport::run_transport_manager(
                     transport_rx,
@@ -334,7 +362,7 @@ impl CaClient {
                     tls_arc,
                 ))
             }
-            #[cfg(not(feature = "tls"))]
+            #[cfg(not(feature = "experimental-rust-tls"))]
             {
                 let _ = &config; // suppress unused
                 epics_base_rs::runtime::task::spawn(transport::run_transport_manager(

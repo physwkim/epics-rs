@@ -40,6 +40,24 @@ struct Args {
     /// Start interactive iocsh shell
     #[arg(long, short = 'i')]
     shell: bool,
+
+    /// EXPERIMENTAL Rust-only TLS: server certificate chain (PEM).
+    /// Both --tls-cert and --tls-key are required to enable TLS.
+    /// Falls back to EPICS_CAS_TLS_CERT_FILE env var if not set.
+    /// Setting these makes the IOC unreachable from C tools — see
+    /// doc/11-tls-design.md.
+    #[arg(long = "tls-cert", value_name = "PEM_FILE")]
+    tls_cert: Option<String>,
+
+    /// EXPERIMENTAL Rust-only TLS: server private key (PEM).
+    #[arg(long = "tls-key", value_name = "PEM_FILE")]
+    tls_key: Option<String>,
+
+    /// EXPERIMENTAL Rust-only TLS: client CA bundle (PEM). When set,
+    /// the server requires mTLS — connections without a valid client
+    /// cert from this trust pool are rejected.
+    #[arg(long = "tls-client-ca", value_name = "PEM_FILE")]
+    tls_client_ca: Option<String>,
 }
 
 fn is_type_keyword(s: &str) -> bool {
@@ -219,6 +237,44 @@ async fn main() -> CaResult<()> {
     for db_file in &args.db_files {
         eprintln!("  Loading DB: {db_file}");
         builder = builder.db_file(db_file, &macros)?;
+    }
+
+    // CLI-supplied TLS overrides any EPICS_CAS_TLS_* env vars; if both
+    // CLI flags are absent the server picks them up from the env at
+    // run() time. Mismatched (only --tls-cert OR only --tls-key) is a
+    // hard error.
+    #[cfg(feature = "experimental-rust-tls")]
+    {
+        match (&args.tls_cert, &args.tls_key) {
+            (Some(cert_path), Some(key_path)) => {
+                let chain = epics_ca_rs::tls::load_certs(cert_path)?;
+                let key = epics_ca_rs::tls::load_private_key(key_path)?;
+                let tls = if let Some(ref ca_path) = args.tls_client_ca {
+                    let roots = epics_ca_rs::tls::load_root_store(ca_path)?;
+                    epics_ca_rs::tls::TlsConfig::server_mtls_from_pem(chain, key, roots)
+                        .map_err(|e| {
+                            epics_base_rs::error::CaError::InvalidValue(format!("TLS: {e}"))
+                        })?
+                } else {
+                    epics_ca_rs::tls::TlsConfig::server_from_pem(chain, key).map_err(|e| {
+                        epics_base_rs::error::CaError::InvalidValue(format!("TLS: {e}"))
+                    })?
+                };
+                builder = builder.with_tls(tls);
+            }
+            (None, None) => {} // env-based or plaintext
+            _ => {
+                return Err(epics_base_rs::error::CaError::InvalidValue(
+                    "--tls-cert and --tls-key must both be set or both unset".into(),
+                ));
+            }
+        }
+    }
+    #[cfg(not(feature = "experimental-rust-tls"))]
+    if args.tls_cert.is_some() || args.tls_key.is_some() || args.tls_client_ca.is_some() {
+        return Err(epics_base_rs::error::CaError::InvalidValue(
+            "TLS flags require building with --features experimental-rust-tls".into(),
+        ));
     }
 
     let server = builder.build().await?;

@@ -5,7 +5,7 @@
 //! results are deterministic across machines without checking certs
 //! into the repo.
 
-#![cfg(feature = "tls")]
+#![cfg(feature = "experimental-rust-tls")]
 
 use epics_ca_rs::tls;
 use std::io::Write;

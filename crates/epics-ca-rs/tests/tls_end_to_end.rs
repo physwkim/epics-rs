@@ -5,7 +5,7 @@
 //! across the encrypted virtual circuit. Built only with the `tls`
 //! feature.
 
-#![cfg(feature = "tls")]
+#![cfg(feature = "experimental-rust-tls")]
 
 use epics_ca_rs::client::{CaClient, CaClientConfig};
 use epics_ca_rs::server::CaServer;

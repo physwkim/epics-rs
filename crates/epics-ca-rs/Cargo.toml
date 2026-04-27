@@ -30,10 +30,20 @@ default = []
 # Without this feature consumers wire up their own observability
 # stack via the bare `metrics` and `tracing` facades.
 observability = ["dep:metrics-exporter-prometheus", "dep:tracing-subscriber"]
-# CA over TLS: encrypted TCP virtual circuits, optional mTLS for
-# authentication. Adds tokio-rustls + rustls-pemfile + x509-parser
-# (for SAN/CN extraction) + sha2 (fingerprint fallback).
-tls = [
+# EXPERIMENTAL Rust-only CA-over-TLS — NOT part of the EPICS spec.
+#
+# Enabling this and configuring TLS makes the IOC unreachable from
+# C tools (caget, caput, camonitor, EDM, MEDM, CSS) and pyepics, since
+# libca/rsrv have no TLS support. For production traffic encryption,
+# prefer network-layer solutions (IPSec, WireGuard, site VPN) — they
+# protect all EPICS traffic transparently and don't break interop.
+#
+# This feature exists for Rust-only deployments and as a foundation
+# for future epics-base 7 `ca-secure` wire compatibility (NOT yet
+# implemented; the wire format is currently Rust-only).
+#
+# See doc/11-tls-design.md for rationale and migration guidance.
+experimental-rust-tls = [
     "dep:tokio-rustls",
     "dep:rustls-pemfile",
     "dep:rustls-pki-types",
