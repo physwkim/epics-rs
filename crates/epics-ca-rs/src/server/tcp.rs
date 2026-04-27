@@ -201,7 +201,7 @@ pub async fn run_tcp_listener(
         }
 
         epics_base_rs::runtime::task::spawn(async move {
-            let result = handle_client(stream, db, acf, actual_port).await;
+            let result = handle_client(stream, peer, db, acf, actual_port).await;
             beacon_reset.notify_one();
             if let Some(tx) = &conn_events {
                 let _ = tx.send(ServerConnectionEvent::Disconnected(peer));
@@ -227,6 +227,7 @@ pub async fn run_tcp_listener(
 
 async fn handle_client(
     stream: tokio::net::TcpStream,
+    peer: SocketAddr,
     db: Arc<PvDatabase>,
     acf: Arc<Option<AccessSecurityConfig>>,
     tcp_port: u16,
@@ -237,6 +238,10 @@ async fn handle_client(
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
     let mut state = ClientState::new(acf, tcp_port);
+    // Default hostname: peer IP (matches C rsrv with EPICS_CAS_USE_HOST_NAMES=NO).
+    // The CA_PROTO_HOST_NAME message overrides this only when the env var
+    // explicitly opts in to client-supplied hostnames.
+    state.hostname = peer.ip().to_string();
 
     let mut buf = vec![0u8; 8192];
     let mut accumulated = Vec::new();
@@ -331,13 +336,23 @@ async fn dispatch_message(
         }
 
         CA_PROTO_HOST_NAME => {
-            let end = payload
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(payload.len());
-            state.hostname = String::from_utf8_lossy(&payload[..end]).to_string();
-            // Re-evaluate access rights for all existing channels
-            reeval_access_rights(state, writer).await?;
+            // EPICS_CAS_USE_HOST_NAMES (default NO) controls whether we
+            // trust the client-supplied hostname for ACF matching. When NO,
+            // the peer IP set during accept() is authoritative.
+            let trust_client_hostname = epics_base_rs::runtime::env::get_or(
+                "EPICS_CAS_USE_HOST_NAMES",
+                "NO",
+            )
+            .eq_ignore_ascii_case("YES");
+            if trust_client_hostname {
+                let end = payload
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(payload.len());
+                state.hostname = String::from_utf8_lossy(&payload[..end]).to_string();
+                // Re-evaluate access rights for all existing channels
+                reeval_access_rights(state, writer).await?;
+            }
         }
 
         CA_PROTO_CLIENT_NAME => {
@@ -794,9 +809,22 @@ async fn dispatch_message(
 
                         let writer_clone = writer.clone();
                         let flow_control = state.flow_control.clone();
+                        let record_for_task = record.clone();
                         let task = epics_base_rs::runtime::task::spawn(async move {
                             let mut rx = rx;
-                            while let Some(mut event) = rx.recv().await {
+                            loop {
+                                // Drain any coalesced overflow value before
+                                // blocking on the channel — the producer
+                                // parks the latest value here when the mpsc
+                                // is full so we always converge on current.
+                                let coalesced_opt =
+                                    record_for_task.read().await.pop_coalesced(sub_id);
+                                let next = if let Some(ev) = coalesced_opt {
+                                    Some(ev)
+                                } else {
+                                    rx.recv().await
+                                };
+                                let Some(mut event) = next else { break };
                                 if flow_control.is_paused() {
                                     let Some(coalesced) =
                                         flow_control.coalesce_while_paused(&mut rx, event).await

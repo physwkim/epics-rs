@@ -53,8 +53,14 @@ async fn setup(pvs: Vec<(&str, EpicsValue)>) -> CaResult<epics_ca_rs::client::Ca
     let udp_port = free_port();
     let db_udp = db.clone();
     tokio::spawn(async move {
-        let _ =
-            epics_ca_rs::server::udp::run_udp_search_responder(db_udp, udp_port, tcp_port).await;
+        let _ = epics_ca_rs::server::udp::run_udp_search_responder(
+            db_udp,
+            udp_port,
+            tcp_port,
+            vec![std::net::Ipv4Addr::UNSPECIFIED],
+            Vec::new(),
+        )
+        .await;
     });
     // Give UDP socket a moment to bind
     tokio::time::sleep(Duration::from_millis(50)).await;

@@ -63,7 +63,7 @@ impl FlowControlGate {
 /// Spawn a task that forwards monitor events from a PV subscription to the client TCP stream.
 /// Returns a handle that can be used to cancel the subscription.
 pub fn spawn_monitor_sender(
-    _pv: Arc<ProcessVariable>,
+    pv: Arc<ProcessVariable>,
     sub_id: u32,
     data_type: u16,
     writer: Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
@@ -71,7 +71,16 @@ pub fn spawn_monitor_sender(
     mut rx: mpsc::Receiver<MonitorEvent>,
 ) -> tokio::task::JoinHandle<()> {
     epics_base_rs::runtime::task::spawn(async move {
-        while let Some(mut event) = rx.recv().await {
+        loop {
+            // Prefer any coalesced overflow value before blocking on the
+            // mpsc — when the queue filled up while we were busy, the
+            // newest value is parked there waiting for delivery.
+            let next = if let Some(ev) = pv.pop_coalesced(sub_id).await {
+                Some(ev)
+            } else {
+                rx.recv().await
+            };
+            let Some(mut event) = next else { break };
             if flow_control.is_paused() {
                 let Some(coalesced) = flow_control.coalesce_while_paused(&mut rx, event).await
                 else {
@@ -79,30 +88,36 @@ pub fn spawn_monitor_sender(
                 };
                 event = coalesced;
             }
-            let payload = match encode_dbr(data_type, &event.snapshot) {
-                Ok(bytes) => bytes,
-                Err(_) => break,
-            };
-            let element_count = event.snapshot.value.count() as u32;
-            let mut padded = payload;
-            padded.resize(align8(padded.len()), 0);
-
-            let mut hdr = CaHeader::new(CA_PROTO_EVENT_ADD);
-            // C client TCP parser requires 8-byte aligned postsize
-            hdr.set_payload_size(padded.len(), element_count);
-            hdr.data_type = data_type;
-            hdr.cid = 1; // ECA_NORMAL status
-            hdr.available = sub_id;
-
-            let hdr_bytes = hdr.to_bytes_extended();
-            let mut w = writer.lock().await;
-            if w.write_all(&hdr_bytes).await.is_err() {
+            if send_event(data_type, sub_id, &event, &writer).await.is_err() {
                 break;
             }
-            if w.write_all(&padded).await.is_err() {
-                break;
-            }
-            let _ = w.flush().await;
         }
     })
+}
+
+async fn send_event(
+    data_type: u16,
+    sub_id: u32,
+    event: &MonitorEvent,
+    writer: &Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+) -> std::io::Result<()> {
+    let payload = encode_dbr(data_type, &event.snapshot)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "encode"))?;
+    let element_count = event.snapshot.value.count() as u32;
+    let mut padded = payload;
+    padded.resize(align8(padded.len()), 0);
+
+    let mut hdr = CaHeader::new(CA_PROTO_EVENT_ADD);
+    // C client TCP parser requires 8-byte aligned postsize
+    hdr.set_payload_size(padded.len(), element_count);
+    hdr.data_type = data_type;
+    hdr.cid = 1; // ECA_NORMAL status
+    hdr.available = sub_id;
+
+    let hdr_bytes = hdr.to_bytes_extended();
+    let mut w = writer.lock().await;
+    w.write_all(&hdr_bytes).await?;
+    w.write_all(&padded).await?;
+    w.flush().await?;
+    Ok(())
 }

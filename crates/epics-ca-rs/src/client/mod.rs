@@ -1564,10 +1564,25 @@ fn parse_addr_list() -> CaResult<Vec<SocketAddr>> {
     let auto_addr = epics_base_rs::runtime::env::get_or("EPICS_CA_AUTO_ADDR_LIST", "YES");
 
     if auto_addr.eq_ignore_ascii_case("YES") || addrs.is_empty() {
-        addrs.push(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::BROADCAST,
-            CA_SERVER_PORT,
-        )));
+        // Add the per-NIC broadcast address for every up, non-loopback
+        // interface so multi-NIC clients reach IOCs on every attached
+        // subnet (matches libca osiSockDiscoverBroadcastAddresses).
+        let server_port = epics_base_rs::runtime::env::get("EPICS_CA_SERVER_PORT")
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(CA_SERVER_PORT);
+        for bcast in crate::server::addr_list::discover_broadcast_addrs() {
+            let entry = SocketAddr::V4(SocketAddrV4::new(bcast, server_port));
+            if !addrs.contains(&entry) {
+                addrs.push(entry);
+            }
+        }
+        // Always include the limited broadcast as a last-resort fallback,
+        // for hosts where interface enumeration fails or has no usable
+        // broadcast (e.g. point-to-point links).
+        let fallback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, server_port));
+        if !addrs.contains(&fallback) {
+            addrs.push(fallback);
+        }
     }
 
     Ok(addrs)

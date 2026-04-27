@@ -1389,10 +1389,15 @@ impl RecordInstance {
                     // Only send when posting mask intersects subscriber mask.
                     // Empty posting mask means nothing changed — skip.
                     if !posting_mask.is_empty() && sub_mask.intersects(posting_mask) {
-                        let _ = sub.tx.try_send(MonitorEvent {
+                        let event = MonitorEvent {
                             snapshot: mon_snap.clone(),
                             origin: 0,
-                        });
+                        };
+                        if sub.tx.try_send(event.clone()).is_err() {
+                            if let Ok(mut slot) = sub.coalesced.lock() {
+                                *slot = Some(event);
+                            }
+                        }
                     }
                 }
             }
@@ -1417,10 +1422,15 @@ impl RecordInstance {
                 for sub in subs {
                     let sub_mask = crate::server::recgbl::EventMask::from_bits(sub.mask);
                     if mask.is_empty() || sub_mask.intersects(mask) {
-                        let _ = sub.tx.try_send(MonitorEvent {
+                        let event = MonitorEvent {
                             snapshot: mon_snap.clone(),
                             origin,
-                        });
+                        };
+                        if sub.tx.try_send(event.clone()).is_err() {
+                            if let Ok(mut slot) = sub.coalesced.lock() {
+                                *slot = Some(event);
+                            }
+                        }
                     }
                 }
             }
@@ -1441,6 +1451,7 @@ impl RecordInstance {
             data_type,
             mask,
             tx,
+            coalesced: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         let field_str = field.to_string();
         self.subscribers
@@ -1463,6 +1474,25 @@ impl RecordInstance {
         for subs in self.subscribers.values_mut() {
             subs.retain(|s| s.sid != sid);
         }
+    }
+
+    /// Take any pending coalesced overflow event for `sid` across all
+    /// fields. Drops-oldest semantics: if the per-subscriber mpsc filled
+    /// while the consumer was slow, the newest event was stashed in the
+    /// coalesce slot and is returned here.
+    pub fn pop_coalesced(&self, sid: u32) -> Option<MonitorEvent> {
+        for subs in self.subscribers.values() {
+            for sub in subs {
+                if sub.sid == sid {
+                    if let Ok(mut slot) = sub.coalesced.lock() {
+                        if let Some(ev) = slot.take() {
+                            return Some(ev);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Clean up closed subscriber channels.

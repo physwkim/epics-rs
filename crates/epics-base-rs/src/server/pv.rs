@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+
 use crate::runtime::sync::{Mutex, RwLock, mpsc};
 
 use crate::server::snapshot::Snapshot;
@@ -26,6 +29,12 @@ pub struct Subscriber {
     pub data_type: DbFieldType,
     pub mask: u16,
     pub tx: mpsc::Sender<MonitorEvent>,
+    /// Last-value coalescing slot. When the bounded mpsc above is full,
+    /// the producer stores the newest event here, overwriting any prior
+    /// pending overflow value. The consumer drains this after each normal
+    /// recv() to deliver the most recent state — matching libca rsrv
+    /// "drop oldest, keep newest" semantics.
+    pub coalesced: Arc<StdMutex<Option<MonitorEvent>>>,
 }
 
 /// A process variable hosted by the server.
@@ -71,10 +80,15 @@ impl ProcessVariable {
         subs.retain(|sub| !sub.tx.is_closed());
         for sub in subs.iter() {
             let snapshot = Snapshot::new(value.clone(), 0, 0, crate::runtime::time::now_wall());
-            let _ = sub.tx.try_send(MonitorEvent {
-                snapshot,
-                origin: 0,
-            });
+            let event = MonitorEvent { snapshot, origin: 0 };
+            if sub.tx.try_send(event.clone()).is_err() {
+                // Queue full — overwrite any prior pending overflow with
+                // the newest event. The consumer will pick it up via
+                // `pop_coalesced` after the next normal recv.
+                if let Ok(mut slot) = sub.coalesced.lock() {
+                    *slot = Some(event);
+                }
+            }
         }
     }
 
@@ -91,6 +105,7 @@ impl ProcessVariable {
             data_type,
             mask,
             tx,
+            coalesced: Arc::new(StdMutex::new(None)),
         };
         self.subscribers.lock().await.push(sub);
         rx
@@ -100,5 +115,14 @@ impl ProcessVariable {
     pub async fn remove_subscriber(&self, sid: u32) {
         let mut subs = self.subscribers.lock().await;
         subs.retain(|s| s.sid != sid);
+    }
+
+    /// Take any pending coalesced overflow value for the given subscriber.
+    /// Called by the per-subscription forwarder task after each delivery
+    /// so a slow consumer always converges on the latest known value.
+    pub async fn pop_coalesced(&self, sid: u32) -> Option<MonitorEvent> {
+        let subs = self.subscribers.lock().await;
+        let sub = subs.iter().find(|s| s.sid == sid)?;
+        sub.coalesced.lock().ok()?.take()
     }
 }
