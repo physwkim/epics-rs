@@ -384,6 +384,15 @@ impl CaServer {
         *self.after_init_hooks.lock().unwrap() = hooks;
     }
 
+    /// Install a TLS server config on a CaServer that was constructed
+    /// via [`Self::from_parts`] (which can't accept a TLS config
+    /// directly — `from_parts` is shared with non-TLS builds).
+    /// Idempotent; replaces any previously set config.
+    #[cfg(feature = "experimental-rust-tls")]
+    pub fn set_tls(&mut self, tls: Arc<tokio_rustls::rustls::ServerConfig>) {
+        self.tls = Some(tls);
+    }
+
     /// Subscribe to connection lifecycle events. Returns a broadcast
     /// receiver that receives [`ServerConnectionEvent::Connected`] /
     /// `Disconnected` for each accepted client.

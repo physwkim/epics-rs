@@ -22,6 +22,16 @@ qsrv-bin = ["qsrv", "dep:clap", "dep:tracing-subscriber"]
 ca-gateway = ["dep:epics-ca-rs", "dep:regex"]
 # CA gateway daemon binary (ca-gateway-rs)
 ca-gateway-bin = ["ca-gateway", "dep:clap"]
+# CA gateway with TLS termination on the downstream side. Clients
+# present certificates to the gateway, the gateway forwards plaintext
+# (or TLS, see upstream side) to the upstream IOC. Layered on the
+# `experimental-rust-tls` feature in epics-ca-rs — read its caveats
+# in epics-ca-rs/doc/11-tls-design.md before enabling.
+ca-gateway-tls = [
+    "ca-gateway",
+    "ca-gateway-bin",
+    "epics-ca-rs/experimental-rust-tls",
+]
 # PVA links for record INP/OUT (planned)
 pvalink = ["dep:epics-pva-rs"]
 # PVA-to-PVA proxy (planned, requires PVA server)

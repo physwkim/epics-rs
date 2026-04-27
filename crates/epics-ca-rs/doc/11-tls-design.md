@@ -376,6 +376,26 @@ but the key claims our TLS extension makes:
 | Attacker MITMs the TLS handshake | rustls cert-chain validation against site root CA |
 | Compromised IOC presents a cert it was issued | Out of scope (revoke and rotate via PKI) |
 
+## Future: `ca-secure` interop with epics-base 7
+
+The upstream `epics-base` project has been working on a secure-CA
+extension that adds TLS at the wire level rather than at the socket
+level. The two designs are *not* interoperable today:
+
+| Dimension | `experimental-rust-tls` (this crate) | upstream `ca-secure` (draft) |
+|-----------|---------------------------------------|------------------------------|
+| Layer | TLS wraps the entire TCP stream from byte zero | TLS upgrade negotiated via a `CA_PROTO_VERSION` capability bit |
+| Plaintext + TLS on same port | No | Yes — capability flag picks per-connection |
+| Spec stability | Stable Rust crate | Drafting upstream |
+
+The Rust-only mode survives — it's the right tool for all-Rust
+deployments and for prototyping. When ca-secure stabilizes upstream,
+[`crate::tls::ca_secure`](../src/tls/ca_secure.rs) holds the
+negotiation hooks and `EPICS_CAS_TLS_MODE=ca-secure-draft`
+selects the upgrade path. Today the draft mode falls back to
+RustOnly with a debug log; the file documents what needs to land for
+real interop.
+
 ## Caveats
 
 - TLS adds ~50-100 µs per request (handshake amortized over the

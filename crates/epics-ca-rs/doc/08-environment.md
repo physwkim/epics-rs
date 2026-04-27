@@ -245,6 +245,18 @@ triggered (SIGTERM or POST /drain). After this elapses the process
 exits cleanly. Default: 30. Set to bracket your Kubernetes
 `terminationGracePeriodSeconds`.
 
+### `EPICS_CAS_TLS_MODE` (rust-only)
+
+Selects the wire-level TLS negotiation mode when TLS is enabled.
+
+- `rust-only` (default): the entire TCP stream is wrapped in TLS
+  from byte zero — interoperable with other `epics-ca-rs` peers, not
+  with C tooling.
+- `ca-secure-draft`: placeholder for upstream `epics-base` 7
+  ca-secure spec interop. Currently falls back to `rust-only` with a
+  debug log; see `doc/11-tls-design.md` and `src/tls/ca_secure.rs`
+  for the design path.
+
 ### `EPICS_CA_RS_CHAOS` (rust-only)
 
 Comma-separated fault-injection directives: `drop:5%`, `stall:50ms`,
@@ -259,7 +271,9 @@ The **rust-only** variables (`EPICS_CA_MONITOR_QUEUE`,
 `EPICS_CAS_MAX_SUBS_PER_CHAN`, `EPICS_CAS_AUDIT_FILE`,
 `EPICS_CAS_AUDIT`, `EPICS_CAS_RATE_LIMIT_*`,
 `EPICS_CAS_INTROSPECTION_ADDR`, `EPICS_CAS_DRAIN_GRACE_SECS`,
-`EPICS_CA_RS_CHAOS`) are no-ops if observed by libca/rsrv.
+`EPICS_CA_RS_CHAOS`, `EPICS_CAS_TLS_MODE`,
+`EPICS_CAS_UDP_SEARCH_RATE_LIMIT`) are no-ops if observed by
+libca/rsrv.
 They were chosen to mirror libca's variable-naming convention so
 operators don't need to learn a separate vocabulary.
 

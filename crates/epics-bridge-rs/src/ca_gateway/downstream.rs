@@ -55,6 +55,25 @@ impl DownstreamServer {
         }
     }
 
+    /// Variant of [`Self::new`] that also wraps every accepted
+    /// connection in TLS. The gateway terminates TLS from clients;
+    /// upstream traffic remains plaintext (see `upstream.rs` for the
+    /// upstream-side TLS hooks). Available with the
+    /// `ca-gateway-tls` feature.
+    #[cfg(feature = "ca-gateway-tls")]
+    pub fn new_with_tls(
+        shadow_db: Arc<PvDatabase>,
+        port: u16,
+        tls: std::sync::Arc<epics_ca_rs::tls::ServerConfig>,
+    ) -> Self {
+        let mut server = CaServer::from_parts(shadow_db.clone(), port, None, None, None);
+        server.set_tls(tls);
+        Self {
+            server: Mutex::new(Some(server)),
+            shadow_db,
+        }
+    }
+
     /// Get the underlying shadow database.
     pub fn database(&self) -> &Arc<PvDatabase> {
         &self.shadow_db

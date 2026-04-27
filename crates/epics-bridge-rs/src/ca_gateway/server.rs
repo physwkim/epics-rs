@@ -69,6 +69,10 @@ pub struct GatewayConfig {
     pub heartbeat_interval: Option<Duration>,
     /// Read-only mode: rejects all puts.
     pub read_only: bool,
+    /// Optional TLS server config for downstream connections.
+    /// Available with the `ca-gateway-tls` feature.
+    #[cfg(feature = "ca-gateway-tls")]
+    pub tls: Option<std::sync::Arc<epics_ca_rs::tls::ServerConfig>>,
 }
 
 impl Default for GatewayConfig {
@@ -87,6 +91,8 @@ impl Default for GatewayConfig {
             stats_interval: Duration::from_secs(10),
             heartbeat_interval: Some(Duration::from_secs(1)),
             read_only: false,
+            #[cfg(feature = "ca-gateway-tls")]
+            tls: None,
         }
     }
 }
@@ -144,8 +150,28 @@ impl GatewayServer {
         let upstream = UpstreamManager::new(cache.clone(), shadow_db.clone()).await?;
         let upstream = Arc::new(RwLock::new(upstream));
 
-        // Downstream server
-        let downstream = Arc::new(DownstreamServer::new(shadow_db.clone(), config.server_port));
+        // Downstream server — wrap each accepted client in TLS when
+        // configured. Upstream traffic to the IOC remains plaintext
+        // unless the upstream side is also TLS-aware (separate
+        // config; not yet wired here).
+        let downstream = Arc::new({
+            #[cfg(feature = "ca-gateway-tls")]
+            {
+                if let Some(ref tls) = config.tls {
+                    DownstreamServer::new_with_tls(
+                        shadow_db.clone(),
+                        config.server_port,
+                        tls.clone(),
+                    )
+                } else {
+                    DownstreamServer::new(shadow_db.clone(), config.server_port)
+                }
+            }
+            #[cfg(not(feature = "ca-gateway-tls"))]
+            {
+                DownstreamServer::new(shadow_db.clone(), config.server_port)
+            }
+        });
 
         // Stats
         let stats = Arc::new(Stats::new(config.stats_prefix.clone()));

@@ -86,6 +86,53 @@ struct Args {
     /// Restart delay in seconds (default 10).
     #[arg(long, default_value_t = 10)]
     restart_delay: u64,
+
+    /// Server certificate chain (PEM). Required for TLS termination.
+    /// Pair with --tls-key. Available with `--features ca-gateway-tls`.
+    #[cfg(feature = "ca-gateway-tls")]
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    /// Server private key (PEM).
+    #[cfg(feature = "ca-gateway-tls")]
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
+
+    /// Optional client CA bundle (PEM) — when set, the gateway
+    /// requires mTLS (client cert verified against this trust pool).
+    #[cfg(feature = "ca-gateway-tls")]
+    #[arg(long)]
+    tls_client_ca: Option<PathBuf>,
+}
+
+#[cfg(feature = "ca-gateway-tls")]
+fn build_tls(args: &Args) -> Result<Option<std::sync::Arc<epics_ca_rs::tls::ServerConfig>>, String> {
+    use epics_ca_rs::tls::{TlsConfig, load_certs, load_private_key, load_root_store};
+    let (cert_path, key_path) = match (&args.tls_cert, &args.tls_key) {
+        (Some(c), Some(k)) => (c, k),
+        (None, None) => return Ok(None),
+        _ => {
+            return Err(
+                "--tls-cert and --tls-key must both be set or both unset".into(),
+            );
+        }
+    };
+    let chain = load_certs(cert_path.to_str().unwrap_or_default())
+        .map_err(|e| format!("loading cert chain: {e}"))?;
+    let key = load_private_key(key_path.to_str().unwrap_or_default())
+        .map_err(|e| format!("loading key: {e}"))?;
+    let cfg = if let Some(ca_path) = &args.tls_client_ca {
+        let roots = load_root_store(ca_path.to_str().unwrap_or_default())
+            .map_err(|e| format!("loading client CA: {e}"))?;
+        TlsConfig::server_mtls_from_pem(chain, key, roots)
+    } else {
+        TlsConfig::server_from_pem(chain, key)
+    }
+    .map_err(|e| format!("TLS server build: {e}"))?;
+    match cfg {
+        TlsConfig::Server(arc) => Ok(Some(arc)),
+        TlsConfig::Client(_) => Err("expected server TlsConfig".into()),
+    }
 }
 
 async fn run_once(config: GatewayConfig) -> Result<(), String> {
@@ -125,6 +172,11 @@ async fn main() -> ExitCode {
             Some(std::time::Duration::from_secs(args.heartbeat_interval))
         },
         read_only: args.read_only,
+        #[cfg(feature = "ca-gateway-tls")]
+        tls: build_tls(&args).unwrap_or_else(|e| {
+            eprintln!("ca-gateway-rs: TLS init failed: {e}");
+            std::process::exit(2);
+        }),
     };
 
     if args.supervised {
