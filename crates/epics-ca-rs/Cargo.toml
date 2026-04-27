@@ -126,6 +126,10 @@ name = "ca-replay-rs"
 path = "src/bin/ca-replay-rs.rs"
 
 [[bin]]
+name = "ca-lint-rs"
+path = "src/bin/ca-lint-rs.rs"
+
+[[bin]]
 name = "ca-soak"
 path = "src/bin/ca-soak.rs"
 
