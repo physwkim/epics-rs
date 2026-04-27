@@ -194,20 +194,29 @@ For an existing C-based facility:
 ## Status in this crate
 
 - `tls.rs` module: ✅ complete (helpers, config types, mTLS builders, identity extraction)
-- `CaServerBuilder::with_tls()`: ✅ stores config
-- `CaClient::new_with_config(tls=...)`: ✅ accepts config
+- `CaServerBuilder::with_tls()`: ✅ complete — stored and threaded through `run()`
+- `CaClient::new_with_config(tls=...)`: ✅ complete
 - Client transport stream wrapping: ✅ complete — `connect_server`
-  dispatches plaintext or `tokio_rustls::TlsStream` based on config;
-  `read_loop` / `write_loop` are now generic over `AsyncRead` /
-  `AsyncWrite`
+  dispatches plaintext or `tokio_rustls::TlsStream`; `read_loop` /
+  `write_loop` are generic over `AsyncRead`/`AsyncWrite`
 - mTLS identity extraction (`identity_from_cert`): ✅ complete —
   prefers SAN dNSName, then SAN URI, then CN, falls back to SHA-256
   fingerprint
-- Server transport stream wrapping: 🚧 follow-up — requires making
-  `tcp.rs::handle_client` generic over the stream type and updating
-  `server/monitor.rs::spawn_monitor_sender` (which holds a concrete
-  `Arc<Mutex<BufWriter<OwnedWriteHalf>>>`)
-- Port-based plaintext/TLS coexistence: 🚧 follow-up (server side)
+- Server transport stream wrapping: ✅ complete — `handle_client<S>`
+  generic over the stream, all helpers + `monitor::spawn_monitor_sender<W>`
+  generic over the writer
+- mTLS identity → ACF: ✅ complete — `run_tcp_listener` extracts the
+  client cert after handshake and passes the derived identity as
+  `initial_hostname`, taking precedence over `peer.ip()`
+- End-to-end TLS interop: ✅ verified by `tests/tls_end_to_end.rs`
+  (Rust client + Rust IOC, self-signed cert, get round-trip)
+- Port-based plaintext/TLS coexistence: 🚧 minor — currently a server
+  is either plaintext OR TLS. Running both simultaneously requires
+  spawning two CaServer instances on different ports (workable today;
+  could be unified into a single "dual" listener in a follow-up).
+- Wire-level libca interop on TLS: 🚧 — libca/rsrv don't speak our
+  TLS variant, so cross-impl TLS is Rust-only for now. Plaintext
+  interop is unchanged and fully tested.
 
 The current commit lays the foundation: stable API, cert/key loading
 helpers, and a documented design. Wiring the actual TLS handshake
