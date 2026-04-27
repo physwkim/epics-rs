@@ -29,6 +29,10 @@ hickory-resolver = { version = "0.24", default-features = false, features = ["to
 hickory-client = { version = "0.24", default-features = false, features = ["dnssec-ring"], optional = true }
 hickory-proto = { version = "0.24", default-features = false, features = ["dnssec-ring", "tokio-runtime"], optional = true }
 base64 = { version = "0.22", optional = true }
+opentelemetry = { version = "0.24", optional = true }
+opentelemetry_sdk = { version = "0.24", default-features = false, features = ["trace", "rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.17", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
+tracing-opentelemetry = { version = "0.25", optional = true }
 
 [features]
 default = []
@@ -70,6 +74,17 @@ discovery-dns-update = [
     "dep:hickory-client",
     "dep:hickory-proto",
     "dep:base64",
+]
+# OpenTelemetry OTLP trace exporter. Wires the `tracing` ecosystem
+# into a remote collector (Tempo, Jaeger, OTel Collector) over gRPC.
+# Pulls in the opentelemetry-otlp + tracing-opentelemetry dep tree —
+# leave off unless you actually need remote tracing.
+otlp = [
+    "observability",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
 ]
 
 [dev-dependencies]

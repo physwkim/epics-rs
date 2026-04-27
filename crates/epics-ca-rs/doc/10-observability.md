@@ -185,6 +185,36 @@ The hot paths (per-monitor delivery, per-search packet) emit at
 | Server overloaded | `ca_server_clients_active` gauge, `ca_server_accepts_total` rate |
 | IOC unstable | `ca_client_beacon_anomalies_total` per server |
 
+## OTLP trace export
+
+Build with the `otlp` feature to ship spans to an OpenTelemetry
+collector (Tempo, Jaeger, OTel Collector) over gRPC:
+
+```rust
+epics_ca_rs::observability::init_otlp(
+    "http://otel-collector.facility.local:4317",
+    "softioc-motor-1",
+)?;
+```
+
+Or rely on the standard OTel env vars:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4317"
+export OTEL_SERVICE_NAME="softioc-motor-1"
+```
+
+…and call `init_otlp_from_env()`. Returns `Ok(false)` when the
+endpoint is unset so callers can fall back to plain `init_tracing`.
+
+The exporter installs a global tracer provider; flush buffered spans
+on process exit with
+`opentelemetry::global::shutdown_tracer_provider()`.
+
+The dependency tree (`opentelemetry`, `opentelemetry-otlp`,
+`tracing-opentelemetry`) is gated behind the feature — default builds
+carry zero OTLP code.
+
 ## See also
 
 - [`07-flow-control.md`](07-flow-control.md) — what's measured by
