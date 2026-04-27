@@ -10,6 +10,7 @@ use tokio::net::{TcpStream, UdpSocket};
 
 use crate::protocol::*;
 
+use super::circuit_breaker::CircuitBreakerRegistry;
 use super::types::{SearchReason, SearchRequest, SearchResponse};
 
 /// Snippet of a UDP/TCP search-response datagram, plus the address it
@@ -173,6 +174,11 @@ struct SearchEngineState {
     rtt_per_path: HashMap<SocketAddr, RttEstimator>,
     budget: SendBudget,
     penalty: HashMap<SocketAddr, PenaltyEntry>,
+    /// Per-server failure-pattern tracker. Sits on top of the single-shot
+    /// `penalty` box: when failures repeat within a window, the breaker
+    /// trips OPEN with an exponentially-doubled cooldown so we don't
+    /// hammer a flapping server.
+    breakers: CircuitBreakerRegistry,
     max_search_period: Duration,
     /// Sequence number for datagram validation (matches C EPICS
     /// lastReceivedSeqNo).  Embedded in VERSION header CID field;
@@ -190,6 +196,7 @@ impl SearchEngineState {
             rtt_per_path: HashMap::new(),
             budget: SendBudget::new(),
             penalty: HashMap::new(),
+            breakers: CircuitBreakerRegistry::new(),
             max_search_period: parse_max_search_period(),
             dgram_seq: 0,
             last_valid_seq: None,
@@ -491,6 +498,7 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
             if success {
                 state.remove_channel(cid);
                 state.penalty.remove(&server_addr);
+                state.breakers.record_success(server_addr);
             } else {
                 state.penalty.insert(
                     server_addr,
@@ -498,6 +506,13 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
                         until: Instant::now() + PENALTY_DURATION,
                     },
                 );
+                let was_open = state.breakers.is_open(server_addr);
+                state.breakers.record_failure(server_addr);
+                if !was_open && state.breakers.is_open(server_addr) {
+                    tracing::warn!(server = %server_addr, "circuit breaker tripped OPEN");
+                    metrics::counter!("ca_client_circuit_breaker_open_total",
+                        "server" => server_addr.to_string()).increment(1);
+                }
             }
         }
     }
@@ -566,7 +581,12 @@ fn handle_udp_response(
                     .map(|p| p.until > recv_time)
                     .unwrap_or(false);
 
-                if penalized {
+                // Circuit breaker OPEN → reject responses from this server
+                // entirely. allow() also performs OPEN→HALF_OPEN transition
+                // when the cooldown has elapsed, permitting one probe.
+                let breaker_blocked = !state.breakers.allow(server_addr);
+
+                if penalized || breaker_blocked {
                     // Don't consume this response — let the channel keep
                     // searching for a better server.
                     offset += CaHeader::SIZE + align8(hdr.postsize as usize);

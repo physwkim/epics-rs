@@ -1,9 +1,12 @@
 mod beacon_monitor;
+mod circuit_breaker;
 mod search;
 mod state;
 mod subscription;
 mod transport;
 mod types;
+
+pub use circuit_breaker::{BreakerConfig, BreakerState};
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
