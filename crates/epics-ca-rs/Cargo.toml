@@ -105,13 +105,17 @@ cap-tokens = [
 ]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tempfile = "3"
 proptest = "1"
 rcgen = "0.13"
 
 [[bench]]
 name = "protocol_bench"
+harness = false
+
+[[bench]]
+name = "end_to_end_bench"
 harness = false
 
 [[bin]]
