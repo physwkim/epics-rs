@@ -554,6 +554,7 @@ fn handle_udp_response(
                 } else {
                     std::net::IpAddr::V4(Ipv4Addr::from(hdr.cid.to_be_bytes()))
                 };
+                metrics::counter!("ca_client_search_responses_total").increment(1);
                 let server_addr = SocketAddr::new(server_ip, server_port as u16);
                 let cid = hdr.available;
 
@@ -591,10 +592,13 @@ fn handle_udp_response(
                             .entry(server_addr)
                             .or_insert_with(RttEstimator::new)
                             .update(sample);
+                        metrics::histogram!("ca_client_search_rtt_seconds",
+                            "server" => server_addr.to_string()).record(sample);
                     }
 
                     state.budget.responded_this_window += 1;
 
+                    tracing::debug!(pv = %ch.pv_name, cid, server = %server_addr, "PV search resolved");
                     let _ = response_tx.send(SearchResponse::Found { cid, server_addr });
                 }
             }

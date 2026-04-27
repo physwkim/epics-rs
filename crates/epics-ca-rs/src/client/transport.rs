@@ -284,13 +284,23 @@ async fn connect_server(
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
 ) -> Option<ServerConnection> {
-    let stream = tokio::time::timeout(
+    tracing::debug!(server = %server_addr, "establishing TCP virtual circuit");
+    let stream = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         TcpStream::connect(server_addr),
     )
     .await
-    .ok()?
-    .ok()?;
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::warn!(server = %server_addr, error = %e, "TCP connect failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(server = %server_addr, "TCP connect timed out");
+            return None;
+        }
+    };
 
     let _ = stream.set_nodelay(true);
 

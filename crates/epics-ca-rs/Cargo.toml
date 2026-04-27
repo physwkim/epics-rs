@@ -14,6 +14,17 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 socket2 = { version = "0.5", features = ["all"] }
 if-addrs = "0.13"
+tracing = "0.1"
+metrics = "0.23"
+metrics-exporter-prometheus = { version = "0.15", default-features = false, features = ["http-listener"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[features]
+default = []
+# Enable the bundled Prometheus exporter helper and tracing-subscriber init
+# helper. Without this feature consumers wire up their own metrics+tracing
+# stacks via the bare `metrics` and `tracing` facades.
+observability = ["dep:metrics-exporter-prometheus", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -50,3 +61,8 @@ path = "src/bin/softioc-rs.rs"
 [[bin]]
 name = "ca-soak"
 path = "src/bin/ca-soak.rs"
+
+[[bin]]
+name = "ca-soak-observed"
+path = "src/bin/ca-soak-observed.rs"
+required-features = ["observability"]

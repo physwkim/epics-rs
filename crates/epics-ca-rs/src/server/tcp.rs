@@ -179,6 +179,9 @@ pub async fn run_tcp_listener(
 
     loop {
         let (stream, peer) = listener.accept().await?;
+        tracing::info!(peer = %peer, "CA client connected");
+        metrics::counter!("ca_server_accepts_total").increment(1);
+        metrics::gauge!("ca_server_clients_active").increment(1.0);
         let db = db.clone();
         let acf = acf.clone();
         let beacon_reset = beacon_reset.clone();
@@ -206,6 +209,8 @@ pub async fn run_tcp_listener(
             if let Some(tx) = &conn_events {
                 let _ = tx.send(ServerConnectionEvent::Disconnected(peer));
             }
+            metrics::gauge!("ca_server_clients_active").decrement(1.0);
+            metrics::counter!("ca_server_disconnects_total").increment(1);
             if let Err(e) = result {
                 // Suppress normal disconnection errors (client closed connection)
                 let is_disconnect = matches!(
@@ -217,9 +222,13 @@ pub async fn run_tcp_listener(
                             | std::io::ErrorKind::UnexpectedEof
                     )
                 );
-                if !is_disconnect {
-                    eprintln!("client {peer} error: {e}");
+                if is_disconnect {
+                    tracing::debug!(peer = %peer, "client disconnected");
+                } else {
+                    tracing::warn!(peer = %peer, error = %e, "client handler error");
                 }
+            } else {
+                tracing::debug!(peer = %peer, "client disconnected cleanly");
             }
         });
     }

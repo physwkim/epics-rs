@@ -1119,6 +1119,8 @@ async fn run_coordinator(
                     CoordRequest::ForceRescanServer { server_addr } => {
                         diag.beacon_anomalies.fetch_add(1, Ordering::Relaxed);
                         diag.record(DiagEvent::BeaconAnomaly { server: server_addr });
+                        tracing::warn!(server = %server_addr, "beacon anomaly detected — IOC may have restarted");
+                        metrics::counter!("ca_client_beacon_anomalies_total", "server" => server_addr.to_string()).increment(1);
                         // Like the C CA client (libca), rescan ALL disconnected/
                         // searching channels on any beacon anomaly.  The beacon
                         // address may use INADDR_ANY and won't match our stored
@@ -1183,6 +1185,7 @@ async fn run_coordinator(
                 match evt {
                     TransportEvent::ChannelCreated { cid, sid, data_type, element_count, access, server_addr } => {
                         if let Some(ch) = channels.get_mut(&cid) {
+                            let was_disconnected = matches!(ch.state, ChannelState::Disconnected);
                             let dbr_type = DbFieldType::from_u16(data_type).ok();
                             ch.state = ChannelState::Connected;
                             ch.sid = sid;
@@ -1191,6 +1194,14 @@ async fn run_coordinator(
                             ch.server_addr = Some(server_addr);
                             ch.access_rights = access;
                             ch.last_connected_at = Some(std::time::Instant::now());
+
+                            if was_disconnected {
+                                tracing::info!(pv = %ch.pv_name, cid, sid, server = %server_addr, "channel reconnected");
+                            } else {
+                                tracing::info!(pv = %ch.pv_name, cid, sid, server = %server_addr, "channel connected");
+                            }
+                            metrics::counter!("ca_client_connections_total", "server" => server_addr.to_string()).increment(1);
+                            metrics::gauge!("ca_client_channels_connected").increment(1.0);
 
                             // Wake connect waiters
                             for waiter in ch.connect_waiters.drain(..) {
@@ -1264,6 +1275,8 @@ async fn run_coordinator(
                             }
                             MonitorDeliveryOutcome::Dropped(_server_addr) => {
                                 diag.dropped_monitors.fetch_add(1, Ordering::Relaxed);
+                                tracing::warn!(subid, "monitor dropped (consumer queue full)");
+                                metrics::counter!("ca_client_dropped_monitors_total").increment(1);
                             }
                             MonitorDeliveryOutcome::Filtered
                             | MonitorDeliveryOutcome::NotFound => {}
@@ -1307,6 +1320,12 @@ async fn run_coordinator(
                         // Logged in transport layer; no further action needed
                     }
                     TransportEvent::TcpClosed { server_addr } => {
+                        let n_affected = server_channels
+                            .get(&server_addr)
+                            .map(|s| s.len())
+                            .unwrap_or(0);
+                        tracing::warn!(server = %server_addr, channels = n_affected, "TCP circuit closed");
+                        metrics::counter!("ca_client_tcp_closed_total", "server" => server_addr.to_string()).increment(1);
                         flow_control.remove(&server_addr);
                         handle_disconnect(&mut channels, &mut subscriptions, &mut server_channels, &search_tx, server_addr, &diag, &mut read_waiters, &mut write_waiters);
                     }
@@ -1341,6 +1360,8 @@ async fn run_coordinator(
                     TransportEvent::CircuitUnresponsive { server_addr } => {
                         diag.unresponsive_events.fetch_add(1, Ordering::Relaxed);
                         diag.record(DiagEvent::Unresponsive { server: server_addr });
+                        tracing::warn!(server = %server_addr, "circuit unresponsive (echo timeout)");
+                        metrics::counter!("ca_client_unresponsive_total", "server" => server_addr.to_string()).increment(1);
                         for ch in channels.values_mut() {
                             if ch.server_addr == Some(server_addr)
                                 && ch.state == ChannelState::Connected
@@ -1352,6 +1373,7 @@ async fn run_coordinator(
                     }
                     TransportEvent::CircuitResponsive { server_addr } => {
                         diag.record(DiagEvent::Responsive { server: server_addr });
+                        tracing::info!(server = %server_addr, "circuit responsive again");
                         for ch in channels.values_mut() {
                             if ch.server_addr == Some(server_addr)
                                 && ch.state == ChannelState::Unresponsive
@@ -1420,6 +1442,13 @@ fn handle_disconnect(
             server: server_addr,
             channels: affected_cids.len(),
         });
+        tracing::warn!(
+            server = %server_addr,
+            affected = affected_cids.len(),
+            "disconnect: scheduling reconnect for affected channels"
+        );
+        metrics::counter!("ca_client_disconnections_total", "server" => server_addr.to_string()).increment(1);
+        metrics::gauge!("ca_client_channels_connected").decrement(affected_cids.len() as f64);
     }
     // Clean up stale server_channels entries so beacon anomaly
     // lookups don't reference disconnected channels.
