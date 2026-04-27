@@ -242,9 +242,25 @@ pub enum OpResponse {
 /// Decode any GET/PUT/MONITOR response. The caller passes the introspection
 /// from a prior INIT response so we can decode data payloads; for INIT
 /// responses themselves, pass `None`.
+///
+/// `type_cache` is a per-connection [`TypeCache`] used to resolve
+/// 0xFD (define) / 0xFE (lookup) markers in INIT responses. Pass an
+/// empty cache initially; the same cache must be reused across all
+/// frames on a single connection for cache references to resolve.
 pub fn decode_op_response(
     frame: &Frame,
     introspection: Option<&FieldDesc>,
+) -> PvaResult<OpResponse> {
+    let mut empty = crate::pvdata::encode::TypeCache::new();
+    decode_op_response_cached(frame, introspection, &mut empty)
+}
+
+/// Like [`decode_op_response`] but threads a per-connection
+/// [`TypeCache`] for 0xFD/0xFE marker support.
+pub fn decode_op_response_cached(
+    frame: &Frame,
+    introspection: Option<&FieldDesc>,
+    type_cache: &mut crate::pvdata::encode::TypeCache,
 ) -> PvaResult<OpResponse> {
     let cmd = Command::from_code(frame.header.command).ok_or_else(|| {
         PvaError::Protocol(format!("unknown command {}", frame.header.command))
@@ -277,10 +293,12 @@ pub fn decode_op_response(
             }));
         }
         // Introspection: a single type-desc byte followed by its body.
-        // pvxs and spvirit both emit `0x80 + structure-body`, which is exactly
-        // what `decode_type_desc` consumes.
-        let intro = crate::pvdata::encode::decode_type_desc(&mut cur, order)
-            .map_err(|e| PvaError::Decode(e.to_string()))?;
+        // pvxs and pvAccessJava emit `0x80 + structure-body` directly OR
+        // `0xFD + key + body` to populate the per-connection cache.
+        // `decode_type_desc_cached` handles both.
+        let intro =
+            crate::pvdata::encode::decode_type_desc_cached(&mut cur, order, type_cache)
+                .map_err(|e| PvaError::Decode(e.to_string()))?;
         return Ok(OpResponse::Init(OpInitResponse {
             ioid,
             subcmd,

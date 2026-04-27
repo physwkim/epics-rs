@@ -105,6 +105,15 @@ fn encode_structure_body(
 
 // ── FieldDesc decode ─────────────────────────────────────────────────────
 
+/// pvData type-descriptor cache. Stream-scoped: pvAccessJava (and
+/// some pvxs paths) emit `0xFD <u16 key> <full desc>` to define a
+/// slot, then `0xFE <u16 key>` to reference it later — saving wire
+/// bytes for repeated NTScalar/etc descriptors in monitor streams.
+///
+/// Per-connection state. The wire emit-side encoder in this module
+/// never produces 0xFD/0xFE; we accept them for interop only.
+pub type TypeCache = std::collections::HashMap<u16, FieldDesc>;
+
 /// Decode a top-level `FieldDesc` (`name` + type description).
 pub fn decode_field_desc(
     cur: &mut Cursor<&[u8]>,
@@ -115,15 +124,64 @@ pub fn decode_field_desc(
     Ok((name, desc))
 }
 
-/// Decode just the type-tag portion of a descriptor.
+/// Variant of [`decode_field_desc`] threading a stream-scoped
+/// [`TypeCache`] for 0xFD/0xFE marker support.
+pub fn decode_field_desc_cached(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    cache: &mut TypeCache,
+) -> Result<(String, FieldDesc), DecodeError> {
+    let name = decode_string(cur, order)?.unwrap_or_default();
+    let desc = decode_type_desc_cached(cur, order, cache)?;
+    Ok((name, desc))
+}
+
+/// Decode just the type-tag portion of a descriptor (no cache).
 pub fn decode_type_desc(
     cur: &mut Cursor<&[u8]>,
     order: ByteOrder,
 ) -> Result<FieldDesc, DecodeError> {
+    let mut empty = TypeCache::new();
+    decode_type_desc_cached(cur, order, &mut empty)
+}
+
+/// Decode a type descriptor honouring 0xFD (define) / 0xFE (lookup)
+/// markers against `cache`. Mirrors pvxs `dataencode.cpp::from_wire(buf,
+/// descs, cache)`.
+///
+/// 0xFD: read a u16 key, recursively decode the full descriptor, store
+/// in cache, return it. Anywhere a fresh inline descriptor would
+/// appear, a peer may insert this prefix to populate the cache.
+///
+/// 0xFE: read a u16 key, return the cached descriptor by clone. If the
+/// slot is empty an error is returned.
+///
+/// 0xFF: NULL — handled by callers (we reject here as caller-context
+/// dependent).
+pub fn decode_type_desc_cached(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    cache: &mut TypeCache,
+) -> Result<FieldDesc, DecodeError> {
     let tag = cur.get_u8()?;
     match tag {
-        TAG_STRUCTURE => decode_structure_body(cur, order, false),
-        TAG_UNION => decode_union_body(cur, order, false),
+        0xFD => {
+            // define new cache slot, then full inline descriptor.
+            let key = cur.get_u16(order)?;
+            let desc = decode_type_desc_cached(cur, order, cache)?;
+            cache.insert(key, desc.clone());
+            Ok(desc)
+        }
+        0xFE => {
+            // lookup existing cache slot.
+            let key = cur.get_u16(order)?;
+            cache
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| DecodeError(format!("typecache miss for slot {key}")))
+        }
+        TAG_STRUCTURE => decode_structure_body_cached(cur, order, false, cache),
+        TAG_UNION => decode_union_body_cached(cur, order, false, cache),
         TAG_STRUCTURE_ARRAY => {
             let inner = cur.get_u8()?;
             if inner != TAG_STRUCTURE {
@@ -131,7 +189,7 @@ pub fn decode_type_desc(
                     "structure-array element tag 0x{inner:02X} (expected 0x80)"
                 )));
             }
-            decode_structure_body(cur, order, true)
+            decode_structure_body_cached(cur, order, true, cache)
         }
         TAG_UNION_ARRAY => {
             let inner = cur.get_u8()?;
@@ -140,7 +198,7 @@ pub fn decode_type_desc(
                     "union-array element tag 0x{inner:02X} (expected 0x81)"
                 )));
             }
-            decode_union_body(cur, order, true)
+            decode_union_body_cached(cur, order, true, cache)
         }
         TAG_VARIANT => Ok(FieldDesc::Variant),
         TAG_VARIANT_ARRAY => Ok(FieldDesc::VariantArray),
@@ -150,8 +208,6 @@ pub fn decode_type_desc(
             Ok(FieldDesc::BoundedString(bound))
         }
         b if b & 0x08 != 0 => {
-            // Scalar array — top bit zone for scalar codes (`0x20..0x60`)
-            // OR'd with `0x08`. `0x80+` codes are handled above.
             let scalar = ScalarType::from_array_type_code(b)
                 .ok_or_else(|| DecodeError(format!("unknown scalar array tag 0x{b:02X}")))?;
             Ok(FieldDesc::ScalarArray(scalar))
@@ -169,13 +225,23 @@ fn decode_structure_body(
     order: ByteOrder,
     is_array: bool,
 ) -> Result<FieldDesc, DecodeError> {
+    let mut empty = TypeCache::new();
+    decode_structure_body_cached(cur, order, is_array, &mut empty)
+}
+
+fn decode_structure_body_cached(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    is_array: bool,
+    cache: &mut TypeCache,
+) -> Result<FieldDesc, DecodeError> {
     let struct_id = decode_string(cur, order)?.unwrap_or_default();
     let n = decode_size(cur, order)?
         .ok_or_else(|| DecodeError("structure field count cannot be null".into()))?
         as usize;
     let mut fields = Vec::with_capacity(n);
     for _ in 0..n {
-        fields.push(decode_field_desc(cur, order)?);
+        fields.push(decode_field_desc_cached(cur, order, cache)?);
     }
     Ok(if is_array {
         FieldDesc::StructureArray { struct_id, fields }
@@ -189,13 +255,23 @@ fn decode_union_body(
     order: ByteOrder,
     is_array: bool,
 ) -> Result<FieldDesc, DecodeError> {
+    let mut empty = TypeCache::new();
+    decode_union_body_cached(cur, order, is_array, &mut empty)
+}
+
+fn decode_union_body_cached(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    is_array: bool,
+    cache: &mut TypeCache,
+) -> Result<FieldDesc, DecodeError> {
     let struct_id = decode_string(cur, order)?.unwrap_or_default();
     let n = decode_size(cur, order)?
         .ok_or_else(|| DecodeError("union variant count cannot be null".into()))?
         as usize;
     let mut variants = Vec::with_capacity(n);
     for _ in 0..n {
-        variants.push(decode_field_desc(cur, order)?);
+        variants.push(decode_field_desc_cached(cur, order, cache)?);
     }
     Ok(if is_array {
         FieldDesc::UnionArray {

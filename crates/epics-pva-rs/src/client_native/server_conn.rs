@@ -73,6 +73,10 @@ pub struct ServerConn {
     alive: Arc<AtomicBool>,
     last_rx_nanos: Arc<AtomicU64>,
     router: Arc<Mutex<Router>>,
+    /// Per-connection FieldDesc cache for 0xFD/0xFE wire markers.
+    /// Populated as INIT responses arrive; consulted when subsequent
+    /// frames reference a slot. Lives for the life of the connection.
+    type_cache: Arc<Mutex<crate::pvdata::encode::TypeCache>>,
 }
 
 /// Type-erased read half. We accept either a plain TCP read half or a
@@ -289,11 +293,18 @@ impl ServerConn {
             alive,
             last_rx_nanos,
             router,
+            type_cache: Arc::new(Mutex::new(crate::pvdata::encode::TypeCache::new())),
         }))
     }
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// Get a clone of the per-connection FieldDesc cache (Arc shared).
+    /// Used by op decoders to resolve 0xFD/0xFE wire markers.
+    pub fn type_cache(&self) -> Arc<Mutex<crate::pvdata::encode::TypeCache>> {
+        self.type_cache.clone()
     }
 
     pub fn close(&self) {

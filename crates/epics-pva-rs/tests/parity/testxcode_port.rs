@@ -512,6 +512,85 @@ fn pvxs_serialize_union_choice_b_string() {
     assert_eq!(buf, expected);
 }
 
+// ── testEmptyRequest + testDecode1 (pvxs testxcode.cpp) — TypeStore cache ─
+//
+// pvxs uses 0xFD = define-cache + 0xFE = lookup-cache markers in
+// type-descriptor wire format. We honour both via TypeCache.
+
+#[test]
+fn pvxs_typestore_empty_request_define_then_lookup_LE() {
+    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+
+    // First message: \xfd\x02\x00 \x80 \x00 \x00 = "define slot 0x0002 as
+    // empty struct (no id, 0 fields)". LE byte order for u16 key.
+    let msg1: &[u8] = b"\xfd\x02\x00\x80\x00\x00";
+    let mut cache = TypeCache::new();
+    let mut cur = Cursor::new(msg1);
+    let desc = decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache)
+        .expect("decode 0xFD");
+    if let FieldDesc::Structure {
+        ref struct_id,
+        ref fields,
+    } = desc
+    {
+        assert!(struct_id.is_empty());
+        assert!(fields.is_empty());
+    } else {
+        panic!("expected empty struct, got {desc:?}");
+    }
+    assert_eq!(cur.position() as usize, msg1.len());
+    assert_eq!(cache.len(), 1);
+
+    // Second message: \xfe\x02\x00 = "look up slot 0x0002".
+    let msg2: &[u8] = b"\xfe\x02\x00";
+    let mut cur = Cursor::new(msg2);
+    let desc2 = decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache)
+        .expect("decode 0xFE");
+    assert_eq!(format!("{desc2}"), format!("{desc}"));
+    assert_eq!(cur.position() as usize, msg2.len());
+}
+
+#[test]
+fn pvxs_typestore_lookup_miss_errors() {
+    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+
+    let msg: &[u8] = b"\xfe\x05\x00";
+    let mut cache = TypeCache::new();
+    let mut cur = Cursor::new(msg);
+    let err =
+        decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache).unwrap_err();
+    assert!(format!("{err:?}").contains("typecache miss"));
+}
+
+#[test]
+fn pvxs_typestore_be_byte_order_for_key() {
+    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+
+    // Big-endian key: 0xFD 0x00 0x07 ... means slot 0x0007.
+    let msg: Vec<u8> = vec![0xFD, 0x00, 0x07, 0x80, 0x00, 0x00];
+    let mut cache = TypeCache::new();
+    let mut cur = Cursor::new(msg.as_slice());
+    let _ = decode_type_desc_cached(&mut cur, ByteOrder::Big, &mut cache).unwrap();
+    assert!(cache.contains_key(&0x0007));
+}
+
+#[test]
+fn pvxs_typestore_define_then_lookup_in_same_buffer() {
+    use epics_pva_rs::pvdata::encode::{decode_type_desc_cached, TypeCache};
+
+    // Concatenate define + lookup in one stream.
+    let mut combined = Vec::new();
+    combined.extend_from_slice(b"\xfd\x01\x00\x80\x00\x00");
+    combined.extend_from_slice(b"\xfe\x01\x00");
+    let mut cache = TypeCache::new();
+    let mut cur = Cursor::new(combined.as_slice());
+
+    let d1 = decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache).unwrap();
+    let d2 = decode_type_desc_cached(&mut cur, ByteOrder::Little, &mut cache).unwrap();
+    assert_eq!(format!("{d1}"), format!("{d2}"));
+    assert_eq!(cur.position() as usize, combined.len());
+}
+
 // ── testRegressBadBitMask (pvxs testxcode.cpp:1165) ────────────────
 //
 // pvxs `from_wire(buf, BitMask)` rejects the null marker (0xff): a

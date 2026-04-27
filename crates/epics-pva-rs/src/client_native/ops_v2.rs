@@ -32,7 +32,7 @@ use crate::pvdata::encode::{decode_pv_field, encode_pv_field, encode_type_desc};
 use crate::pvdata::{FieldDesc, PvField, PvStructure, ScalarValue};
 
 use super::channel::Channel;
-use super::decode::{decode_op_response, OpResponse};
+use super::decode::{decode_op_response, decode_op_response_cached, OpResponse};
 
 static NEXT_IOID: AtomicU32 = AtomicU32::new(1);
 fn alloc_ioid() -> u32 {
@@ -62,12 +62,13 @@ pub async fn op_get(
     };
 
     let mut stream = server.register_ioid_stream(ioid);
+    let cache = server.type_cache();
 
     // INIT
     let init_req = codec.build_get_init(sid, ioid, &pv_req);
     server.send(init_req).await?;
     let init_frame = await_frame(&mut stream, op_timeout).await?;
-    let init = match decode_op_response(&init_frame, None)? {
+    let init = match decode_op_response_cached(&init_frame, None, &mut cache.lock())? {
         OpResponse::Init(i) => i,
         other => {
             server.unregister_ioid(ioid);
@@ -124,12 +125,13 @@ pub async fn op_put(
 
     let pv_req = build_pv_request_value_only(big_endian);
     let mut stream = server.register_ioid_stream(ioid);
+    let cache = server.type_cache();
 
     // INIT
     let init_req = codec.build_put_init(sid, ioid, &pv_req);
     server.send(init_req).await?;
     let init_frame = await_frame(&mut stream, op_timeout).await?;
-    let init = match decode_op_response(&init_frame, None)? {
+    let init = match decode_op_response_cached(&init_frame, None, &mut cache.lock())? {
         OpResponse::Init(i) => i,
         other => {
             server.unregister_ioid(ioid);
@@ -278,7 +280,8 @@ where
         .recv()
         .await
         .ok_or(MonitorEnd::ConnectionLost)?;
-    let init = match decode_op_response(&init_frame, None) {
+    let cache = server.type_cache();
+    let init = match decode_op_response_cached(&init_frame, None, &mut cache.lock()) {
         Ok(OpResponse::Init(i)) => i,
         Ok(other) => {
             server.unregister_ioid(ioid);
