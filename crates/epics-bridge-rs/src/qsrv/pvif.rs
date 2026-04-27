@@ -554,10 +554,7 @@ mod tests {
     fn test_snapshot(value: EpicsValue) -> Snapshot {
         Snapshot {
             value,
-            alarm: AlarmInfo {
-                status: 0,
-                severity: 0,
-            },
+            alarm: AlarmInfo::default(),
             timestamp: UNIX_EPOCH,
             display: Some(DisplayInfo {
                 units: "degC".into(),
@@ -607,10 +604,7 @@ mod tests {
     fn nt_enum_structure() {
         let snap = Snapshot {
             value: EpicsValue::Enum(1),
-            alarm: AlarmInfo {
-                status: 0,
-                severity: 0,
-            },
+            alarm: AlarmInfo::default(),
             timestamp: UNIX_EPOCH,
             display: None,
             control: None,
@@ -664,10 +658,7 @@ mod tests {
     fn put_roundtrip_enum() {
         let snap = Snapshot {
             value: EpicsValue::Enum(2),
-            alarm: AlarmInfo {
-                status: 0,
-                severity: 0,
-            },
+            alarm: AlarmInfo::default(),
             timestamp: UNIX_EPOCH,
             display: None,
             control: None,

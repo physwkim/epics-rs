@@ -330,6 +330,7 @@ fn test_encode_sts_matches_serialize() {
     snap.alarm = AlarmInfo {
         status: 5,
         severity: 1,
+        ..Default::default()
     };
     assert_eq!(
         encode_dbr(8, &snap).unwrap(),
@@ -346,6 +347,7 @@ fn test_encode_time_matches_serialize() {
     snap.alarm = AlarmInfo {
         status: 1,
         severity: 2,
+        ..Default::default()
     };
     assert_eq!(
         encode_dbr(20, &snap).unwrap(),
@@ -509,8 +511,39 @@ fn test_encode_ctrl_short_with_ctrl_limits() {
 #[test]
 fn test_encode_invalid_type() {
     let snap = bare_snapshot(EpicsValue::Double(0.0));
-    assert!(encode_dbr(35, &snap).is_err());
+    // 38+ are reserved/unused (35-37 are PUT_ACKT/PUT_ACKS/STSACK_STRING).
+    assert!(encode_dbr(38, &snap).is_err());
     assert!(encode_dbr(100, &snap).is_err());
+}
+
+#[test]
+fn test_encode_stsack_string_layout() {
+    // STSACK_STRING wire layout: status(2) severity(2) ackt(2) acks(2) value(40) = 48 bytes
+    let mut snap = bare_snapshot(EpicsValue::String("warn".to_string()));
+    snap.alarm = AlarmInfo {
+        status: 5,
+        severity: 1,
+        ackt: Some(1),
+        acks: Some(2),
+    };
+    let data = encode_dbr(epics_base_rs::types::DBR_STSACK_STRING, &snap).unwrap();
+    assert_eq!(data.len(), 48);
+    assert_eq!(&data[0..2], &5u16.to_be_bytes());
+    assert_eq!(&data[2..4], &1u16.to_be_bytes());
+    assert_eq!(&data[4..6], &1u16.to_be_bytes());
+    assert_eq!(&data[6..8], &2u16.to_be_bytes());
+    assert_eq!(&data[8..12], b"warn");
+}
+
+#[test]
+fn test_encode_stsack_string_default_ackt_acks() {
+    // ackt/acks default to None → encoded as zero so SimplePvs without
+    // record-backed alarm fields still produce a valid response.
+    let snap = bare_snapshot(EpicsValue::String("ok".to_string()));
+    let data = encode_dbr(epics_base_rs::types::DBR_STSACK_STRING, &snap).unwrap();
+    assert_eq!(data.len(), 48);
+    assert_eq!(&data[4..6], &0u16.to_be_bytes());
+    assert_eq!(&data[6..8], &0u16.to_be_bytes());
 }
 
 #[test]

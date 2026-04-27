@@ -185,6 +185,26 @@ pub fn encode_dbr(
         14..=20 => serialize_time(native, &val_bytes, status, severity, snapshot.timestamp),
         21..=27 => encode_gr(native, &val_bytes, snapshot),
         28..=34 => encode_ctrl(native, &val_bytes, snapshot),
+        // PUT_ACKT (35) and PUT_ACKS (36) are write-only on the wire:
+        // the server should never produce them in a read response. We
+        // expose a no-op encoding so callers that round-trip through
+        // encode_dbr (e.g. forwarders) don't fail loudly.
+        super::DBR_PUT_ACKT | super::DBR_PUT_ACKS => Ok(val_bytes),
+        // STSACK_STRING — alarm acknowledge string response. Layout:
+        //   status(2) severity(2) ackt(2) acks(2) value(40) = 48 bytes.
+        // ackt/acks are taken from snapshot.alarm if available; the
+        // value itself comes from the encoded native String.
+        super::DBR_STSACK_STRING => {
+            let ackt = snapshot.alarm.ackt.unwrap_or(0);
+            let acks = snapshot.alarm.acks.unwrap_or(0);
+            let mut buf = Vec::with_capacity(8 + val_bytes.len());
+            buf.extend_from_slice(&status.to_be_bytes());
+            buf.extend_from_slice(&severity.to_be_bytes());
+            buf.extend_from_slice(&ackt.to_be_bytes());
+            buf.extend_from_slice(&acks.to_be_bytes());
+            buf.extend_from_slice(&val_bytes);
+            Ok(buf)
+        }
         _ => Err(CaError::UnsupportedType(dbr_type)),
     }
 }

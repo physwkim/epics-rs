@@ -1,6 +1,8 @@
 use crate::error::{CaError, CaResult};
 
-// DBR type ranges: native(0-6), STS(7-13), TIME(14-20), GR(21-27), CTRL(28-34)
+// DBR type ranges: native(0-6), STS(7-13), TIME(14-20), GR(21-27),
+// CTRL(28-34), and a small handful of special types: PUT_ACKT (35),
+// PUT_ACKS (36), STSACK_STRING (37). Everything beyond that is unused.
 pub const DBR_STS_STRING: u16 = 7;
 pub const DBR_TIME_STRING: u16 = 14;
 pub const DBR_TIME_SHORT: u16 = 15;
@@ -9,6 +11,9 @@ pub const DBR_TIME_ENUM: u16 = 17;
 pub const DBR_TIME_CHAR: u16 = 18;
 pub const DBR_TIME_LONG: u16 = 19;
 pub const DBR_TIME_DOUBLE: u16 = 20;
+pub const DBR_PUT_ACKT: u16 = 35;
+pub const DBR_PUT_ACKS: u16 = 36;
+pub const DBR_STSACK_STRING: u16 = 37;
 
 /// EPICS DBR field types (native types only)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +119,11 @@ fn dbr_native_index(dbr_type: u16) -> Option<u16> {
         14..=20 => Some(dbr_type - 14),
         21..=27 => Some(dbr_type - 21),
         28..=34 => Some(dbr_type - 28),
+        // Alarm-acknowledge writes carry a single u16, so map them to
+        // Short for codec purposes. STSACK_STRING returns a string body
+        // so it maps to String.
+        35 | 36 => Some(1), // DBR_PUT_ACKT / DBR_PUT_ACKS — u16
+        37 => Some(0),      // DBR_STSACK_STRING — value is a string
         _ => None,
     }
 }

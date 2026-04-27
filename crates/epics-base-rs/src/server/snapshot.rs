@@ -7,6 +7,12 @@ use crate::types::EpicsValue;
 pub struct AlarmInfo {
     pub status: u16,
     pub severity: u16,
+    /// Acknowledge transient (record ACKT field). Populated when
+    /// callers want DBR_STSACK_STRING responses to carry it; otherwise
+    /// `None` and the encoder substitutes 0.
+    pub ackt: Option<u16>,
+    /// Acknowledge severity (record ACKS field).
+    pub acks: Option<u16>,
 }
 
 /// Display/graphic metadata for numeric types.
@@ -58,7 +64,12 @@ impl Snapshot {
     pub fn new(value: EpicsValue, status: u16, severity: u16, timestamp: SystemTime) -> Self {
         Self {
             value,
-            alarm: AlarmInfo { status, severity },
+            alarm: AlarmInfo {
+                status,
+                severity,
+                ackt: None,
+                acks: None,
+            },
             timestamp,
             display: None,
             control: None,

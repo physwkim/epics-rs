@@ -531,6 +531,21 @@ async fn dispatch_message(
             if requested_count > 0 && requested_count < snapshot.value.count() {
                 snapshot.value.truncate(requested_count as usize);
             }
+
+            // For DBR_STSACK_STRING populate ackt/acks from the record so
+            // alarm-handler clients see the current acknowledge state.
+            if requested_type == epics_base_rs::types::DBR_STSACK_STRING {
+                if let ChannelTarget::RecordField { record, .. } = &entry.target {
+                    let inst = record.read().await;
+                    if let Some(EpicsValue::Short(v)) = inst.resolve_field("ACKT") {
+                        snapshot.alarm.ackt = Some(v as u16);
+                    }
+                    if let Some(EpicsValue::Short(v)) = inst.resolve_field("ACKS") {
+                        snapshot.alarm.acks = Some(v as u16);
+                    }
+                }
+            }
+
             let data = match encode_dbr(requested_type, &snapshot) {
                 Ok(d) => d,
                 Err(_) => {
@@ -578,6 +593,71 @@ async fn dispatch_message(
             let sid = hdr.cid;
             let ioid = hdr.available;
             let is_notify = hdr.cmmd == CA_PROTO_WRITE_NOTIFY;
+
+            // DBR_PUT_ACKT (35) and DBR_PUT_ACKS (36) are alarm-acknowledge
+            // writes — payload is a single u16 routed to the record's
+            // ACKT/ACKS field. Handle before the regular DbFieldType
+            // dispatch so we don't reject the type as unsupported.
+            if hdr.data_type == epics_base_rs::types::DBR_PUT_ACKT
+                || hdr.data_type == epics_base_rs::types::DBR_PUT_ACKS
+            {
+                let entry = match state.channels.get(&sid) {
+                    Some(e) => e,
+                    None => {
+                        if is_notify {
+                            send_cmd_error(
+                                writer,
+                                CA_PROTO_WRITE_NOTIFY,
+                                hdr.data_type,
+                                ECA_BADCHID,
+                                ioid,
+                            )
+                            .await?;
+                        }
+                        return Ok(());
+                    }
+                };
+                let value_u16 = if payload.len() >= 2 {
+                    u16::from_be_bytes([payload[0], payload[1]])
+                } else {
+                    0
+                };
+                let field_name = if hdr.data_type == epics_base_rs::types::DBR_PUT_ACKT {
+                    "ACKT"
+                } else {
+                    "ACKS"
+                };
+                let result = match &entry.target {
+                    ChannelTarget::RecordField { record, .. } => {
+                        let name = record.read().await.name.clone();
+                        db.put_record_field_from_ca(
+                            &name,
+                            field_name,
+                            EpicsValue::Short(value_u16 as i16),
+                        )
+                        .await
+                        .map(|_| ())
+                    }
+                    ChannelTarget::SimplePv(_) => Err(epics_base_rs::error::CaError::Protocol(
+                        "PUT_ACKT/PUT_ACKS only valid on record-backed channels".to_string(),
+                    )),
+                };
+                if is_notify {
+                    let eca = match result {
+                        Ok(()) => ECA_NORMAL,
+                        Err(_) => ECA_PUTFAIL,
+                    };
+                    let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
+                    resp.data_type = hdr.data_type;
+                    resp.count = hdr.count;
+                    resp.cid = eca;
+                    resp.available = ioid;
+                    let mut w = writer.lock().await;
+                    w.write_all(&resp.to_bytes()).await?;
+                    w.flush().await?;
+                }
+                return Ok(());
+            }
 
             let write_type = match DbFieldType::from_u16(hdr.data_type) {
                 Ok(t) => t,
