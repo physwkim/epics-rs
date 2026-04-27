@@ -46,11 +46,18 @@ pub const DEFAULT_BROADCAST_PORT: u16 = 5076;
 
 /// Command sent into the engine.
 pub enum SearchCommand {
-    /// Resolve `pv_name` → server address. Reply via `responder` once a
-    /// SEARCH_RESPONSE comes in.
+    /// Resolve `pv_name` → first server address. Reply via `responder`
+    /// once a SEARCH_RESPONSE comes in.
     Find {
         pv_name: String,
         responder: oneshot::Sender<SocketAddr>,
+    },
+    /// Resolve `pv_name` and collect *all* responses received within
+    /// the next [`MULTI_SERVER_WINDOW`]. The reply contains every
+    /// server that claimed the PV; the caller can fan-out / fail over.
+    FindAll {
+        pv_name: String,
+        responder: oneshot::Sender<Vec<SocketAddr>>,
     },
     /// Cancel an outstanding search (channel was dropped or closed).
     Cancel { pv_name: String },
@@ -62,6 +69,10 @@ pub enum SearchCommand {
         guid: [u8; 12],
     },
 }
+
+/// How long the engine collects extra SEARCH_RESPONSE entries after the
+/// first one for a given pv name (used by [`SearchCommand::FindAll`]).
+pub const MULTI_SERVER_WINDOW: Duration = Duration::from_millis(200);
 
 /// Public handle to the engine. Cheap to clone (it's just a sender).
 #[derive(Clone)]
@@ -98,6 +109,22 @@ impl SearchEngine {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SearchCommand::Find {
+                pv_name: pv_name.to_string(),
+                responder: tx,
+            })
+            .await
+            .map_err(|_| PvaError::Protocol("search engine closed".into()))?;
+        rx.await
+            .map_err(|_| PvaError::Protocol("search request cancelled".into()))
+    }
+
+    /// Collect every SEARCH_RESPONSE for `pv_name` within
+    /// [`MULTI_SERVER_WINDOW`]. Returns a ranked list — first is the
+    /// fastest responder. Empty list means the search timed out.
+    pub async fn find_all(&self, pv_name: &str) -> PvaResult<Vec<SocketAddr>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SearchCommand::FindAll {
                 pv_name: pv_name.to_string(),
                 responder: tx,
             })
@@ -160,10 +187,18 @@ fn bind_beacon_udp() -> Option<UdpSocket> {
 
 // ── Engine main loop ────────────────────────────────────────────────────
 
-#[derive(Debug)]
+enum Responder {
+    Single(oneshot::Sender<SocketAddr>),
+    Multi {
+        responder: oneshot::Sender<Vec<SocketAddr>>,
+        accumulated: Vec<SocketAddr>,
+        deadline: Instant,
+    },
+}
+
 struct Pending {
     pv_name: String,
-    responder: oneshot::Sender<SocketAddr>,
+    responder: Responder,
     last_attempt: Instant,
     attempt: usize,
     search_id: u32,
@@ -204,14 +239,33 @@ async fn run_engine(
                     let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
                     let p = Pending {
                         pv_name: pv_name.clone(),
-                        responder,
+                        responder: Responder::Single(responder),
                         last_attempt: Instant::now(),
                         attempt: 0,
                         search_id: sid,
                     };
                     by_name.insert(pv_name, sid);
                     pending.insert(sid, p);
-                    // Fire first SEARCH immediately.
+                    if let Some(p) = pending.get(&sid) {
+                        let pkt = codec.build_search(0, sid, &p.pv_name, [0,0,0,0], response_port, false);
+                        broadcast(&search_socket, &pkt, &extra_targets).await;
+                    }
+                }
+                Some(SearchCommand::FindAll { pv_name, responder }) => {
+                    let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
+                    let p = Pending {
+                        pv_name: pv_name.clone(),
+                        responder: Responder::Multi {
+                            responder,
+                            accumulated: Vec::new(),
+                            deadline: Instant::now() + MULTI_SERVER_WINDOW,
+                        },
+                        last_attempt: Instant::now(),
+                        attempt: 0,
+                        search_id: sid,
+                    };
+                    by_name.insert(pv_name, sid);
+                    pending.insert(sid, p);
                     if let Some(p) = pending.get(&sid) {
                         let pkt = codec.build_search(0, sid, &p.pv_name, [0,0,0,0], response_port, false);
                         broadcast(&search_socket, &pkt, &extra_targets).await;
@@ -248,8 +302,28 @@ async fn run_engine(
             }
 
             _ = tick.tick() => {
-                // Retry pending searches whose backoff has elapsed.
                 let now = Instant::now();
+
+                // 1. Flush any FindAll multi-window responders whose deadline
+                //    has passed (delivers accumulated list, removes entry).
+                let mut to_flush = Vec::new();
+                for (sid, p) in pending.iter() {
+                    if let Responder::Multi { deadline, accumulated, .. } = &p.responder {
+                        if now >= *deadline && !accumulated.is_empty() {
+                            to_flush.push(*sid);
+                        }
+                    }
+                }
+                for sid in to_flush {
+                    if let Some(p) = pending.remove(&sid) {
+                        by_name.remove(&p.pv_name);
+                        if let Responder::Multi { responder, accumulated, .. } = p.responder {
+                            let _ = responder.send(accumulated);
+                        }
+                    }
+                }
+
+                // 2. Retry pending searches whose backoff has elapsed.
                 for p in pending.values_mut() {
                     let backoff = BACKOFF_SECS[p.attempt.min(BACKOFF_SECS.len()-1)];
                     if now.duration_since(p.last_attempt) >= Duration::from_secs(backoff) {
@@ -314,9 +388,25 @@ fn handle_search_response(
         return;
     }
     for cid in resp.cids {
-        if let Some(p) = pending.remove(&cid) {
-            by_name.remove(&p.pv_name);
-            let _ = p.responder.send(rewrite_loopback(resp.server_addr));
+        let server = rewrite_loopback(resp.server_addr);
+        let Some(entry) = pending.get_mut(&cid) else {
+            continue;
+        };
+        match &mut entry.responder {
+            Responder::Single(_) => {
+                // Single responder: deliver and remove.
+                let p = pending.remove(&cid).unwrap();
+                by_name.remove(&p.pv_name);
+                if let Responder::Single(tx) = p.responder {
+                    let _ = tx.send(server);
+                }
+            }
+            Responder::Multi { accumulated, .. } => {
+                if !accumulated.contains(&server) {
+                    accumulated.push(server);
+                }
+                // Don't deliver yet — wait for the deadline tick to flush.
+            }
         }
     }
 }

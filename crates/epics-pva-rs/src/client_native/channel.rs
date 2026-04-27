@@ -59,6 +59,12 @@ pub struct Channel {
     /// share a single TCP virtual circuit).
     pool: Arc<ConnectionPool>,
     resolver: Resolver,
+    /// Alternative server addresses cached from the most recent search
+    /// (excluding the one currently being tried). Multi-server failover:
+    /// if `ensure_active` fails to connect or `CREATE_CHANNEL`s to the
+    /// first server, it pops the next alternative before falling back to
+    /// a fresh UDP search.
+    alternatives: parking_lot::Mutex<Vec<std::net::SocketAddr>>,
 }
 
 /// How a channel resolves its PV name to a server address.
@@ -70,14 +76,23 @@ enum Resolver {
 }
 
 /// Pool of live `ServerConn`s, keyed by server address.
+///
+/// Optionally configured with a TLS client config — when present, every
+/// new connection is upgraded to TLS via `pvas://` semantics.
 #[derive(Default)]
 pub struct ConnectionPool {
     inner: parking_lot::Mutex<std::collections::HashMap<std::net::SocketAddr, Arc<ServerConn>>>,
+    tls: parking_lot::Mutex<Option<Arc<crate::auth::TlsClientConfig>>>,
 }
 
 impl ConnectionPool {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Enable TLS for every subsequent connect call.
+    pub fn set_tls(&self, tls: Option<Arc<crate::auth::TlsClientConfig>>) {
+        *self.tls.lock() = tls;
     }
 
     pub async fn get_or_connect(
@@ -105,7 +120,14 @@ impl ConnectionPool {
                 }
             }
         }
-        let fresh = ServerConn::connect(addr, user, host, op_timeout).await?;
+        let tls = self.tls.lock().clone();
+        let fresh = match tls {
+            Some(cfg) => {
+                ServerConn::connect_tls(addr, &addr.ip().to_string(), cfg, user, host, op_timeout)
+                    .await?
+            }
+            None => ServerConn::connect(addr, user, host, op_timeout).await?,
+        };
         let mut map = self.inner.lock();
         // Race: someone else may have inserted. Prefer an alive existing one.
         if let Some(existing) = map.get(&addr).cloned() {
@@ -143,6 +165,7 @@ impl Channel {
             op_timeout,
             pool,
             resolver: Resolver::Search(search),
+            alternatives: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -166,6 +189,7 @@ impl Channel {
             op_timeout,
             pool,
             resolver: Resolver::Direct(addr),
+            alternatives: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -216,26 +240,69 @@ impl Channel {
             }
         }
 
-        self.set_state(ChannelState::Searching);
-        let server_addr = match &self.resolver {
-            Resolver::Search(engine) => engine.find(&self.pv_name).await?,
-            Resolver::Direct(addr) => *addr,
+        // Pull a candidate server. Prefer cached alternatives from the
+        // most recent multi-window search; otherwise issue a fresh search.
+        // The lock guard from parking_lot is !Send, so we drop it before
+        // any await.
+        let cached: Option<Vec<std::net::SocketAddr>> = {
+            let mut alts = self.alternatives.lock();
+            if alts.is_empty() {
+                None
+            } else {
+                Some(std::mem::take(&mut *alts))
+            }
+        };
+        let candidates = match cached {
+            Some(list) => list,
+            None => {
+                self.set_state(ChannelState::Searching);
+                match &self.resolver {
+                    Resolver::Search(engine) => engine
+                        .find_all(&self.pv_name)
+                        .await
+                        .unwrap_or_default(),
+                    Resolver::Direct(addr) => vec![*addr],
+                }
+            }
         };
 
-        self.set_state(ChannelState::Connecting);
-        let server = self
-            .pool
-            .get_or_connect(server_addr, &self.user, &self.host, self.op_timeout)
-            .await?;
+        if candidates.is_empty() {
+            return Err(PvaError::Protocol("no servers found for PV".into()));
+        }
 
-        // Send CREATE_CHANNEL and wait for response.
-        let sid = self.do_create_channel(&server).await?;
-
-        self.set_state(ChannelState::Active {
-            server: server.clone(),
-            sid,
-        });
-        Ok((server, sid))
+        // Try each candidate in order; stash the rest as alternatives.
+        let mut last_err: Option<PvaError> = None;
+        for (idx, server_addr) in candidates.iter().enumerate() {
+            self.set_state(ChannelState::Connecting);
+            match self
+                .pool
+                .get_or_connect(*server_addr, &self.user, &self.host, self.op_timeout)
+                .await
+            {
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Ok(server) => match self.do_create_channel(&server).await {
+                    Ok(sid) => {
+                        // Stash remaining candidates as alternatives.
+                        let leftovers: Vec<_> =
+                            candidates.iter().skip(idx + 1).copied().collect();
+                        *self.alternatives.lock() = leftovers;
+                        self.set_state(ChannelState::Active {
+                            server: server.clone(),
+                            sid,
+                        });
+                        return Ok((server, sid));
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        continue;
+                    }
+                },
+            }
+        }
+        Err(last_err.unwrap_or_else(|| PvaError::Protocol("connect failed".into())))
     }
 
     fn set_state(&self, new_state: ChannelState) {

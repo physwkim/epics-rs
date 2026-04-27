@@ -45,6 +45,7 @@ pub struct PvaClientBuilder {
     user: Option<String>,
     host: Option<String>,
     pipeline_size: u32,
+    tls: Option<Arc<crate::auth::TlsClientConfig>>,
 }
 
 impl PvaClientBuilder {
@@ -55,7 +56,16 @@ impl PvaClientBuilder {
             user: None,
             host: None,
             pipeline_size: DEFAULT_PIPELINE_SIZE,
+            tls: None,
         }
+    }
+
+    /// Enable TLS for every connection. Pass an `Arc<TlsClientConfig>`
+    /// from `crate::auth::tls::load_client_config()` (or built from
+    /// scratch via `rustls`).
+    pub fn with_tls(mut self, tls: Arc<crate::auth::TlsClientConfig>) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     pub fn timeout(mut self, t: Duration) -> Self {
@@ -86,6 +96,10 @@ impl PvaClientBuilder {
     }
 
     pub fn build(self) -> PvaClient {
+        let pool = ConnectionPool::new();
+        if self.tls.is_some() {
+            pool.set_tls(self.tls.clone());
+        }
         PvaClient {
             inner: Arc::new(ClientInner {
                 timeout: self.timeout,
@@ -93,7 +107,7 @@ impl PvaClientBuilder {
                 user: self.user.unwrap_or_else(super::super::auth::authnz_default_user),
                 host: self.host.unwrap_or_else(super::super::auth::authnz_default_host),
                 pipeline_size: self.pipeline_size,
-                pool: ConnectionPool::new(),
+                pool,
                 channels: RwLock::new(HashMap::new()),
                 search: OnceLock::new(),
             }),

@@ -75,8 +75,15 @@ pub struct ServerConn {
     router: Arc<Mutex<Router>>,
 }
 
+/// Type-erased read half. We accept either a plain TCP read half or a
+/// TLS read half through the same code path.
+type DynRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+/// Type-erased write half.
+type DynWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
 impl ServerConn {
-    /// Open a connection, run the handshake, and start background tasks.
+    /// Open a plain TCP connection, run the handshake, and start
+    /// background tasks.
     pub async fn connect(
         target: SocketAddr,
         user: &str,
@@ -88,8 +95,52 @@ impl ServerConn {
             .map_err(|_| PvaError::Timeout)?
             .map_err(PvaError::Io)?;
         stream.set_nodelay(true).ok();
+        let (reader, writer) = stream.into_split();
+        let reader: DynRead = Box::new(reader);
+        let writer: DynWrite = Box::new(writer);
+        Self::run_handshake_and_spawn(target, reader, writer, user, host, op_timeout).await
+    }
 
-        let (mut reader, writer) = stream.into_split();
+    /// Open a TLS-wrapped connection (`pvas://`).
+    pub async fn connect_tls(
+        target: SocketAddr,
+        server_name: &str,
+        tls: Arc<crate::auth::TlsClientConfig>,
+        user: &str,
+        host: &str,
+        op_timeout: Duration,
+    ) -> PvaResult<Arc<Self>> {
+        let stream = timeout(op_timeout, TcpStream::connect(target))
+            .await
+            .map_err(|_| PvaError::Timeout)?
+            .map_err(PvaError::Io)?;
+        stream.set_nodelay(true).ok();
+
+        let connector = tokio_rustls::TlsConnector::from(tls.config.clone());
+        let dnsname = rustls::pki_types::ServerName::try_from(server_name.to_string())
+            .map_err(|e| PvaError::Protocol(format!("invalid TLS server name: {e}")))?;
+        let tls_stream = timeout(op_timeout, connector.connect(dnsname, stream))
+            .await
+            .map_err(|_| PvaError::Timeout)?
+            .map_err(PvaError::Io)?;
+
+        let (reader, writer) = tokio::io::split(tls_stream);
+        let reader: DynRead = Box::new(reader);
+        let writer: DynWrite = Box::new(writer);
+        Self::run_handshake_and_spawn(target, reader, writer, user, host, op_timeout).await
+    }
+
+    /// Internal: takes already-split read/write halves, runs the handshake,
+    /// then spawns the reader/writer/heartbeat tasks. Used by both
+    /// [`connect`] and [`connect_tls`].
+    async fn run_handshake_and_spawn(
+        target: SocketAddr,
+        mut reader: DynRead,
+        mut writer: DynWrite,
+        user: &str,
+        host: &str,
+        op_timeout: Duration,
+    ) -> PvaResult<Arc<Self>> {
 
         // Step 1+2: read handshake frames until we get CONNECTION_VALIDATION.
         let mut rx_buf: Vec<u8> = Vec::with_capacity(8192);
@@ -298,8 +349,8 @@ fn now_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-async fn read_handshake_init(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+async fn read_handshake_init<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
     rx_buf: &mut Vec<u8>,
     op_timeout: Duration,
 ) -> PvaResult<(ByteOrder, u32, u16, Vec<String>)> {
@@ -324,8 +375,8 @@ async fn read_handshake_init(
     }
 }
 
-async fn wait_for_validated(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+async fn wait_for_validated<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
     rx_buf: &mut Vec<u8>,
     op_timeout: Duration,
 ) -> PvaResult<()> {
@@ -347,8 +398,8 @@ async fn wait_for_validated(
     }
 }
 
-async fn read_one_frame(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
     rx_buf: &mut Vec<u8>,
     op_timeout: Duration,
 ) -> PvaResult<Frame> {

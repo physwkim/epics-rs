@@ -25,6 +25,10 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
+[dev-dependencies]
+rcgen = "0.13"
+tempfile = "3"
+
 [[bin]]
 name = "pvget-rs"
 path = "src/bin/pvget-rs.rs"

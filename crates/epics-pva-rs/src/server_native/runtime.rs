@@ -11,7 +11,7 @@ use super::tcp::run_tcp_server;
 use super::udp::{random_guid, run_udp_responder};
 
 /// Runtime configuration for [`run_pva_server`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PvaServerConfig {
     pub tcp_port: u16,
     pub udp_port: u16,
@@ -32,6 +32,10 @@ pub struct PvaServerConfig {
     /// Per-monitor outbound queue depth. When exceeded, the back-pressure
     /// policy kicks in (squash to last value).
     pub monitor_queue_depth: usize,
+    /// Optional TLS server config. When `Some`, every accepted TCP
+    /// connection is upgraded to TLS via `tokio_rustls::TlsAcceptor`
+    /// before the PVA handshake begins.
+    pub tls: Option<std::sync::Arc<crate::auth::TlsServerConfig>>,
 }
 
 impl Default for PvaServerConfig {
@@ -45,6 +49,7 @@ impl Default for PvaServerConfig {
             max_channels_per_connection: 1024,
             idle_timeout: Duration::from_secs(45),
             monitor_queue_depth: 64,
+            tls: None,
         }
     }
 }

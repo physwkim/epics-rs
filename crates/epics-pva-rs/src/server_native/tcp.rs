@@ -76,22 +76,57 @@ pub async fn run_tcp_server(
     let listener = TcpListener::bind(bind_addr).await.map_err(PvaError::Io)?;
     debug!(?bind_addr, "TCP listener up");
     let active = Arc::new(AtomicUsize::new(0));
+
+    let tls_acceptor = config
+        .tls
+        .as_ref()
+        .map(|cfg| tokio_rustls::TlsAcceptor::from(cfg.config.clone()));
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 let cur = active.fetch_add(1, Ordering::SeqCst);
                 if cur >= config.max_connections {
-                    // Slot limit reached — refuse and drop.
                     active.fetch_sub(1, Ordering::SeqCst);
-                    warn!(?peer, "rejecting connection: max_connections={}", config.max_connections);
+                    warn!(
+                        ?peer,
+                        "rejecting connection: max_connections={}",
+                        config.max_connections
+                    );
                     drop(stream);
                     continue;
                 }
                 let src = source.clone();
                 let cfg = config.clone();
                 let active_dec = active.clone();
+                let acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(src, stream, peer, cfg).await {
+                    stream.set_nodelay(true).ok();
+                    let result = match acceptor {
+                        Some(a) => match a.accept(stream).await {
+                            Ok(tls_stream) => {
+                                let (r, w) = tokio::io::split(tls_stream);
+                                handle_connection_io(
+                                    src,
+                                    Box::new(r),
+                                    Box::new(w),
+                                    peer,
+                                    cfg,
+                                )
+                                .await
+                            }
+                            Err(e) => {
+                                debug!(?peer, "TLS handshake failed: {e}");
+                                Err(PvaError::Io(e))
+                            }
+                        },
+                        None => {
+                            let (r, w) = stream.into_split();
+                            handle_connection_io(src, Box::new(r), Box::new(w), peer, cfg)
+                                .await
+                        }
+                    };
+                    if let Err(e) = result {
                         debug!(?peer, "connection ended: {e}");
                     }
                     active_dec.fetch_sub(1, Ordering::SeqCst);
@@ -105,17 +140,21 @@ pub async fn run_tcp_server(
     }
 }
 
-async fn handle_connection(
+/// Type-erased read/write halves so the same handler works for plain TCP
+/// and TLS-wrapped streams.
+type SrvRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type SrvWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
+async fn handle_connection_io(
     source: DynSource,
-    stream: TcpStream,
+    mut reader: SrvRead,
+    writer_raw: SrvWrite,
     peer: SocketAddr,
     config: PvaServerConfig,
 ) -> PvaResult<()> {
     let op_timeout = config.op_timeout;
     let idle_timeout = config.idle_timeout;
-    stream.set_nodelay(true).ok();
-    let (mut reader, writer) = stream.into_split();
-    let writer = Arc::new(Mutex::new(writer));
+    let writer = Arc::new(Mutex::new(writer_raw));
 
     // Track per-connection liveness for the idle-timeout watchdog and the
     // server-side echo heartbeat task.
@@ -316,8 +355,8 @@ async fn handle_connection(
     }
 }
 
-async fn read_frame(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
     rx_buf: &mut Vec<u8>,
     op_timeout: Duration,
 ) -> PvaResult<Frame> {
@@ -372,7 +411,7 @@ fn build_server_connection_validation(
 async fn handle_create_channel(
     source: &DynSource,
     frame: &Frame,
-    writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    writer: &Arc<Mutex<SrvWrite>>,
     channels: &mut HashMap<u32, ChannelState>,
     order: ByteOrder,
 ) -> PvaResult<()> {
@@ -430,7 +469,7 @@ async fn handle_create_channel(
 
 async fn handle_destroy_channel(
     frame: &Frame,
-    writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    writer: &Arc<Mutex<SrvWrite>>,
     channels: &mut HashMap<u32, ChannelState>,
     order: ByteOrder,
 ) -> PvaResult<()> {
@@ -470,7 +509,7 @@ fn handle_destroy_request(
 async fn handle_op(
     source: &DynSource,
     frame: &Frame,
-    writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    writer: &Arc<Mutex<SrvWrite>>,
     channels: &mut HashMap<u32, ChannelState>,
     order: ByteOrder,
     kind: OpKind,
@@ -695,7 +734,7 @@ async fn handle_op(
 async fn handle_get_field(
     source: &DynSource,
     frame: &Frame,
-    writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    writer: &Arc<Mutex<SrvWrite>>,
     channels: &HashMap<u32, ChannelState>,
     order: ByteOrder,
 ) -> PvaResult<()> {
@@ -734,7 +773,7 @@ async fn handle_get_field(
 }
 
 async fn send_op_error(
-    writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    writer: &Arc<Mutex<SrvWrite>>,
     kind: OpKind,
     ioid: u32,
     msg: &str,
