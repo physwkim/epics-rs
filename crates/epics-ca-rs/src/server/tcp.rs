@@ -99,6 +99,12 @@ struct ClientState {
     /// Optional audit logger. When None the audit hot path is a single
     /// branch test and no allocation.
     audit: Option<crate::audit::AuditLogger>,
+    /// Optional per-client token bucket. None disables rate limiting.
+    rate_limiter: Option<crate::server::rate_limit::RateLimiter>,
+    /// Consecutive denied messages — disconnect when this exceeds the
+    /// configured strike threshold.
+    rate_limit_strikes: u32,
+    rate_limit_strike_threshold: u32,
 }
 
 impl ClientState {
@@ -120,6 +126,9 @@ impl ClientState {
             channel_limit_warned: false,
             peer: String::new(),
             audit: None,
+            rate_limiter: None,
+            rate_limit_strikes: 0,
+            rate_limit_strike_threshold: 0,
         }
     }
 
@@ -350,6 +359,9 @@ where
     state.hostname = initial_hostname.unwrap_or_else(|| peer.ip().to_string());
     state.peer = peer.to_string();
     state.audit = audit;
+    let rl_cfg = crate::server::rate_limit::RateLimitConfig::from_env();
+    state.rate_limiter = rl_cfg.build();
+    state.rate_limit_strike_threshold = rl_cfg.strike_threshold;
     state.audit("connect", "", "", "ok").await;
     let mut reader = reader;
 
@@ -400,6 +412,28 @@ where
             } else {
                 Vec::new()
             };
+
+            // Rate-limit gate: drop messages when the bucket is empty;
+            // disconnect the client once it accumulates enough strikes.
+            if let Some(ref limiter) = state.rate_limiter {
+                if limiter.try_acquire().is_err() {
+                    metrics::counter!("ca_server_rate_limit_drops_total").increment(1);
+                    state.rate_limit_strikes = state.rate_limit_strikes.saturating_add(1);
+                    if state.rate_limit_strike_threshold > 0
+                        && state.rate_limit_strikes >= state.rate_limit_strike_threshold
+                    {
+                        tracing::warn!(peer = %state.peer, strikes = state.rate_limit_strikes,
+                            "rate limit exceeded; closing connection");
+                        metrics::counter!("ca_server_rate_limit_disconnects_total").increment(1);
+                        state.audit("disconnect", "", "", "rate_limited").await;
+                        return Ok(());
+                    }
+                    offset += msg_len;
+                    continue;
+                } else if state.rate_limit_strikes > 0 {
+                    state.rate_limit_strikes = 0;
+                }
+            }
 
             dispatch_message(&hdr, &payload, &mut state, &db, &writer).await?;
             offset += msg_len;

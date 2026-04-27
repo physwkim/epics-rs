@@ -5,6 +5,7 @@ pub mod beacon;
 pub mod ca_server;
 pub mod ioc_app;
 pub mod monitor;
+pub mod rate_limit;
 pub mod tcp;
 pub mod udp;
 

@@ -210,12 +210,32 @@ Alternative sink. `stderr` mirrors audit lines to standard error
 (useful under systemd-journald). Ignored when
 `EPICS_CAS_AUDIT_FILE` is also set.
 
+### `EPICS_CAS_RATE_LIMIT_MSGS_PER_SEC` (rust-only)
+
+Per-client steady-state rate cap (CA messages per second). Default:
+0 (disabled). When set, every accepted CA message draws one token
+from a bucket; when the bucket is empty the message is dropped and a
+strike is recorded.
+
+### `EPICS_CAS_RATE_LIMIT_BURST` (rust-only)
+
+Per-client burst capacity. Default: `4 × MSGS_PER_SEC`. Sized to
+absorb short bursts (channel-create storm at IOC startup) without
+penalizing the well-behaved.
+
+### `EPICS_CAS_RATE_LIMIT_STRIKES` (rust-only)
+
+How many consecutive dropped messages cause the connection to be
+torn down. Default: 100. Set to 0 to never disconnect (drop-only
+mode).
+
 ## Compatibility notes
 
 The **rust-only** variables (`EPICS_CA_MONITOR_QUEUE`,
 `EPICS_CAS_INACTIVITY_TMO`, `EPICS_CAS_MAX_CHANNELS`,
 `EPICS_CAS_MAX_SUBS_PER_CHAN`, `EPICS_CAS_AUDIT_FILE`,
-`EPICS_CAS_AUDIT`) are no-ops if observed by libca/rsrv.
+`EPICS_CAS_AUDIT`, `EPICS_CAS_RATE_LIMIT_*`) are no-ops if observed
+by libca/rsrv.
 They were chosen to mirror libca's variable-naming convention so
 operators don't need to learn a separate vocabulary.
 
