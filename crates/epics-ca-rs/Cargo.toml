@@ -36,6 +36,7 @@ tls = ["dep:tokio-rustls", "dep:rustls-pemfile", "dep:rustls-pki-types"]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 proptest = "1"
+rcgen = "0.13"
 
 [[bench]]
 name = "protocol_bench"
