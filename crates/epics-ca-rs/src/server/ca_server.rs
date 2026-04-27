@@ -11,7 +11,7 @@ use epics_base_rs::runtime::net::CA_SERVER_PORT;
 use epics_base_rs::server::record::Record;
 use epics_base_rs::types::EpicsValue;
 
-use super::{beacon, tcp, udp};
+use super::{addr_list, beacon, tcp, udp};
 use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::server::scan::ScanScheduler;
 use epics_base_rs::server::{access_security, autosave, device_support, ioc_builder, iocsh};
@@ -334,13 +334,19 @@ impl CaServer {
             ))
         })?;
 
-        eprintln!("CA server: UDP search on port {port}, TCP on port {tcp_port}");
+        let udp_cfg = addr_list::from_env();
+        eprintln!(
+            "CA server: UDP search on port {port}, TCP on port {tcp_port}, beacons → {} address(es)",
+            udp_cfg.beacon_addrs.len()
+        );
 
         // Spawn UDP responder as its own task so its waker isn't multiplexed
         // through a select! branch (which can drop/replace wakers between polls
         // and miss edge-triggered epoll events).
+        let intf_addrs = udp_cfg.intf_addrs.clone();
+        let ignore_addrs = udp_cfg.ignore_addrs.clone();
         let udp_handle = epics_base_rs::runtime::task::spawn(async move {
-            udp::run_udp_search_responder(db_udp, port, tcp_port).await
+            udp::run_udp_search_responder(db_udp, port, tcp_port, intf_addrs, ignore_addrs).await
         });
         let udp_abort = udp_handle.abort_handle();
 
@@ -363,7 +369,12 @@ impl CaServer {
                     )),
                 }
             }
-            r = beacon::run_beacon_emitter(tcp_port, beacon_reset) => {
+            r = beacon::run_beacon_emitter(
+                tcp_port,
+                udp_cfg.beacon_addrs.clone(),
+                udp_cfg.beacon_period,
+                beacon_reset,
+            ) => {
                 eprintln!("Beacon emitter exited: {r:?}");
                 r
             }

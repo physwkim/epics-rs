@@ -49,7 +49,10 @@ pub(crate) async fn run_beacon_monitor(coord_tx: mpsc::UnboundedSender<CoordRequ
     }
 
     let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
-    let mut buf = [0u8; 256];
+    // Beacons are 16 B but the repeater may concatenate VERSION + RSRV_IS_UP
+    // and forward client-noop traffic. Use 4 KB so chained datagrams are
+    // received intact.
+    let mut buf = [0u8; 4096];
 
     loop {
         // Use timeout to detect beacon silence → re-register with repeater
@@ -66,63 +69,79 @@ pub(crate) async fn run_beacon_monitor(coord_tx: mpsc::UnboundedSender<CoordRequ
         if len < CaHeader::SIZE {
             continue;
         }
-        let Ok(hdr) = CaHeader::from_bytes(&buf[..len]) else {
-            continue;
-        };
 
-        if hdr.cmmd != CA_PROTO_RSRV_IS_UP {
-            continue;
+        // Walk every CA frame in the datagram so chained beacons aren't
+        // dropped when the repeater coalesces them.
+        let mut offset = 0;
+        while offset + CaHeader::SIZE <= len {
+            let Ok(hdr) = CaHeader::from_bytes(&buf[offset..len]) else {
+                break;
+            };
+            let payload_padded = ((hdr.postsize as usize) + 7) & !7;
+            let frame_len = (CaHeader::SIZE + payload_padded).max(CaHeader::SIZE);
+            offset += frame_len;
+
+            if hdr.cmmd != CA_PROTO_RSRV_IS_UP {
+                continue;
+            }
+            handle_beacon(hdr, &mut servers, &coord_tx);
         }
+    }
+}
 
-        // count = server TCP port (CA v4.1+), data_type = protocol version.
-        let server_port = if hdr.count != 0 {
-            hdr.count
-        } else {
-            CA_SERVER_PORT
-        };
-        let beacon_id = hdr.cid;
+fn handle_beacon(
+    hdr: CaHeader,
+    servers: &mut HashMap<SocketAddr, BeaconState>,
+    coord_tx: &mpsc::UnboundedSender<CoordRequest>,
+) {
+    // count = server TCP port (CA v4.1+), data_type = protocol version.
+    let server_port = if hdr.count != 0 {
+        hdr.count
+    } else {
+        CA_SERVER_PORT
+    };
+    let beacon_id = hdr.cid;
 
-        // New servers always set available=INADDR_ANY (0).  Use 0.0.0.0
-        // as-is for beacon tracking — each IOC still has a unique port,
-        // matching the approach used by the C CA client (libca).
-        let server_ip = Ipv4Addr::from(hdr.available.to_be_bytes());
-        let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
-        let now = Instant::now();
+    // New servers always set available=INADDR_ANY (0).  Use 0.0.0.0
+    // as-is for beacon tracking — each IOC still has a unique port,
+    // matching the approach used by the C CA client (libca).
+    let server_ip = Ipv4Addr::from(hdr.available.to_be_bytes());
+    let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
+    let now = Instant::now();
 
-        let entry = servers.entry(server_addr).or_insert_with(|| BeaconState {
-            last_id: beacon_id.wrapping_sub(1),
-            last_seen: now,
-            period_estimate: Duration::from_secs(15),
-            count: 0,
-        });
+    let entry = servers.entry(server_addr).or_insert_with(|| BeaconState {
+        last_id: beacon_id.wrapping_sub(1),
+        last_seen: now,
+        period_estimate: Duration::from_secs(15),
+        count: 0,
+    });
 
-        let actual_interval = now.duration_since(entry.last_seen);
-        let expected_next_id = entry.last_id.wrapping_add(1);
+    let actual_interval = now.duration_since(entry.last_seen);
+    let expected_next_id = entry.last_id.wrapping_add(1);
 
-        // Anomaly: beacon_id not monotonically increasing (IOC restarted
-        // with a fresh sequence), OR period suddenly dropped below 1/3 of
-        // the estimated steady-state period (IOC restarted and is in its
-        // fast-beacon initial phase).
-        let is_anomaly = beacon_id != expected_next_id
-            || (entry.count > 3 && actual_interval < entry.period_estimate / 3);
+    // Anomaly: beacon_id not monotonically increasing (IOC restarted
+    // with a fresh sequence), OR period suddenly dropped below 1/3 of
+    // the estimated steady-state period (IOC restarted and is in its
+    // fast-beacon initial phase).
+    let is_anomaly = beacon_id != expected_next_id
+        || (entry.count > 3 && actual_interval < entry.period_estimate / 3);
 
-        // Update state.
-        entry.last_id = beacon_id;
-        entry.last_seen = now;
-        entry.count += 1;
+    // Update state.
+    entry.last_id = beacon_id;
+    entry.last_seen = now;
+    entry.count += 1;
 
-        if entry.count > 1 {
-            let alpha = 0.25;
-            let new_estimate = Duration::from_secs_f64(
-                entry.period_estimate.as_secs_f64() * (1.0 - alpha)
-                    + actual_interval.as_secs_f64() * alpha,
-            );
-            entry.period_estimate = new_estimate;
-        }
+    if entry.count > 1 {
+        let alpha = 0.25;
+        let new_estimate = Duration::from_secs_f64(
+            entry.period_estimate.as_secs_f64() * (1.0 - alpha)
+                + actual_interval.as_secs_f64() * alpha,
+        );
+        entry.period_estimate = new_estimate;
+    }
 
-        if is_anomaly {
-            let _ = coord_tx.send(CoordRequest::ForceRescanServer { server_addr });
-        }
+    if is_anomaly {
+        let _ = coord_tx.send(CoordRequest::ForceRescanServer { server_addr });
     }
 }
 

@@ -91,6 +91,10 @@ pub struct CaDiagnostics {
     pub subscriptions_stale: AtomicU64,
     pub beacon_anomalies: AtomicU64,
     pub search_requests: AtomicU64,
+    /// Monitor updates dropped because the application's queue was full.
+    /// Slow consumers should bump up EPICS_CA_MONITOR_QUEUE or call
+    /// recv() more often.
+    pub dropped_monitors: AtomicU64,
     /// Ring buffer of recent events for post-mortem analysis.
     history: std::sync::Mutex<Vec<DiagRecord>>,
 }
@@ -106,6 +110,7 @@ impl Default for CaDiagnostics {
             subscriptions_stale: AtomicU64::new(0),
             beacon_anomalies: AtomicU64::new(0),
             search_requests: AtomicU64::new(0),
+            dropped_monitors: AtomicU64::new(0),
             history: std::sync::Mutex::new(Vec::with_capacity(EVENT_HISTORY_CAPACITY)),
         }
     }
@@ -138,6 +143,7 @@ impl CaDiagnostics {
             subscriptions_stale: self.subscriptions_stale.load(Ordering::Relaxed),
             beacon_anomalies: self.beacon_anomalies.load(Ordering::Relaxed),
             search_requests: self.search_requests.load(Ordering::Relaxed),
+            dropped_monitors: self.dropped_monitors.load(Ordering::Relaxed),
             history,
         }
     }
@@ -154,6 +160,7 @@ pub struct DiagnosticsSnapshot {
     pub subscriptions_stale: u64,
     pub beacon_anomalies: u64,
     pub search_requests: u64,
+    pub dropped_monitors: u64,
     pub history: Vec<DiagRecord>,
 }
 
@@ -167,6 +174,7 @@ impl std::fmt::Display for DiagnosticsSnapshot {
         writeln!(f, "Subscriptions stale:    {}", self.subscriptions_stale)?;
         writeln!(f, "Beacon anomalies:       {}", self.beacon_anomalies)?;
         writeln!(f, "Search requests:        {}", self.search_requests)?;
+        writeln!(f, "Dropped monitors:       {}", self.dropped_monitors)?;
         if !self.history.is_empty() {
             writeln!(f, "Recent events ({}):", self.history.len())?;
             let start = self
@@ -218,7 +226,7 @@ enum CoordRequest {
         subid: u32,
         mask: u16,
         deadband: f64,
-        callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
+        callback_tx: mpsc::Sender<CaResult<Snapshot>>,
         reply: oneshot::Sender<CaResult<()>>,
     },
     Unsubscribe {
@@ -268,6 +276,7 @@ impl CaClient {
         epics_base_rs::runtime::task::spawn(async { repeater::ensure_repeater().await });
 
         let addr_list = parse_addr_list()?;
+        let nameserver_addrs = parse_nameserver_list();
 
         let (search_tx, search_rx) = mpsc::unbounded_channel();
         let (search_resp_tx, search_resp_rx) = mpsc::unbounded_channel();
@@ -279,6 +288,7 @@ impl CaClient {
 
         let search_task = epics_base_rs::runtime::task::spawn(search::run_search_engine(
             addr_list,
+            nameserver_addrs,
             search_rx,
             search_resp_tx,
         ));
@@ -334,22 +344,32 @@ impl CaClient {
         let cid = alloc_cid();
         let (conn_tx, _) = broadcast::channel(16);
 
+        // EPICS_CA_USE_SHELL_VARS=YES expands ${VAR}/$(VAR) tokens in PV
+        // names against the process environment, matching libca behaviour.
+        let pv_name = if epics_base_rs::runtime::env::get_or("EPICS_CA_USE_SHELL_VARS", "NO")
+            .eq_ignore_ascii_case("YES")
+        {
+            expand_shell_vars(name)
+        } else {
+            name.to_string()
+        };
+
         let _ = self.coord_tx.send(CoordRequest::RegisterChannel {
             cid,
-            pv_name: name.to_string(),
+            pv_name: pv_name.clone(),
             conn_tx: conn_tx.clone(),
         });
 
         let _ = self.search_tx.send(SearchRequest::Schedule {
             cid,
-            pv_name: name.to_string(),
+            pv_name: pv_name.clone(),
             reason: SearchReason::Initial,
             initial_lane: 0,
         });
 
         CaChannel {
             cid,
-            pv_name: name.to_string(),
+            pv_name,
             coord_tx: self.coord_tx.clone(),
             transport_tx: self.transport_tx.clone(),
             conn_tx,
@@ -747,7 +767,14 @@ impl CaChannel {
     /// Events where |new - old| < deadband are suppressed (scalar values only).
     pub async fn subscribe_with_deadband(&self, deadband: f64) -> CaResult<MonitorHandle> {
         let subid = alloc_subid();
-        let (callback_tx, callback_rx) = mpsc::unbounded_channel();
+        // Bounded queue prevents unbounded memory growth on slow consumers.
+        // EVENTS_OFF will fire when outstanding hits FLOW_CONTROL_OFF_THRESHOLD,
+        // but the queue gives the application a buffer before drops kick in.
+        let queue_size = epics_base_rs::runtime::env::get("EPICS_CA_MONITOR_QUEUE")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(256)
+            .max(8);
+        let (callback_tx, callback_rx) = mpsc::channel(queue_size);
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = self.coord_tx.send(CoordRequest::Subscribe {
@@ -784,7 +811,7 @@ impl Drop for CaChannel {
 /// Handle for a monitor subscription. Dropping it cancels the subscription.
 pub struct MonitorHandle {
     subid: u32,
-    callback_rx: mpsc::UnboundedReceiver<CaResult<Snapshot>>,
+    callback_rx: mpsc::Receiver<CaResult<Snapshot>>,
     coord_tx: mpsc::UnboundedSender<CoordRequest>,
 }
 
@@ -1226,14 +1253,20 @@ async fn run_coordinator(
                         }
                     }
                     TransportEvent::MonitorData { subid, data_type, count, data } => {
-                        if let Some(server_addr) =
-                            subscriptions.on_monitor_data(subid, data_type, count, &data)
-                        {
-                            flow_control_note_queued(
-                                &mut flow_control,
-                                server_addr,
-                                &transport_tx,
-                            );
+                        use subscription::MonitorDeliveryOutcome;
+                        match subscriptions.on_monitor_data(subid, data_type, count, &data) {
+                            MonitorDeliveryOutcome::Queued(server_addr) => {
+                                flow_control_note_queued(
+                                    &mut flow_control,
+                                    server_addr,
+                                    &transport_tx,
+                                );
+                            }
+                            MonitorDeliveryOutcome::Dropped(_server_addr) => {
+                                diag.dropped_monitors.fetch_add(1, Ordering::Relaxed);
+                            }
+                            MonitorDeliveryOutcome::Filtered
+                            | MonitorDeliveryOutcome::NotFound => {}
                         }
                     }
                     TransportEvent::AccessRightsChanged { cid, access } => {
@@ -1449,6 +1482,62 @@ fn resolve_host(host: &str, port: u16) -> CaResult<SocketAddr> {
         .or(addrs.first())
         .copied()
         .ok_or_else(|| CaError::Protocol(format!("no addresses for '{host}'")))
+}
+
+/// Expand shell-style `${VAR}` and `$(VAR)` references in `s` against the
+/// process environment. Unknown variables expand to the empty string,
+/// matching libca's expandedClient behaviour. Plain `$` and unmatched
+/// braces/parens are left intact.
+fn expand_shell_vars(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() {
+            let close = match bytes[i + 1] {
+                b'{' => Some(b'}'),
+                b'(' => Some(b')'),
+                _ => None,
+            };
+            if let Some(end) = close {
+                if let Some(j) = bytes[i + 2..].iter().position(|&b| b == end) {
+                    let name = &s[i + 2..i + 2 + j];
+                    let value = epics_base_rs::runtime::env::get(name).unwrap_or_default();
+                    out.push_str(&value);
+                    i += 3 + j;
+                    continue;
+                }
+            }
+        }
+        out.push(s.as_bytes()[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Parse `EPICS_CA_NAME_SERVERS` — whitespace-separated host[:port] entries
+/// reachable over TCP. Returns an empty vec when the variable is unset, so
+/// the search engine simply doesn't spawn any nameserver tasks.
+fn parse_nameserver_list() -> Vec<SocketAddr> {
+    let Some(list) = epics_base_rs::runtime::env::get("EPICS_CA_NAME_SERVERS") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in list.split_whitespace() {
+        let resolved = if entry.contains(':') {
+            entry.parse::<SocketAddr>().ok().or_else(|| {
+                let (host, port_str) = entry.rsplit_once(':')?;
+                let port: u16 = port_str.parse().ok()?;
+                resolve_host(host, port).ok()
+            })
+        } else {
+            resolve_host(entry, CA_SERVER_PORT).ok()
+        };
+        if let Some(addr) = resolved {
+            out.push(addr);
+        }
+    }
+    out
 }
 
 fn parse_addr_list() -> CaResult<Vec<SocketAddr>> {

@@ -8,25 +8,35 @@ use crate::protocol::*;
 use epics_base_rs::error::CaResult;
 
 /// Run the beacon emitter. Broadcasts CA_PROTO_RSRV_IS_UP at exponentially
-/// increasing intervals (starting at 20ms, doubling up to 15 seconds).
+/// increasing intervals (starting at 20ms, doubling up to `max_period`).
+///
+/// `beacon_addrs` lists every destination — usually the per-interface
+/// broadcast addresses plus any operator-supplied entries. Unicast routes
+/// (e.g. site-wide gateways) are sent the same beacon stream.
 ///
 /// When `reset` is notified (e.g. on TCP connect/disconnect), the interval
 /// resets to the initial 20ms, matching C EPICS behavior. This lets clients
 /// detect server state changes quickly via beacon anomaly detection.
-pub async fn run_beacon_emitter(server_port: u16, reset: Arc<Notify>) -> CaResult<()> {
+pub async fn run_beacon_emitter(
+    server_port: u16,
+    beacon_addrs: Vec<SocketAddr>,
+    max_period: Duration,
+    reset: Arc<Notify>,
+) -> CaResult<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
 
-    let broadcast_addr = (Ipv4Addr::BROADCAST, CA_REPEATER_PORT);
-
-    // Resolve the server's local IP via routing (same technique as udp.rs).
-    // Connect a temporary socket to the broadcast destination to discover
-    // which interface the OS would use.
+    // Resolve the server's local IP via routing. Prefer the first beacon
+    // destination as a probe so multi-NIC hosts pick the matching outgoing
+    // interface; fall back to limited broadcast.
+    let probe_dest = beacon_addrs
+        .first()
+        .copied()
+        .unwrap_or(SocketAddr::from((Ipv4Addr::BROADCAST, CA_REPEATER_PORT)));
     let server_ip: u32 = {
         let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok();
         let ip = probe.and_then(|s| {
-            s.connect(SocketAddr::from((Ipv4Addr::BROADCAST, CA_REPEATER_PORT)))
-                .ok()?;
+            s.connect(probe_dest).ok()?;
             match s.local_addr().ok()? {
                 SocketAddr::V4(a) if !a.ip().is_unspecified() => {
                     Some(u32::from_be_bytes(a.ip().octets()))
@@ -39,8 +49,16 @@ pub async fn run_beacon_emitter(server_port: u16, reset: Arc<Notify>) -> CaResul
 
     let mut beacon_id: u32 = 0;
     let initial_interval = Duration::from_millis(20);
-    let max_interval = Duration::from_secs(15);
+    let max_interval = max_period.max(initial_interval);
     let mut interval = initial_interval;
+
+    if beacon_addrs.is_empty() {
+        // Nothing to send to — quietly idle but still consume reset
+        // notifications so the channel doesn't fill up.
+        loop {
+            reset.notified().await;
+        }
+    }
 
     loop {
         // Build beacon message: CA_PROTO_RSRV_IS_UP
@@ -49,8 +67,11 @@ pub async fn run_beacon_emitter(server_port: u16, reset: Arc<Notify>) -> CaResul
         hdr.count = server_port;
         hdr.cid = beacon_id;
         hdr.available = server_ip;
+        let bytes = hdr.to_bytes();
 
-        let _ = socket.send_to(&hdr.to_bytes(), broadcast_addr).await;
+        for addr in &beacon_addrs {
+            let _ = socket.send_to(&bytes, addr).await;
+        }
 
         beacon_id = beacon_id.wrapping_add(1);
 

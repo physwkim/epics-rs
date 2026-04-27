@@ -7,19 +7,70 @@ use crate::protocol::*;
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::database::PvDatabase;
 
-/// Run the UDP search responder on the given port.
-/// Listens for CA_PROTO_SEARCH requests and responds if the PV exists.
+/// Run UDP search responders bound to one or more local interfaces.
+///
+/// Each interface gets its own task — having a dedicated socket per
+/// interface lets the OS keep the broadcast routing straight on multi-NIC
+/// hosts (matching C EPICS osiSockDiscoverInterfaces behaviour).
+///
+/// `ignore_addrs` filters out source addresses that should never receive
+/// search replies (EPICS_CAS_IGNORE_ADDR_LIST).
 pub async fn run_udp_search_responder(
     db: Arc<PvDatabase>,
     port: u16,
     tcp_port: u16,
+    intf_addrs: Vec<Ipv4Addr>,
+    ignore_addrs: Vec<Ipv4Addr>,
+) -> CaResult<()> {
+    let intfs = if intf_addrs.is_empty() {
+        vec![Ipv4Addr::UNSPECIFIED]
+    } else {
+        intf_addrs
+    };
+
+    // Spawn one responder task per interface and wait for the first error.
+    let mut handles = Vec::with_capacity(intfs.len());
+    for ip in intfs {
+        let db_t = db.clone();
+        let ignore_t = ignore_addrs.clone();
+        let handle = epics_base_rs::runtime::task::spawn(async move {
+            run_single_responder(db_t, ip, port, tcp_port, ignore_t).await
+        });
+        handles.push(handle);
+    }
+
+    // Propagate the first error, abort the rest.
+    let mut handles_iter = handles.into_iter();
+    let result = if let Some(first) = handles_iter.next() {
+        match first.await {
+            Ok(inner) => inner,
+            Err(e) => Err(epics_base_rs::error::CaError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))),
+        }
+    } else {
+        Ok(())
+    };
+    for h in handles_iter {
+        h.abort();
+    }
+    result
+}
+
+async fn run_single_responder(
+    db: Arc<PvDatabase>,
+    bind_ip: Ipv4Addr,
+    port: u16,
+    tcp_port: u16,
+    ignore_addrs: Vec<Ipv4Addr>,
 ) -> CaResult<()> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
     #[cfg(target_os = "macos")]
     sock.set_reuse_port(true)?;
     sock.set_nonblocking(true)?;
-    sock.bind(&std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, port).into())?;
+    sock.bind(&std::net::SocketAddrV4::new(bind_ip, port).into())?;
     let socket = UdpSocket::from_std(sock.into())?;
     socket.set_broadcast(true)?;
 
@@ -29,6 +80,14 @@ pub async fn run_udp_search_responder(
         let (len, src) = socket.recv_from(&mut buf).await?;
         if len < CaHeader::SIZE {
             continue;
+        }
+
+        // Apply ignore list (EPICS_CAS_IGNORE_ADDR_LIST). Any datagram
+        // whose source IP appears in the list is silently dropped.
+        if let SocketAddr::V4(v4) = src {
+            if ignore_addrs.contains(v4.ip()) {
+                continue;
+            }
         }
 
         let mut offset = 0;
@@ -55,14 +114,7 @@ pub async fn run_udp_search_responder(
                     .position(|&b| b == 0)
                     .unwrap_or(payload.len());
                 if let Ok(pv_name) = std::str::from_utf8(&payload[..pv_name_end]) {
-                    // Check both simple PVs and record base names
                     if db.has_name(pv_name).await {
-                        // Build search response
-                        // cid = server IP so the client knows where to TCP-connect.
-                        // C libca only substitutes INADDR_ANY with the UDP source
-                        // address under specific conditions; some builds/versions
-                        // take cid=0 literally and try to connect to 0.0.0.0.
-                        // Resolve our local interface IP that routes to this client.
                         let server_ip = local_ip_for(src);
                         let mut resp = CaHeader::new(CA_PROTO_SEARCH);
                         resp.postsize = 8;
@@ -71,21 +123,28 @@ pub async fn run_udp_search_responder(
                         resp.cid = u32::from_be_bytes(server_ip.octets());
                         resp.available = hdr.available;
 
-                        // Version header first
                         let mut ver = CaHeader::new(CA_PROTO_VERSION);
                         ver.count = CA_MINOR_VERSION;
 
                         let mut reply = Vec::with_capacity(CaHeader::SIZE * 2 + 8);
                         reply.extend_from_slice(&ver.to_bytes());
                         reply.extend_from_slice(&resp.to_bytes());
-                        // libca's UDP search reply parser only trusts the appended
-                        // minor version when postsize >= sizeof(ca_uint32_t).
-                        // Use an 8-byte aligned payload like the C server.
                         let mut search_payload = [0u8; 8];
                         search_payload[0..2].copy_from_slice(&CA_MINOR_VERSION.to_be_bytes());
                         reply.extend_from_slice(&search_payload);
 
                         let _ = socket.send_to(&reply, src).await;
+                    } else if hdr.data_type == CA_DO_REPLY {
+                        // Client asked for an explicit negative reply
+                        // (search header data_type == CA_DO_REPLY=10).
+                        // Send CA_PROTO_NOT_FOUND so it doesn't have to
+                        // wait for the search timeout.
+                        let mut nf = CaHeader::new(CA_PROTO_NOT_FOUND);
+                        nf.data_type = CA_DO_REPLY;
+                        nf.count = CA_MINOR_VERSION;
+                        nf.cid = hdr.available;
+                        nf.available = hdr.available;
+                        let _ = socket.send_to(&nf.to_bytes(), src).await;
                     }
                 }
             }

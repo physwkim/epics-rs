@@ -5,11 +5,17 @@ use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
 
 use epics_base_rs::runtime::sync::mpsc;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 
 use crate::protocol::*;
 
 use super::types::{SearchReason, SearchRequest, SearchResponse};
+
+/// Snippet of a UDP/TCP search-response datagram, plus the address it
+/// arrived from. Used to feed nameserver TCP responses through the same
+/// `handle_udp_response` parser as plain UDP search replies.
+type ParsedDatagram = (Vec<u8>, SocketAddr);
 
 // ---------------------------------------------------------------------------
 // Configuration constants
@@ -232,6 +238,7 @@ fn lane_period(lane_index: u32, base_rtte: Duration, max_period: Duration) -> Du
 
 pub(crate) async fn run_search_engine(
     addr_list: Vec<SocketAddr>,
+    nameserver_addrs: Vec<SocketAddr>,
     mut request_rx: mpsc::UnboundedReceiver<SearchRequest>,
     response_tx: mpsc::UnboundedSender<SearchResponse>,
 ) {
@@ -248,6 +255,22 @@ pub(crate) async fn run_search_engine(
         let fd = unsafe { BorrowedFd::borrow_raw(socket.as_raw_fd()) };
         let sock_ref = socket2::SockRef::from(&fd);
         let _ = sock_ref.set_recv_buffer_size(256 * 1024);
+    }
+
+    // Spawn a connection task per EPICS_CA_NAME_SERVERS entry.
+    // Each task auto-reconnects with exponential backoff and forwards
+    // outgoing search bytes to its TCP socket. Incoming responses are
+    // queued via tcp_response_tx for the main loop to process through
+    // the shared handle_udp_response parser.
+    let (tcp_response_tx, mut tcp_response_rx) = mpsc::unbounded_channel::<ParsedDatagram>();
+    let mut nameserver_send_txs: Vec<mpsc::UnboundedSender<Vec<u8>>> = Vec::new();
+    for addr in nameserver_addrs {
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        nameserver_send_txs.push(tx);
+        let resp_tx = tcp_response_tx.clone();
+        epics_base_rs::runtime::task::spawn(async move {
+            run_nameserver_connection(addr, rx, resp_tx).await;
+        });
     }
 
     let mut state = SearchEngineState::new();
@@ -272,7 +295,7 @@ pub(crate) async fn run_search_engine(
                 while let Ok(req) = request_rx.try_recv() {
                     handle_request(&mut state, req);
                 }
-                send_due_searches(&mut state, &addr_list, &socket).await;
+                send_due_searches(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
             }
 
             result = socket.recv_from(&mut recv_buf) => {
@@ -281,12 +304,126 @@ pub(crate) async fn run_search_engine(
                 // Also send any due searches after processing responses.
                 // Without this, budget-limited channels stuck at deadline=now
                 // starve when recv_from keeps winning the select! race.
-                send_due_searches(&mut state, &addr_list, &socket).await;
+                send_due_searches(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
+            }
+
+            tcp_dgram = tcp_response_rx.recv() => {
+                let Some((bytes, src)) = tcp_dgram else { continue };
+                handle_udp_response(&mut state, &bytes, src, &response_tx);
             }
 
             _ = sleep => {
-                send_due_searches(&mut state, &addr_list, &socket).await;
+                send_due_searches(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
             }
+        }
+    }
+}
+
+/// Long-lived task: maintain a TCP connection to one nameserver, forward
+/// outgoing search bytes from `outgoing_rx`, and feed parsed response
+/// frames into `response_tx`. Reconnects with exponential backoff on
+/// failure.
+async fn run_nameserver_connection(
+    addr: SocketAddr,
+    mut outgoing_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    response_tx: mpsc::UnboundedSender<ParsedDatagram>,
+) {
+    let mut backoff = Duration::from_secs(1);
+    let max_backoff = Duration::from_secs(30);
+
+    loop {
+        let stream = match tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            _ => {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                continue;
+            }
+        };
+        let _ = stream.set_nodelay(true);
+        backoff = Duration::from_secs(1);
+
+        let (mut reader, mut writer) = stream.into_split();
+
+        // Send initial VERSION + HOST_NAME + CLIENT_NAME so the nameserver
+        // accepts our search frames (mirrors transport.rs handshake).
+        let mut handshake = Vec::new();
+        let mut version = CaHeader::new(CA_PROTO_VERSION);
+        version.count = CA_MINOR_VERSION;
+        handshake.extend_from_slice(&version.to_bytes());
+        let host_payload = pad_string(&epics_base_rs::runtime::env::hostname());
+        let mut host = CaHeader::new(CA_PROTO_HOST_NAME);
+        host.postsize = host_payload.len() as u16;
+        handshake.extend_from_slice(&host.to_bytes());
+        handshake.extend_from_slice(&host_payload);
+        let user = epics_base_rs::runtime::env::get("USER")
+            .or_else(|| epics_base_rs::runtime::env::get("USERNAME"))
+            .unwrap_or_else(|| "unknown".to_string());
+        let user_payload = pad_string(&user);
+        let mut client = CaHeader::new(CA_PROTO_CLIENT_NAME);
+        client.postsize = user_payload.len() as u16;
+        handshake.extend_from_slice(&client.to_bytes());
+        handshake.extend_from_slice(&user_payload);
+        if writer.write_all(&handshake).await.is_err() {
+            tokio::time::sleep(backoff).await;
+            continue;
+        }
+
+        let resp_tx = response_tx.clone();
+        let read_task = epics_base_rs::runtime::task::spawn(async move {
+            let mut buf = vec![0u8; 8192];
+            let mut accumulated: Vec<u8> = Vec::new();
+            loop {
+                let n = match reader.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                accumulated.extend_from_slice(&buf[..n]);
+                // Forward the whole buffer; the engine parses VERSION +
+                // SEARCH/NOT_FOUND chains the same way it does for UDP.
+                let _ = resp_tx.send((accumulated.clone(), addr));
+                accumulated.clear();
+            }
+        });
+
+        // Pipe outgoing search frames to the TCP writer until the reader
+        // task ends or the channel closes.
+        let mut writer_failed = false;
+        loop {
+            tokio::select! {
+                msg = outgoing_rx.recv() => {
+                    let Some(bytes) = msg else { return };
+                    if writer.write_all(&bytes).await.is_err() {
+                        writer_failed = true;
+                        break;
+                    }
+                }
+                _ = epics_base_rs::runtime::task::sleep(Duration::from_secs(60)) => {
+                    // Periodic noop keeps the connection warm.
+                    let echo = CaHeader::new(CA_PROTO_ECHO);
+                    if writer.write_all(&echo.to_bytes()).await.is_err() {
+                        writer_failed = true;
+                        break;
+                    }
+                }
+            }
+            if read_task.is_finished() {
+                break;
+            }
+        }
+        read_task.abort();
+        let _ = read_task.await;
+
+        if writer_failed {
+            // Brief pause before reconnect to avoid a spin loop when the
+            // nameserver is fully unreachable.
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
         }
     }
 }
@@ -458,6 +595,24 @@ fn handle_udp_response(
                     let _ = response_tx.send(SearchResponse::Found { cid, server_addr });
                 }
             }
+            CA_PROTO_NOT_FOUND => {
+                // Server explicitly told us the PV is not on it. We don't
+                // remove the channel — another server in the addr list may
+                // still answer Found. Just count it toward the AIMD budget
+                // so the rate limiter recognizes the response and update
+                // RTT for this path.
+                state.budget.responded_this_window += 1;
+                if let Some(ch) = state.channels.get(&hdr.available) {
+                    if let Some(sent_at) = ch.last_sent_at {
+                        let sample = recv_time.duration_since(sent_at).as_secs_f64();
+                        state
+                            .rtt_per_path
+                            .entry(src)
+                            .or_insert_with(RttEstimator::new)
+                            .update(sample);
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -473,6 +628,7 @@ async fn send_due_searches(
     state: &mut SearchEngineState,
     addr_list: &[SocketAddr],
     socket: &UdpSocket,
+    nameserver_txs: &[mpsc::UnboundedSender<Vec<u8>>],
 ) {
     let now = Instant::now();
 
@@ -531,6 +687,9 @@ async fn send_due_searches(
                 for addr in addr_list {
                     let _ = socket.send_to(&current_frame, addr).await;
                 }
+                for ns_tx in nameserver_txs {
+                    let _ = ns_tx.send(current_frame.clone());
+                }
                 state.budget.sent_this_window += 1;
                 frames_sent += 1;
                 sent_cids.append(&mut current_frame_cids);
@@ -551,6 +710,9 @@ async fn send_due_searches(
             for addr in addr_list {
                 let _ = socket.send_to(&solo, addr).await;
             }
+            for ns_tx in nameserver_txs {
+                let _ = ns_tx.send(solo.clone());
+            }
             state.budget.sent_this_window += 1;
             frames_sent += 1;
             sent_cids.push(cid);
@@ -564,6 +726,9 @@ async fn send_due_searches(
     if current_frame.len() > CaHeader::SIZE && frames_sent < frames_per_try {
         for addr in addr_list {
             let _ = socket.send_to(&current_frame, addr).await;
+        }
+        for ns_tx in nameserver_txs {
+            let _ = ns_tx.send(current_frame.clone());
         }
         state.budget.sent_this_window += 1;
         sent_cids.append(&mut current_frame_cids);

@@ -3,12 +3,28 @@ use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use epics_base_rs::runtime::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use epics_base_rs::error::CaResult;
 use epics_base_rs::server::snapshot::Snapshot;
 use epics_base_rs::types::{DbFieldType, EpicsValue, decode_dbr};
 
 use super::types::TransportCommand;
+
+/// Outcome of `on_monitor_data` — lets the coordinator decide whether to
+/// bump flow control or the dropped counter.
+pub(crate) enum MonitorDeliveryOutcome {
+    /// Snapshot was queued to the application; caller should increment
+    /// per-server flow control outstanding count.
+    Queued(SocketAddr),
+    /// Snapshot was dropped (queue full or callback closed). Caller should
+    /// bump the dropped counter and ideally request EVENTS_OFF.
+    Dropped(SocketAddr),
+    /// Filtered by client-side deadband (no action).
+    Filtered,
+    /// Subscription not found.
+    NotFound,
+}
 
 pub(crate) struct SubscriptionRecord {
     pub subid: u32,
@@ -17,7 +33,7 @@ pub(crate) struct SubscriptionRecord {
     pub count: Option<u32>,
     pub mask: u16,
     pub server_addr: SocketAddr,
-    pub callback_tx: mpsc::UnboundedSender<CaResult<Snapshot>>,
+    pub callback_tx: mpsc::Sender<CaResult<Snapshot>>,
     pub needs_restore: bool,
     /// Client-side deadband: suppress callback if |new - old| < deadband.
     pub deadband: f64,
@@ -52,60 +68,54 @@ impl SubscriptionRegistry {
         data_type: u16,
         count: u32,
         data: &[u8],
-    ) -> Option<SocketAddr> {
-        if let Some(rec) = self.subscriptions.get_mut(&subid) {
-            let snapshot = if data_type <= 6 {
-                let dbr_type = match DbFieldType::from_u16(data_type) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        if rec.callback_tx.send(Err(e)).is_ok() {
-                            rec.pending_deliveries += 1;
-                            return Some(rec.server_addr);
-                        }
-                        return None;
-                    }
-                };
-                match EpicsValue::from_bytes_array(dbr_type, data, count as usize) {
-                    Ok(value) => Snapshot::new(value, 0, 0, SystemTime::now()),
-                    Err(e) => {
-                        if rec.callback_tx.send(Err(e)).is_ok() {
-                            rec.pending_deliveries += 1;
-                            return Some(rec.server_addr);
-                        }
-                        return None;
-                    }
-                }
-            } else {
-                match decode_dbr(data_type, data, count as usize) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        if rec.callback_tx.send(Err(e)).is_ok() {
-                            rec.pending_deliveries += 1;
-                            return Some(rec.server_addr);
-                        }
-                        return None;
-                    }
+    ) -> MonitorDeliveryOutcome {
+        let Some(rec) = self.subscriptions.get_mut(&subid) else {
+            return MonitorDeliveryOutcome::NotFound;
+        };
+        let server_addr = rec.server_addr;
+
+        let snapshot = if data_type <= 6 {
+            let dbr_type = match DbFieldType::from_u16(data_type) {
+                Ok(t) => t,
+                Err(e) => {
+                    return try_deliver_err(rec, e, server_addr);
                 }
             };
-
-            // Client-side deadband filtering (scalar values only)
-            if rec.deadband > 0.0 {
-                if let Some(new_val) = snapshot.value.to_f64() {
-                    if let Some(old_val) = rec.last_value {
-                        if (new_val - old_val).abs() < rec.deadband {
-                            return None; // Suppress — within deadband
-                        }
-                    }
-                    rec.last_value = Some(new_val);
+            match EpicsValue::from_bytes_array(dbr_type, data, count as usize) {
+                Ok(value) => Snapshot::new(value, 0, 0, SystemTime::now()),
+                Err(e) => {
+                    return try_deliver_err(rec, e, server_addr);
                 }
             }
+        } else {
+            match decode_dbr(data_type, data, count as usize) {
+                Ok(s) => s,
+                Err(e) => {
+                    return try_deliver_err(rec, e, server_addr);
+                }
+            }
+        };
 
-            if rec.callback_tx.send(Ok(snapshot)).is_ok() {
-                rec.pending_deliveries += 1;
-                return Some(rec.server_addr);
+        // Client-side deadband filtering (scalar values only)
+        if rec.deadband > 0.0 {
+            if let Some(new_val) = snapshot.value.to_f64() {
+                if let Some(old_val) = rec.last_value {
+                    if (new_val - old_val).abs() < rec.deadband {
+                        return MonitorDeliveryOutcome::Filtered;
+                    }
+                }
+                rec.last_value = Some(new_val);
             }
         }
-        None
+
+        match rec.callback_tx.try_send(Ok(snapshot)) {
+            Ok(()) => {
+                rec.pending_deliveries += 1;
+                MonitorDeliveryOutcome::Queued(server_addr)
+            }
+            Err(TrySendError::Full(_)) => MonitorDeliveryOutcome::Dropped(server_addr),
+            Err(TrySendError::Closed(_)) => MonitorDeliveryOutcome::Dropped(server_addr),
+        }
     }
 
     /// Mark all subscriptions for a given server's channels as needing restore.
@@ -215,5 +225,23 @@ impl SubscriptionRegistry {
             .filter(|(_, rec)| rec.cid == cid)
             .map(|(&subid, _)| subid)
             .collect()
+    }
+}
+
+/// Helper to deliver an error result. Best-effort: if the queue is full or
+/// the consumer dropped, the error is silently lost (the next successful
+/// delivery will be a fresh snapshot, which is more useful than a stale
+/// decode error).
+fn try_deliver_err(
+    rec: &mut SubscriptionRecord,
+    err: epics_base_rs::error::CaError,
+    server_addr: SocketAddr,
+) -> MonitorDeliveryOutcome {
+    match rec.callback_tx.try_send(Err(err)) {
+        Ok(()) => {
+            rec.pending_deliveries += 1;
+            MonitorDeliveryOutcome::Queued(server_addr)
+        }
+        Err(_) => MonitorDeliveryOutcome::Dropped(server_addr),
     }
 }

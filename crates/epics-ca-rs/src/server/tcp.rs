@@ -3,10 +3,42 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::broadcast;
+
+/// Maximum accumulated TCP read buffer per client (DoS guard).
+/// Mirrors the client-side cap in `client/transport.rs`.
+const MAX_ACCUMULATED: usize = 1024 * 1024; // 1 MB
+
+/// Maximum idle time before forcibly closing a TCP client.
+/// OS-level TCP keepalive (~30s) handles half-open detection; this is
+/// a belt-and-suspenders cap for environments where keepalive is unreliable.
+/// 600s default; configurable via EPICS_CAS_INACTIVITY_TMO.
+fn inactivity_timeout() -> Duration {
+    epics_base_rs::runtime::env::get("EPICS_CAS_INACTIVITY_TMO")
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|v| Duration::from_secs_f64(v.max(30.0)))
+        .unwrap_or(Duration::from_secs(600))
+}
+
+/// Maximum simultaneous channels per CA client (EPICS_CAS_MAX_CHANNELS).
+fn max_channels_per_client() -> usize {
+    epics_base_rs::runtime::env::get("EPICS_CAS_MAX_CHANNELS")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4096)
+        .max(1)
+}
+
+/// Maximum subscriptions per channel (EPICS_CAS_MAX_SUBS_PER_CHAN).
+fn max_subs_per_channel() -> usize {
+    epics_base_rs::runtime::env::get("EPICS_CAS_MAX_SUBS_PER_CHAN")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(100)
+        .max(1)
+}
 
 /// Connection lifecycle event broadcast by the TCP listener.
 #[derive(Debug, Clone)]
@@ -155,6 +187,19 @@ pub async fn run_tcp_listener(
             let _ = tx.send(ServerConnectionEvent::Connected(peer));
         }
         let conn_events = conn_events.clone();
+
+        // Enable OS-level TCP keepalive on accepted socket so half-open
+        // connections (e.g. NAT timeout, gateway down) are detected within
+        // ~30s. Mirrors client-side keepalive in client/transport.rs.
+        {
+            let sock = socket2::SockRef::from(&stream);
+            let keepalive = socket2::TcpKeepalive::new()
+                .with_time(Duration::from_secs(15))
+                .with_interval(Duration::from_secs(5));
+            let _ = sock.set_keepalive(true);
+            let _ = sock.set_tcp_keepalive(&keepalive);
+        }
+
         epics_base_rs::runtime::task::spawn(async move {
             let result = handle_client(stream, db, acf, actual_port).await;
             beacon_reset.notify_one();
@@ -195,13 +240,34 @@ async fn handle_client(
 
     let mut buf = vec![0u8; 8192];
     let mut accumulated = Vec::new();
+    let inactivity = inactivity_timeout();
 
     loop {
-        let n = reader.read(&mut buf).await?;
+        // Bound read with inactivity timeout so a fully-silent half-open
+        // connection eventually gets cleaned up even if OS keepalive failed.
+        let n = match tokio::time::timeout(inactivity, reader.read(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                // Inactivity timeout — close the connection.
+                eprintln!("CA server: client idle for {}s, closing", inactivity.as_secs());
+                break;
+            }
+        };
         if n == 0 {
             break;
         }
         accumulated.extend_from_slice(&buf[..n]);
+
+        // DoS guard: a malformed or hostile client could declare a huge
+        // postsize and stream nothing more, growing this Vec unbounded.
+        if accumulated.len() > MAX_ACCUMULATED {
+            eprintln!(
+                "CA server: client accumulated buffer exceeded {} bytes, closing",
+                MAX_ACCUMULATED
+            );
+            break;
+        }
 
         let mut offset = 0;
         while offset + CaHeader::SIZE <= accumulated.len() {
@@ -289,6 +355,16 @@ async fn dispatch_message(
             // Silently ignore these, matching C server behavior (camessage.c:1204).
             // The client will retry with v4.4+ format after receiving our VERSION.
             if hdr.actual_postsize() <= 1 {
+                return Ok(());
+            }
+
+            // DoS guard: refuse new channels once the per-client cap is hit.
+            if state.channels.len() >= max_channels_per_client() {
+                let mut fail = CaHeader::new(CA_PROTO_CREATE_CH_FAIL);
+                fail.cid = hdr.cid;
+                let mut w = writer.lock().await;
+                w.write_all(&fail.to_bytes()).await?;
+                w.flush().await?;
                 return Ok(());
             }
 
@@ -398,7 +474,8 @@ async fn dispatch_message(
             }
         }
 
-        CA_PROTO_READ_NOTIFY => {
+        CA_PROTO_READ | CA_PROTO_READ_NOTIFY => {
+            let is_notify = hdr.cmmd == CA_PROTO_READ_NOTIFY;
             let sid = hdr.cid;
             let ioid = hdr.available;
             let requested_type = hdr.data_type;
@@ -407,6 +484,23 @@ async fn dispatch_message(
             let entry = match state.channels.get(&sid) {
                 Some(e) => e,
                 None => {
+                    if is_notify {
+                        send_cmd_error(
+                            writer,
+                            CA_PROTO_READ_NOTIFY,
+                            requested_type,
+                            ECA_BADCHID,
+                            ioid,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+            };
+
+            let snapshot = get_full_snapshot(&entry.target).await;
+            let Some(mut snapshot) = snapshot else {
+                if is_notify {
                     send_cmd_error(
                         writer,
                         CA_PROTO_READ_NOTIFY,
@@ -415,20 +509,7 @@ async fn dispatch_message(
                         ioid,
                     )
                     .await?;
-                    return Ok(());
                 }
-            };
-
-            let snapshot = get_full_snapshot(&entry.target).await;
-            let Some(mut snapshot) = snapshot else {
-                send_cmd_error(
-                    writer,
-                    CA_PROTO_READ_NOTIFY,
-                    requested_type,
-                    ECA_BADCHID,
-                    ioid,
-                )
-                .await?;
                 return Ok(());
             };
             // Respect client's requested element count (e.g. caget -# 10)
@@ -438,14 +519,16 @@ async fn dispatch_message(
             let data = match encode_dbr(requested_type, &snapshot) {
                 Ok(d) => d,
                 Err(_) => {
-                    send_cmd_error(
-                        writer,
-                        CA_PROTO_READ_NOTIFY,
-                        requested_type,
-                        ECA_BADTYPE,
-                        ioid,
-                    )
-                    .await?;
+                    if is_notify {
+                        send_cmd_error(
+                            writer,
+                            CA_PROTO_READ_NOTIFY,
+                            requested_type,
+                            ECA_BADTYPE,
+                            ioid,
+                        )
+                        .await?;
+                    }
                     return Ok(());
                 }
             };
@@ -453,11 +536,21 @@ async fn dispatch_message(
             let mut padded = data;
             padded.resize(align8(padded.len()), 0);
 
-            let mut resp = CaHeader::new(CA_PROTO_READ_NOTIFY);
+            // For deprecated CA_PROTO_READ (cmd=3), the response carries the
+            // SID in cid (not ECA status). Notify clients (cmd=15) get the
+            // ECA_NORMAL status so they can demultiplex by ioid.
+            let mut resp = if is_notify {
+                let mut r = CaHeader::new(CA_PROTO_READ_NOTIFY);
+                r.cid = ECA_NORMAL;
+                r
+            } else {
+                let mut r = CaHeader::new(CA_PROTO_READ);
+                r.cid = sid;
+                r
+            };
             // C client TCP parser requires 8-byte aligned postsize
             resp.set_payload_size(padded.len(), element_count);
             resp.data_type = requested_type;
-            resp.cid = ECA_NORMAL;
             resp.available = ioid;
 
             let mut w = writer.lock().await;
@@ -606,6 +699,24 @@ async fn dispatch_message(
             let sid = hdr.cid;
             let sub_id = hdr.available;
             let requested_type = hdr.data_type;
+
+            // DoS guard: cap subscriptions per channel.
+            let subs_for_channel = state
+                .subscriptions
+                .values()
+                .filter(|s| s.channel_sid == sid)
+                .count();
+            if subs_for_channel >= max_subs_per_channel() {
+                send_cmd_error(
+                    writer,
+                    CA_PROTO_EVENT_ADD,
+                    requested_type,
+                    ECA_ALLOCMEM,
+                    sub_id,
+                )
+                .await?;
+                return Ok(());
+            }
 
             let native_type = match native_type_for_dbr(requested_type) {
                 Ok(t) => t,
@@ -813,8 +924,20 @@ async fn dispatch_message(
                 w.write_all(&resp.to_bytes_extended()).await?;
                 w.write_all(&search_payload).await?;
                 w.flush().await?;
+            } else if hdr.data_type == CA_DO_REPLY {
+                // Explicit negative reply requested — send NOT_FOUND so the
+                // client doesn't have to wait for a search timeout.
+                let mut nf = CaHeader::new(CA_PROTO_NOT_FOUND);
+                nf.data_type = CA_DO_REPLY;
+                nf.count = CA_MINOR_VERSION;
+                nf.cid = hdr.available;
+                nf.available = hdr.available;
+                let mut w = writer.lock().await;
+                w.write_all(&nf.to_bytes()).await?;
+                w.flush().await?;
             }
-            // Not found → silent (matches C server behavior)
+            // Otherwise silent — clients without CA_DO_REPLY treat absence
+            // as "this server doesn't have it" and move on.
         }
 
         CA_PROTO_CLEAR_CHANNEL => {
