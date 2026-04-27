@@ -9,6 +9,12 @@ use epics_pva_rs::proto::BitSet;
 use epics_pva_rs::pv_request::{request_to_mask, RequestMaskError};
 use epics_pva_rs::pvdata::{FieldDesc, ScalarType};
 
+/// Returns true iff `marked` and `mask` share at least one set bit.
+/// Mirrors pvxs's `testmask(val, mask)` semantic.
+fn intersects(marked: &BitSet, mask: &BitSet) -> bool {
+    mask.iter().any(|i| marked.get(i))
+}
+
 /// NTScalar(String) descriptor: 10 bits total (root + value + alarm{3} +
 /// timeStamp{3}).
 fn nt_scalar_string() -> FieldDesc {
@@ -187,6 +193,76 @@ fn pvxs_request_includes_skips_nonexistent_field_silently() {
     };
     let mask = request_to_mask(&value, &req).unwrap();
     assert_eq!(collect(&mask), vec![0, 2, 4, 6, 7, 8, 9]);
+}
+
+// ── testPvMask (pvxs testpvreq.cpp:102) ────────────────────────────
+//
+// pvxs builds an NTScalar(String) value, requests `field { value {} }`
+// (mask = {0,1}), then walks through "marked"/"unmarked" states and
+// checks whether the marked-bitset intersects the request mask. We
+// don't have pvxs's per-field mark state on Value — so we drive the
+// "marked" side directly with a BitSet.
+//
+// pvxs bit numbering for NTScalar(String):
+//   0: root, 1: value, 2: alarm, 3: alarm.severity, 4: alarm.status,
+//   5: alarm.message, 6: timeStamp, 7..9: timeStamp.{seconds,ns,userTag}
+
+#[test]
+fn pvxs_pv_mask_value_request_intersects_value_only() {
+    let value = nt_scalar_string();
+    let req = request_field_value();
+    let mask = request_to_mask(&value, &req).unwrap();
+    assert_eq!(collect(&mask), vec![0, 1]);
+
+    // initially nothing marked → no intersection
+    let mut marked = BitSet::new();
+    assert!(!intersects(&marked, &mask));
+
+    // mark alarm.status only (bit 4) → still no intersection
+    marked.set(4);
+    assert!(!intersects(&marked, &mask));
+
+    // mark value (bit 1) → intersects
+    marked.set(1);
+    assert!(intersects(&marked, &mask));
+
+    // unmark alarm.status → still intersects (value still set)
+    marked.clear(4);
+    assert!(intersects(&marked, &mask));
+
+    // unmark all → no intersection
+    marked = BitSet::new();
+    assert!(!intersects(&marked, &mask));
+
+    // mark all (root bit) → intersects (mask has root bit too)
+    marked.set(0);
+    assert!(intersects(&marked, &mask));
+}
+
+#[test]
+fn pvxs_pv_mask_alarm_only_does_not_intersect_value_request() {
+    let value = nt_scalar_string();
+    let req = request_field_value();
+    let mask = request_to_mask(&value, &req).unwrap(); // {0, 1}
+
+    // marked = {alarm.severity, alarm.status, alarm.message} = bits 3,4,5
+    let mut marked = BitSet::new();
+    marked.set(3);
+    marked.set(4);
+    marked.set(5);
+    assert!(!intersects(&marked, &mask));
+}
+
+#[test]
+fn pvxs_pv_mask_empty_request_intersects_anything() {
+    // empty `field {}` mask = all 10 bits
+    let value = nt_scalar_string();
+    let req = empty_request_field();
+    let mask = request_to_mask(&value, &req).unwrap();
+
+    let mut marked = BitSet::new();
+    marked.set(7); // timeStamp.secondsPastEpoch
+    assert!(intersects(&marked, &mask));
 }
 
 #[test]
