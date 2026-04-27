@@ -13,3 +13,5 @@ mod tls_interop;
 mod stability_interop;
 #[path = "parity/testbitmask_port.rs"]
 mod testbitmask_port;
+#[path = "parity/testxcode_port.rs"]
+mod testxcode_port;

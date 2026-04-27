@@ -340,6 +340,78 @@ pub fn encode_pv_field(value: &PvField, desc: &FieldDesc, order: ByteOrder, out:
     }
 }
 
+/// Encode the value bytes for `value` consulting `bitset` to know which
+/// fields to emit. Mirrors pvxs `to_wire_valid(buf, value)`.
+///
+/// pvData spec §5.4 bit numbering: the root structure is bit 0, then
+/// nested fields are numbered depth-first in declaration order. A
+/// substructure is "present" when its own bit OR any descendant bit
+/// is set — in that case we recurse and emit each child according to
+/// its own bit. Fields whose bit is NOT set produce *no bytes*.
+pub fn encode_pv_field_with_bitset(
+    value: &PvField,
+    desc: &FieldDesc,
+    bitset: &crate::proto::BitSet,
+    bit_offset: usize,
+    order: ByteOrder,
+    out: &mut Vec<u8>,
+) {
+    fn any_descendant_set(
+        bitset: &crate::proto::BitSet,
+        pos: usize,
+        desc_local: &FieldDesc,
+    ) -> bool {
+        let total = desc_local.total_bits();
+        for i in 0..total {
+            if bitset.get(pos + i) {
+                return true;
+            }
+        }
+        false
+    }
+
+    match desc {
+        FieldDesc::Scalar(_)
+        | FieldDesc::ScalarArray(_)
+        | FieldDesc::Variant
+        | FieldDesc::VariantArray
+        | FieldDesc::BoundedString(_)
+        | FieldDesc::Union { .. }
+        | FieldDesc::UnionArray { .. }
+        | FieldDesc::StructureArray { .. } => {
+            if bitset.get(bit_offset) {
+                encode_pv_field(value, desc, order, out);
+            }
+            // else: emit no bytes
+        }
+        FieldDesc::Structure { fields, .. } => {
+            if !any_descendant_set(bitset, bit_offset, desc) {
+                return;
+            }
+            // Recurse into each child; emit only set ones.
+            let mut child_bit = bit_offset + 1;
+            for (name, child_desc) in fields {
+                let child_value = match value {
+                    PvField::Structure(s) => s
+                        .get_field(name)
+                        .cloned()
+                        .unwrap_or_else(|| default_value_for(child_desc)),
+                    _ => default_value_for(child_desc),
+                };
+                encode_pv_field_with_bitset(
+                    &child_value,
+                    child_desc,
+                    bitset,
+                    child_bit,
+                    order,
+                    out,
+                );
+                child_bit += child_desc.total_bits();
+            }
+        }
+    }
+}
+
 /// Decode a `PvField` matching `desc`, consulting `bitset` to know which
 /// fields are actually present on the wire.
 ///
