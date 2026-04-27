@@ -1,17 +1,35 @@
 //! Public `PvaClient` facade.
+//!
+//! Built on top of:
+//!
+//! - [`super::search_engine::SearchEngine`] — single background task,
+//!   handles SEARCH retry backoff + beacon listening.
+//! - [`super::channel::ConnectionPool`] — shared `ServerConn` per server
+//!   address, with full handshake + heartbeat + auto-shutdown.
+//! - [`super::channel::Channel`] — per-PV state machine (Searching →
+//!   Connecting → Active → Reconnecting). Multiple ops share a single
+//!   channel instance.
+//! - [`super::ops_v2`] — GET / PUT / MONITOR / RPC; MONITOR transparently
+//!   re-issues INIT + START on every reconnect.
+//!
+//! Public API stays compatible with the previous shape so existing callers
+//! (pvget-rs, pvput-rs, pvmonitor-rs, pvinfo-rs) keep working.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+use parking_lot::RwLock;
 
 use crate::error::{PvaError, PvaResult};
 use crate::pvdata::{FieldDesc, PvField};
 
-use super::conn::Connection;
-use super::ops::{create_channel, op_get, op_get_field, op_monitor, op_put, op_rpc};
-use super::search::{default_server_port, search};
+use super::channel::{Channel, ConnectionPool};
+use super::ops_v2::{op_get, op_monitor, op_put, op_rpc, DEFAULT_PIPELINE_SIZE};
+use super::search_engine::SearchEngine;
 
-/// Result of a successful GET — value plus introspection used by the
-/// formatter.
 #[derive(Debug, Clone)]
 pub struct PvGetResult {
     pub pv_name: String,
@@ -26,6 +44,7 @@ pub struct PvaClientBuilder {
     server_addr: Option<SocketAddr>,
     user: Option<String>,
     host: Option<String>,
+    pipeline_size: u32,
 }
 
 impl PvaClientBuilder {
@@ -35,6 +54,7 @@ impl PvaClientBuilder {
             server_addr: None,
             user: None,
             host: None,
+            pipeline_size: DEFAULT_PIPELINE_SIZE,
         }
     }
 
@@ -58,12 +78,25 @@ impl PvaClientBuilder {
         self
     }
 
+    /// Override the monitor pipeline size (default 4 — one ack per 4 events).
+    /// Set to 0 to disable pipelining.
+    pub fn pipeline_size(mut self, n: u32) -> Self {
+        self.pipeline_size = n;
+        self
+    }
+
     pub fn build(self) -> PvaClient {
         PvaClient {
-            timeout: self.timeout,
-            server_addr: self.server_addr,
-            user: self.user.unwrap_or_else(default_user),
-            host: self.host.unwrap_or_else(default_host),
+            inner: Arc::new(ClientInner {
+                timeout: self.timeout,
+                server_addr: self.server_addr,
+                user: self.user.unwrap_or_else(super::super::auth::authnz_default_user),
+                host: self.host.unwrap_or_else(super::super::auth::authnz_default_host),
+                pipeline_size: self.pipeline_size,
+                pool: ConnectionPool::new(),
+                channels: RwLock::new(HashMap::new()),
+                search: OnceLock::new(),
+            }),
         }
     }
 }
@@ -74,13 +107,31 @@ impl Default for PvaClientBuilder {
     }
 }
 
-/// Pure-Rust pvAccess client (no `spvirit_client` dependency).
-#[derive(Clone, Debug)]
-pub struct PvaClient {
+struct ClientInner {
     timeout: Duration,
     server_addr: Option<SocketAddr>,
     user: String,
     host: String,
+    pipeline_size: u32,
+    pool: Arc<ConnectionPool>,
+    channels: RwLock<HashMap<String, Arc<Channel>>>,
+    /// Lazy: only spawn the search engine when we actually need to resolve.
+    search: OnceLock<SearchEngine>,
+}
+
+#[derive(Clone)]
+pub struct PvaClient {
+    inner: Arc<ClientInner>,
+}
+
+impl std::fmt::Debug for PvaClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PvaClient")
+            .field("timeout", &self.inner.timeout)
+            .field("user", &self.inner.user)
+            .field("host", &self.inner.host)
+            .finish()
+    }
 }
 
 impl PvaClient {
@@ -92,130 +143,141 @@ impl PvaClient {
         Ok(Self::builder().build())
     }
 
-    /// Construct targeting an explicit `(udp_port, tcp_port)` pair.
-    /// Provided for backwards compatibility with the spvirit-shaped API; the
-    /// `udp_port` is ignored when `server_addr` is set, but otherwise feeds
-    /// into the search subsystem (via env vars, since per-instance UDP port
-    /// isn't carried — set `EPICS_PVA_BROADCAST_PORT`).
+    /// Backwards-compatible: targets a specific TCP port (UDP ignored —
+    /// search uses the standard port machinery).
     pub fn with_ports(_udp_port: u16, tcp_port: u16) -> Self {
         let server_addr =
             SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), tcp_port);
         Self::builder().server_addr(server_addr).build()
     }
 
-    async fn resolve(&self, pv_name: &str) -> PvaResult<SocketAddr> {
-        if let Some(addr) = self.server_addr {
-            // Override path: skip UDP search.
-            return Ok(SocketAddr::new(addr.ip(), addr.port().max(default_server_port())));
+    async fn search_engine(&self) -> PvaResult<&SearchEngine> {
+        if self.inner.search.get().is_none() {
+            let engine = SearchEngine::spawn(Vec::new()).await?;
+            let _ = self.inner.search.set(engine);
         }
-        search(pv_name, self.timeout).await
+        Ok(self.inner.search.get().unwrap())
     }
 
-    async fn open(&self, pv_name: &str) -> PvaResult<(Connection, super::ops::ChannelIds)> {
-        let target = self.resolve(pv_name).await?;
-        let mut conn = Connection::connect(target, &self.user, &self.host, self.timeout).await?;
-        let ids = create_channel(&mut conn, pv_name).await?;
-        Ok((conn, ids))
+    async fn channel(&self, pv_name: &str) -> PvaResult<Arc<Channel>> {
+        if let Some(c) = self.inner.channels.read().get(pv_name).cloned() {
+            return Ok(c);
+        }
+
+        let ch = if let Some(direct) = self.inner.server_addr {
+            // Direct-server mode: no UDP search at all. Channel will go
+            // straight to Connecting → Active using `direct`.
+            Arc::new(Channel::new_direct(
+                pv_name.to_string(),
+                self.inner.user.clone(),
+                self.inner.host.clone(),
+                self.inner.timeout,
+                self.inner.pool.clone(),
+                direct,
+            ))
+        } else {
+            let search = self.search_engine().await?.clone();
+            Arc::new(Channel::new(
+                pv_name.to_string(),
+                self.inner.user.clone(),
+                self.inner.host.clone(),
+                self.inner.timeout,
+                self.inner.pool.clone(),
+                search,
+            ))
+        };
+
+        let mut map = self.inner.channels.write();
+        if let Some(existing) = map.get(pv_name).cloned() {
+            return Ok(existing);
+        }
+        map.insert(pv_name.to_string(), ch.clone());
+        Ok(ch)
     }
 
     pub async fn pvget(&self, pv_name: &str) -> PvaResult<PvField> {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        let (_intro, value) = op_get(&mut conn, ids, &[]).await?;
-        Ok(value)
+        let ch = self.channel(pv_name).await?;
+        let (_, v) = op_get(&ch, &[], self.inner.timeout).await?;
+        Ok(v)
     }
 
     pub async fn pvget_full(&self, pv_name: &str) -> PvaResult<PvGetResult> {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        let (intro, value) = op_get(&mut conn, ids, &[]).await?;
+        let ch = self.channel(pv_name).await?;
+        let (intro, value) = op_get(&ch, &[], self.inner.timeout).await?;
+        let server_addr = match ch.current_state() {
+            super::channel::ChannelState::Active { server, .. } => server.addr,
+            _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+        };
         Ok(PvGetResult {
             pv_name: pv_name.to_string(),
             value,
             introspection: intro,
-            server_addr: conn.server_addr,
+            server_addr,
         })
     }
 
     pub async fn pvget_fields(&self, pv_name: &str, fields: &[&str]) -> PvaResult<PvGetResult> {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        let (intro, value) = op_get(&mut conn, ids, fields).await?;
+        let ch = self.channel(pv_name).await?;
+        let (intro, value) = op_get(&ch, fields, self.inner.timeout).await?;
+        let server_addr = match ch.current_state() {
+            super::channel::ChannelState::Active { server, .. } => server.addr,
+            _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+        };
         Ok(PvGetResult {
             pv_name: pv_name.to_string(),
             value,
             introspection: intro,
-            server_addr: conn.server_addr,
+            server_addr,
         })
     }
 
     pub async fn pvput(&self, pv_name: &str, value_str: &str) -> PvaResult<()> {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        op_put(&mut conn, ids, value_str).await
+        let ch = self.channel(pv_name).await?;
+        op_put(&ch, value_str, self.inner.timeout).await
     }
 
     pub async fn pvmonitor<F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
     where
-        F: FnMut(&PvField),
+        F: FnMut(&PvField) + Send,
     {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        op_monitor(&mut conn, ids, &[], |_desc, value| callback(value)).await
+        let ch = self.channel(pv_name).await?;
+        op_monitor(&ch, &[], self.inner.pipeline_size, move |_desc, value| {
+            callback(value)
+        })
+        .await
     }
 
-    pub async fn pvmonitor_typed<F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
+    pub async fn pvmonitor_typed<F>(&self, pv_name: &str, callback: F) -> PvaResult<()>
     where
-        F: FnMut(&FieldDesc, &PvField),
+        F: FnMut(&FieldDesc, &PvField) + Send,
     {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        op_monitor(&mut conn, ids, &[], |desc, value| callback(desc, value)).await
+        let ch = self.channel(pv_name).await?;
+        op_monitor(&ch, &[], self.inner.pipeline_size, callback).await
     }
 
     pub async fn pvinfo(&self, pv_name: &str) -> PvaResult<FieldDesc> {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        // Try GET_FIELD first; some servers don't support it — fall back to a
-        // GET INIT which also returns the descriptor.
-        match op_get_field(&mut conn, ids, "").await {
-            Ok(d) => Ok(d),
-            Err(_) => {
-                let (intro, _value) = op_get(&mut conn, ids, &[]).await?;
-                Ok(intro)
-            }
-        }
+        let ch = self.channel(pv_name).await?;
+        let (intro, _value) = op_get(&ch, &[], self.inner.timeout).await?;
+        Ok(intro)
     }
 
-    /// Issue an RPC against `pv_name`.
-    ///
-    /// Returns the response descriptor + value. The request `descriptor`
-    /// must match the layout the server expects; for arbitrary RPC servers
-    /// this is a `structure { value: <typed argument> }` or a free-form
-    /// structure. The server's response descriptor is whatever the server
-    /// produces in its INIT response.
+    pub async fn pvinfo_full(&self, pv_name: &str) -> PvaResult<(FieldDesc, SocketAddr)> {
+        let ch = self.channel(pv_name).await?;
+        let (intro, _value) = op_get(&ch, &[], self.inner.timeout).await?;
+        let server_addr = match ch.current_state() {
+            super::channel::ChannelState::Active { server, .. } => server.addr,
+            _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+        };
+        Ok((intro, server_addr))
+    }
+
     pub async fn pvrpc(
         &self,
         pv_name: &str,
         request_desc: &FieldDesc,
         request_value: &PvField,
     ) -> PvaResult<(FieldDesc, PvField)> {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        op_rpc(&mut conn, ids, request_desc, request_value).await
+        let ch = self.channel(pv_name).await?;
+        op_rpc(&ch, request_desc, request_value, self.inner.timeout).await
     }
-
-    pub async fn pvinfo_full(&self, pv_name: &str) -> PvaResult<(FieldDesc, SocketAddr)> {
-        let (mut conn, ids) = self.open(pv_name).await?;
-        let intro = match op_get_field(&mut conn, ids, "").await {
-            Ok(d) => d,
-            Err(_) => op_get(&mut conn, ids, &[]).await?.0,
-        };
-        Ok((intro, conn.server_addr))
-    }
-}
-
-fn default_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "anonymous".to_string())
-}
-
-fn default_host() -> String {
-    hostname::get()
-        .ok()
-        .and_then(|s| s.into_string().ok())
-        .unwrap_or_else(|| "localhost".to_string())
 }

@@ -13,10 +13,15 @@
 //! The legacy `crate::client` module is a thin re-export of this one (see
 //! `client.rs`), so existing callers like `pvget-rs` keep working.
 
+pub mod beacon_throttle;
+pub mod channel;
 pub mod conn;
 pub mod context;
 pub mod decode;
 pub mod ops;
+pub mod ops_v2;
 pub mod search;
+pub mod search_engine;
+pub mod server_conn;
 
 pub use context::{PvGetResult, PvaClient, PvaClientBuilder};

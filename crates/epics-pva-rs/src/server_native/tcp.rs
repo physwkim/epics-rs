@@ -14,13 +14,14 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, AtomicUsize, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
-use tracing::{debug, error};
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::interval;
+use tracing::{debug, error, warn};
 
 use crate::client_native::decode::{try_parse_frame, Frame};
 use crate::error::{PvaError, PvaResult};
@@ -32,6 +33,7 @@ use crate::pvdata::encode::{decode_pv_field, decode_type_desc, encode_pv_field, 
 use crate::pvdata::{FieldDesc, PvField};
 
 use super::source::DynSource;
+use super::runtime::PvaServerConfig;
 
 static NEXT_SID: AtomicU32 = AtomicU32::new(1);
 fn alloc_sid() -> u32 {
@@ -52,6 +54,9 @@ struct ChannelState {
 struct OpState {
     intro: FieldDesc,
     kind: OpKind,
+    /// For MONITOR ops: true once the subscriber task has been spawned.
+    /// Subsequent START/pipeline-ack messages are no-ops.
+    monitor_started: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,18 +71,30 @@ enum OpKind {
 pub async fn run_tcp_server(
     source: DynSource,
     bind_addr: SocketAddr,
-    op_timeout: Duration,
+    config: PvaServerConfig,
 ) -> PvaResult<()> {
     let listener = TcpListener::bind(bind_addr).await.map_err(PvaError::Io)?;
     debug!(?bind_addr, "TCP listener up");
+    let active = Arc::new(AtomicUsize::new(0));
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                let cur = active.fetch_add(1, Ordering::SeqCst);
+                if cur >= config.max_connections {
+                    // Slot limit reached — refuse and drop.
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    warn!(?peer, "rejecting connection: max_connections={}", config.max_connections);
+                    drop(stream);
+                    continue;
+                }
                 let src = source.clone();
+                let cfg = config.clone();
+                let active_dec = active.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(src, stream, peer, op_timeout).await {
+                    if let Err(e) = handle_connection(src, stream, peer, cfg).await {
                         debug!(?peer, "connection ended: {e}");
                     }
+                    active_dec.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             Err(e) => {
@@ -92,11 +109,42 @@ async fn handle_connection(
     source: DynSource,
     stream: TcpStream,
     peer: SocketAddr,
-    op_timeout: Duration,
+    config: PvaServerConfig,
 ) -> PvaResult<()> {
+    let op_timeout = config.op_timeout;
+    let idle_timeout = config.idle_timeout;
     stream.set_nodelay(true).ok();
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
+
+    // Track per-connection liveness for the idle-timeout watchdog and the
+    // server-side echo heartbeat task.
+    let last_rx = Arc::new(AtomicU64::new(now_nanos()));
+
+    // Spawn server-side heartbeat: send ECHO_REQUEST every 15 s; close if
+    // we've been idle for `idle_timeout`.
+    let last_rx_hb = last_rx.clone();
+    let writer_hb = writer.clone();
+    let order_hb = ByteOrder::Little;
+    let hb_handle = tokio::spawn(async move {
+        let mut tick = interval(Duration::from_secs(15));
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let last = last_rx_hb.load(Ordering::SeqCst);
+            let elapsed = now_nanos().saturating_sub(last);
+            if Duration::from_nanos(elapsed) > idle_timeout {
+                warn!(?peer, "PVA client idle > {idle_timeout:?}; closing");
+                break;
+            }
+            let h = PvaHeader::control(true, order_hb, ControlCommand::EchoRequest.code(), 0);
+            let mut buf = Vec::with_capacity(8);
+            h.write_into(&mut buf);
+            if writer_hb.lock().await.write_all(&buf).await.is_err() {
+                break;
+            }
+        }
+    });
 
     let order = ByteOrder::Little;
 
@@ -123,6 +171,7 @@ async fn handle_connection(
 
     loop {
         let frame = read_frame(&mut reader, &mut rx_buf, op_timeout).await?;
+        last_rx.store(now_nanos(), Ordering::SeqCst);
         if frame.header.flags.is_control() {
             // Handle echo etc., otherwise ignore.
             if frame.header.command == ControlCommand::EchoRequest.code() {
@@ -168,6 +217,26 @@ async fn handle_connection(
         // Application messages
         match Command::from_code(frame.header.command) {
             Some(Command::CreateChannel) => {
+                if channels.len() >= config.max_channels_per_connection {
+                    warn!(?peer, "rejecting CREATE_CHANNEL: per-connection limit reached");
+                    // Reject by sending an error CreateChannel response with cid=u32::MAX.
+                    let mut payload = Vec::new();
+                    payload.put_u32(u32::MAX, order);
+                    payload.put_u32(0u32, order);
+                    Status::error("max channels per connection reached".to_string())
+                        .write_into(order, &mut payload);
+                    let h = PvaHeader::application(
+                        true,
+                        order,
+                        Command::CreateChannel.code(),
+                        payload.len() as u32,
+                    );
+                    let mut buf = Vec::new();
+                    h.write_into(&mut buf);
+                    buf.extend_from_slice(&payload);
+                    writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
+                    continue;
+                }
                 handle_create_channel(&source, &frame, &writer, &mut channels, order).await?;
             }
             Some(Command::DestroyChannel) => {
@@ -181,6 +250,7 @@ async fn handle_connection(
                     &mut channels,
                     order,
                     OpKind::Get,
+                    &config,
                 )
                 .await?;
             }
@@ -192,6 +262,7 @@ async fn handle_connection(
                     &mut channels,
                     order,
                     OpKind::Put,
+                    &config,
                 )
                 .await?;
             }
@@ -203,6 +274,19 @@ async fn handle_connection(
                     &mut channels,
                     order,
                     OpKind::Monitor,
+                    &config,
+                )
+                .await?;
+            }
+            Some(Command::Rpc) => {
+                handle_op(
+                    &source,
+                    &frame,
+                    &writer,
+                    &mut channels,
+                    order,
+                    OpKind::Rpc,
+                    &config,
                 )
                 .await?;
             }
@@ -390,6 +474,7 @@ async fn handle_op(
     channels: &mut HashMap<u32, ChannelState>,
     order: ByteOrder,
     kind: OpKind,
+    config: &PvaServerConfig,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
     let sid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
@@ -425,6 +510,7 @@ async fn handle_op(
             OpState {
                 intro: intro.clone(),
                 kind,
+                monitor_started: false,
             },
         );
 
@@ -505,53 +591,65 @@ async fn handle_op(
             writer.lock().await.write_all(&buf).await.map_err(PvaError::Io)?;
         }
         OpKind::Monitor => {
-            // subcmd 0x40 means MONITOR_START; 0x80 means STOP/PIPELINE_ACK.
-            // For simplicity we handle START by spawning a subscriber task.
-            if subcmd & 0x40 != 0 || subcmd == 0x00 {
+            // MONITOR_START / pipeline-ack uses subcmd 0x40 in the
+            // formal spec, 0x80 in pvxs/spvirit byte-parity (legacy
+            // "pipeline" subcmd). Either signals "start emitting / ack
+            // window". Also treat plain 0x00 as "start" for compatibility.
+            let is_start_or_ack = subcmd & 0x40 != 0
+                || subcmd & 0x80 != 0
+                || subcmd == 0x00;
+            // Only spawn the subscriber task once per ioid.
+            let already_running = ch
+                .ops
+                .get(&ioid)
+                .map(|s| s.monitor_started)
+                .unwrap_or(false);
+            if is_start_or_ack && !already_running {
+                if let Some(s) = ch.ops.get_mut(&ioid) {
+                    s.monitor_started = true;
+                }
                 let pv_name = ch.name.clone();
                 let intro_clone = intro.clone();
                 let writer_clone = writer.clone();
                 let src = source.clone();
+                let queue_depth = config.monitor_queue_depth;
                 tokio::spawn(async move {
                     let Some(mut rx) = src.subscribe(&pv_name).await else {
                         return;
                     };
-                    // First event: full snapshot if available.
+                    // Emit initial snapshot.
                     if let Some(initial) = src.get_value(&pv_name).await {
-                        let mut payload = Vec::new();
-                        payload.put_u32(ioid, order);
-                        payload.put_u8(0x00);
-                        let bits = BitSet::all_set(intro_clone.total_bits());
-                        bits.write_into(order, &mut payload);
-                        encode_pv_field(&initial, &intro_clone, order, &mut payload);
-                        let h = PvaHeader::application(
-                            true,
-                            order,
-                            Command::Monitor.code(),
-                            payload.len() as u32,
-                        );
-                        let mut buf = Vec::new();
-                        h.write_into(&mut buf);
-                        buf.extend_from_slice(&payload);
-                        let _ = writer_clone.lock().await.write_all(&buf).await;
+                        let payload = build_monitor_payload(ioid, &intro_clone, &initial, order);
+                        if writer_clone.lock().await.write_all(&payload).await.is_err() {
+                            return;
+                        }
                     }
-                    while let Some(value) = rx.recv().await {
-                        let mut payload = Vec::new();
-                        payload.put_u32(ioid, order);
-                        payload.put_u8(0x00);
-                        let bits = BitSet::all_set(intro_clone.total_bits());
-                        bits.write_into(order, &mut payload);
-                        encode_pv_field(&value, &intro_clone, order, &mut payload);
-                        let h = PvaHeader::application(
-                            true,
-                            order,
-                            Command::Monitor.code(),
-                            payload.len() as u32,
-                        );
-                        let mut buf = Vec::new();
-                        h.write_into(&mut buf);
-                        buf.extend_from_slice(&payload);
-                        if writer_clone.lock().await.write_all(&buf).await.is_err() {
+                    // Back-pressure / squashing loop: drain available
+                    // events between writes, keeping only the most recent
+                    // value if more than `queue_depth` events stack up.
+                    let mut squashing = false;
+                    while let Some(mut value) = rx.recv().await {
+                        // Drain extras; keep the latest.
+                        let mut squashed = 0usize;
+                        loop {
+                            match rx.try_recv() {
+                                Ok(next) => {
+                                    value = next;
+                                    squashed += 1;
+                                    if squashed > queue_depth {
+                                        squashing = true;
+                                    }
+                                }
+                                Err(mpsc::error::TryRecvError::Empty) => break,
+                                Err(mpsc::error::TryRecvError::Disconnected) => return,
+                            }
+                        }
+                        if squashing {
+                            debug!(pv = %pv_name, squashed, "monitor squashed events");
+                            squashing = false;
+                        }
+                        let payload = build_monitor_payload(ioid, &intro_clone, &value, order);
+                        if writer_clone.lock().await.write_all(&payload).await.is_err() {
                             break;
                         }
                     }
@@ -663,3 +761,32 @@ async fn send_op_error(
 #[allow(unused_imports)]
 use crate::proto::ReadExt;
 const _: u8 = PVA_VERSION;
+
+/// Build a complete MONITOR data frame (header + payload) for a single value
+/// emission. Pulled out so the back-pressure squashing loop can call it.
+fn build_monitor_payload(
+    ioid: u32,
+    intro: &FieldDesc,
+    value: &PvField,
+    order: ByteOrder,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.put_u32(ioid, order);
+    payload.put_u8(0x00);
+    let bits = BitSet::all_set(intro.total_bits());
+    bits.write_into(order, &mut payload);
+    encode_pv_field(value, intro, order, &mut payload);
+    let h = PvaHeader::application(true, order, Command::Monitor.code(), payload.len() as u32);
+    let mut buf = Vec::with_capacity(8 + payload.len());
+    h.write_into(&mut buf);
+    buf.extend_from_slice(&payload);
+    buf
+}
+
+fn now_nanos() -> u64 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
