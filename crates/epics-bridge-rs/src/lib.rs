@@ -40,6 +40,9 @@ pub mod qsrv;
 #[cfg(feature = "ca-gateway")]
 pub mod ca_gateway;
 
+#[cfg(feature = "pvalink")]
+pub mod pvalink;
+
 // Convenience re-exports for the QSRV bridge (default feature).
 // External users can write `epics_bridge_rs::BridgeProvider` directly.
 #[cfg(feature = "qsrv")]

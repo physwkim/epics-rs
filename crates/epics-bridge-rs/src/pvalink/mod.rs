@@ -1,0 +1,26 @@
+//! `pvalink` — PVA links for EPICS record INP/OUT fields.
+//!
+//! When a record's INP (or OUT) field carries a link string of the form
+//! `@pva://<remote-pv>` (or the legacy `pva://<pv>` form), this module
+//! resolves that link to a live PVA client that periodically reads the
+//! remote PV (INP) or pushes record output to it (OUT).
+//!
+//! Mirror of pvxs `ioc/pvalink*.cpp`. Pure Rust, no spvirit_*.
+//!
+//! ## Usage
+//!
+//! ```ignore
+//! use epics_bridge_rs::pvalink::{PvaLink, PvaLinkConfig};
+//!
+//! let cfg = PvaLinkConfig::parse("pva://OTHER:IOC:TEMP")?;
+//! let link = PvaLink::open(cfg).await?;
+//! let value = link.read().await?;
+//! ```
+
+mod config;
+mod link;
+mod registry;
+
+pub use config::{LinkDirection, PvaLinkConfig, PvaLinkParseError};
+pub use link::{PvaLink, PvaLinkError};
+pub use registry::PvaLinkRegistry;

@@ -287,6 +287,101 @@ pub async fn op_get_field(
         .ok_or_else(|| PvaError::Protocol("GET_FIELD: missing introspection".to_string()))
 }
 
+/// Run an RPC operation. The request structure is sent INIT-then-DATA per
+/// pvxs `clientreq.cpp::Operation::doRPC`; the response comes back as a
+/// single application data frame with `subcmd == 0x00`.
+pub async fn op_rpc(
+    conn: &mut Connection,
+    channel: ChannelIds,
+    request_desc: &FieldDesc,
+    request_value: &PvField,
+) -> PvaResult<(FieldDesc, PvField)> {
+    let order = conn.byte_order;
+    let big_endian = matches!(order, ByteOrder::Big);
+    let codec = PvaCodec { big_endian };
+    let ioid = alloc_ioid();
+
+    // Build a pvRequest matching the request descriptor (RPC always uses the
+    // request structure type itself as the pvRequest envelope).
+    let mut pv_req = Vec::new();
+    crate::pvdata::encode::encode_type_desc(request_desc, order, &mut pv_req);
+
+    // INIT
+    let init = codec.build_get_init(channel.sid, ioid, &pv_req);
+    // The INIT command for RPC is CMD_RPC (20), not GET — use op_payload directly.
+    let mut p = Vec::with_capacity(9 + pv_req.len());
+    p.put_u32(channel.sid, order);
+    p.put_u32(ioid, order);
+    p.put_u8(QosFlags::INIT);
+    p.extend_from_slice(&pv_req);
+    let init_header =
+        PvaHeader::application(false, order, Command::Rpc.code(), p.len() as u32);
+    let mut init_bytes = Vec::with_capacity(8 + p.len());
+    init_header.write_into(&mut init_bytes);
+    init_bytes.extend_from_slice(&p);
+    let _ = init; // shadow the GET-shaped init we built first
+    conn.send(&init_bytes).await?;
+
+    let init_frame = conn.read_app_frame().await?;
+    let init_resp = match decode_op_response(&init_frame, None)? {
+        OpResponse::Init(i) => i,
+        other => {
+            return Err(PvaError::Protocol(format!(
+                "expected RPC INIT response, got {other:?}"
+            )))
+        }
+    };
+    if !init_resp.status.is_success() {
+        return Err(PvaError::Protocol(format!(
+            "RPC INIT failed: {:?}",
+            init_resp.status
+        )));
+    }
+    // The server's INIT response carries the *response* introspection.
+    let response_intro = init_resp.introspection;
+
+    // DATA: send the request value with subcmd=0x00 + structure-tag prefix +
+    // value bytes (no bitset, since RPC arguments are always all-fields).
+    let mut data_payload = Vec::new();
+    data_payload.put_u32(channel.sid, order);
+    data_payload.put_u32(ioid, order);
+    data_payload.put_u8(0x00);
+    encode_pv_field(request_value, request_desc, order, &mut data_payload);
+    let data_header = PvaHeader::application(
+        false,
+        order,
+        Command::Rpc.code(),
+        data_payload.len() as u32,
+    );
+    let mut data_bytes = Vec::with_capacity(8 + data_payload.len());
+    data_header.write_into(&mut data_bytes);
+    data_bytes.extend_from_slice(&data_payload);
+    conn.send(&data_bytes).await?;
+
+    // Response data frame
+    let resp_frame = conn.read_app_frame().await?;
+    match decode_op_response(&resp_frame, Some(&response_intro))? {
+        OpResponse::Data(d) => {
+            if !d.status.is_success() {
+                return Err(PvaError::Protocol(format!("RPC failed: {:?}", d.status)));
+            }
+            // Best-effort cleanup: send DESTROY_REQUEST.
+            let destroy = codec.build_destroy_request(channel.sid, ioid);
+            let _ = conn.send(&destroy).await;
+            Ok((response_intro, d.value))
+        }
+        OpResponse::Status(s) => {
+            if !s.status.is_success() {
+                return Err(PvaError::Protocol(format!("RPC error: {:?}", s.status)));
+            }
+            Err(PvaError::Protocol("RPC: empty response".to_string()))
+        }
+        other => Err(PvaError::Protocol(format!(
+            "expected RPC data response, got {other:?}"
+        ))),
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 /// pvxs's "all fields" sentinel: variant `0xFD 0x02 0x00 0x80 0x00 0x00`. We

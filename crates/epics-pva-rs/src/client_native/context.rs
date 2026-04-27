@@ -7,7 +7,7 @@ use crate::error::{PvaError, PvaResult};
 use crate::pvdata::{FieldDesc, PvField};
 
 use super::conn::Connection;
-use super::ops::{create_channel, op_get, op_get_field, op_monitor, op_put};
+use super::ops::{create_channel, op_get, op_get_field, op_monitor, op_put, op_rpc};
 use super::search::{default_server_port, search};
 
 /// Result of a successful GET — value plus introspection used by the
@@ -178,6 +178,23 @@ impl PvaClient {
                 Ok(intro)
             }
         }
+    }
+
+    /// Issue an RPC against `pv_name`.
+    ///
+    /// Returns the response descriptor + value. The request `descriptor`
+    /// must match the layout the server expects; for arbitrary RPC servers
+    /// this is a `structure { value: <typed argument> }` or a free-form
+    /// structure. The server's response descriptor is whatever the server
+    /// produces in its INIT response.
+    pub async fn pvrpc(
+        &self,
+        pv_name: &str,
+        request_desc: &FieldDesc,
+        request_value: &PvField,
+    ) -> PvaResult<(FieldDesc, PvField)> {
+        let (mut conn, ids) = self.open(pv_name).await?;
+        op_rpc(&mut conn, ids, request_desc, request_value).await
     }
 
     pub async fn pvinfo_full(&self, pv_name: &str) -> PvaResult<(FieldDesc, SocketAddr)> {

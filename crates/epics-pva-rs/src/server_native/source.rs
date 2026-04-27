@@ -41,6 +41,20 @@ pub trait ChannelSource: Send + Sync + 'static {
         &self,
         name: &str,
     ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send;
+
+    /// Dispatch an RPC. The default impl returns "RPC not supported";
+    /// implementors can override to provide actual RPC behaviour.
+    ///
+    /// Returns the response (FieldDesc, PvField) on success.
+    fn rpc(
+        &self,
+        name: &str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> impl std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send {
+        let _ = (name, request_desc, request_value);
+        async move { Err("RPC not supported by this source".to_string()) }
+    }
 }
 
 /// Type-erased handle so the server runtime can hold heterogeneous sources
@@ -80,6 +94,18 @@ pub trait ChannelSourceObj: Send + Sync {
         name: &'a str,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send + 'a>,
+    >;
+    fn rpc<'a>(
+        &'a self,
+        name: &'a str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>>
+                + Send
+                + 'a,
+        >,
     >;
 }
 
@@ -128,5 +154,24 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
         Box<dyn std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send + 'a>,
     > {
         Box::pin(<Self as ChannelSource>::subscribe(self, name))
+    }
+    fn rpc<'a>(
+        &'a self,
+        name: &'a str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(<Self as ChannelSource>::rpc(
+            self,
+            name,
+            request_desc,
+            request_value,
+        ))
     }
 }

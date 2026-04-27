@@ -559,13 +559,31 @@ async fn handle_op(
             }
         }
         OpKind::Rpc => {
-            // RPC: read input value, call source if it has an RPC handler;
-            // for v1 we return an empty struct OK.
-            let _input_intro = decode_type_desc(&mut cur, order);
+            // Decode request value using the introspection from INIT.
+            let value = match decode_pv_field(&intro, &mut cur, order) {
+                Ok(v) => v,
+                Err(_) => {
+                    // Fall back to a null value if the body is empty (some
+                    // legacy clients don't send a value bodies for parameter-
+                    // less RPCs).
+                    PvField::Null
+                }
+            };
+            let pv_name = ch.name.clone();
+            let intro_clone = intro.clone();
+            let result = source.rpc(&pv_name, intro_clone, value).await;
+
             let mut payload = Vec::new();
             payload.put_u32(ioid, order);
             payload.put_u8(0x00);
-            Status::ok().write_into(order, &mut payload);
+            match result {
+                Ok((resp_desc, resp_value)) => {
+                    Status::ok().write_into(order, &mut payload);
+                    encode_type_desc(&resp_desc, order, &mut payload);
+                    encode_pv_field(&resp_value, &resp_desc, order, &mut payload);
+                }
+                Err(msg) => Status::error(msg).write_into(order, &mut payload),
+            }
             let h = PvaHeader::application(true, order, Command::Rpc.code(), payload.len() as u32);
             let mut buf = Vec::new();
             h.write_into(&mut buf);
