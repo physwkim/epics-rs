@@ -59,21 +59,61 @@ pub async fn run_udp_responder_proto(
     guid: [u8; 12],
     protocol: &'static str,
 ) -> PvaResult<()> {
+    run_udp_responder_with_config(
+        source,
+        udp_port,
+        tcp_port,
+        guid,
+        protocol,
+        Duration::from_secs(15),
+        Vec::new(),
+        true,
+    )
+    .await
+}
+
+/// Like [`run_udp_responder_proto`] but configurable: explicit beacon
+/// period, explicit destinations, and an auto-NIC-broadcast flag. When
+/// `destinations` is empty AND `auto_beacon` is true, beacons fan out
+/// to per-NIC broadcasts (via [`crate::config::env::list_broadcast_addresses`]).
+/// When `destinations` is non-empty, exactly those addresses are used.
+pub async fn run_udp_responder_with_config(
+    source: DynSource,
+    udp_port: u16,
+    tcp_port: u16,
+    guid: [u8; 12],
+    protocol: &'static str,
+    beacon_period: Duration,
+    destinations: Vec<SocketAddr>,
+    auto_beacon: bool,
+) -> PvaResult<()> {
     let socket = bind_udp(udp_port)?;
     let socket = Arc::new(socket);
     debug!(?udp_port, "UDP search responder started");
 
-    // Beacon timer (15s).
+    // Resolve beacon destinations once at startup. pvxs re-resolves
+    // on interface change but we keep it static for now; restart the
+    // server to pick up new NICs.
+    let beacon_destinations: Vec<SocketAddr> = if !destinations.is_empty() {
+        destinations
+    } else if auto_beacon {
+        crate::config::env::list_broadcast_addresses(udp_port)
+    } else {
+        // Final fallback: limited broadcast.
+        vec![format!("255.255.255.255:{}", udp_port).parse().unwrap()]
+    };
+    debug!(?beacon_destinations, ?beacon_period, "beacon emitter config");
+
     let beacon_socket = socket.clone();
     let beacon_guid = guid;
     let beacon = tokio::spawn(async move {
-        let mut tick = interval(Duration::from_secs(15));
+        let mut tick = interval(beacon_period);
         loop {
             tick.tick().await;
             let beacon = build_beacon(beacon_guid, tcp_port, ByteOrder::Little);
-            // Emit on limited broadcast.
-            let bcast: SocketAddr = format!("255.255.255.255:{}", udp_port).parse().unwrap();
-            let _ = beacon_socket.send_to(&beacon, bcast).await;
+            for dest in &beacon_destinations {
+                let _ = beacon_socket.send_to(&beacon, dest).await;
+            }
         }
     });
 

@@ -17,6 +17,7 @@ pub mod auth;
 pub mod client;
 pub mod client_native;
 pub mod codec;
+pub mod config;
 pub mod error;
 pub mod format;
 pub mod nt;
