@@ -61,6 +61,12 @@ fn pvxs_available(names: &[&str]) -> bool {
     names.iter().all(|n| find_pvxs_bin(n).is_some())
 }
 
+static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(31000);
+fn alloc_port_pair() -> (u16, u16) {
+    let base = NEXT_PORT.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+    (base, base + 1)
+}
+
 #[tokio::test]
 #[ignore]
 async fn rust_client_to_pvxs_softiocpvx_get() {
@@ -79,8 +85,7 @@ async fn rust_client_to_pvxs_softiocpvx_get() {
     )
     .unwrap();
 
-    let port = 25075u16;
-    let udp = 25076u16;
+    let (port, udp) = alloc_port_pair();
 
     let mut cmd = TokioCommand::new(&softioc);
     cmd.env("EPICS_PVA_SERVER_PORT", port.to_string())
@@ -289,10 +294,11 @@ async fn rust_client_pvput_to_pvxs_softiocpvx() {
     )
     .unwrap();
 
-    let port = 26075u16;
+    let (port, udp) = alloc_port_pair();
+    let _ = udp;
     let mut child = TokioCommand::new(&softioc)
         .env("EPICS_PVA_SERVER_PORT", port.to_string())
-        .env("EPICS_PVA_BROADCAST_PORT", "26076")
+        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
         .arg("-S")
         .arg("-d")
         .arg(dbfile.path())
@@ -349,6 +355,402 @@ async fn rust_client_pvput_to_pvxs_softiocpvx() {
 
 #[tokio::test]
 #[ignore]
+async fn pvxs_pvxcall_to_rust_server_rpc() {
+    if !pvxs_available(&["pvxcall"]) {
+        return;
+    }
+    let pvxcall = find_pvxs_bin("pvxcall").unwrap();
+
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
+    use epics_pva_rs::server_native::{run_pva_server, ChannelSource, PvaServerConfig};
+
+    /// RPC service: takes `{ a: double, b: double }` and returns
+    /// `{ result: double }` where result = a + b.
+    #[derive(Clone)]
+    struct AddService {
+        _v: Arc<Mutex<()>>,
+    }
+
+    impl ChannelSource for AddService {
+        fn list_pvs(&self) -> impl std::future::Future<Output = Vec<String>> + Send {
+            async { vec!["RPC:ADD".into()] }
+        }
+        fn has_pv(&self, n: &str) -> impl std::future::Future<Output = bool> + Send {
+            let n = n.to_string();
+            async move { n == "RPC:ADD" }
+        }
+        fn get_introspection(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<FieldDesc>> + Send {
+            async {
+                Some(FieldDesc::Structure {
+                    struct_id: String::new(),
+                    fields: vec![
+                        ("a".into(), FieldDesc::Scalar(ScalarType::Double)),
+                        ("b".into(), FieldDesc::Scalar(ScalarType::Double)),
+                    ],
+                })
+            }
+        }
+        fn get_value(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<PvField>> + Send {
+            async { None }
+        }
+        fn put_value(
+            &self,
+            _: &str,
+            _: PvField,
+        ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+            async { Err("PUT not supported".to_string()) }
+        }
+        fn is_writable(&self, _: &str) -> impl std::future::Future<Output = bool> + Send {
+            async { false }
+        }
+        fn subscribe(
+            &self,
+            _: &str,
+        ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send {
+            async { None }
+        }
+        fn rpc(
+            &self,
+            _name: &str,
+            _request_desc: FieldDesc,
+            request_value: PvField,
+        ) -> impl std::future::Future<
+            Output = Result<(FieldDesc, PvField), String>,
+        > + Send {
+            async move {
+                let mut a = 0.0f64;
+                let mut b = 0.0f64;
+                if let PvField::Structure(s) = &request_value {
+                    if let Some(PvField::Scalar(ScalarValue::Double(av))) = s.get_field("a") {
+                        a = *av;
+                    }
+                    if let Some(PvField::Scalar(ScalarValue::Double(bv))) = s.get_field("b") {
+                        b = *bv;
+                    }
+                }
+                let result_desc = FieldDesc::Structure {
+                    struct_id: String::new(),
+                    fields: vec![("result".into(), FieldDesc::Scalar(ScalarType::Double))],
+                };
+                let mut s = PvStructure::new("");
+                s.fields.push((
+                    "result".into(),
+                    PvField::Scalar(ScalarValue::Double(a + b)),
+                ));
+                Ok((result_desc, PvField::Structure(s)))
+            }
+        }
+    }
+
+    let (port, udp) = alloc_port_pair();
+    let source = Arc::new(AddService {
+        _v: Arc::new(Mutex::new(())),
+    });
+    let cfg = PvaServerConfig {
+        tcp_port: port,
+        udp_port: udp,
+        ..Default::default()
+    };
+    let h = tokio::spawn(async move {
+        let _ = run_pva_server(source, cfg).await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // pvxcall RPC:ADD a=2.5 b=4.5
+    let output = TokioCommand::new(&pvxcall)
+        .env("EPICS_PVA_ADDR_LIST", format!("127.0.0.1:{}", port + 1))
+        .env("EPICS_PVA_AUTO_ADDR_LIST", "NO")
+        .arg("-w")
+        .arg("3")
+        .arg("RPC:ADD")
+        .arg("a=2.5")
+        .arg("b=4.5")
+        .output()
+        .await
+        .expect("pvxcall run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("pvxcall stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("7") || stdout.contains("result"),
+        "expected RPC result containing 7.0, got stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    h.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn rust_client_ntscalar_array_get_from_pvxs() {
+    if !pvxs_available(&["softIocPVX"]) {
+        return;
+    }
+    let softioc = find_pvxs_bin("softIocPVX").unwrap();
+
+    let dbfile = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        dbfile.path(),
+        r#"record(waveform, "INTEROP:WAVE") {
+    field(NELM, "10")
+    field(FTVL, "DOUBLE")
+    field(INP, [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5])
+}
+"#,
+    )
+    .unwrap();
+
+    let (port, udp) = alloc_port_pair();
+    let _ = udp;
+    let mut child = TokioCommand::new(&softioc)
+        .env("EPICS_PVA_SERVER_PORT", port.to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .arg("-S")
+        .arg("-d")
+        .arg(dbfile.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    );
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::net::TcpStream::connect(server_addr).is_ok() {
+            break;
+        }
+    }
+    let _killer = ChildKiller(&mut child);
+
+    use epics_pva_rs::client_native::context::PvaClient;
+    use epics_pva_rs::pvdata::{PvField, ScalarValue};
+    let client = PvaClient::builder()
+        .timeout(Duration::from_secs(3))
+        .server_addr(server_addr)
+        .build();
+
+    let v = tokio::time::timeout(Duration::from_secs(5), client.pvget("INTEROP:WAVE"))
+        .await
+        .expect("pvget timeout")
+        .expect("pvget failed");
+
+    eprintln!("WAVE got: {v}");
+    if let PvField::Structure(s) = v {
+        assert!(
+            s.struct_id.starts_with("epics:nt/NTScalarArray"),
+            "struct_id: {}",
+            s.struct_id
+        );
+        match s.get_field("value") {
+            Some(PvField::ScalarArray(items)) => {
+                assert_eq!(items.len(), 10, "expected 10 elements, got {}", items.len());
+                if let ScalarValue::Double(d) = items[0] {
+                    assert!((d - 1.5).abs() < 1e-6);
+                }
+                if let ScalarValue::Double(d) = items[9] {
+                    assert!((d - 10.5).abs() < 1e-6);
+                }
+            }
+            other => panic!("expected ScalarArray, got {other:?}"),
+        }
+    } else {
+        panic!("expected NTScalarArray structure");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn rust_client_various_scalar_types_from_pvxs() {
+    if !pvxs_available(&["softIocPVX"]) {
+        return;
+    }
+    let softioc = find_pvxs_bin("softIocPVX").unwrap();
+
+    let dbfile = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        dbfile.path(),
+        r#"record(ai, "INTEROP:DBL") { field(VAL, "3.1416") }
+record(longin, "INTEROP:LNG") { field(VAL, "12345") }
+record(stringin, "INTEROP:STR") { field(VAL, "hello world") }
+record(bo, "INTEROP:BIN") {
+    field(ZNAM, "off")
+    field(ONAM, "on")
+    field(VAL, "1")
+}
+"#,
+    )
+    .unwrap();
+
+    let (port, udp) = alloc_port_pair();
+    let _ = udp;
+    let mut child = TokioCommand::new(&softioc)
+        .env("EPICS_PVA_SERVER_PORT", port.to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .arg("-S")
+        .arg("-d")
+        .arg(dbfile.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    );
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::net::TcpStream::connect(server_addr).is_ok() {
+            break;
+        }
+    }
+    let _killer = ChildKiller(&mut child);
+
+    use epics_pva_rs::client_native::context::PvaClient;
+    use epics_pva_rs::pvdata::{PvField, ScalarValue};
+    let client = PvaClient::builder()
+        .timeout(Duration::from_secs(3))
+        .server_addr(server_addr)
+        .build();
+
+    // Double
+    let v = tokio::time::timeout(Duration::from_secs(3), client.pvget("INTEROP:DBL"))
+        .await
+        .expect("DBL pvget timeout")
+        .expect("DBL pvget failed");
+    if let PvField::Structure(s) = v {
+        match s.get_value() {
+            Some(ScalarValue::Double(d)) => assert!((d - 3.1416).abs() < 1e-4, "got {d}"),
+            other => panic!("DBL expected Double, got {other:?}"),
+        }
+    } else {
+        panic!("DBL not a structure");
+    }
+
+    // Long (Int32)
+    let v = tokio::time::timeout(Duration::from_secs(3), client.pvget("INTEROP:LNG"))
+        .await
+        .expect("LNG pvget timeout")
+        .expect("LNG pvget failed");
+    if let PvField::Structure(s) = v {
+        match s.get_value() {
+            Some(ScalarValue::Int(i)) => assert_eq!(*i, 12345),
+            other => panic!("LNG expected Int, got {other:?}"),
+        }
+    }
+
+    // String
+    let v = tokio::time::timeout(Duration::from_secs(3), client.pvget("INTEROP:STR"))
+        .await
+        .expect("STR pvget timeout")
+        .expect("STR pvget failed");
+    if let PvField::Structure(s) = v {
+        match s.get_value() {
+            Some(ScalarValue::String(s)) => assert_eq!(s, "hello world"),
+            other => panic!("STR expected String, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn rust_client_ntenum_from_pvxs_mbbo() {
+    if !pvxs_available(&["softIocPVX"]) {
+        return;
+    }
+    let softioc = find_pvxs_bin("softIocPVX").unwrap();
+
+    let dbfile = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        dbfile.path(),
+        r#"record(mbbo, "INTEROP:MODE") {
+    field(ZRST, "Idle")
+    field(ONST, "Acquire")
+    field(TWST, "Pause")
+    field(THST, "Stop")
+    field(VAL, "1")
+}
+"#,
+    )
+    .unwrap();
+
+    let (port, udp) = alloc_port_pair();
+    let _ = udp;
+    let mut child = TokioCommand::new(&softioc)
+        .env("EPICS_PVA_SERVER_PORT", port.to_string())
+        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
+        .arg("-S")
+        .arg("-d")
+        .arg(dbfile.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    );
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::net::TcpStream::connect(server_addr).is_ok() {
+            break;
+        }
+    }
+    let _killer = ChildKiller(&mut child);
+
+    use epics_pva_rs::client_native::context::PvaClient;
+    use epics_pva_rs::pvdata::{PvField, ScalarValue};
+    let client = PvaClient::builder()
+        .timeout(Duration::from_secs(3))
+        .server_addr(server_addr)
+        .build();
+
+    let v = tokio::time::timeout(Duration::from_secs(5), client.pvget("INTEROP:MODE"))
+        .await
+        .expect("pvget timeout")
+        .expect("pvget failed");
+
+    eprintln!("MODE got: {v}");
+    if let PvField::Structure(s) = v {
+        assert!(
+            s.struct_id.starts_with("epics:nt/NTEnum"),
+            "struct_id: {}",
+            s.struct_id
+        );
+        match s.get_field("value") {
+            Some(PvField::Structure(es)) => {
+                if let Some(PvField::Scalar(ScalarValue::Int(i))) = es.get_field("index") {
+                    assert_eq!(*i, 1, "expected index=1 (Acquire), got {i}");
+                }
+                if let Some(PvField::ScalarArray(choices)) = es.get_field("choices") {
+                    assert_eq!(choices.len(), 4);
+                    if let ScalarValue::String(s0) = &choices[0] {
+                        assert_eq!(s0, "Idle");
+                    }
+                }
+            }
+            other => panic!("NTEnum value expected Structure, got {other:?}"),
+        }
+    } else {
+        panic!("expected NTEnum structure");
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn rust_client_pvmonitor_pvxs_softiocpvx_via_pvxput() {
     if !pvxs_available(&["softIocPVX", "pvxput"]) {
         return;
@@ -363,10 +765,11 @@ async fn rust_client_pvmonitor_pvxs_softiocpvx_via_pvxput() {
     )
     .unwrap();
 
-    let port = 27075u16;
+    let (port, udp) = alloc_port_pair();
+    let _ = udp;
     let mut child = TokioCommand::new(&softioc)
         .env("EPICS_PVA_SERVER_PORT", port.to_string())
-        .env("EPICS_PVA_BROADCAST_PORT", "27076")
+        .env("EPICS_PVA_BROADCAST_PORT", (port+1).to_string())
         .arg("-S")
         .arg("-d")
         .arg(dbfile.path())
@@ -418,7 +821,7 @@ async fn rust_client_pvmonitor_pvxs_softiocpvx_via_pvxput() {
     // Drive pvxput from outside to update the value.
     for v in &[2.0_f64, 3.0, 4.0] {
         let out = TokioCommand::new(&pvxput)
-            .env("EPICS_PVA_ADDR_LIST", format!("127.0.0.1:27076"))
+            .env("EPICS_PVA_ADDR_LIST", format!("127.0.0.1:{}", port + 1))
             .env("EPICS_PVA_AUTO_ADDR_LIST", "NO")
             .arg("-w")
             .arg("3")
