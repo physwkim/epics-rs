@@ -177,6 +177,375 @@ pub enum RequestMaskError {
     EmptyMask,
 }
 
+// ── pvRequest expression parser (mirrors pvxs PVRParser) ─────────────────
+
+/// Parsed pvRequest expression.
+///
+/// Captures the field selectors and record options as parsed from a
+/// pvxs-style expression (e.g. `field(value,alarm.severity)record[pipeline=true]`).
+/// Use [`PvRequestExpr::to_field_desc`] to materialize a wire-encodable
+/// [`FieldDesc`] mirror, or [`PvRequestExpr::field_paths`] to extract just
+/// the dotted field paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PvRequestExpr {
+    /// Dotted field paths the caller is interested in. A `None` entry
+    /// means "everything"; an empty list means "everything" too.
+    pub fields: Vec<String>,
+    /// Record-level options (`record[k=v,...]`).
+    pub record_options: Vec<(String, String)>,
+}
+
+impl PvRequestExpr {
+    /// Parse a pvRequest expression. Empty input yields an empty expr
+    /// (which translates to `field()` = select-all in pvxs).
+    pub fn parse(input: &str) -> Result<Self, PvRequestParseError> {
+        let mut p = Parser::new(input);
+        let mut out = PvRequestExpr::default();
+        p.parse(&mut out)?;
+        Ok(out)
+    }
+
+    /// True iff the expression selects a specific subset of fields.
+    /// (Empty fields list = select-all.)
+    pub fn has_field_selectors(&self) -> bool {
+        !self.fields.is_empty()
+    }
+
+    /// Just the top-level field names (first dotted segment) — useful
+    /// when callers want the simple `field(a,b,c)` form. Sub-structure
+    /// selectors like `alarm.severity` are flattened to `alarm`.
+    pub fn top_level_fields(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        for f in &self.fields {
+            let head = f.split('.').next().unwrap_or(f);
+            if !out.contains(&head) {
+                out.push(head);
+            }
+        }
+        out
+    }
+
+    /// Build a wire-encodable pvRequest [`FieldDesc`] tree from this
+    /// parsed expression. The resulting structure is what callers feed
+    /// to [`encode_type_desc`].
+    pub fn to_field_desc(&self) -> FieldDesc {
+        let inner = if self.fields.is_empty() {
+            // empty `field {}` selects all
+            FieldDesc::Structure {
+                struct_id: String::new(),
+                fields: Vec::new(),
+            }
+        } else {
+            FieldDesc::Structure {
+                struct_id: String::new(),
+                fields: build_nested(&self.fields),
+            }
+        };
+        let mut top_fields: Vec<(String, FieldDesc)> =
+            vec![("field".to_string(), inner)];
+        if !self.record_options.is_empty() {
+            let opts: Vec<(String, FieldDesc)> = self
+                .record_options
+                .iter()
+                .map(|(k, _v)| (k.clone(), FieldDesc::Scalar(crate::pvdata::ScalarType::String)))
+                .collect();
+            top_fields.push((
+                "record".to_string(),
+                FieldDesc::Structure {
+                    struct_id: String::new(),
+                    fields: vec![(
+                        "_options".to_string(),
+                        FieldDesc::Structure {
+                            struct_id: String::new(),
+                            fields: opts,
+                        },
+                    )],
+                },
+            ));
+        }
+        FieldDesc::Structure {
+            struct_id: String::new(),
+            fields: top_fields,
+        }
+    }
+
+    /// Encode this expression as a wire-format pvRequest (0x80 + body).
+    pub fn encode(&self, big_endian: bool) -> Vec<u8> {
+        let order = if big_endian {
+            ByteOrder::Big
+        } else {
+            ByteOrder::Little
+        };
+        let desc = self.to_field_desc();
+        let mut out = Vec::new();
+        encode_type_desc(&desc, order, &mut out);
+        out
+    }
+}
+
+/// Build a nested-empty-struct tree for a list of dotted field paths.
+fn build_nested(paths: &[String]) -> Vec<(String, FieldDesc)> {
+    use std::collections::BTreeMap;
+    // Group by first segment, recurse on tails. Preserve first-seen order
+    // by tracking order separately.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in paths {
+        let mut split = path.splitn(2, '.');
+        let head = split.next().unwrap_or("").to_string();
+        let tail = split.next().unwrap_or("").to_string();
+        if !groups.contains_key(&head) {
+            order.push(head.clone());
+        }
+        let entry = groups.entry(head).or_default();
+        if !tail.is_empty() {
+            entry.push(tail);
+        }
+    }
+    let mut out: Vec<(String, FieldDesc)> = Vec::with_capacity(order.len());
+    for head in order {
+        let tails = groups.remove(&head).unwrap_or_default();
+        let child = if tails.is_empty() {
+            FieldDesc::Structure {
+                struct_id: String::new(),
+                fields: Vec::new(),
+            }
+        } else {
+            FieldDesc::Structure {
+                struct_id: String::new(),
+                fields: build_nested(&tails),
+            }
+        };
+        out.push((head, child));
+    }
+    out
+}
+
+/// Errors from [`PvRequestExpr::parse`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PvRequestParseError {
+    #[error("unexpected character at position {pos}: {chr}")]
+    UnexpectedChar { pos: usize, chr: String },
+    #[error("expected '{want}' at position {pos}, got '{got}'")]
+    Expected {
+        pos: usize,
+        want: String,
+        got: String,
+    },
+    #[error("invalid identifier at position {pos}")]
+    InvalidIdent { pos: usize },
+    #[error("unterminated bracket at position {pos}")]
+    Unterminated { pos: usize },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Token {
+    Comma,
+    LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    Equal,
+    Field,
+    Record,
+    Name(String),
+    Eof,
+}
+
+struct Parser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+
+    fn advance(&mut self, n: usize) {
+        self.pos += n;
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(c) = self.peek_char() {
+            if c.is_whitespace() {
+                self.advance(c.len_utf8());
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn lex(&mut self) -> Result<Token, PvRequestParseError> {
+        self.skip_whitespace();
+        let Some(c) = self.peek_char() else {
+            return Ok(Token::Eof);
+        };
+        match c {
+            ',' => {
+                self.advance(1);
+                Ok(Token::Comma)
+            }
+            '(' => {
+                self.advance(1);
+                Ok(Token::LParen)
+            }
+            ')' => {
+                self.advance(1);
+                Ok(Token::RParen)
+            }
+            '[' => {
+                self.advance(1);
+                Ok(Token::LBracket)
+            }
+            ']' => {
+                self.advance(1);
+                Ok(Token::RBracket)
+            }
+            '=' => {
+                self.advance(1);
+                Ok(Token::Equal)
+            }
+            _ if is_ident_start(c) => {
+                let start = self.pos;
+                while let Some(c) = self.peek_char() {
+                    if is_ident(c) {
+                        self.advance(c.len_utf8());
+                    } else {
+                        break;
+                    }
+                }
+                let s = &self.input[start..self.pos];
+                Ok(match s {
+                    "field" => Token::Field,
+                    "record" => Token::Record,
+                    other => Token::Name(other.to_string()),
+                })
+            }
+            _ => Err(PvRequestParseError::UnexpectedChar {
+                pos: self.pos,
+                chr: c.to_string(),
+            }),
+        }
+    }
+
+    fn parse(&mut self, out: &mut PvRequestExpr) -> Result<(), PvRequestParseError> {
+        loop {
+            let tok = self.lex()?;
+            match tok {
+                Token::Eof => break,
+                Token::Field => {
+                    self.expect(Token::LParen)?;
+                    self.parse_field_list(out)?;
+                    // parse_field_list consumed up through RParen
+                }
+                Token::Record => {
+                    self.expect(Token::LBracket)?;
+                    self.parse_options(out)?;
+                }
+                Token::Name(s) => {
+                    out.fields.push(s);
+                }
+                other => {
+                    return Err(PvRequestParseError::UnexpectedChar {
+                        pos: self.pos,
+                        chr: format!("{other:?}"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_field_list(
+        &mut self,
+        out: &mut PvRequestExpr,
+    ) -> Result<(), PvRequestParseError> {
+        loop {
+            let tok = self.lex()?;
+            match tok {
+                Token::RParen => return Ok(()),
+                Token::Comma => continue,
+                Token::Name(s) => {
+                    out.fields.push(s);
+                }
+                Token::Eof => {
+                    return Err(PvRequestParseError::Unterminated { pos: self.pos });
+                }
+                other => {
+                    return Err(PvRequestParseError::UnexpectedChar {
+                        pos: self.pos,
+                        chr: format!("{other:?}"),
+                    });
+                }
+            }
+        }
+    }
+
+    fn parse_options(
+        &mut self,
+        out: &mut PvRequestExpr,
+    ) -> Result<(), PvRequestParseError> {
+        loop {
+            let tok = self.lex()?;
+            match tok {
+                Token::RBracket => return Ok(()),
+                Token::Comma => continue,
+                Token::Eof => {
+                    return Err(PvRequestParseError::Unterminated { pos: self.pos });
+                }
+                Token::Name(key) => {
+                    self.expect(Token::Equal)?;
+                    let val_tok = self.lex()?;
+                    let val = match val_tok {
+                        Token::Name(v) => v,
+                        other => {
+                            return Err(PvRequestParseError::Expected {
+                                pos: self.pos,
+                                want: "value".into(),
+                                got: format!("{other:?}"),
+                            });
+                        }
+                    };
+                    out.record_options.push((key, val));
+                }
+                other => {
+                    return Err(PvRequestParseError::UnexpectedChar {
+                        pos: self.pos,
+                        chr: format!("{other:?}"),
+                    });
+                }
+            }
+        }
+    }
+
+    fn expect(&mut self, expected: Token) -> Result<(), PvRequestParseError> {
+        let pos = self.pos;
+        let tok = self.lex()?;
+        if std::mem::discriminant(&tok) == std::mem::discriminant(&expected) {
+            Ok(())
+        } else {
+            Err(PvRequestParseError::Expected {
+                pos,
+                want: format!("{expected:?}"),
+                got: format!("{tok:?}"),
+            })
+        }
+    }
+}
+
+fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || c.is_ascii_digit()
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '.'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

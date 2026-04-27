@@ -265,6 +265,142 @@ fn pvxs_pv_mask_empty_request_intersects_anything() {
     assert!(intersects(&marked, &mask));
 }
 
+// ── testParse* (pvxs testpvreq.cpp) ────────────────────────────────
+//
+// pvxs's PVRParser converts pvRequest expression strings into a Value
+// shaped like `struct { struct field { ... }, struct record { struct
+// _options { ... } } }`. We mirror the same behaviour via PvRequestExpr.
+
+#[test]
+fn pvxs_parse_empty_yields_empty_field_subtree() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    let expr = PvRequestExpr::parse("").expect("parse");
+    assert!(expr.fields.is_empty());
+    assert!(expr.record_options.is_empty());
+}
+
+#[test]
+fn pvxs_parse_field_value() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    // pvxs: pvRequest("field(value)")
+    let expr = PvRequestExpr::parse("field(value)").expect("parse");
+    assert_eq!(expr.fields, vec!["value".to_string()]);
+}
+
+#[test]
+fn pvxs_parse_multiple_field_calls_accumulate() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    // pvxs: "field(foo)field(bar.baz)record[abc=xyz]record[pipeline=true]"
+    let expr =
+        PvRequestExpr::parse("field(foo)field(bar.baz)record[abc=xyz]record[pipeline=true]")
+            .expect("parse");
+    assert_eq!(expr.fields, vec!["foo".to_string(), "bar.baz".to_string()]);
+    assert_eq!(
+        expr.record_options,
+        vec![
+            ("abc".into(), "xyz".into()),
+            ("pipeline".into(), "true".into()),
+        ]
+    );
+}
+
+#[test]
+fn pvxs_parse_field_with_comma_list() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    // pvxs: "field(foo,bar.baz)record[abc=xyz,pipeline=true]"
+    let expr =
+        PvRequestExpr::parse("field(foo,bar.baz)record[abc=xyz,pipeline=true]")
+            .expect("parse");
+    assert_eq!(expr.fields, vec!["foo".to_string(), "bar.baz".to_string()]);
+    assert_eq!(
+        expr.record_options,
+        vec![
+            ("abc".into(), "xyz".into()),
+            ("pipeline".into(), "true".into()),
+        ]
+    );
+}
+
+#[test]
+fn pvxs_parse_short_hand_bare_name() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    // pvxs: "a" — short-hand for field(a)
+    let expr = PvRequestExpr::parse("a").expect("parse");
+    assert_eq!(expr.fields, vec!["a".to_string()]);
+}
+
+// testValid: the following pvxs-valid expressions parse without error.
+
+#[test]
+fn pvxs_parse_valid_expressions() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    for expr in [
+        "field()",
+        "field(a,b,a.b)field(x)",
+        "a",
+        "field(,)",
+        "field(foo,)",
+        "record[foo=bar,]",
+    ] {
+        PvRequestExpr::parse(expr).unwrap_or_else(|e| {
+            panic!("expected valid: {expr} got {e:?}");
+        });
+    }
+}
+
+// testError: the following pvxs-invalid expressions return an error.
+
+#[test]
+fn pvxs_parse_error_expressions() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    for expr in [
+        "field(",
+        "field(value",
+        "field(value,alarm",
+        "record(",
+        "record[",
+        "record[key",
+        "record[key=",
+    ] {
+        let res = PvRequestExpr::parse(expr);
+        assert!(
+            res.is_err(),
+            "expected error for {expr}, got {:?}",
+            res.ok()
+        );
+    }
+}
+
+#[test]
+fn pvxs_parse_to_field_desc_round_trip() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+    use epics_pva_rs::pvdata::FieldDesc;
+
+    let expr = PvRequestExpr::parse("field(value,alarm.severity)").unwrap();
+    let desc = expr.to_field_desc();
+    if let FieldDesc::Structure { fields, .. } = desc {
+        // root has just `field`
+        let field_desc = fields
+            .iter()
+            .find_map(|(n, d)| if n == "field" { Some(d) } else { None })
+            .expect("field");
+        if let FieldDesc::Structure { fields: f2, .. } = field_desc {
+            // `value` (empty) and `alarm` (containing `severity`)
+            let names: Vec<&str> = f2.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, vec!["value", "alarm"]);
+            // alarm should have a `severity` empty struct
+            let alarm = f2
+                .iter()
+                .find_map(|(n, d)| if n == "alarm" { Some(d) } else { None })
+                .expect("alarm");
+            if let FieldDesc::Structure { fields: f3, .. } = alarm {
+                assert_eq!(f3.len(), 1);
+                assert_eq!(f3[0].0, "severity");
+            }
+        }
+    }
+}
+
 #[test]
 fn pvxs_request_only_nonexistent_field_errors() {
     // pvxs: request `{ field { nonexistent {} } }` throws runtime_error
