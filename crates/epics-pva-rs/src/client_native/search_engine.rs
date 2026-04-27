@@ -427,10 +427,13 @@ fn handle_beacon(
     let Ok(guid) = cur.get_bytes(12) else {
         return;
     };
+    // pvxs udp_collector.cpp::CMD_BEACON skips 4 bytes here:
+    // flags(u8) + seq(u8) + change(u16). server.cpp::doBeacons emits
+    // exactly this layout.
     let Ok(_flags) = cur.get_u8() else {
         return;
     };
-    let Ok(_seq) = cur.get_u16(order) else {
+    let Ok(_seq) = cur.get_u8() else {
         return;
     };
     let Ok(_change) = cur.get_u16(order) else {

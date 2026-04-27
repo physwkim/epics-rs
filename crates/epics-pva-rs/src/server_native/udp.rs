@@ -156,14 +156,15 @@ pub async fn run_udp_responder(
 fn build_beacon(guid: [u8; 12], tcp_port: u16, order: ByteOrder) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&guid);
-    payload.put_u8(0); // flags
-    payload.put_u16(0, order); // beacon sequence id
-    payload.put_u16(0, order); // change count
+    // pvxs server.cpp::doBeacons: flags(u8) + seq(u8) + change(u16) = 4 bytes
+    payload.put_u8(0); // flags / QoS (undefined, 0)
+    payload.put_u8(0); // beacon sequence (u8)
+    payload.put_u16(0, order); // change count (u16)
     let addr = ip_to_bytes(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     payload.extend_from_slice(&addr);
     payload.put_u16(tcp_port, order);
     encode_string_into("tcp", order, &mut payload);
-    encode_size_into(0, order, &mut payload); // server status (variant null)
+    payload.put_u8(0xFF); // null serverStatus marker (matches pvxs)
     let header =
         PvaHeader::application(true, order, Command::Beacon.code(), payload.len() as u32);
     let mut out = Vec::new();
