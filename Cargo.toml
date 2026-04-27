@@ -40,10 +40,3 @@ scaler-rs = { path = "crates/scaler-rs", version = "0.9.4" }
 optics-rs = { path = "crates/optics-rs", version = "0.9.4" }
 mqtt-rs = { path = "crates/mqtt-rs", version = "0.9.4" }
 
-[patch.crates-io]
-spvirit-server = { git = "https://github.com/ISISNeutronMuon/spvirit.git", rev = "5af368efda9cdea5e4946af5d4157d2cf5645edd" }
-spvirit-codec  = { git = "https://github.com/ISISNeutronMuon/spvirit.git", rev = "5af368efda9cdea5e4946af5d4157d2cf5645edd" }
-spvirit-types  = { git = "https://github.com/ISISNeutronMuon/spvirit.git", rev = "5af368efda9cdea5e4946af5d4157d2cf5645edd" }
-spvirit-client = { git = "https://github.com/ISISNeutronMuon/spvirit.git", rev = "5af368efda9cdea5e4946af5d4157d2cf5645edd" }
-spvirit-tools  = { git = "https://github.com/ISISNeutronMuon/spvirit.git", rev = "5af368efda9cdea5e4946af5d4157d2cf5645edd" }
-
