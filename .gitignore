@@ -8,3 +8,9 @@ examples/ophyd-test-ioc/ioc/0*
 # Python bytecode (e.g., from PyDM opi scripts)
 __pycache__/
 *.pyc
+
+# iocsh history left behind by softioc-rs runs
+.iocsh_history
+
+# kodex MCP scratch output
+kodex-out/

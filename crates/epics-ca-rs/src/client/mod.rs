@@ -1543,6 +1543,12 @@ fn parse_nameserver_list() -> Vec<SocketAddr> {
 fn parse_addr_list() -> CaResult<Vec<SocketAddr>> {
     let mut addrs = Vec::new();
 
+    // Default port for unqualified entries follows EPICS_CA_SERVER_PORT
+    // (matches libca: addAddrToChannelAccessAddressList).
+    let default_port = epics_base_rs::runtime::env::get("EPICS_CA_SERVER_PORT")
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(CA_SERVER_PORT);
+
     if let Some(list) = epics_base_rs::runtime::env::get("EPICS_CA_ADDR_LIST") {
         for entry in list.split_whitespace() {
             let addr = if entry.contains(':') {
@@ -1555,7 +1561,7 @@ fn parse_addr_list() -> CaResult<Vec<SocketAddr>> {
                     resolve_host(host, port)
                 })?
             } else {
-                resolve_host(entry, CA_SERVER_PORT)?
+                resolve_host(entry, default_port)?
             };
             addrs.push(addr);
         }
@@ -1567,9 +1573,7 @@ fn parse_addr_list() -> CaResult<Vec<SocketAddr>> {
         // Add the per-NIC broadcast address for every up, non-loopback
         // interface so multi-NIC clients reach IOCs on every attached
         // subnet (matches libca osiSockDiscoverBroadcastAddresses).
-        let server_port = epics_base_rs::runtime::env::get("EPICS_CA_SERVER_PORT")
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(CA_SERVER_PORT);
+        let server_port = default_port;
         for bcast in crate::server::addr_list::discover_broadcast_addrs() {
             let entry = SocketAddr::V4(SocketAddrV4::new(bcast, server_port));
             if !addrs.contains(&entry) {

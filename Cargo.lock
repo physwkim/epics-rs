@@ -578,6 +578,7 @@ dependencies = [
  "epics-base-rs",
  "if-addrs",
  "socket2 0.5.10",
+ "tempfile",
  "tokio",
 ]
 

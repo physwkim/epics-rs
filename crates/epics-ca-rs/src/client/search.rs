@@ -543,10 +543,13 @@ fn handle_udp_response(
             }
             CA_PROTO_SEARCH => {
                 let server_port = hdr.data_type;
-                // CA v4.8+: cid contains server IP, or 0 (INADDR_ANY)
-                // meaning "use UDP source address" (matches C EPICS
-                // udpiiu.cpp searchRespAction).
-                let server_ip = if hdr.cid == 0 {
+                // CA v4.8+: cid contains server IP. Both 0 (INADDR_ANY)
+                // and 0xFFFFFFFF (~0u32, libca's "address unknown" sentinel
+                // — see udpiiu.cpp searchRespAction) mean "use UDP source
+                // address". Without handling both, real C softIoc replies
+                // (cid=~0u32) get rerouted to 255.255.255.255 and the
+                // search appears to fail.
+                let server_ip = if hdr.cid == 0 || hdr.cid == u32::MAX {
                     src.ip()
                 } else {
                     std::net::IpAddr::V4(Ipv4Addr::from(hdr.cid.to_be_bytes()))

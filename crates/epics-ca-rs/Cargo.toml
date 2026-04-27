@@ -17,6 +17,7 @@ if-addrs = "0.13"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
 
 [[bench]]
 name = "protocol_bench"
@@ -45,3 +46,7 @@ path = "src/bin/ca-repeater-rs.rs"
 [[bin]]
 name = "softioc-rs"
 path = "src/bin/softioc-rs.rs"
+
+[[bin]]
+name = "ca-soak"
+path = "src/bin/ca-soak.rs"
