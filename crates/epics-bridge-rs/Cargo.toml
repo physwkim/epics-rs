@@ -28,6 +28,11 @@ pvalink = ["dep:epics-pva-rs"]
 pva-gateway = ["dep:epics-pva-rs", "dep:regex"]
 # Convenience: enable all bridges + binaries
 all-bridges = ["qsrv", "qsrv-bin", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway"]
+# Dual-protocol IOC: serves the same PV database over both CA and PVA
+# from a single process. Drops in for sites whose tooling mix is
+# transitioning to PVA.
+dual-ioc = ["dep:epics-pva-rs", "dep:epics-ca-rs"]
+dual-ioc-bin = ["dual-ioc", "dep:clap", "dep:tracing-subscriber"]
 
 [dependencies]
 epics-base-rs = { workspace = true }
@@ -55,3 +60,8 @@ required-features = ["ca-gateway-bin"]
 name = "qsrv-rs"
 path = "src/bin/qsrv_rs.rs"
 required-features = ["qsrv-bin"]
+
+[[bin]]
+name = "dual-ioc-rs"
+path = "src/bin/dual_ioc_rs.rs"
+required-features = ["dual-ioc-bin"]
