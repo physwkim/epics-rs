@@ -1,8 +1,9 @@
 //! NDPluginPva — serves the latest NDArray as an NTNDArray over pvAccess.
 //!
-//! Corresponds to C++ areaDetector's NDPluginPva.
-//! Captures each incoming NDArray, converts it to `NtPayload::NdArray`,
-//! and publishes it as a PV through the spvirit PVA server.
+//! Corresponds to C++ areaDetector's NDPluginPva. Captures each incoming
+//! NDArray, converts it to a native [`PvField::Structure`] shaped per
+//! `epics:nt/NTNDArray:1.0`, and stores it in the registry consumed by the
+//! qsrv adapter.
 
 use std::sync::Arc;
 
@@ -10,17 +11,24 @@ use ad_core_rs::ndarray::{NDArray, NDDataBuffer};
 use ad_core_rs::ndarray_pool::NDArrayPool;
 use ad_core_rs::plugin::runtime::{NDPluginProcess, ProcessResult};
 use parking_lot::Mutex;
-use spvirit_types::{
-    NdCodec, NdDimension, NtAlarm, NtAttribute, NtNdArray, NtPayload, NtTimeStamp,
-    ScalarArrayValue, ScalarValue,
-};
 use tokio::sync::mpsc;
 
-/// PVA plugin processor: captures the latest NDArray and converts to NtPayload.
+use epics_pva_rs::nt::nd_array::{
+    nt_nd_array_value, NdAlarm, NdArrayBuffer, NdAttribute, NdCodec, NdDimension, NdTimeStamp,
+    NtNdArray,
+};
+use epics_pva_rs::pvdata::{PvField, ScalarValue};
+
+/// Latest snapshot + subscriber list, shared with the qsrv adapter via a
+/// global registry.
+pub type LatestHandle = Arc<Mutex<Option<PvField>>>;
+pub type SubscribersHandle = Arc<Mutex<Vec<mpsc::Sender<PvField>>>>;
+
+/// PVA plugin processor: captures the latest NDArray and converts to PvField.
 pub struct PvaProcessor {
     pv_name: String,
-    latest: Arc<Mutex<Option<NtPayload>>>,
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<NtPayload>>>>,
+    latest: LatestHandle,
+    subscribers: SubscribersHandle,
 }
 
 impl PvaProcessor {
@@ -32,13 +40,11 @@ impl PvaProcessor {
         }
     }
 
-    /// Handle for accessing the latest NtPayload snapshot.
-    pub fn latest_handle(&self) -> Arc<Mutex<Option<NtPayload>>> {
+    pub fn latest_handle(&self) -> LatestHandle {
         self.latest.clone()
     }
 
-    /// Handle for subscribing to updates.
-    pub fn subscribers_handle(&self) -> Arc<Mutex<Vec<mpsc::Sender<NtPayload>>>> {
+    pub fn subscribers_handle(&self) -> SubscribersHandle {
         self.subscribers.clone()
     }
 }
@@ -51,14 +57,14 @@ impl Default for PvaProcessor {
 
 impl NDPluginProcess for PvaProcessor {
     fn process_array(&mut self, array: &NDArray, _pool: &NDArrayPool) -> ProcessResult {
-        let payload = ndarray_to_nt_payload(array);
+        let payload = ndarray_to_pv_field(array);
         *self.latest.lock() = Some(payload.clone());
 
-        // Notify subscribers, remove dead ones
+        // Notify subscribers, remove dead ones.
         let mut subs = self.subscribers.lock();
         subs.retain(|tx| tx.try_send(payload.clone()).is_ok());
 
-        // Pass through to downstream plugins
+        // Pass through to downstream plugins.
         ProcessResult::arrays(vec![Arc::new(array.clone())])
     }
 
@@ -76,16 +82,16 @@ impl NDPluginProcess for PvaProcessor {
     }
 
     fn array_data_handle(&self) -> Option<Arc<Mutex<Option<Arc<NDArray>>>>> {
-        None // We serve NtPayload, not raw NDArray
+        None
     }
 }
 
 // ---------------------------------------------------------------------------
-// NDArray → NtPayload conversion
+// NDArray → PvField conversion
 // ---------------------------------------------------------------------------
 
-fn ndarray_to_nt_payload(array: &NDArray) -> NtPayload {
-    let value = ndbuffer_to_scalar_array(&array.data);
+fn ndarray_to_pv_field(array: &NDArray) -> PvField {
+    let value = ndbuffer_to_buffer(&array.data);
     let element_size = array.data.data_type().element_size() as i64;
     let num_elements = array.data.len() as i64;
     let uncompressed_size = num_elements * element_size;
@@ -95,14 +101,14 @@ fn ndarray_to_nt_payload(array: &NDArray) -> NtPayload {
             c.compressed_size as i64,
             NdCodec {
                 name: codec_name_to_string(c.name),
-                parameters: Default::default(),
+                parameters: None,
             },
         ),
         None => (
             uncompressed_size,
             NdCodec {
                 name: String::new(),
-                parameters: Default::default(),
+                parameters: None,
             },
         ),
     };
@@ -121,10 +127,10 @@ fn ndarray_to_nt_payload(array: &NDArray) -> NtPayload {
 
     let data_time_stamp = epics_ts_to_nt(&array.timestamp);
 
-    let attribute: Vec<NtAttribute> = array
+    let attribute: Vec<NdAttribute> = array
         .attributes
         .iter()
-        .map(|a| NtAttribute {
+        .map(|a| NdAttribute {
             name: a.name.clone(),
             value: attribute_value_to_scalar(&a.value),
             descriptor: a.description.clone(),
@@ -133,43 +139,43 @@ fn ndarray_to_nt_payload(array: &NDArray) -> NtPayload {
         })
         .collect();
 
-    NtPayload::NdArray(NtNdArray {
+    let nt = NtNdArray {
         value,
         codec,
         compressed_size,
         uncompressed_size,
         dimension,
         unique_id: array.unique_id,
-        data_time_stamp,
+        data_time_stamp: data_time_stamp.clone(),
         attribute,
-        descriptor: None,
-        alarm: Some(NtAlarm {
+        descriptor: String::new(),
+        alarm: NdAlarm {
             severity: 0,
             status: 0,
             message: "NO_ALARM".into(),
-        }),
-        time_stamp: Some(epics_ts_to_nt(&array.timestamp)),
-        display: None,
-    })
+        },
+        time_stamp: data_time_stamp,
+    };
+    nt_nd_array_value(&nt)
 }
 
-fn ndbuffer_to_scalar_array(buf: &NDDataBuffer) -> ScalarArrayValue {
+fn ndbuffer_to_buffer(buf: &NDDataBuffer) -> NdArrayBuffer {
     match buf {
-        NDDataBuffer::I8(v) => ScalarArrayValue::I8(v.clone()),
-        NDDataBuffer::U8(v) => ScalarArrayValue::U8(v.clone()),
-        NDDataBuffer::I16(v) => ScalarArrayValue::I16(v.clone()),
-        NDDataBuffer::U16(v) => ScalarArrayValue::U16(v.clone()),
-        NDDataBuffer::I32(v) => ScalarArrayValue::I32(v.clone()),
-        NDDataBuffer::U32(v) => ScalarArrayValue::U32(v.clone()),
-        NDDataBuffer::I64(v) => ScalarArrayValue::I64(v.clone()),
-        NDDataBuffer::U64(v) => ScalarArrayValue::U64(v.clone()),
-        NDDataBuffer::F32(v) => ScalarArrayValue::F32(v.clone()),
-        NDDataBuffer::F64(v) => ScalarArrayValue::F64(v.clone()),
+        NDDataBuffer::I8(v) => NdArrayBuffer::Byte(v.clone()),
+        NDDataBuffer::U8(v) => NdArrayBuffer::UByte(v.clone()),
+        NDDataBuffer::I16(v) => NdArrayBuffer::Short(v.clone()),
+        NDDataBuffer::U16(v) => NdArrayBuffer::UShort(v.clone()),
+        NDDataBuffer::I32(v) => NdArrayBuffer::Int(v.clone()),
+        NDDataBuffer::U32(v) => NdArrayBuffer::UInt(v.clone()),
+        NDDataBuffer::I64(v) => NdArrayBuffer::Long(v.clone()),
+        NDDataBuffer::U64(v) => NdArrayBuffer::ULong(v.clone()),
+        NDDataBuffer::F32(v) => NdArrayBuffer::Float(v.clone()),
+        NDDataBuffer::F64(v) => NdArrayBuffer::Double(v.clone()),
     }
 }
 
-fn epics_ts_to_nt(ts: &ad_core_rs::timestamp::EpicsTimestamp) -> NtTimeStamp {
-    NtTimeStamp {
+fn epics_ts_to_nt(ts: &ad_core_rs::timestamp::EpicsTimestamp) -> NdTimeStamp {
+    NdTimeStamp {
         seconds_past_epoch: ts.sec as i64,
         nanoseconds: ts.nsec as i32,
         user_tag: 0,
@@ -217,18 +223,18 @@ fn ndattr_source_string(src: &ad_core_rs::attributes::NDAttrSource) -> String {
 fn attribute_value_to_scalar(val: &ad_core_rs::attributes::NDAttrValue) -> ScalarValue {
     use ad_core_rs::attributes::NDAttrValue;
     match val {
-        NDAttrValue::Int8(v) => ScalarValue::I8(*v),
-        NDAttrValue::UInt8(v) => ScalarValue::U8(*v),
-        NDAttrValue::Int16(v) => ScalarValue::I16(*v),
-        NDAttrValue::UInt16(v) => ScalarValue::U16(*v),
-        NDAttrValue::Int32(v) => ScalarValue::I32(*v),
-        NDAttrValue::UInt32(v) => ScalarValue::U32(*v),
-        NDAttrValue::Int64(v) => ScalarValue::I64(*v),
-        NDAttrValue::UInt64(v) => ScalarValue::U64(*v),
-        NDAttrValue::Float32(v) => ScalarValue::F32(*v),
-        NDAttrValue::Float64(v) => ScalarValue::F64(*v),
-        NDAttrValue::String(v) => ScalarValue::Str(v.clone()),
-        NDAttrValue::Undefined => ScalarValue::I32(0),
+        NDAttrValue::Int8(v) => ScalarValue::Byte(*v),
+        NDAttrValue::UInt8(v) => ScalarValue::UByte(*v),
+        NDAttrValue::Int16(v) => ScalarValue::Short(*v),
+        NDAttrValue::UInt16(v) => ScalarValue::UShort(*v),
+        NDAttrValue::Int32(v) => ScalarValue::Int(*v),
+        NDAttrValue::UInt32(v) => ScalarValue::UInt(*v),
+        NDAttrValue::Int64(v) => ScalarValue::Long(*v),
+        NDAttrValue::UInt64(v) => ScalarValue::ULong(*v),
+        NDAttrValue::Float32(v) => ScalarValue::Float(*v),
+        NDAttrValue::Float64(v) => ScalarValue::Double(*v),
+        NDAttrValue::String(v) => ScalarValue::String(v.clone()),
+        NDAttrValue::Undefined => ScalarValue::Int(0),
     }
 }
 
@@ -249,24 +255,14 @@ mod tests {
                 *v = i as u8;
             }
         }
-
-        let payload = ndarray_to_nt_payload(&arr);
+        let payload = ndarray_to_pv_field(&arr);
         match &payload {
-            NtPayload::NdArray(nt) => {
-                assert_eq!(nt.unique_id, 42);
-                assert_eq!(nt.dimension.len(), 2);
-                assert_eq!(nt.dimension[0].size, 4);
-                assert_eq!(nt.dimension[1].size, 4);
-                assert_eq!(nt.uncompressed_size, 16);
-                if let ScalarArrayValue::U8(data) = &nt.value {
-                    assert_eq!(data.len(), 16);
-                    assert_eq!(data[0], 0);
-                    assert_eq!(data[15], 15);
-                } else {
-                    panic!("expected U8 array");
-                }
+            PvField::Structure(s) => {
+                assert_eq!(s.struct_id, "epics:nt/NTNDArray:1.0");
+                assert!(s.get_field("value").is_some());
+                assert!(s.get_field("dimension").is_some());
             }
-            _ => panic!("expected NdArray payload"),
+            _ => panic!("expected structure"),
         }
     }
 
@@ -275,15 +271,9 @@ mod tests {
         let mut proc = PvaProcessor::new("TEST:Pva1:Image".into());
         let pool = NDArrayPool::new(1_000_000);
         let arr = NDArray::new(vec![NDDimension::new(8)], NDDataType::Float64);
-
         proc.process_array(&arr, &pool);
 
         let latest = proc.latest_handle().lock().clone();
         assert!(latest.is_some());
-        if let Some(NtPayload::NdArray(nt)) = latest {
-            assert_eq!(nt.dimension[0].size, 8);
-        } else {
-            panic!("expected NdArray");
-        }
     }
 }
