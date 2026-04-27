@@ -146,23 +146,42 @@ fn push_kv(s: &mut String, k: &str, v: &str) {
 }
 
 /// Convenience handle. The server wraps this in an Arc and clones it
-/// to per-connection tasks; the `Option` lets the hot path skip work
-/// when no audit sink is configured.
+/// to per-connection tasks. Internally a bounded mpsc decouples the
+/// hot caller path from the sink: a slow disk drops audit lines
+/// (counted in `ca_server_audit_drops_total`) instead of blocking the
+/// CA connection. The `Option` at the call sites lets the hot path
+/// skip work when no logger is configured.
 #[derive(Clone)]
 pub struct AuditLogger {
-    sink: Arc<AuditSink>,
+    tx: tokio::sync::mpsc::Sender<String>,
 }
 
+const AUDIT_QUEUE_CAPACITY: usize = 4096;
+
 impl AuditLogger {
+    /// Wrap a sink and spawn a single writer task. The writer drains
+    /// the queue and serializes writes; if the queue fills, new
+    /// events are dropped at `log()` time so the CA hot path never
+    /// stalls on disk I/O.
     pub fn new(sink: AuditSink) -> Self {
-        Self {
-            sink: Arc::new(sink),
-        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(AUDIT_QUEUE_CAPACITY);
+        let sink = Arc::new(sink);
+        tokio::spawn(async move {
+            while let Some(line) = rx.recv().await {
+                sink.write(&line).await;
+            }
+        });
+        Self { tx }
     }
 
     pub async fn log(&self, ev: AuditEvent<'_>) {
         let line = ev.to_json();
-        self.sink.write(&line).await;
+        // try_send: never block the caller. Drop on full queue and
+        // count it — losing a line under sustained overload is
+        // strictly better than pinning a CA connection.
+        if self.tx.try_send(line).is_err() {
+            metrics::counter!("ca_server_audit_drops_total").increment(1);
+        }
     }
 }
 

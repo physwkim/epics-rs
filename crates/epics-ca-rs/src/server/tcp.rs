@@ -384,6 +384,16 @@ where
         if n == 0 {
             break;
         }
+
+        // Chaos: optional stall + simulated read drop. Compiles to a
+        // single branch when EPICS_CA_RS_CHAOS is unset.
+        if crate::chaos::enabled() {
+            crate::chaos::maybe_stall().await;
+            if crate::chaos::should_drop_read() {
+                continue;
+            }
+        }
+
         accumulated.extend_from_slice(&buf[..n]);
 
         // DoS guard: a malformed or hostile client could declare a huge

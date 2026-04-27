@@ -16,6 +16,7 @@
 
 pub mod audit;
 pub(crate) mod channel;
+pub mod chaos;
 pub mod client;
 pub mod discovery;
 pub mod observability;
