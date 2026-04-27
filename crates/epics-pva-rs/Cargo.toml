@@ -9,12 +9,6 @@ repository.workspace = true
 
 [dependencies]
 epics-base-rs = { workspace = true }
-# spvirit-client + spvirit-server have been fully replaced by
-# crate::{client_native, server_native}. spvirit-codec / spvirit-types are
-# only used by the parity test harness and the legacy NTNDArray plugin
-# registry (scheduled for Phase 5/6 cleanup).
-spvirit-codec = "0.1.9"
-spvirit-types = "0.1.9"
 tracing = "0.1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

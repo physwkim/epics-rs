@@ -15,11 +15,6 @@ qsrv = [
     "dep:epics-ca-rs",
     "dep:serde",
     "dep:serde_json",
-    # spvirit-codec / spvirit-types are still pulled in for the legacy
-    # NTNDArray plugin-PV path (`pva_pvs` registry); they will be removed
-    # in Phase 5 once that path moves to native PvField/FieldDesc.
-    "dep:spvirit-codec",
-    "dep:spvirit-types",
 ]
 # QSRV daemon binary (qsrv-rs)
 qsrv-bin = ["qsrv", "dep:clap", "dep:tracing-subscriber"]
@@ -45,8 +40,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 # Feature-gated optional dependencies
 epics-pva-rs = { workspace = true, optional = true }
 epics-ca-rs = { workspace = true, optional = true }
-spvirit-codec = { version = "0.1.9", optional = true }
-spvirit-types = { version = "0.1.9", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 parking_lot = "0.12"
