@@ -94,6 +94,11 @@ struct ClientState {
     /// per-client cap. Prevents log spam on every subsequent
     /// CREATE_CHAN once the warning has fired.
     channel_limit_warned: bool,
+    /// Peer address as a string, retained for audit events.
+    peer: String,
+    /// Optional audit logger. When None the audit hot path is a single
+    /// branch test and no allocation.
+    audit: Option<crate::audit::AuditLogger>,
 }
 
 impl ClientState {
@@ -113,6 +118,24 @@ impl ClientState {
             client_minor_version: 0,
             flow_control: Arc::new(FlowControlGate::default()),
             channel_limit_warned: false,
+            peer: String::new(),
+            audit: None,
+        }
+    }
+
+    async fn audit(&self, event: &str, pv: &str, value: &str, result: &str) {
+        if let Some(ref logger) = self.audit {
+            logger
+                .log(crate::audit::AuditEvent {
+                    event,
+                    peer: &self.peer,
+                    user: &self.username,
+                    host: &self.hostname,
+                    pv,
+                    value,
+                    result,
+                })
+                .await;
         }
     }
 
@@ -177,6 +200,7 @@ pub async fn run_tcp_listener(
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
     conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
+    audit: Option<crate::audit::AuditLogger>,
     #[cfg(feature = "experimental-rust-tls")] tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
@@ -202,6 +226,7 @@ pub async fn run_tcp_listener(
             let _ = tx.send(ServerConnectionEvent::Connected(peer));
         }
         let conn_events = conn_events.clone();
+        let audit = audit.clone();
         #[cfg(feature = "experimental-rust-tls")]
         let tls_acceptor = tls
             .clone()
@@ -242,8 +267,16 @@ pub async fn run_tcp_listener(
                                     tracing::info!(peer = %peer, identity = %id,
                                         "mTLS identity verified");
                                 }
-                                handle_client(tls_stream, peer, db, acf, actual_port, identity)
-                                    .await
+                                handle_client(
+                                    tls_stream,
+                                    peer,
+                                    db,
+                                    acf,
+                                    actual_port,
+                                    identity,
+                                    audit,
+                                )
+                                .await
                             }
                             Err(e) => {
                                 tracing::warn!(peer = %peer, error = %e,
@@ -252,12 +285,12 @@ pub async fn run_tcp_listener(
                             }
                         }
                     } else {
-                        handle_client(stream, peer, db, acf, actual_port, None).await
+                        handle_client(stream, peer, db, acf, actual_port, None, audit).await
                     }
                 }
                 #[cfg(not(feature = "experimental-rust-tls"))]
                 {
-                    handle_client(stream, peer, db, acf, actual_port, None).await
+                    handle_client(stream, peer, db, acf, actual_port, None, audit).await
                 }
             };
             beacon_reset.notify_one();
@@ -303,6 +336,7 @@ async fn handle_client<S>(
     acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
     tcp_port: u16,
     initial_hostname: Option<String>,
+    audit: Option<crate::audit::AuditLogger>,
 ) -> CaResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -314,6 +348,9 @@ where
     // peer IP. Matches C rsrv default with EPICS_CAS_USE_HOST_NAMES=NO,
     // upgraded transparently when mTLS is in effect.
     state.hostname = initial_hostname.unwrap_or_else(|| peer.ip().to_string());
+    state.peer = peer.to_string();
+    state.audit = audit;
+    state.audit("connect", "", "", "ok").await;
     let mut reader = reader;
 
     let mut buf = vec![0u8; 8192];
@@ -386,6 +423,7 @@ where
         }
     }
 
+    state.audit("disconnect", "", "", "ok").await;
     Ok(())
 }
 
@@ -565,6 +603,13 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                 w.write_all(&ar.to_bytes()).await?;
                 w.write_all(&resp.to_bytes_extended()).await?;
                 w.flush().await?;
+                drop(w);
+
+                let result = match access_level {
+                    AccessLevel::NoAccess => "denied",
+                    _ => "ok",
+                };
+                state.audit("create_chan", &pv_name, "", result).await;
             } else {
                 // PV not found — send CREATE_CH_FAIL
                 let mut fail = CaHeader::new(CA_PROTO_CREATE_CH_FAIL);
@@ -572,6 +617,9 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                 let mut w = writer.lock().await;
                 w.write_all(&fail.to_bytes()).await?;
                 w.flush().await?;
+                drop(w);
+
+                state.audit("create_chan", &pv_name, "", "not_found").await;
             }
         }
 
@@ -779,6 +827,15 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                 }
             };
 
+            // Resolve the audit-friendly PV name once. Cheap when audit
+            // is off because state.audit() is a single None check.
+            let audit_pv = match &entry.target {
+                ChannelTarget::SimplePv(pv) => pv.name.clone(),
+                ChannelTarget::RecordField { record, field } => {
+                    format!("{}.{}", record.read().await.name, field)
+                }
+            };
+
             // Check access level
             let access = state
                 .channel_access
@@ -796,6 +853,7 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     w.write_all(&resp.to_bytes()).await?;
                     w.flush().await?;
                 }
+                state.audit("caput", &audit_pv, "", "denied").await;
                 return Ok(());
             }
 
@@ -818,6 +876,14 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                 }
             };
 
+            // Stringify the value once for the audit log; skipped when
+            // audit is off.
+            let audit_value = if state.audit.is_some() {
+                format!("{new_value}")
+            } else {
+                String::new()
+            };
+
             let write_result = match &entry.target {
                 ChannelTarget::SimplePv(pv) => {
                     pv.set(new_value).await;
@@ -828,6 +894,11 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     db.put_record_field_from_ca(&name, field, new_value).await
                 }
             };
+
+            let audit_result = if write_result.is_ok() { "ok" } else { "fail" };
+            state
+                .audit("caput", &audit_pv, &audit_value, audit_result)
+                .await;
 
             // F1: CA_PROTO_WRITE (cmd=4) is fire-and-forget — no response
             if is_notify {

@@ -14,6 +14,7 @@
 //! This crate provides the CA wire protocol implementation,
 //! separated from the core IOC infrastructure in `epics-base-rs`.
 
+pub mod audit;
 pub(crate) mod channel;
 pub mod client;
 pub mod discovery;

@@ -197,11 +197,25 @@ When a client tries to create the (N+1)st channel the server replies
 Maximum number of subscriptions per channel. Default: 100. Minimum:
 1. Excess `EVENT_ADD` requests get `ECA_ALLOCMEM`.
 
+### `EPICS_CAS_AUDIT_FILE` (rust-only)
+
+Path to a JSON-Lines audit log. When set, the server appends one
+line per security-relevant event (connect, disconnect,
+create_chan, caput, ACF deny). Pair with `logrotate` for retention.
+Unset disables audit.
+
+### `EPICS_CAS_AUDIT` (rust-only)
+
+Alternative sink. `stderr` mirrors audit lines to standard error
+(useful under systemd-journald). Ignored when
+`EPICS_CAS_AUDIT_FILE` is also set.
+
 ## Compatibility notes
 
 The **rust-only** variables (`EPICS_CA_MONITOR_QUEUE`,
 `EPICS_CAS_INACTIVITY_TMO`, `EPICS_CAS_MAX_CHANNELS`,
-`EPICS_CAS_MAX_SUBS_PER_CHAN`) are no-ops if observed by libca/rsrv.
+`EPICS_CAS_MAX_SUBS_PER_CHAN`, `EPICS_CAS_AUDIT_FILE`,
+`EPICS_CAS_AUDIT`) are no-ops if observed by libca/rsrv.
 They were chosen to mirror libca's variable-naming convention so
 operators don't need to learn a separate vocabulary.
 

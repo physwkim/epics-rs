@@ -44,6 +44,9 @@ pub struct CaServerBuilder {
     /// Optional RFC 2136 Dynamic DNS UPDATE registration.
     #[cfg(feature = "discovery-dns-update")]
     dns_update: Option<crate::discovery::DnsRegistration>,
+    /// Optional audit logger. When set, security-relevant events
+    /// (connect, caput, ACF deny, ...) land in the configured sink.
+    audit: Option<crate::audit::AuditLogger>,
 }
 
 impl CaServerBuilder {
@@ -59,7 +62,17 @@ impl CaServerBuilder {
             mdns_txt: Vec::new(),
             #[cfg(feature = "discovery-dns-update")]
             dns_update: None,
+            audit: audit_from_env(),
         }
+    }
+
+    /// Wire a structured audit log. Every connection lifecycle event
+    /// and every `caput` lands as one JSON line in the supplied sink.
+    /// Useful for compliance and forensic review; cost is one
+    /// `Option::is_some()` check per event when omitted.
+    pub fn audit(mut self, logger: crate::audit::AuditLogger) -> Self {
+        self.audit = Some(logger);
+        self
     }
 
     /// Announce this IOC via mDNS as
@@ -220,6 +233,7 @@ impl CaServerBuilder {
             mdns_txt: self.mdns_txt,
             #[cfg(feature = "discovery-dns-update")]
             dns_update: self.dns_update,
+            audit: self.audit,
         })
     }
 }
@@ -256,6 +270,8 @@ pub struct CaServer {
     /// RFC 2136 dynamic DNS UPDATE registration. None disables it.
     #[cfg(feature = "discovery-dns-update")]
     dns_update: Option<crate::discovery::DnsRegistration>,
+    /// Optional structured audit logger.
+    audit: Option<crate::audit::AuditLogger>,
 }
 
 impl CaServer {
@@ -288,6 +304,7 @@ impl CaServer {
             mdns_txt: Vec::new(),
             #[cfg(feature = "discovery-dns-update")]
             dns_update: None,
+            audit: audit_from_env(),
         }
     }
 
@@ -502,6 +519,7 @@ impl CaServer {
             );
             metrics::counter!("ca_server_tls_enabled_total").increment(1);
         }
+        let audit_for_tcp = self.audit.clone();
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
             #[cfg(feature = "experimental-rust-tls")]
             {
@@ -512,14 +530,23 @@ impl CaServer {
                     tcp_tx,
                     beacon_reset_tcp,
                     conn_events,
+                    audit_for_tcp,
                     tls,
                 )
                 .await
             }
             #[cfg(not(feature = "experimental-rust-tls"))]
             {
-                tcp::run_tcp_listener(db_tcp, port, acf, tcp_tx, beacon_reset_tcp, conn_events)
-                    .await
+                tcp::run_tcp_listener(
+                    db_tcp,
+                    port,
+                    acf,
+                    tcp_tx,
+                    beacon_reset_tcp,
+                    conn_events,
+                    audit_for_tcp,
+                )
+                .await
             }
         });
         let tcp_abort = tcp_handle.abort_handle();
@@ -650,4 +677,41 @@ impl CaServer {
         }
         result
     }
+}
+
+/// Resolve an audit logger from environment variables. The default
+/// builders call this so every CaServer picks up site-wide audit
+/// configuration without code changes.
+///
+/// - `EPICS_CAS_AUDIT_FILE=<path>` writes JSON-Lines to the path
+/// - `EPICS_CAS_AUDIT=stderr`      writes to stderr
+/// - unset / empty                 disables audit
+fn audit_from_env() -> Option<crate::audit::AuditLogger> {
+    if let Some(path) = epics_base_rs::runtime::env::get("EPICS_CAS_AUDIT_FILE") {
+        if !path.is_empty() {
+            // Open the file synchronously; tokio's `spawn_blocking` would
+            // be cleaner but `from_parts` is sync.
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                Ok(f) => {
+                    let async_file = tokio::fs::File::from_std(f);
+                    let sink = crate::audit::AuditSink::File(tokio::sync::Mutex::new(async_file));
+                    return Some(crate::audit::AuditLogger::new(sink));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path,
+                        "EPICS_CAS_AUDIT_FILE: failed to open; audit disabled");
+                }
+            }
+        }
+    }
+    if let Some(val) = epics_base_rs::runtime::env::get("EPICS_CAS_AUDIT") {
+        if val.eq_ignore_ascii_case("stderr") {
+            return Some(crate::audit::AuditLogger::new(crate::audit::AuditSink::Stderr));
+        }
+    }
+    None
 }

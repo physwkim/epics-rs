@@ -85,6 +85,7 @@ async fn rust_client_tls_to_rust_server() {
 
     let client = CaClient::new_with_config(CaClientConfig {
         tls: Some(client_tls),
+        ..Default::default()
     })
     .await
     .expect("client");
