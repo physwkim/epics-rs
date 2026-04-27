@@ -18,7 +18,7 @@ use super::scalar::ScalarType;
 /// - `Variant` / `VariantArray` are "any" — the value carries its own
 ///   descriptor on the wire.
 /// - `BoundedString` is a string with a wire-side maximum length tag.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FieldDesc {
     Scalar(ScalarType),
     ScalarArray(ScalarType),

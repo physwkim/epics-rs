@@ -4,7 +4,7 @@ use std::fmt;
 
 /// PVA scalar types. The wire encoding uses the type-code lookup table from
 /// pvData (`FieldCreateFactory.cpp`), not the enum's discriminant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ScalarType {
     Boolean = 0,

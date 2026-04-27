@@ -52,7 +52,10 @@ pub fn encode_field_desc(name: &str, desc: &FieldDesc, order: ByteOrder, out: &m
     encode_type_desc(desc, order, out);
 }
 
-/// Encode just the type-tag portion (no name) of a `FieldDesc`.
+/// Encode just the type-tag portion (no name) of a `FieldDesc`. Always
+/// emits the inline form — never produces 0xFD/0xFE cache markers. Use
+/// [`encode_type_desc_cached`] when sharing type slots across messages
+/// on a single connection.
 pub fn encode_type_desc(desc: &FieldDesc, order: ByteOrder, out: &mut Vec<u8>) {
     match desc {
         FieldDesc::Scalar(st) => out.put_u8(st.type_code()),
@@ -100,6 +103,156 @@ fn encode_structure_body(
     encode_size_into(fields.len() as u32, order, out);
     for (name, child) in fields {
         encode_field_desc(name, child, order, out);
+    }
+}
+
+// ── FieldDesc encode (cached / 0xFD-0xFE emitter) ────────────────────────
+
+/// Per-connection state for emitting `0xFD`/`0xFE` type-cache markers.
+///
+/// Mirror of the receiver-side [`TypeCache`]: when the same compound
+/// `FieldDesc` is sent twice on a single connection the second emission
+/// is replaced with a 3-byte `0xFE <slot>` reference instead of the full
+/// inline body. For NTScalar/NTTable-class descriptors this saves
+/// 100–500 bytes per repeat.
+///
+/// Only compound types (`Structure`, `StructureArray`, `Union`,
+/// `UnionArray`) are cached — scalars and other 1–2 byte tags are smaller
+/// inline than the 3-byte marker would be.
+///
+/// The receiver populates its decode `TypeCache` post-order from the
+/// inline body of `0xFD <slot>` frames; the slot we allocate here is
+/// arbitrary (a monotonic counter) and the decoder honours whatever key
+/// we pick. Slots overflow `u16`; we panic on exhaustion (65 535 distinct
+/// compound descriptors per connection — far beyond realistic use).
+#[derive(Debug, Default, Clone)]
+pub struct EncodeTypeCache {
+    next: u16,
+    map: std::collections::HashMap<FieldDesc, u16>,
+}
+
+impl EncodeTypeCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn cacheable(desc: &FieldDesc) -> bool {
+        matches!(
+            desc,
+            FieldDesc::Structure { .. }
+                | FieldDesc::StructureArray { .. }
+                | FieldDesc::Union { .. }
+                | FieldDesc::UnionArray { .. }
+        )
+    }
+}
+
+/// [`encode_field_desc`] threading an [`EncodeTypeCache`] so repeat
+/// compound descriptors emit `0xFE <slot>` instead of the full body.
+pub fn encode_field_desc_cached(
+    name: &str,
+    desc: &FieldDesc,
+    order: ByteOrder,
+    cache: &mut EncodeTypeCache,
+    out: &mut Vec<u8>,
+) {
+    encode_string_into(name, order, out);
+    encode_type_desc_cached(desc, order, cache, out);
+}
+
+/// [`encode_type_desc`] threading an [`EncodeTypeCache`]. On first sight
+/// of a cacheable descriptor emits `0xFD <slot>` followed by the inline
+/// body; on later sights of the same descriptor emits `0xFE <slot>`.
+/// Non-cacheable descriptors (scalars, variants, bounded strings) always
+/// fall through to the inline encoding.
+pub fn encode_type_desc_cached(
+    desc: &FieldDesc,
+    order: ByteOrder,
+    cache: &mut EncodeTypeCache,
+    out: &mut Vec<u8>,
+) {
+    if EncodeTypeCache::cacheable(desc) {
+        if let Some(&slot) = cache.map.get(desc) {
+            out.put_u8(0xFE);
+            out.put_u16(slot, order);
+            return;
+        }
+        let slot = cache.next;
+        cache.next = cache
+            .next
+            .checked_add(1)
+            .expect("encode type cache slot overflow (>65535 compound descriptors)");
+        cache.map.insert(desc.clone(), slot);
+        out.put_u8(0xFD);
+        out.put_u16(slot, order);
+        // fall through and emit the inline body
+    }
+    encode_type_desc_inline_cached(desc, order, cache, out);
+}
+
+/// Emit the descriptor's inline body. Children may still consult the
+/// cache and emit their own 0xFD/0xFE markers.
+fn encode_type_desc_inline_cached(
+    desc: &FieldDesc,
+    order: ByteOrder,
+    cache: &mut EncodeTypeCache,
+    out: &mut Vec<u8>,
+) {
+    match desc {
+        FieldDesc::Scalar(st) => out.put_u8(st.type_code()),
+        FieldDesc::ScalarArray(st) => out.put_u8(st.array_type_code()),
+        FieldDesc::Structure { struct_id, fields } => {
+            out.put_u8(TAG_STRUCTURE);
+            encode_structure_body_cached(struct_id, fields, order, cache, out);
+        }
+        FieldDesc::StructureArray { struct_id, fields } => {
+            out.put_u8(TAG_STRUCTURE_ARRAY);
+            out.put_u8(TAG_STRUCTURE);
+            encode_structure_body_cached(struct_id, fields, order, cache, out);
+        }
+        FieldDesc::Union {
+            struct_id,
+            variants,
+        } => {
+            out.put_u8(TAG_UNION);
+            encode_structure_body_cached(struct_id, variants, order, cache, out);
+        }
+        FieldDesc::UnionArray {
+            struct_id,
+            variants,
+        } => {
+            out.put_u8(TAG_UNION_ARRAY);
+            out.put_u8(TAG_UNION);
+            encode_structure_body_cached(struct_id, variants, order, cache, out);
+        }
+        FieldDesc::Variant => out.put_u8(TAG_VARIANT),
+        FieldDesc::VariantArray => out.put_u8(TAG_VARIANT_ARRAY),
+        FieldDesc::BoundedString(bound) => {
+            out.put_u8(TAG_BOUNDED_STRING);
+            encode_size_into(*bound, order, out);
+        }
+    }
+}
+
+fn encode_structure_body_cached(
+    struct_id: &str,
+    fields: &[(String, FieldDesc)],
+    order: ByteOrder,
+    cache: &mut EncodeTypeCache,
+    out: &mut Vec<u8>,
+) {
+    encode_string_into(struct_id, order, out);
+    encode_size_into(fields.len() as u32, order, out);
+    for (name, child) in fields {
+        encode_field_desc_cached(name, child, order, cache, out);
     }
 }
 
@@ -961,5 +1114,130 @@ mod tests {
             }
             other => panic!("expected variant, got {other:?}"),
         }
+    }
+
+    // ── TypeStore (0xFD/0xFE) encode tests ──────────────────────────────
+
+    #[test]
+    fn cached_first_emission_starts_with_fd() {
+        let desc = nt_scalar_double_desc();
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let mut cache = EncodeTypeCache::new();
+            let mut buf = Vec::new();
+            encode_type_desc_cached(&desc, order, &mut cache, &mut buf);
+            assert_eq!(buf[0], 0xFD, "first emission must define a slot");
+            // cache holds outer NTScalar + nested alarm
+            assert_eq!(cache.len(), 2);
+        }
+    }
+
+    #[test]
+    fn cached_second_emission_is_three_byte_reference() {
+        let desc = nt_scalar_double_desc();
+        let order = ByteOrder::Little;
+        let mut cache = EncodeTypeCache::new();
+        let mut first = Vec::new();
+        encode_type_desc_cached(&desc, order, &mut cache, &mut first);
+
+        let mut second = Vec::new();
+        encode_type_desc_cached(&desc, order, &mut cache, &mut second);
+
+        // Repeat must collapse to exactly 3 bytes: 0xFE + u16 slot.
+        assert_eq!(second.len(), 3);
+        assert_eq!(second[0], 0xFE);
+        assert!(
+            second.len() < first.len() / 4,
+            "repeat must shrink dramatically (first={}, second={})",
+            first.len(),
+            second.len()
+        );
+    }
+
+    #[test]
+    fn cached_round_trip_through_decoder() {
+        let desc = nt_scalar_double_desc();
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let mut enc_cache = EncodeTypeCache::new();
+            let mut buf = Vec::new();
+            // Two consecutive INIT-like emissions on the same connection.
+            encode_type_desc_cached(&desc, order, &mut enc_cache, &mut buf);
+            encode_type_desc_cached(&desc, order, &mut enc_cache, &mut buf);
+
+            let mut dec_cache = TypeCache::new();
+            let mut cur = Cursor::new(buf.as_slice());
+            let first = decode_type_desc_cached(&mut cur, order, &mut dec_cache).unwrap();
+            let second = decode_type_desc_cached(&mut cur, order, &mut dec_cache).unwrap();
+            assert_eq!(format!("{first}"), format!("{desc}"));
+            assert_eq!(format!("{second}"), format!("{desc}"));
+            assert_eq!(cur.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn cached_shares_nested_struct_across_outer_types() {
+        // Two distinct outer descriptors that share an inner `alarm_t`.
+        let alarm = FieldDesc::Structure {
+            struct_id: "alarm_t".into(),
+            fields: vec![
+                ("severity".into(), FieldDesc::Scalar(ScalarType::Int)),
+                ("status".into(), FieldDesc::Scalar(ScalarType::Int)),
+                ("message".into(), FieldDesc::Scalar(ScalarType::String)),
+            ],
+        };
+        let nt_double = FieldDesc::Structure {
+            struct_id: "epics:nt/NTScalar:1.0".into(),
+            fields: vec![
+                ("value".into(), FieldDesc::Scalar(ScalarType::Double)),
+                ("alarm".into(), alarm.clone()),
+            ],
+        };
+        let nt_int = FieldDesc::Structure {
+            struct_id: "epics:nt/NTScalar:1.0".into(),
+            fields: vec![
+                ("value".into(), FieldDesc::Scalar(ScalarType::Int)),
+                ("alarm".into(), alarm.clone()),
+            ],
+        };
+
+        let order = ByteOrder::Little;
+        let mut enc_cache = EncodeTypeCache::new();
+        let mut buf = Vec::new();
+        encode_type_desc_cached(&nt_double, order, &mut enc_cache, &mut buf);
+        let len_after_first = buf.len();
+        encode_type_desc_cached(&nt_int, order, &mut enc_cache, &mut buf);
+        let len_after_second = buf.len();
+        let second_size = len_after_second - len_after_first;
+
+        // Second NTScalar should be smaller than the first because the
+        // shared `alarm_t` body collapses to a 3-byte 0xFE reference.
+        assert!(
+            second_size < len_after_first,
+            "shared inner struct should compress: first={}, second={}",
+            len_after_first,
+            second_size
+        );
+
+        let mut dec_cache = TypeCache::new();
+        let mut cur = Cursor::new(buf.as_slice());
+        let dec_double = decode_type_desc_cached(&mut cur, order, &mut dec_cache).unwrap();
+        let dec_int = decode_type_desc_cached(&mut cur, order, &mut dec_cache).unwrap();
+        assert_eq!(format!("{dec_double}"), format!("{nt_double}"));
+        assert_eq!(format!("{dec_int}"), format!("{nt_int}"));
+    }
+
+    #[test]
+    fn cached_does_not_wrap_scalars() {
+        // Scalar tags are 1 byte inline; 0xFD/0xFE markers would inflate.
+        let order = ByteOrder::Little;
+        let mut cache = EncodeTypeCache::new();
+        let mut buf = Vec::new();
+        encode_type_desc_cached(
+            &FieldDesc::Scalar(ScalarType::Double),
+            order,
+            &mut cache,
+            &mut buf,
+        );
+        assert_eq!(buf, vec![ScalarType::Double.type_code()]);
+        assert!(cache.is_empty());
     }
 }

@@ -29,7 +29,10 @@ use crate::proto::{
     encode_size_into, encode_string_into, BitSet, ByteOrder, Command, ControlCommand, PvaHeader,
     Status, WriteExt, PVA_VERSION,
 };
-use crate::pvdata::encode::{decode_pv_field, decode_type_desc, encode_pv_field, encode_type_desc};
+use crate::pvdata::encode::{
+    decode_pv_field, decode_type_desc, encode_pv_field, encode_type_desc,
+    encode_type_desc_cached, EncodeTypeCache,
+};
 use crate::pvdata::{FieldDesc, PvField};
 
 use super::source::DynSource;
@@ -208,6 +211,11 @@ async fn handle_connection_io(
     let mut handshake_complete = false;
     let _peer = peer;
 
+    // Per-connection type-cache for emit-side TypeStore. Repeat compound
+    // descriptors collapse to 3-byte 0xFE references — big win when many
+    // channels share the same NTScalar/NTTable shape on one client.
+    let mut encode_type_cache = EncodeTypeCache::new();
+
     loop {
         let frame = read_frame(&mut reader, &mut rx_buf, op_timeout).await?;
         last_rx.store(now_nanos(), Ordering::SeqCst);
@@ -290,6 +298,7 @@ async fn handle_connection_io(
                     order,
                     OpKind::Get,
                     &config,
+                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -302,6 +311,7 @@ async fn handle_connection_io(
                     order,
                     OpKind::Put,
                     &config,
+                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -314,6 +324,7 @@ async fn handle_connection_io(
                     order,
                     OpKind::Monitor,
                     &config,
+                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -326,6 +337,7 @@ async fn handle_connection_io(
                     order,
                     OpKind::Rpc,
                     &config,
+                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -514,6 +526,7 @@ async fn handle_op(
     order: ByteOrder,
     kind: OpKind,
     config: &PvaServerConfig,
+    encode_cache: &mut EncodeTypeCache,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
     let sid = cur.get_u32(order).map_err(|e| PvaError::Decode(e.to_string()))?;
@@ -565,7 +578,7 @@ async fn handle_op(
         payload.put_u32(ioid, order);
         payload.put_u8(subcmd);
         Status::ok().write_into(order, &mut payload);
-        encode_type_desc(&intro, order, &mut payload);
+        encode_type_desc_cached(&intro, order, encode_cache, &mut payload);
         let h = PvaHeader::application(true, order, cmd.code(), payload.len() as u32);
         let mut buf = Vec::new();
         h.write_into(&mut buf);
@@ -716,7 +729,7 @@ async fn handle_op(
             match result {
                 Ok((resp_desc, resp_value)) => {
                     Status::ok().write_into(order, &mut payload);
-                    encode_type_desc(&resp_desc, order, &mut payload);
+                    encode_type_desc_cached(&resp_desc, order, encode_cache, &mut payload);
                     encode_pv_field(&resp_value, &resp_desc, order, &mut payload);
                 }
                 Err(msg) => Status::error(msg).write_into(order, &mut payload),
