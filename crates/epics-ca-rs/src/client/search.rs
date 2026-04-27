@@ -259,6 +259,10 @@ pub(crate) async fn run_search_engine(
     #[cfg(unix)]
     {
         use std::os::fd::BorrowedFd;
+        // SAFETY: socket.as_raw_fd() returns a valid OS-owned fd that
+        // outlives the BorrowedFd we construct here (`socket` is on the
+        // stack and not closed until end of scope). socket2::SockRef
+        // does not take ownership; it only reads/writes socket options.
         let fd = unsafe { BorrowedFd::borrow_raw(socket.as_raw_fd()) };
         let sock_ref = socket2::SockRef::from(&fd);
         let _ = sock_ref.set_recv_buffer_size(256 * 1024);

@@ -1150,10 +1150,28 @@ impl RecordInstance {
             });
         }
         self.common.lcnt = 0;
+        // RAII guard that resets `self.processing` to false on drop —
+        // both for the normal exit path and for any `?` early return.
+        // The guard holds a raw pointer rather than a reference because
+        // we still need `self` mutably while the guard is alive (the
+        // record body below mutates other `self` fields).
         struct ProcessGuard(*const AtomicBool);
+        // SAFETY: AtomicBool is Sync; raw pointers don't auto-derive
+        // Send. We hand-roll Send because the ptr targets a field of
+        // `self`, which the caller already proves can be borrowed
+        // through this code path. The pointer is only ever read for an
+        // atomic store, never written, dereferenced for raw access, or
+        // escaped from this scope.
         unsafe impl Send for ProcessGuard {}
         impl Drop for ProcessGuard {
             fn drop(&mut self) {
+                // SAFETY: `self.0` was constructed from
+                // `&self.processing as *const AtomicBool` below, where
+                // `self` is the live RecordInstance whose lifetime
+                // strictly outlives `_guard`. RecordInstance is
+                // !Unpin-equivalent in practice (we never move it
+                // while held in the database's `Arc<RwLock<_>>`), so
+                // the pointer remains valid until Drop runs.
                 unsafe { &*self.0 }.store(false, std::sync::atomic::Ordering::Release);
             }
         }
