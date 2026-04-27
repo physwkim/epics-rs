@@ -87,7 +87,7 @@ struct ClientState {
     next_sid: AtomicU32,
     hostname: String,
     username: String,
-    acf: Arc<Option<AccessSecurityConfig>>,
+    acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
     tcp_port: u16,
     client_minor_version: u16,
     flow_control: Arc<FlowControlGate>,
@@ -98,7 +98,10 @@ struct ClientState {
 }
 
 impl ClientState {
-    fn new(acf: Arc<Option<AccessSecurityConfig>>, tcp_port: u16) -> Self {
+    fn new(
+        acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
+        tcp_port: u16,
+    ) -> Self {
         Self {
             channels: HashMap::new(),
             subscriptions: HashMap::new(),
@@ -122,7 +125,8 @@ impl ClientState {
     async fn compute_access(&self, target: &ChannelTarget) -> u32 {
         match target {
             ChannelTarget::SimplePv(_) => {
-                if let Some(ref acf_cfg) = *self.acf {
+                let guard = self.acf.read().await;
+                if let Some(ref acf_cfg) = *guard {
                     match acf_cfg.check_access("DEFAULT", &self.hostname, &self.username) {
                         AccessLevel::ReadWrite => 3,
                         AccessLevel::Read => 1,
@@ -143,15 +147,18 @@ impl ClientState {
                     .unwrap_or(false);
                 if is_ro {
                     1
-                } else if let Some(ref acf_cfg) = *self.acf {
-                    let asg = &instance.common.asg;
-                    match acf_cfg.check_access(asg, &self.hostname, &self.username) {
-                        AccessLevel::ReadWrite => 3,
-                        AccessLevel::Read => 1,
-                        AccessLevel::NoAccess => 0,
-                    }
                 } else {
-                    3
+                    let guard = self.acf.read().await;
+                    if let Some(ref acf_cfg) = *guard {
+                        let asg = &instance.common.asg;
+                        match acf_cfg.check_access(asg, &self.hostname, &self.username) {
+                            AccessLevel::ReadWrite => 3,
+                            AccessLevel::Read => 1,
+                            AccessLevel::NoAccess => 0,
+                        }
+                    } else {
+                        3
+                    }
                 }
             }
         }
@@ -167,7 +174,7 @@ impl ClientState {
 pub async fn run_tcp_listener(
     db: Arc<PvDatabase>,
     port: u16,
-    acf: Arc<Option<AccessSecurityConfig>>,
+    acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
     conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
@@ -243,7 +250,7 @@ async fn handle_client(
     stream: tokio::net::TcpStream,
     peer: SocketAddr,
     db: Arc<PvDatabase>,
-    acf: Arc<Option<AccessSecurityConfig>>,
+    acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
     tcp_port: u16,
 ) -> CaResult<()> {
     // Disable Nagle's algorithm to avoid extra latency for small control messages.

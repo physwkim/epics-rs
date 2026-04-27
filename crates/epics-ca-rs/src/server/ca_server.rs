@@ -25,6 +25,10 @@ pub struct CaServerBuilder {
     ioc: ioc_builder::IocBuilder,
     port: u16,
     acf: Option<access_security::AccessSecurityConfig>,
+    /// Captured by `acf_file(path)` so the built server can later
+    /// `reload_acf()` from the same source. None when the ACF was
+    /// supplied in-memory via `acf(config)`.
+    acf_path: Option<String>,
 }
 
 impl CaServerBuilder {
@@ -33,6 +37,7 @@ impl CaServerBuilder {
             ioc: ioc_builder::IocBuilder::new(),
             port: CA_SERVER_PORT,
             acf: None,
+            acf_path: None,
         }
     }
 
@@ -44,10 +49,12 @@ impl CaServerBuilder {
         self
     }
 
-    /// Load an access security configuration file.
+    /// Load an access security configuration file. The path is
+    /// retained so `CaServer::reload_acf()` can later re-read it.
     pub fn acf_file(mut self, path: &str) -> CaResult<Self> {
         let content = std::fs::read_to_string(path).map_err(CaError::Io)?;
         self.acf = Some(access_security::parse_acf(&content)?);
+        self.acf_path = Some(path.to_string());
         Ok(self)
     }
 
@@ -133,11 +140,12 @@ impl CaServerBuilder {
     /// Build the server.
     pub async fn build(self) -> CaResult<CaServer> {
         let (db, autosave_config) = self.ioc.build().await?;
-        let acf = Arc::new(self.acf);
+        let acf = Arc::new(tokio::sync::RwLock::new(self.acf));
         Ok(CaServer {
             db,
             port: self.port,
             acf,
+            acf_source_path: std::sync::Mutex::new(self.acf_path),
             autosave_config,
             autosave_manager: None,
             conn_events: None,
@@ -150,7 +158,14 @@ impl CaServerBuilder {
 pub struct CaServer {
     db: Arc<PvDatabase>,
     port: u16,
-    acf: Arc<Option<access_security::AccessSecurityConfig>>,
+    /// Active access security configuration. Wrapped in `RwLock` so
+    /// `reload_acf` can swap it without restarting the server. Access
+    /// checks acquire a read lock; reload acquires write.
+    acf: Arc<tokio::sync::RwLock<Option<access_security::AccessSecurityConfig>>>,
+    /// Path the ACF was originally loaded from, retained so the no-arg
+    /// `reload_acf()` knows which file to re-read. None when the server
+    /// was built via the in-memory `acf(config)` setter.
+    acf_source_path: std::sync::Mutex<Option<String>>,
     autosave_config: Option<autosave::SaveSetConfig>,
     autosave_manager: Option<Arc<autosave::AutosaveManager>>,
     /// Optional broadcast channel for connection lifecycle events.
@@ -178,12 +193,59 @@ impl CaServer {
         Self {
             db,
             port,
-            acf: Arc::new(acf),
+            acf: Arc::new(tokio::sync::RwLock::new(acf)),
+            acf_source_path: std::sync::Mutex::new(None),
             autosave_config,
             autosave_manager,
             conn_events: None,
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Re-read the ACF file the server was originally configured with
+    /// and atomically swap in the new configuration. The new rules take
+    /// effect on the next access check (CREATE_CHAN, HOST_NAME, or
+    /// CLIENT_NAME message); already-allocated channel access bits stay
+    /// in place until re-evaluated.
+    ///
+    /// Errors when no source path is registered. Use `reload_acf_from`
+    /// with an explicit path when the server was constructed via
+    /// `acf(config)` rather than `acf_file(path)`.
+    pub async fn reload_acf(&self) -> CaResult<()> {
+        let path = self
+            .acf_source_path
+            .lock()
+            .map_err(|_| CaError::InvalidValue("acf_source_path lock poisoned".into()))?
+            .clone();
+        match path {
+            Some(p) => self.reload_acf_from(&p).await,
+            None => Err(CaError::InvalidValue(
+                "no ACF source path registered; use reload_acf_from() with an explicit path"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Re-read ACF from an arbitrary path. Use this when the source has
+    /// moved or when the server was originally configured in-memory.
+    pub async fn reload_acf_from(&self, path: &str) -> CaResult<()> {
+        let content = std::fs::read_to_string(path).map_err(CaError::Io)?;
+        let parsed = access_security::parse_acf(&content)?;
+        {
+            let mut guard = self.acf.write().await;
+            *guard = Some(parsed);
+        }
+        if let Ok(mut p) = self.acf_source_path.lock() {
+            *p = Some(path.to_string());
+        }
+        tracing::info!(path = %path, "ACF reloaded; new rules apply to subsequent access checks");
+        metrics::counter!("ca_server_acf_reloads_total").increment(1);
+        Ok(())
+    }
+
+    /// Returns the path the ACF was loaded from, if any.
+    pub fn acf_source_path(&self) -> Option<String> {
+        self.acf_source_path.lock().ok().and_then(|g| g.clone())
     }
 
     /// Set callbacks to run after PINI processing completes.
