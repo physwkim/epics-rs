@@ -8,7 +8,7 @@ use crate::error::PvaResult;
 
 use super::source::{ChannelSource, ChannelSourceObj, DynSource};
 use super::tcp::run_tcp_server;
-use super::udp::{random_guid, run_udp_responder};
+use super::udp::{random_guid, run_udp_responder_proto};
 
 /// Runtime configuration for [`run_pva_server`].
 #[derive(Clone)]
@@ -69,11 +69,15 @@ where
     let guid = random_guid();
     let bind_addr = SocketAddr::new(std::net::IpAddr::V4(config.bind_ip), config.tcp_port);
 
-    let udp_handle = tokio::spawn(run_udp_responder(
+    // Advertise "tls" in SEARCH_RESPONSE when the server requires TLS, so
+    // pvxs clients with TLS configured connect via `pvas://`.
+    let protocol: &'static str = if config.tls.is_some() { "tls" } else { "tcp" };
+    let udp_handle = tokio::spawn(run_udp_responder_proto(
         dyn_source.clone(),
         config.udp_port,
         config.tcp_port,
         guid,
+        protocol,
     ));
     let tcp_handle = tokio::spawn(run_tcp_server(dyn_source, bind_addr, config.clone()));
 

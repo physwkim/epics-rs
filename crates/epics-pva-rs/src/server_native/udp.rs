@@ -49,12 +49,15 @@ fn bind_udp(port: u16) -> PvaResult<UdpSocket> {
 /// Run the UDP search responder + beacon emitter until the runtime is dropped.
 ///
 /// `tcp_port` is advertised in SEARCH_RESPONSE so clients know where to
-/// open the virtual circuit.
-pub async fn run_udp_responder(
+/// open the virtual circuit. `protocol` is normally `"tcp"`; set to
+/// `"tls"` when the TCP listener requires TLS so pvxs clients with TLS
+/// configured will connect over `pvas://`.
+pub async fn run_udp_responder_proto(
     source: DynSource,
     udp_port: u16,
     tcp_port: u16,
     guid: [u8; 12],
+    protocol: &'static str,
 ) -> PvaResult<()> {
     let socket = bind_udp(udp_port)?;
     let socket = Arc::new(socket);
@@ -90,12 +93,13 @@ pub async fn run_udp_responder(
                 if !exists {
                     continue;
                 }
-                let resp = build_search_response(
+                let resp = build_search_response_proto(
                     guid,
                     req.seq,
                     tcp_port,
                     &[cid_name.0],
                     req.byte_order,
+                    protocol,
                 );
                 if let Err(e) = socket.send_to(&resp, peer).await {
                     debug!("udp send to {peer}: {e}");
@@ -111,13 +115,14 @@ pub async fn run_udp_responder(
     }
 }
 
-/// Build a (one-PV) SEARCH_RESPONSE frame.
-fn build_search_response(
+/// Build a (one-PV) SEARCH_RESPONSE frame with explicit protocol name.
+fn build_search_response_proto(
     guid: [u8; 12],
     seq: u32,
     tcp_port: u16,
     cids: &[u32],
     order: ByteOrder,
+    protocol: &str,
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&guid);
@@ -125,7 +130,7 @@ fn build_search_response(
     let addr = ip_to_bytes(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     payload.extend_from_slice(&addr);
     payload.put_u16(tcp_port, order);
-    encode_string_into("tcp", order, &mut payload);
+    encode_string_into(protocol, order, &mut payload);
     payload.put_u8(1); // found
     payload.put_u16(cids.len() as u16, order);
     for &cid in cids {
@@ -136,6 +141,16 @@ fn build_search_response(
     header.write_into(&mut out);
     out.extend_from_slice(&payload);
     out
+}
+
+/// Backwards-compat wrapper: protocol = "tcp".
+pub async fn run_udp_responder(
+    source: DynSource,
+    udp_port: u16,
+    tcp_port: u16,
+    guid: [u8; 12],
+) -> PvaResult<()> {
+    run_udp_responder_proto(source, udp_port, tcp_port, guid, "tcp").await
 }
 
 fn build_beacon(guid: [u8; 12], tcp_port: u16, order: ByteOrder) -> Vec<u8> {
