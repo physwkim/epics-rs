@@ -15,6 +15,7 @@
 //! separated from the core IOC infrastructure in `epics-base-rs`.
 
 pub mod audit;
+pub mod cap_token;
 pub(crate) mod channel;
 pub mod chaos;
 pub mod client;

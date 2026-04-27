@@ -29,6 +29,11 @@ hickory-resolver = { version = "0.24", default-features = false, features = ["to
 hickory-client = { version = "0.24", default-features = false, features = ["dnssec-ring"], optional = true }
 hickory-proto = { version = "0.24", default-features = false, features = ["dnssec-ring", "tokio-runtime"], optional = true }
 base64 = { version = "0.22", optional = true }
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+ed25519-dalek = { version = "2", optional = true, features = ["rand_core"] }
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
+thiserror = { version = "1", optional = true }
 opentelemetry = { version = "0.24", optional = true }
 opentelemetry_sdk = { version = "0.24", default-features = false, features = ["trace", "rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.17", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
@@ -85,6 +90,18 @@ otlp = [
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
+]
+# Ed25519 capability tokens for identity-based access control. Used
+# as an alternative to UNIX-style host/user matching for clients
+# behind NAT, in containers, or otherwise unable to present a stable
+# host identity. Adds ed25519-dalek + rand_core + base64.
+cap-tokens = [
+    "dep:ed25519-dalek",
+    "dep:rand_core",
+    "dep:base64",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
 ]
 
 [dev-dependencies]

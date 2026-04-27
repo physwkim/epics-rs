@@ -75,6 +75,11 @@ async fn run_single_responder(
     socket.set_broadcast(true)?;
 
     let mut buf = [0u8; 4096];
+    // Per-source-IP token bucket. Off by default; when
+    // EPICS_CAS_UDP_SEARCH_RATE_LIMIT is set, drops excess packets to
+    // mitigate amplification attacks where a tiny search reflects a
+    // larger response.
+    let udp_rl = UdpRateLimiter::from_env();
 
     loop {
         let (len, src) = socket.recv_from(&mut buf).await?;
@@ -88,6 +93,12 @@ async fn run_single_responder(
             if ignore_addrs.contains(v4.ip()) {
                 continue;
             }
+        }
+
+        // Per-source-IP rate limit gate.
+        if !udp_rl.allow(&src) {
+            metrics::counter!("ca_server_udp_search_drops_total").increment(1);
+            continue;
         }
 
         let mut offset = 0;
@@ -167,5 +178,59 @@ fn local_ip_for(remote: SocketAddr) -> Ipv4Addr {
     match sock.local_addr() {
         Ok(SocketAddr::V4(a)) => *a.ip(),
         _ => Ipv4Addr::UNSPECIFIED,
+    }
+}
+
+/// Per-source-IP token bucket on the UDP search responder. Mitigates
+/// amplification (a tiny SEARCH eliciting a much larger SEARCH_REPLY
+/// across many records) and absurd loops from misconfigured clients.
+///
+/// Disabled when neither env var is set; the cost is one IP-equality
+/// comparison per packet otherwise. The implementation is a fixed
+/// 1-second sliding window — coarse but cheap; replace with
+/// per-IP token buckets if a finer policy is ever needed.
+struct UdpRateLimiter {
+    enabled: bool,
+    cap_per_sec: u32,
+    counts: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (std::time::Instant, u32)>>,
+}
+
+impl UdpRateLimiter {
+    fn from_env() -> Self {
+        let cap = epics_base_rs::runtime::env::get("EPICS_CAS_UDP_SEARCH_RATE_LIMIT")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0u32);
+        Self {
+            enabled: cap > 0,
+            cap_per_sec: cap,
+            counts: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn allow(&self, src: &SocketAddr) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let ip = src.ip();
+        let now = std::time::Instant::now();
+        let mut counts = self.counts.lock().unwrap();
+        let entry = counts
+            .entry(ip)
+            .or_insert((now, 0));
+        if now.duration_since(entry.0) >= std::time::Duration::from_secs(1) {
+            entry.0 = now;
+            entry.1 = 0;
+        }
+        if entry.1 >= self.cap_per_sec {
+            return false;
+        }
+        entry.1 += 1;
+        // Periodic GC: prune stale entries every 1024 packets to keep
+        // the map bounded under DDoS conditions where sources rotate.
+        if counts.len() > 4096 {
+            let cutoff = now - std::time::Duration::from_secs(5);
+            counts.retain(|_, (t, _)| *t >= cutoff);
+        }
+        true
     }
 }

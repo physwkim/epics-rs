@@ -7,6 +7,14 @@ use tokio::sync::Notify;
 use crate::protocol::*;
 use epics_base_rs::error::CaResult;
 
+// Note on signed beacons: the cap_token module provides the Ed25519
+// signing primitives, but wire-level beacon authentication is
+// deferred. Spoof-resistance requires (a) a side-channel signed
+// companion datagram or postsize TLV, (b) a keypair distribution
+// channel, and (c) verifier integration into client beacon_monitor.
+// The crypto foundation is in place; tracker for the wire integration
+// lives in TODO_FOLLOWUPS.md.
+//
 /// Run the beacon emitter. Broadcasts CA_PROTO_RSRV_IS_UP at exponentially
 /// increasing intervals (starting at 20ms, doubling up to `max_period`).
 ///
