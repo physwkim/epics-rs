@@ -74,6 +74,8 @@ pub enum TokenError {
     BadSignature,
     #[error("token expired")]
     Expired,
+    #[error("token revoked")]
+    Revoked,
 }
 
 /// Issues tokens. One signing key per server / role.
@@ -123,10 +125,16 @@ impl TokenIssuer {
     }
 }
 
-/// Verifies tokens against a keyring of trusted issuers.
+/// Verifies tokens against a keyring of trusted issuers. Tracks a
+/// revocation list of `(iss, sub)` pairs so an operator can blacklist
+/// a stolen / leaked subject without rotating the issuer's key.
 #[derive(Default)]
 pub struct TokenVerifier {
     keys: HashMap<String, VerifyingKey>,
+    /// Revocation entries keyed by `(iss, sub)`. Stateless tokens
+    /// can't be "expired early" any other way; we accept the storage
+    /// cost (small — typically a handful of entries).
+    revoked: std::collections::HashSet<(String, String)>,
 }
 
 impl TokenVerifier {
@@ -136,6 +144,28 @@ impl TokenVerifier {
 
     pub fn trust(&mut self, iss_id: impl Into<String>, key: VerifyingKey) {
         self.keys.insert(iss_id.into(), key);
+    }
+
+    /// Block a subject issued by a specific issuer. Future verifies
+    /// of any token with the same `(iss, sub)` pair return
+    /// [`TokenError::Revoked`]. Idempotent.
+    pub fn revoke(&mut self, iss_id: impl Into<String>, sub: impl Into<String>) {
+        self.revoked.insert((iss_id.into(), sub.into()));
+    }
+
+    /// Lift a previous revoke. Idempotent.
+    pub fn unrevoke(&mut self, iss_id: &str, sub: &str) {
+        self.revoked.remove(&(iss_id.to_string(), sub.to_string()));
+    }
+
+    /// Snapshot of the trusted keys for export / publishing
+    /// (e.g. via a `/keys` introspection endpoint). Returned as
+    /// `(issuer_id, public_key_bytes)` pairs.
+    pub fn export_keys(&self) -> Vec<(String, [u8; 32])> {
+        self.keys
+            .iter()
+            .map(|(iss, vk)| (iss.clone(), vk.to_bytes()))
+            .collect()
     }
 
     pub fn verify(&self, token: &str) -> Result<TokenClaims, TokenError> {
@@ -163,6 +193,12 @@ impl TokenVerifier {
             .map_err(|_| TokenError::BadSignature)?;
         if claims.is_expired() {
             return Err(TokenError::Expired);
+        }
+        if self
+            .revoked
+            .contains(&(claims.iss.clone(), claims.sub.clone()))
+        {
+            return Err(TokenError::Revoked);
         }
         Ok(claims)
     }
@@ -208,6 +244,34 @@ mod tests {
         p_bytes[0] ^= 0xFF;
         let tampered = format!("cap:{}.{s}", String::from_utf8_lossy(&p_bytes));
         assert!(verifier.verify(&tampered).is_err());
+    }
+
+    #[test]
+    fn rejects_revoked_then_unrevoke_works() {
+        let issuer = TokenIssuer::generate("ops-1");
+        let mut verifier = TokenVerifier::new();
+        verifier.trust("ops-1", issuer.verifying_key());
+        let tok = issuer.issue("alice", &[], 3600);
+        assert!(verifier.verify(&tok).is_ok());
+        verifier.revoke("ops-1", "alice");
+        let err = verifier.verify(&tok).unwrap_err();
+        matches!(err, TokenError::Revoked)
+            .then_some(())
+            .expect("expected Revoked");
+        // Lifting the revocation re-allows the token.
+        verifier.unrevoke("ops-1", "alice");
+        assert!(verifier.verify(&tok).is_ok());
+    }
+
+    #[test]
+    fn export_keys_reflects_keyring() {
+        let issuer = TokenIssuer::generate("ops-1");
+        let mut verifier = TokenVerifier::new();
+        verifier.trust("ops-1", issuer.verifying_key());
+        let exported = verifier.export_keys();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].0, "ops-1");
+        assert_eq!(exported[0].1, issuer.verifying_key().to_bytes());
     }
 
     #[test]
