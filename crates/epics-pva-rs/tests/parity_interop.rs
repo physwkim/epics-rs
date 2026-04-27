@@ -27,3 +27,5 @@ mod testdata_port;
 mod testconfig_port;
 #[path = "parity/testudp_port.rs"]
 mod testudp_port;
+#[path = "parity/testdiscover_port.rs"]
+mod testdiscover_port;

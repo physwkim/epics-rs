@@ -68,6 +68,25 @@ pub enum SearchCommand {
         server: SocketAddr,
         guid: [u8; 12],
     },
+    /// Subscribe to discovery events. The returned receiver yields a
+    /// `Discovered` for every beacon that observation logic regards as a
+    /// new server (first-seen GUID) or a re-observed-after-restart GUID.
+    Subscribe {
+        responder: oneshot::Sender<mpsc::Receiver<Discovered>>,
+    },
+}
+
+/// Discovery event delivered to subscribers of [`SearchEngine::discover`].
+#[derive(Debug, Clone)]
+pub enum Discovered {
+    /// A beacon arrived for a (server, guid) pair we hadn't seen before,
+    /// or a known server reported a different GUID (i.e. restarted).
+    Online {
+        server: SocketAddr,
+        guid: [u8; 12],
+    },
+    // Reserved for future expansion: pvxs has Discovered::Timeout when
+    // a server stops emitting beacons. We don't track that yet.
 }
 
 /// How long the engine collects extra SEARCH_RESPONSE entries after the
@@ -149,6 +168,23 @@ impl SearchEngine {
             .send(SearchCommand::BeaconObserved { server, guid })
             .await;
     }
+
+    /// Subscribe to beacon-driven discovery events. The receiver yields a
+    /// [`Discovered::Online`] for every (server, guid) pair the
+    /// [`BeaconTracker`] regards as new or restarted. Mirrors pvxs's
+    /// `client::Context::discover()` callback API.
+    ///
+    /// The receiver is bounded; if the consumer falls behind, events are
+    /// dropped silently. Drop the receiver to unsubscribe.
+    pub async fn discover(&self) -> PvaResult<mpsc::Receiver<Discovered>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SearchCommand::Subscribe { responder: tx })
+            .await
+            .map_err(|_| PvaError::Protocol("search engine closed".into()))?;
+        rx.await
+            .map_err(|_| PvaError::Protocol("subscribe cancelled".into()))
+    }
 }
 
 // ── UDP socket helpers ──────────────────────────────────────────────────
@@ -218,6 +254,12 @@ async fn run_engine(
 
     let mut pending: HashMap<u32, Pending> = HashMap::new(); // by search_id
     let mut by_name: HashMap<String, u32> = HashMap::new(); // pv_name → search_id
+    let mut subscribers: Vec<mpsc::Sender<Discovered>> = Vec::new();
+    // (server, guid) pairs already announced via discover(). pvxs's
+    // discover() fires Online once per new server identity; tracker
+    // uses different (reconnect-throttle) semantics so we de-dup here.
+    let mut announced: std::collections::HashSet<(SocketAddr, [u8; 12])> =
+        std::collections::HashSet::new();
 
     let mut tick = interval(Duration::from_secs(1));
     let mut search_buf = vec![0u8; 4096];
@@ -277,14 +319,24 @@ async fn run_engine(
                     }
                 }
                 Some(SearchCommand::BeaconObserved { server, guid }) => {
-                    if beacons.observe(server, guid) {
-                        // Wake all pending searches — if any of them
-                        // resolves to this server they'll get retried
-                        // immediately on the next tick.
+                    let allow_reconnect = beacons.observe(server, guid);
+                    // discover() de-dup: announce each (server, guid) pair
+                    // exactly once until forgotten.
+                    let first_announce = announced.insert((server, guid));
+                    if allow_reconnect {
                         for p in pending.values_mut() {
                             p.last_attempt = Instant::now() - Duration::from_secs(60);
                         }
                     }
+                    if first_announce {
+                        let evt = Discovered::Online { server, guid };
+                        subscribers.retain(|tx| tx.try_send(evt.clone()).is_ok());
+                    }
+                }
+                Some(SearchCommand::Subscribe { responder }) => {
+                    let (tx, rx) = mpsc::channel::<Discovered>(64);
+                    subscribers.push(tx);
+                    let _ = responder.send(rx);
                 }
                 None => break,
             },
@@ -297,7 +349,7 @@ async fn run_engine(
 
             res = beacon_recv => {
                 if let Ok((n, _from)) = res {
-                    handle_beacon(&beacon_buf[..n], &beacons, &mut pending);
+                    handle_beacon(&beacon_buf[..n], &beacons, &mut pending, &mut subscribers, &mut announced);
                 }
             }
 
@@ -415,6 +467,8 @@ fn handle_beacon(
     bytes: &[u8],
     beacons: &Arc<BeaconTracker>,
     pending: &mut HashMap<u32, Pending>,
+    subscribers: &mut Vec<mpsc::Sender<Discovered>>,
+    announced: &mut std::collections::HashSet<(SocketAddr, [u8; 12])>,
 ) {
     let Ok(Some((frame, _))) = try_parse_frame(bytes) else {
         return;
@@ -457,11 +511,19 @@ fn handle_beacon(
     };
     let server = SocketAddr::new(ip, port);
 
-    if beacons.observe(server, guid_arr) {
-        // Allow next tick to immediately re-send for any pending search.
+    let allow_reconnect = beacons.observe(server, guid_arr);
+    let first_announce = announced.insert((server, guid_arr));
+    if allow_reconnect {
         for p in pending.values_mut() {
             p.last_attempt = Instant::now() - Duration::from_secs(60);
         }
+    }
+    if first_announce {
+        let evt = Discovered::Online {
+            server,
+            guid: guid_arr,
+        };
+        subscribers.retain(|tx| tx.try_send(evt.clone()).is_ok());
     }
 }
 
