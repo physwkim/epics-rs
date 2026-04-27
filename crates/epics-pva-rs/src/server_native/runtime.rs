@@ -36,6 +36,10 @@ pub struct PvaServerConfig {
     /// connection is upgraded to TLS via `tokio_rustls::TlsAcceptor`
     /// before the PVA handshake begins.
     pub tls: Option<std::sync::Arc<crate::auth::TlsServerConfig>>,
+    /// Wire byte order the server sends in its SET_BYTE_ORDER control
+    /// message. Clients adopt whatever the server picks. pvxs's
+    /// `Config::overrideSendBE` exposes the same knob; defaults to LE.
+    pub wire_byte_order: crate::proto::ByteOrder,
 }
 
 impl Default for PvaServerConfig {
@@ -50,6 +54,7 @@ impl Default for PvaServerConfig {
             idle_timeout: Duration::from_secs(45),
             monitor_queue_depth: 64,
             tls: None,
+            wire_byte_order: crate::proto::ByteOrder::Little,
         }
     }
 }

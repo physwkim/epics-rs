@@ -164,7 +164,7 @@ async fn handle_connection_io(
     // we've been idle for `idle_timeout`.
     let last_rx_hb = last_rx.clone();
     let writer_hb = writer.clone();
-    let order_hb = ByteOrder::Little;
+    let order_hb = config.wire_byte_order;
     let hb_handle = tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(15));
         tick.tick().await;
@@ -185,7 +185,7 @@ async fn handle_connection_io(
         }
     });
 
-    let order = ByteOrder::Little;
+    let order = config.wire_byte_order;
 
     // Step 1: send SET_BYTE_ORDER (control message). Per pvxs, the byte order
     // we want to use is encoded in the control header's flag bit 7.

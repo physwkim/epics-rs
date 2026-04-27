@@ -15,3 +15,7 @@ mod stability_interop;
 mod testbitmask_port;
 #[path = "parity/testxcode_port.rs"]
 mod testxcode_port;
+#[path = "parity/testendian_port.rs"]
+mod testendian_port;
+#[path = "parity/testpvreq_port.rs"]
+mod testpvreq_port;

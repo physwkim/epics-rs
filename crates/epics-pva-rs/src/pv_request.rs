@@ -67,6 +67,116 @@ pub fn build_pv_request_fields(fields: &[&str], big_endian: bool) -> Vec<u8> {
     build(fields, order)
 }
 
+/// Convert a pvRequest *structure* (rooted at `request_desc`) into a
+/// `BitSet` over the fields of `value_desc`, using pvData spec §5.4
+/// depth-first bit numbering. Mirrors pvxs `request2mask`.
+///
+/// Rules:
+/// - The pvRequest has shape `structure { structure field { ... } }`.
+///   Each direct child of `field` selects the matching top-level field
+///   in `value_desc` and (recursively) its sub-fields named.
+/// - An empty `field {}` (no children) selects *every* bit (root + all
+///   descendants).
+/// - Names in pvRequest that don't exist in `value_desc` are silently
+///   skipped, *unless* no field at all matched — in which case
+///   `Err(EmptyMask)` is returned.
+/// - The root bit (bit 0) is always set when at least one descendant is
+///   selected.
+pub fn request_to_mask(
+    value_desc: &crate::pvdata::FieldDesc,
+    request_desc: &crate::pvdata::FieldDesc,
+) -> Result<crate::proto::BitSet, RequestMaskError> {
+    use crate::pvdata::FieldDesc;
+    let mut mask = crate::proto::BitSet::new();
+
+    // Find the top-level "field" sub-structure inside the pvRequest.
+    let request_field = match request_desc {
+        FieldDesc::Structure { fields, .. } => fields.iter().find(|(n, _)| n == "field"),
+        _ => None,
+    };
+    let request_field = match request_field {
+        Some((_, FieldDesc::Structure { fields, .. })) => fields,
+        _ => {
+            // No `field` sub-structure → select root only.
+            mask.set(0);
+            return Ok(mask);
+        }
+    };
+
+    // Empty `field {}` → all fields set.
+    if request_field.is_empty() {
+        let total = value_desc.total_bits();
+        for i in 0..total {
+            mask.set(i);
+        }
+        return Ok(mask);
+    }
+
+    // Walk each requested top-level name and recursively select bits.
+    let mut any_matched = false;
+    if let FieldDesc::Structure { fields, .. } = value_desc {
+        let mut child_bit = 1usize;
+        for (name, child_desc) in fields {
+            if let Some((_, sub_request)) = request_field.iter().find(|(n, _)| n == name) {
+                any_matched = true;
+                // Mark this field and recurse.
+                mark_path(&mut mask, child_bit, child_desc, sub_request);
+            }
+            child_bit += child_desc.total_bits();
+        }
+    }
+
+    if !any_matched {
+        return Err(RequestMaskError::EmptyMask);
+    }
+    mask.set(0); // root
+    Ok(mask)
+}
+
+/// Recursively mark `value_desc`'s bit (at `bit_offset`) plus any
+/// requested sub-fields as defined by `sub_request`.
+fn mark_path(
+    mask: &mut crate::proto::BitSet,
+    bit_offset: usize,
+    value_desc: &crate::pvdata::FieldDesc,
+    sub_request: &crate::pvdata::FieldDesc,
+) {
+    use crate::pvdata::FieldDesc;
+    mask.set(bit_offset);
+
+    // Pick out the named sub-fields requested.
+    let sub_fields = match sub_request {
+        FieldDesc::Structure { fields, .. } => fields,
+        _ => return,
+    };
+    if sub_fields.is_empty() {
+        // Empty {} selects this entire sub-tree.
+        let total = value_desc.total_bits();
+        for i in 0..total {
+            mask.set(bit_offset + i);
+        }
+        return;
+    }
+
+    if let FieldDesc::Structure { fields, .. } = value_desc {
+        let mut child_bit = bit_offset + 1;
+        for (name, child_desc) in fields {
+            if let Some((_, sub2)) = sub_fields.iter().find(|(n, _)| n == name) {
+                mark_path(mask, child_bit, child_desc, sub2);
+            }
+            child_bit += child_desc.total_bits();
+        }
+    }
+}
+
+/// Errors from [`request_to_mask`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RequestMaskError {
+    /// The pvRequest selected no existing fields.
+    #[error("pvRequest selected no existing fields")]
+    EmptyMask,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
