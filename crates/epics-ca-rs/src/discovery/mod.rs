@@ -29,6 +29,8 @@ mod mdns;
 mod dnssd;
 #[cfg(feature = "discovery")]
 mod zone;
+#[cfg(feature = "discovery-dns-update")]
+mod dns_update;
 
 #[cfg(feature = "discovery")]
 pub use dnssd::DnsSdBackend;
@@ -36,6 +38,8 @@ pub use dnssd::DnsSdBackend;
 pub use mdns::MdnsBackend;
 #[cfg(feature = "discovery")]
 pub use zone::ZoneSnippet;
+#[cfg(feature = "discovery-dns-update")]
+pub use dns_update::{DnsRegistration, DnsUpdater, TsigAlgo, TsigKey};
 
 /// Standard CA service type. Used by both mDNS announces and DNS-SD
 /// PTR records. Format `_<name>._<proto>` per RFC 6763 §4.1.

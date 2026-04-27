@@ -41,6 +41,9 @@ pub struct CaServerBuilder {
     mdns_instance: Option<String>,
     /// Extra TXT key=value pairs attached to the mDNS announce.
     mdns_txt: Vec<(String, String)>,
+    /// Optional RFC 2136 Dynamic DNS UPDATE registration.
+    #[cfg(feature = "discovery-dns-update")]
+    dns_update: Option<crate::discovery::DnsRegistration>,
 }
 
 impl CaServerBuilder {
@@ -54,6 +57,8 @@ impl CaServerBuilder {
             tls: None,
             mdns_instance: None,
             mdns_txt: Vec::new(),
+            #[cfg(feature = "discovery-dns-update")]
+            dns_update: None,
         }
     }
 
@@ -70,6 +75,17 @@ impl CaServerBuilder {
     /// Useful for site-wide metadata: `version`, `asg`, `owner`.
     pub fn announce_txt(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.mdns_txt.push((key.into(), value.into()));
+        self
+    }
+
+    /// Self-register with a unicast DNS server via RFC 2136 Dynamic
+    /// DNS UPDATE. The server adds SRV/PTR/TXT records on startup,
+    /// refreshes them periodically (`reg.keepalive`), and removes
+    /// them on graceful shutdown. Requires the
+    /// `discovery-dns-update` cargo feature.
+    #[cfg(feature = "discovery-dns-update")]
+    pub fn register_dns_update(mut self, reg: crate::discovery::DnsRegistration) -> Self {
+        self.dns_update = Some(reg);
         self
     }
 
@@ -202,6 +218,8 @@ impl CaServerBuilder {
             tls,
             mdns_instance: self.mdns_instance,
             mdns_txt: self.mdns_txt,
+            #[cfg(feature = "discovery-dns-update")]
+            dns_update: self.dns_update,
         })
     }
 }
@@ -235,6 +253,9 @@ pub struct CaServer {
     mdns_instance: Option<String>,
     /// Extra TXT key=value pairs for the mDNS announce.
     mdns_txt: Vec<(String, String)>,
+    /// RFC 2136 dynamic DNS UPDATE registration. None disables it.
+    #[cfg(feature = "discovery-dns-update")]
+    dns_update: Option<crate::discovery::DnsRegistration>,
 }
 
 impl CaServer {
@@ -265,6 +286,8 @@ impl CaServer {
             tls: None,
             mdns_instance: None,
             mdns_txt: Vec::new(),
+            #[cfg(feature = "discovery-dns-update")]
+            dns_update: None,
         }
     }
 
@@ -543,6 +566,34 @@ impl CaServer {
                 "mDNS announce requested via .announce_mdns() but built without `discovery` \
                  cargo feature; ignoring"
             );
+        }
+
+        // RFC 2136 dynamic DNS UPDATE — held for run() lifetime.
+        // Drop sends DELETE updates to clean up the records.
+        #[cfg(feature = "discovery-dns-update")]
+        let _dns_updater = if let Some(ref reg) = self.dns_update {
+            // The configured port may differ from the actual listening
+            // port (e.g. when binding 0 for ephemeral). Patch the
+            // registration with `tcp_port` before sending.
+            let mut reg = reg.clone();
+            reg.port = tcp_port;
+            match crate::discovery::DnsUpdater::register(reg).await {
+                Ok(updater) => {
+                    tracing::info!("RFC 2136 dynamic DNS registration active");
+                    Some(updater)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e,
+                        "RFC 2136 dynamic DNS registration failed; continuing");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(feature = "discovery-dns-update"))]
+        {
+            // No-op when feature is off.
         }
 
         // Spawn UDP responder as its own task so its waker isn't multiplexed

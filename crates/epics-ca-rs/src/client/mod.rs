@@ -291,6 +291,14 @@ pub struct CaClientConfig {
     /// its `EPICS_CA_ADDR_LIST` at startup. Falls back to the
     /// `EPICS_CA_DISCOVERY` env var when `None`.
     pub discovery: Option<crate::discovery::DiscoveryConfig>,
+
+    /// Pre-built discovery backends to consult in addition to whatever
+    /// `discovery` resolves to. Lets applications plug in custom
+    /// `Backend` implementations (HTTP API, Consul, etcd, site CMDB,
+    /// ...) without having to extend `DiscoveryConfig`. Each backend's
+    /// `discover()` is called once at startup; addresses are deduped
+    /// against `EPICS_CA_ADDR_LIST` and `discovery`-provided sources.
+    pub extra_backends: Vec<Box<dyn crate::discovery::Backend>>,
 }
 
 impl CaClient {
@@ -335,14 +343,19 @@ impl CaClient {
         let mut addr_list = parse_addr_list()?;
 
         // Service discovery: explicit config wins; otherwise honour
-        // EPICS_CA_DISCOVERY env var. Result is merged with addr_list
-        // (deduped by SocketAddr).
+        // EPICS_CA_DISCOVERY env var. Custom `extra_backends` are then
+        // appended. Results are merged with addr_list (deduped by
+        // SocketAddr).
         let discovery_cfg = config
             .discovery
             .clone()
             .or_else(crate::discovery::from_env);
-        if let Some(cfg) = discovery_cfg {
-            let backends = crate::discovery::build_backends(cfg);
+        let mut backends: Vec<Box<dyn crate::discovery::Backend>> = match discovery_cfg {
+            Some(cfg) => crate::discovery::build_backends(cfg),
+            None => Vec::new(),
+        };
+        backends.extend(config.extra_backends);
+        if !backends.is_empty() {
             let mut discovered: Vec<SocketAddr> = Vec::new();
             for b in &backends {
                 for addr in b.discover().await {
@@ -399,7 +412,6 @@ impl CaClient {
             }
             #[cfg(not(feature = "experimental-rust-tls"))]
             {
-                let _ = &config; // suppress unused
                 epics_base_rs::runtime::task::spawn(transport::run_transport_manager(
                     transport_rx,
                     transport_evt_tx,

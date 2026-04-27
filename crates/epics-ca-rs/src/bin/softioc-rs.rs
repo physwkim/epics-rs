@@ -71,6 +71,44 @@ struct Args {
     /// `asg=BEAM`. Ignored unless --mdns is set.
     #[arg(long = "mdns-txt", value_name = "KEY=VALUE")]
     mdns_txt: Vec<String>,
+
+    /// RFC 2136 Dynamic DNS UPDATE: address of the authoritative DNS
+    /// server (e.g. `10.0.0.1:53`). When all of --dns-update-server,
+    /// --dns-update-zone, and --dns-update-instance are set, the IOC
+    /// self-registers a SRV+PTR+TXT triple in the zone on startup and
+    /// removes them on graceful shutdown. Requires building with
+    /// --features discovery-dns-update.
+    #[arg(long = "dns-update-server", value_name = "HOST:PORT")]
+    dns_update_server: Option<String>,
+
+    /// DNS zone for RFC 2136 UPDATE (e.g. `facility.local.`).
+    #[arg(long = "dns-update-zone", value_name = "ZONE")]
+    dns_update_zone: Option<String>,
+
+    /// Service-instance label used in the SRV record's owner name —
+    /// becomes `<INSTANCE>._epics-ca._tcp.<ZONE>`.
+    #[arg(long = "dns-update-instance", value_name = "NAME")]
+    dns_update_instance: Option<String>,
+
+    /// Hostname target written into the SRV record. Falls back to the
+    /// system hostname. The host must already have an A/AAAA record in
+    /// a resolvable zone.
+    #[arg(long = "dns-update-host", value_name = "HOST")]
+    dns_update_host: Option<String>,
+
+    /// Path to a BIND-format TSIG key file (output of `tsig-keygen`).
+    /// Without it the UPDATE is sent unsigned and most production DNS
+    /// servers will reject it.
+    #[arg(long = "dns-update-tsig-key", value_name = "FILE")]
+    dns_update_tsig_key: Option<String>,
+
+    /// TTL in seconds applied to every record we add (default: 60).
+    #[arg(long = "dns-update-ttl", value_name = "SECONDS", default_value_t = 60)]
+    dns_update_ttl: u64,
+
+    /// Keepalive refresh interval in seconds (default: 30).
+    #[arg(long = "dns-update-keepalive", value_name = "SECONDS", default_value_t = 30)]
+    dns_update_keepalive: u64,
 }
 
 fn is_type_keyword(s: &str) -> bool {
@@ -302,6 +340,80 @@ async fn main() -> CaResult<()> {
                 eprintln!("warning: --mdns-txt expects KEY=VALUE, got {kv:?}; skipping");
             }
         }
+    }
+
+    // RFC 2136 Dynamic DNS UPDATE registration.
+    #[cfg(feature = "discovery-dns-update")]
+    {
+        let any_dns_flag = args.dns_update_server.is_some()
+            || args.dns_update_zone.is_some()
+            || args.dns_update_instance.is_some();
+        let all_required = args.dns_update_server.is_some()
+            && args.dns_update_zone.is_some()
+            && args.dns_update_instance.is_some();
+        if any_dns_flag && !all_required {
+            return Err(epics_base_rs::error::CaError::InvalidValue(
+                "--dns-update-server, --dns-update-zone, --dns-update-instance must all be set together".into(),
+            ));
+        }
+        if all_required {
+            let server: std::net::SocketAddr = args
+                .dns_update_server
+                .as_ref()
+                .unwrap()
+                .parse()
+                .map_err(|e| {
+                    epics_base_rs::error::CaError::InvalidValue(format!(
+                        "--dns-update-server: {e}"
+                    ))
+                })?;
+            let host = args.dns_update_host.clone().unwrap_or_else(|| {
+                // Fallback: $HOSTNAME env var, then /etc/hostname, then "localhost".
+                // We avoid pulling in a `hostname` crate just for this; users with
+                // exotic hostname sources can pass --dns-update-host explicitly.
+                std::env::var("HOSTNAME").ok()
+                    .or_else(|| {
+                        std::fs::read_to_string("/etc/hostname")
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                    })
+                    .unwrap_or_else(|| "localhost".to_string())
+            });
+            let tsig = match args.dns_update_tsig_key.as_ref() {
+                Some(path) => Some(
+                    epics_ca_rs::discovery::TsigKey::from_bind_file(path)
+                        .map_err(|e| {
+                            epics_base_rs::error::CaError::InvalidValue(format!(
+                                "--dns-update-tsig-key: {e}"
+                            ))
+                        })?,
+                ),
+                None => None,
+            };
+            let reg = epics_ca_rs::discovery::DnsRegistration {
+                server,
+                zone: args.dns_update_zone.clone().unwrap(),
+                instance: args.dns_update_instance.clone().unwrap(),
+                host,
+                port: args.port,
+                txt: Vec::new(),
+                ttl: std::time::Duration::from_secs(args.dns_update_ttl),
+                keepalive: std::time::Duration::from_secs(args.dns_update_keepalive),
+                tsig,
+            };
+            builder = builder.register_dns_update(reg);
+        }
+    }
+    #[cfg(not(feature = "discovery-dns-update"))]
+    if args.dns_update_server.is_some()
+        || args.dns_update_zone.is_some()
+        || args.dns_update_instance.is_some()
+        || args.dns_update_tsig_key.is_some()
+    {
+        return Err(epics_base_rs::error::CaError::InvalidValue(
+            "--dns-update-* flags require building with --features discovery-dns-update".into(),
+        ));
     }
 
     let server = builder.build().await?;
