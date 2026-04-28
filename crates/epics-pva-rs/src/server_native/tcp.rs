@@ -176,6 +176,12 @@ pub struct ClientCredentials {
     /// only — never trust it for access decisions over the network
     /// hostname / mTLS-verified peer.
     pub host: String,
+    /// Group / role claims advertised by the auth method. Populated
+    /// by the `ca` method via [`crate::auth::posix_groups`] on the
+    /// client side; on the server side the same list is parsed off
+    /// the wire here. ACF rules of the form
+    /// `R member group:operators` match against this set.
+    pub roles: Vec<String>,
 }
 
 impl ClientCredentials {
@@ -184,6 +190,18 @@ impl ClientCredentials {
             method: "anonymous".into(),
             account: "anonymous".into(),
             host: String::new(),
+            roles: Vec::new(),
+        }
+    }
+
+    /// Format a one-line debug label for tracing / diagnostics.
+    /// Mirrors pvxs `peerLabel()` (conn.cpp:50). Includes peer
+    /// address, auth method, and account.
+    pub fn peer_label(&self, peer: std::net::SocketAddr) -> String {
+        if self.account.is_empty() {
+            format!("{peer}/{}", self.method)
+        } else {
+            format!("{}@{peer}/{}", self.account, self.method)
         }
     }
 }
@@ -212,16 +230,36 @@ fn parse_client_credentials(frame: &Frame, order: ByteOrder) -> Option<ClientCre
         method: method.clone(),
         account: String::new(),
         host: String::new(),
+        roles: Vec::new(),
     };
     if let Ok(desc) = decode_type_desc(&mut cur, order) {
         if let Ok(PvField::Structure(s)) = decode_pv_field(&desc, &mut cur, order) {
             for (name, field) in &s.fields {
-                if let PvField::Scalar(crate::pvdata::ScalarValue::String(v)) = field {
-                    match name.as_str() {
-                        "user" => creds.account = v.clone(),
-                        "host" => creds.host = v.clone(),
-                        _ => {}
+                match (name.as_str(), field) {
+                    ("user", PvField::Scalar(crate::pvdata::ScalarValue::String(v))) => {
+                        creds.account = v.clone();
                     }
+                    ("host", PvField::Scalar(crate::pvdata::ScalarValue::String(v))) => {
+                        creds.host = v.clone();
+                    }
+                    // pvxs ca-auth advertises POSIX groups as a
+                    // string array under `groups` (or sometimes
+                    // `roles`). Accept either name. Our PvField
+                    // ScalarArray holds heterogeneous ScalarValue —
+                    // we filter to the string-typed entries.
+                    ("groups" | "roles", PvField::ScalarArray(arr)) => {
+                        creds.roles = arr
+                            .iter()
+                            .filter_map(|sv| {
+                                if let crate::pvdata::ScalarValue::String(s) = sv {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -367,7 +405,7 @@ async fn handle_connection_io(
                 // doesn't gate the ack on auth content).
                 cred = parse_client_credentials(&frame, order).unwrap_or(cred);
                 debug!(?peer, method = %cred.method, account = %cred.account,
-                    "PVA client credentials");
+                    roles = ?cred.roles, "PVA client credentials");
                 let mut payload = Vec::new();
                 Status::ok().write_into(order, &mut payload);
                 let h = PvaHeader::application(
@@ -381,6 +419,14 @@ async fn handle_connection_io(
                 buf.extend_from_slice(&payload);
                 let _ = tx.send(buf).await;
                 handshake_complete = true;
+                // Fire user-installed `auth_complete` hook (pvxs
+                // serverconn.cpp:181 parity) once we've accepted the
+                // peer's identity claim. Hook signature mirrors pvxs
+                // — peer addr + credentials snapshot. ACF
+                // integration goes here.
+                if let Some(hook) = config.auth_complete.as_ref() {
+                    hook(peer, &cred);
+                }
                 continue;
             } else {
                 // Some clients send CREATE_CHANNEL right after SET_BYTE_ORDER

@@ -510,22 +510,41 @@ fn build_client_connection_validation(
 
     // pvxs always reads a Variant payload after the auth method string —
     // even for "anonymous". Send the null-variant marker (0xFF) for
-    // anonymous, or an inline structure with user/host for "ca".
+    // anonymous, or an inline structure with user/host[/groups] for
+    // "ca". The optional `groups` field carries POSIX group names so
+    // server-side ACF can match `group:foo` rules — pvxs ca-auth
+    // parity (osgroups.cpp).
     if auth == "ca" {
-        // Variant tag (0xFD) + inline AuthZ structure carrying user+host.
+        let groups = crate::auth::posix_groups();
+        // Variant tag (0xFD) + inline AuthZ structure carrying
+        // user (str) + host (str) [+ groups (str[])].
         payload.put_u8(0xFD);
         payload.put_u16(1, order);
         payload.put_u8(0x80);
         payload.put_u8(0x00);
-        payload.put_u8(0x02);
+        let n_fields = if groups.is_empty() { 2u8 } else { 3u8 };
+        payload.put_u8(n_fields);
         payload.put_u8(0x04);
         payload.extend_from_slice(b"user");
-        payload.put_u8(0x60);
+        payload.put_u8(0x60); // string
         payload.put_u8(0x04);
         payload.extend_from_slice(b"host");
-        payload.put_u8(0x60);
+        payload.put_u8(0x60); // string
+        if !groups.is_empty() {
+            payload.put_u8(0x06);
+            payload.extend_from_slice(b"groups");
+            payload.put_u8(0x68); // string[]
+        }
         encode_string_into(user, order, &mut payload);
         encode_string_into(host, order, &mut payload);
+        if !groups.is_empty() {
+            // string-array length prefix (size_t encoding) + each
+            // string.
+            crate::proto::encode_size_into(groups.len() as u32, order, &mut payload);
+            for g in &groups {
+                encode_string_into(g, order, &mut payload);
+            }
+        }
     } else {
         // Null variant — pvxs `readVariant` returns `Value()` for 0xFF.
         payload.put_u8(0xFF);

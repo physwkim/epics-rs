@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 epics-base-rs = { workspace = true }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
@@ -20,6 +21,12 @@ hostname = "0.4"
 tokio-util = { version = "0.7", default-features = false }
 parking_lot = "0.12"
 if-addrs = "0.13"
+
+# POSIX getgrouplist / getpwuid / getgrgid for posix_groups() — pvxs
+# osdGetRoles parity. Stays a regular dep; on non-Unix targets the
+# auth::plain::posix_groups() path is cfg-gated to return [].
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # TLS for `pvas://` (opt-in via `EPICS_PVAS_TLS_KEYCHAIN`).
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }

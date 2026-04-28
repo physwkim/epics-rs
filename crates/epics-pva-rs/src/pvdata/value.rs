@@ -174,6 +174,41 @@ impl Value {
         Ok(())
     }
 
+    /// Same-type empty clone — a fresh `Value` with this `Value`'s
+    /// type descriptor, default-initialized fields, and an empty mark
+    /// bitset. Mirrors pvxs `Value::cloneEmpty()` (data.cpp:132).
+    /// Useful for PUT building: caller `set()`s the fields they want
+    /// to update, then sends the `Value` over the wire — only marked
+    /// leaves are encoded.
+    pub fn clone_empty(&self) -> Self {
+        Self::create_from((*self.desc).clone())
+    }
+
+    /// pvxs naming alias for [`Self::set`]. `copy_in` (and the
+    /// fallible `try_copy_in`) match the pvxs Value API exactly so
+    /// callers porting from pvxs code don't have to translate names.
+    /// Both share the underlying coercion logic.
+    pub fn copy_in<T: IntoScalarValue>(&mut self, path: &str, v: T) -> Result<(), ValueError> {
+        self.set(path, v)
+    }
+
+    /// pvxs alias — see [`Self::copy_in`]. Returns false on failure
+    /// instead of `Err`, matching pvxs's `tryCopyIn` semantics.
+    pub fn try_copy_in<T: IntoScalarValue>(&mut self, path: &str, v: T) -> bool {
+        self.set(path, v).is_ok()
+    }
+
+    /// pvxs naming alias for [`Self::get_as`].
+    pub fn copy_out<T: FromScalarValue>(&self, path: &str) -> Result<T, ValueError> {
+        self.get_as(path)
+    }
+
+    /// pvxs alias — see [`Self::copy_out`]. Returns `None` on failure
+    /// instead of `Err`, matching pvxs's `tryCopyOut` semantics.
+    pub fn try_copy_out<T: FromScalarValue>(&self, path: &str) -> Option<T> {
+        self.get_as(path).ok()
+    }
+
     /// Assign from another `Value`. Copies all leaf fields whose path
     /// exists in both, performing type coercion as needed. Marks every
     /// leaf that the source had marked AND that exists here. Pvxs's

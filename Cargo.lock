@@ -887,6 +887,7 @@ dependencies = [
  "epics-base-rs",
  "hostname",
  "if-addrs",
+ "libc",
  "parking_lot",
  "rcgen",
  "rustls 0.23.39",
@@ -899,6 +900,7 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

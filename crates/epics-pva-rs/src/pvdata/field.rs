@@ -177,6 +177,152 @@ impl FieldDesc {
     }
 }
 
+/// One member entry inside a [`TypeDef`] structure / union body.
+/// Mirrors pvxs `Member` (data.h) — pair of (field name, descriptor).
+#[derive(Debug, Clone)]
+pub struct Member {
+    pub name: String,
+    pub desc: FieldDesc,
+}
+
+impl Member {
+    pub fn new(name: impl Into<String>, desc: FieldDesc) -> Self {
+        Self {
+            name: name.into(),
+            desc,
+        }
+    }
+
+    /// Convenience: scalar member `name: T`. Mirrors pvxs
+    /// `Member(TypeCode::Int32, "value")` shorthand.
+    pub fn scalar(name: impl Into<String>, st: ScalarType) -> Self {
+        Self::new(name, FieldDesc::Scalar(st))
+    }
+
+    /// Convenience: scalar-array member `name: T[]`.
+    pub fn scalar_array(name: impl Into<String>, st: ScalarType) -> Self {
+        Self::new(name, FieldDesc::ScalarArray(st))
+    }
+}
+
+/// Fluent builder for [`FieldDesc`] structure trees. Mirrors pvxs's
+/// `TypeDef(TypeCode::Struct, "epics:nt/NTScalar:1.0", { Member(...), ... })`
+/// construct, the canonical way pvxs code declares record types.
+///
+/// # Examples
+///
+/// ```ignore
+/// use epics_pva_rs::pvdata::{TypeDef, Member, ScalarType};
+///
+/// let nt_scalar = TypeDef::structure("epics:nt/NTScalar:1.0")
+///     .member(Member::scalar("value", ScalarType::Double))
+///     .member(Member::new("alarm", TypeDef::structure("alarm_t")
+///         .member(Member::scalar("severity", ScalarType::Int))
+///         .member(Member::scalar("status", ScalarType::Int))
+///         .member(Member::scalar("message", ScalarType::String))
+///         .build()))
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct TypeDef {
+    /// Underlying type discriminator. Wrapped so we can switch
+    /// between Structure / StructureArray / Union / UnionArray at
+    /// `build()` time.
+    kind: TypeDefKind,
+    struct_id: String,
+    members: Vec<Member>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TypeDefKind {
+    Structure,
+    StructureArray,
+    Union,
+    UnionArray,
+}
+
+impl TypeDef {
+    /// Begin a structure type. `struct_id` is the optional NT id
+    /// (e.g., `"epics:nt/NTScalar:1.0"`); pass `""` for unnamed.
+    pub fn structure(struct_id: impl Into<String>) -> Self {
+        Self {
+            kind: TypeDefKind::Structure,
+            struct_id: struct_id.into(),
+            members: Vec::new(),
+        }
+    }
+
+    /// Begin a structure-array type.
+    pub fn structure_array(struct_id: impl Into<String>) -> Self {
+        Self {
+            kind: TypeDefKind::StructureArray,
+            struct_id: struct_id.into(),
+            members: Vec::new(),
+        }
+    }
+
+    /// Begin a union type. `struct_id` may be empty for an unnamed
+    /// union. Members are tagged variants — exactly one is populated
+    /// in any concrete value.
+    pub fn union(struct_id: impl Into<String>) -> Self {
+        Self {
+            kind: TypeDefKind::Union,
+            struct_id: struct_id.into(),
+            members: Vec::new(),
+        }
+    }
+
+    /// Begin a union-array type.
+    pub fn union_array(struct_id: impl Into<String>) -> Self {
+        Self {
+            kind: TypeDefKind::UnionArray,
+            struct_id: struct_id.into(),
+            members: Vec::new(),
+        }
+    }
+
+    /// Append a member. Returns self by value for fluent chaining.
+    pub fn member(mut self, m: Member) -> Self {
+        self.members.push(m);
+        self
+    }
+
+    /// Append a scalar member by shorthand. Equivalent to
+    /// `.member(Member::scalar(name, st))`.
+    pub fn scalar(self, name: impl Into<String>, st: ScalarType) -> Self {
+        self.member(Member::scalar(name, st))
+    }
+
+    /// Append a scalar-array member.
+    pub fn scalar_array(self, name: impl Into<String>, st: ScalarType) -> Self {
+        self.member(Member::scalar_array(name, st))
+    }
+
+    /// Materialize the [`FieldDesc`] tree.
+    pub fn build(self) -> FieldDesc {
+        let fields: Vec<(String, FieldDesc)> =
+            self.members.into_iter().map(|m| (m.name, m.desc)).collect();
+        match self.kind {
+            TypeDefKind::Structure => FieldDesc::Structure {
+                struct_id: self.struct_id,
+                fields,
+            },
+            TypeDefKind::StructureArray => FieldDesc::StructureArray {
+                struct_id: self.struct_id,
+                fields,
+            },
+            TypeDefKind::Union => FieldDesc::Union {
+                struct_id: self.struct_id,
+                variants: fields,
+            },
+            TypeDefKind::UnionArray => FieldDesc::UnionArray {
+                struct_id: self.struct_id,
+                variants: fields,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

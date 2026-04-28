@@ -83,6 +83,22 @@ pub struct PvaServerConfig {
     /// unused (pvxs notes the `onLowMark` callback isn't fully
     /// implemented either). Reserved for future flow-control logic.
     pub monitor_low_watermark: usize,
+    /// Optional post-handshake hook. Fires once per accepted client
+    /// connection, immediately after the server has parsed the
+    /// peer's `CONNECTION_VALIDATION` reply and sent
+    /// `CONNECTION_VALIDATED`. Receives the peer address and the
+    /// parsed [`crate::server_native::tcp::ClientCredentials`].
+    /// Mirrors pvxs `auth_complete` server-side hook
+    /// (serverconn.cpp:181). Use this to integrate per-peer ACF
+    /// state — e.g., look up `cred.account` + `cred.roles` against a
+    /// rule database and stash the decision somewhere the per-op
+    /// path can consult.
+    ///
+    /// Stored as `Arc<dyn Fn>` so the closure can be cloned across
+    /// per-connection tasks. Default: `None` (no-op).
+    pub auth_complete: Option<
+        std::sync::Arc<dyn Fn(std::net::SocketAddr, &super::tcp::ClientCredentials) + Send + Sync>,
+    >,
 }
 
 impl PvaServerConfig {
@@ -121,6 +137,7 @@ impl Default for PvaServerConfig {
             ignore_addrs: Vec::new(),
             monitor_high_watermark: 48, // 64 * 3 / 4 default
             monitor_low_watermark: 0,
+            auth_complete: None,
         }
     }
 }
