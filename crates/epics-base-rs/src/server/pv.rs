@@ -43,6 +43,34 @@ pub struct WriteContext {
 /// callers (`ProcessVariable::set`, `put_pv_and_post`) bypass it so
 /// the upstream-monitor forwarder can update local state without
 /// recursing into itself.
+///
+/// ## Stale-local hazard
+///
+/// "Hook returns `Ok` → caller does NOT update local value" assumes
+/// the upstream will emit a monitor event reflecting the new value.
+/// EPICS records can violate that assumption: PP=NO fields,
+/// PUT-only fields (e.g. `.PROC`), and records configured to suppress
+/// monitor events on identical values. In those cases the shadow
+/// PV remains at its pre-put value indefinitely — caput appears to
+/// succeed but `caget` afterwards returns the old value.
+///
+/// Hook implementors who target such records SHOULD update the local
+/// `ProcessVariable` themselves on `Ok` — typically by invoking
+/// `pv.set(new_value).await` AFTER the upstream put-ack, accepting
+/// the cost of one local mutation per put. The base hook contract
+/// stays "do nothing on Ok" because most monitor-driven shadows
+/// (the CA gateway's primary use case) WILL receive a monitor event
+/// and updating locally would race with it.
+///
+/// ## Reentrancy
+///
+/// The TCP write path clones the hook `Arc` and releases the read
+/// guard BEFORE invoking it, so a hook that calls
+/// `pv.set_write_hook(...)` to swap itself does not deadlock. A hook
+/// that calls `pv.set(...)` reentrantly is allowed but defeats the
+/// "let the upstream-monitor update local state" contract — the
+/// reentrant `set` will be silently overwritten by the next
+/// upstream event.
 pub type WriteHook = Arc<
     dyn Fn(EpicsValue, WriteContext) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<(), CaError>> + Send>,

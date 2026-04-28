@@ -328,6 +328,38 @@ impl PvDatabase {
             .insert(name.to_string(), pv);
     }
 
+    /// Add a simple PV that already has a [`WriteHook`] installed.
+    ///
+    /// Equivalent to `add_pv` followed by `find_pv` + `set_write_hook`,
+    /// but the PV is constructed with the hook in place so it is
+    /// inserted into the `simple_pvs` map ATOMICALLY with the hook
+    /// already attached. Closes a small race in proxy/gateway code
+    /// where a downstream client could (in principle) `CREATE_CHAN` +
+    /// `WRITE_NOTIFY` between the two awaits and hit the local
+    /// `pv.set()` fallback path before the hook landed.
+    pub async fn add_pv_with_hook(
+        &self,
+        name: &str,
+        initial: EpicsValue,
+        hook: crate::server::pv::WriteHook,
+    ) {
+        let pv = Arc::new(ProcessVariable::new(name.to_string(), initial));
+        pv.set_write_hook(hook).await;
+        self.inner
+            .simple_pvs
+            .write()
+            .await
+            .insert(name.to_string(), pv);
+    }
+
+    /// Remove a simple PV by name. Returns `Some(pv)` if a PV was
+    /// removed. Used by the gateway sweep so an evicted upstream
+    /// subscription doesn't leave a stale shadow PV (with a now-dead
+    /// `WriteHook` capturing an aborted upstream channel).
+    pub async fn remove_simple_pv(&self, name: &str) -> Option<Arc<ProcessVariable>> {
+        self.inner.simple_pvs.write().await.remove(name)
+    }
+
     /// Add a record (accepts a boxed Record to avoid double-boxing).
     pub async fn add_record(&self, name: &str, record: Box<dyn Record>) {
         let instance = RecordInstance::new_boxed(name.to_string(), record);

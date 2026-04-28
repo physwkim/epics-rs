@@ -124,31 +124,42 @@ impl PvList {
         }
     }
 
-    /// Whether `name` is denied for the given client `host`.
+    /// Whether the put from `host` for PV `name` is denied by a host-
+    /// targeted DENY rule (`pattern DENY FROM host1 host2 …`).
     ///
-    /// Considers `DENY` rules with a `FROM host …` clause: a rule matches
-    /// when the PV name pattern matches AND the supplied host appears in
-    /// the rule's `from_hosts` list (case-insensitive). Rules with an
-    /// empty `from_hosts` list (`pattern DENY`) deny unconditionally and
-    /// are also returned here so a single call covers both shapes.
+    /// **Scope**: only host-targeted DENY rules participate in this
+    /// check. Untargeted `pattern DENY` rules are evaluated by
+    /// [`Self::match_name`] (which honors `EvaluationOrder`); a put
+    /// for a name that `match_name` returns `Some` for has already
+    /// passed the search-time policy. `is_host_denied` is therefore
+    /// strictly additional — it can only further restrict, never
+    /// override an ALLOW.
     ///
-    /// Used by the put-hook path; UDP search responder does not have the
-    /// client identity and therefore relies on `match_name` alone.
+    /// This matches C ca-gateway semantics: `DENY FROM host` is a
+    /// hard host-blacklist that applies regardless of `EVALUATION
+    /// ORDER`. Comparison is ASCII-case-insensitive (CA hostnames are
+    /// ASCII in practice; punycode is NOT decoded).
+    ///
+    /// IPv6 hosts: callers should pass the bracket-less `to_string()`
+    /// form (`::1`, NOT `[::1]`) so it matches the pvlist syntax. The
+    /// CA TCP handler populates `WriteContext::host` with that form.
     pub fn is_host_denied(&self, name: &str, host: &str) -> bool {
-        let host_lc = host.to_ascii_lowercase();
         for entry in &self.entries {
             if let PvListEntry::Deny {
                 pattern,
                 from_hosts,
             } = entry
             {
+                // Untargeted DENY rules are handled by `match_name` +
+                // EvaluationOrder; skip them here so we only enforce
+                // the strictly-additional host blacklist.
+                if from_hosts.is_empty() {
+                    continue;
+                }
                 if !pattern.is_match(name) {
                     continue;
                 }
-                if from_hosts.is_empty() {
-                    return true;
-                }
-                if from_hosts.iter().any(|h| h.eq_ignore_ascii_case(&host_lc)) {
+                if from_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
                     return true;
                 }
             }

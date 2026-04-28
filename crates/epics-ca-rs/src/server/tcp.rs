@@ -40,24 +40,34 @@ fn max_subs_per_channel() -> usize {
 }
 
 /// Connection lifecycle event broadcast by the TCP listener.
+///
+/// Marked `#[non_exhaustive]` so subsequent variants (e.g. per-monitor
+/// events) can be added without breaking downstream `match` arms.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ServerConnectionEvent {
     /// New client connection accepted.
     Connected(SocketAddr),
     /// Client connection closed.
     Disconnected(SocketAddr),
-    /// `CA_PROTO_CREATE_CHAN` succeeded for `pv_name` on `peer`. Used by
-    /// the CA gateway to drive per-PV `Inactive` → `Active` transitions
-    /// (see `ca_gateway::cache::GwPvEntry::add_subscriber`).
+    /// `CA_PROTO_CREATE_CHAN` succeeded for `pv_name` on `peer`. The
+    /// `cid` is the client-supplied channel id from the request — pass
+    /// it through to consumers so multiple channels for the same
+    /// `(peer, pv_name)` pair don't collapse into one refcount slot.
+    /// Used by the CA gateway to drive per-PV `Inactive` → `Active`
+    /// transitions (see `ca_gateway::cache::GwPvEntry::add_subscriber`).
     ChannelCreated {
         peer: SocketAddr,
         pv_name: String,
+        cid: u32,
     },
     /// `CA_PROTO_CLEAR_CHANNEL` (or implicit teardown) closed a channel
-    /// for `pv_name` on `peer`. Reverse of [`Self::ChannelCreated`].
+    /// for `pv_name` on `peer`. The `cid` matches the corresponding
+    /// [`Self::ChannelCreated`] event one-to-one. Reverse of that event.
     ChannelCleared {
         peer: SocketAddr,
         pv_name: String,
+        cid: u32,
     },
 }
 
@@ -589,6 +599,24 @@ where
         }
     }
 
+    // Emit a `ChannelCleared` event for every channel still open at
+    // disconnect time. Without this, a client that drops without
+    // sending `CA_PROTO_CLEAR_CHANNEL` (TCP RST, network drop, panic)
+    // leaks its channel refcount in any consumer that uses these
+    // events for refcounting (e.g. ca_gateway's per-PV `Active` →
+    // `Inactive` transition). Done here so the events fire BEFORE
+    // the listener emits `Disconnected(peer)`, preserving the
+    // ordering invariant "clears precede disconnect".
+    if let Some(tx) = &conn_events {
+        for (_sid, entry) in state.channels.drain() {
+            let _ = tx.send(ServerConnectionEvent::ChannelCleared {
+                peer,
+                pv_name: entry.pv_name,
+                cid: entry.cid,
+            });
+        }
+    }
+
     state.audit("disconnect", "", "", "ok").await;
     Ok(())
 }
@@ -814,10 +842,14 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
 
                 // Notify subscribers (e.g. ca_gateway tracking PV → client
                 // attachments for `Active`/`Inactive` state transitions).
+                // `cid` is included so consumers can refcount per
+                // (peer, pv_name, cid) — same client opening N channels
+                // to the same PV must increment N times.
                 if let Some(tx) = &conn_events {
                     let _ = tx.send(ServerConnectionEvent::ChannelCreated {
                         peer,
                         pv_name: pv_name.clone(),
+                        cid: client_cid,
                     });
                 }
             } else {
@@ -1433,6 +1465,7 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     let _ = tx.send(ServerConnectionEvent::ChannelCleared {
                         peer,
                         pv_name: entry.pv_name.clone(),
+                        cid: entry.cid,
                     });
                 }
 

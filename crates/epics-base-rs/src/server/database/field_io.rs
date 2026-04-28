@@ -152,6 +152,20 @@ impl PvDatabase {
         let (base, field) = super::parse_pv_name(name);
         let field = field.to_ascii_uppercase();
 
+        // Simple-PV path: PVs registered via `add_pv` (e.g. CA gateway
+        // shadow PVs, IOCsh stats PVs) are stored in `simple_pvs`,
+        // not `records`. Without this branch the function would
+        // silently return `ChannelNotFound` for every gateway-mirrored
+        // PV — `ProcessVariable::set` already does the
+        // notify-subscribers fan-out internally so all we need here is
+        // to delegate. The `origin` tag is a no-op for simple PVs
+        // because they don't yet plumb origin through `set`.
+        if let Some(pv) = self.inner.simple_pvs.read().await.get(name).cloned() {
+            let _ = origin; // simple PVs don't currently honor origin tagging
+            pv.set(value).await;
+            return Ok(());
+        }
+
         if let Some(rec) = self.inner.records.read().await.get(base) {
             let mut instance = rec.write().await;
 
@@ -454,5 +468,33 @@ impl PvDatabase {
         }
 
         Err(CaError::ChannelNotFound(name.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::PvDatabase;
+    use crate::types::EpicsValue;
+
+    /// Regression: prior to fixing B1, `put_pv_and_post` walked only
+    /// `inner.records` and returned `ChannelNotFound` for everything
+    /// `add_pv`-registered. The CA gateway's monitor forwarder uses
+    /// `add_pv` then expects `put_pv_and_post` to fan-out to
+    /// downstream subscribers — without the simple-PV branch, every
+    /// upstream event was silently dropped and the gateway delivered
+    /// no monitors.
+    #[tokio::test]
+    async fn put_pv_and_post_handles_simple_pv() {
+        let db = PvDatabase::new();
+        db.add_pv("gw:test", EpicsValue::Double(0.0)).await;
+
+        // Should NOT return ChannelNotFound.
+        db.put_pv_and_post("gw:test", EpicsValue::Double(42.0))
+            .await
+            .expect("simple PV put_pv_and_post must succeed");
+
+        // Value actually landed.
+        let pv = db.find_pv("gw:test").await.expect("PV exists");
+        assert!(matches!(pv.get().await, EpicsValue::Double(v) if v == 42.0));
     }
 }

@@ -203,29 +203,38 @@ impl UpstreamManager {
             _ => EpicsValue::Double(0.0),
         };
 
-        self.shadow_db.add_pv(upstream_name, initial_value).await;
-
-        // Install WriteHook so caput goes upstream rather than landing
-        // locally. Capture the per-PV ACL fields by value into the
-        // closure — `asg`/`asl` are immutable for the subscription's
-        // lifetime; the global env (`access`/`pvlist`/`putlog`/`stats`)
-        // is hot-reloadable via interior `RwLock`.
-        if let Some(pv) = self.shadow_db.find_pv(upstream_name).await {
-            let hook = build_write_hook(
-                upstream_name.to_string(),
-                channel.clone(),
-                asg.clone(),
-                asl,
-                self.write_env.clone(),
-            );
-            pv.set_write_hook(hook).await;
-        }
+        // Atomically register the shadow PV WITH its WriteHook
+        // attached. `add_pv_with_hook` constructs the PV with the
+        // hook installed before inserting into `simple_pvs`, so a
+        // downstream client cannot race a CREATE_CHAN + WRITE_NOTIFY
+        // into the small window where the PV is findable but the
+        // hook isn't yet bound (which would silently drop the put
+        // into the local `pv.set()` fallback).
+        let hook = build_write_hook(
+            upstream_name.to_string(),
+            channel.clone(),
+            asg.clone(),
+            asl,
+            self.write_env.clone(),
+        );
+        self.shadow_db
+            .add_pv_with_hook(upstream_name, initial_value, hook)
+            .await;
 
         // Subscribe (monitor receiver is independent of the channel handle).
-        let mut monitor = channel
-            .subscribe()
-            .await
-            .map_err(|e| BridgeError::PutRejected(format!("subscribe failed: {e}")))?;
+        // On failure we MUST also remove the just-added shadow PV — otherwise
+        // it lingers in `simple_pvs` with a hook pointing at a dead channel,
+        // and the next downstream search resolves it without re-running
+        // the resolver, leaving the gateway in a stuck state.
+        let mut monitor = match channel.subscribe().await {
+            Ok(m) => m,
+            Err(e) => {
+                self.shadow_db.remove_simple_pv(upstream_name).await;
+                return Err(BridgeError::PutRejected(format!(
+                    "subscribe failed: {e}"
+                )));
+            }
+        };
 
         // Spawn forwarding task — does NOT borrow the channel, so the
         // direct put()/get() path can use the same channel without
@@ -251,12 +260,25 @@ impl UpstreamManager {
 
                     stats_for_task.record_event();
 
-                    // Update gateway cache
+                    // Update gateway cache.
+                    //
+                    // First event after Connecting / Disconnect:
+                    //   * If subscribers are already attached
+                    //     (downstream re-attached during the gap), go
+                    //     straight to `Active` — naive demote to
+                    //     `Inactive` would otherwise regress an
+                    //     already-active PV every time the upstream
+                    //     reconnects.
+                    //   * Otherwise → `Inactive`.
                     if let Some(entry_arc) = cache_clone.read().await.get(&name) {
                         let mut entry = entry_arc.write().await;
-                        // First event → transition Connecting / Disconnect → Inactive
                         if matches!(entry.state, PvState::Connecting | PvState::Disconnect) {
-                            entry.set_state(PvState::Inactive);
+                            let next = if entry.subscriber_count() > 0 {
+                                PvState::Active
+                            } else {
+                                PvState::Inactive
+                            };
+                            entry.set_state(next);
                         }
                         entry.update(snapshot.clone());
                     }
@@ -317,13 +339,19 @@ impl UpstreamManager {
         Ok(())
     }
 
-    /// Remove an upstream subscription and abort its task. Drops
-    /// the cached channel — the next `ensure_subscribed` will open
-    /// a fresh one.
+    /// Remove an upstream subscription and abort its task. Also
+    /// drops the corresponding shadow PV from the database so its
+    /// (now-stale) `WriteHook` — which captures the soon-to-be-aborted
+    /// upstream channel — cannot be invoked by a downstream client
+    /// that opened the channel before the eviction landed.
+    /// Mirrors C ca-gateway's `gatePvData::deactivate` cleanup.
     pub async fn unsubscribe(&mut self, upstream_name: &str) {
         if let Some(sub) = self.subs.remove(upstream_name) {
             sub.task.abort();
         }
+        // Best-effort: if the PV is gone already (concurrent reload
+        // path) `remove_simple_pv` returns None; we don't care.
+        let _ = self.shadow_db.remove_simple_pv(upstream_name).await;
     }
 
     /// Forward a put operation to the upstream IOC. Reuses the
@@ -422,77 +450,72 @@ fn build_write_hook(
         let asg = asg.clone();
         let env = env.clone();
         Box::pin(async move {
-            let value_str = format!("{new_value}");
+            // Bound the audit-log value so a client putting a 1M
+            // element waveform doesn't allocate a 25MB String per
+            // put and write a multi-megabyte putlog line. 256 chars
+            // is enough for scalars, NTScalar, and a leading slice
+            // of array values; full fidelity would belong in a
+            // separate binary trace if ever needed.
+            let value_str = format_value_for_audit(&new_value, 256);
 
-            // 1. read-only mode
+            // 1. read-only mode — gateway-wide flag.
             if env.read_only {
                 env.stats.record_readonly_reject();
-                if let Some(pl) = &env.putlog {
-                    let _ = pl
-                        .log(
-                            &ctx.user,
-                            &ctx.host,
-                            &pv_name,
-                            &value_str,
-                            PutOutcome::Denied,
-                        )
-                        .await;
-                }
-                return Err(CaError::ReadOnlyField(pv_name));
+                log_denial(&env, &ctx, &pv_name, &value_str).await;
+                return Err(CaError::ReadOnlyField(format!(
+                    "{pv_name} (gateway in read-only mode)"
+                )));
             }
 
-            // 2. pvlist host-based DENY
+            // 2. pvlist host-based DENY — surface as PutDisabled so the
+            // ECA status differs from "ACL deny" and operators can
+            // distinguish in audits.
             let pvlist = env.pvlist.read().await.clone();
             if pvlist.is_host_denied(&pv_name, &ctx.host) {
-                if let Some(pl) = &env.putlog {
-                    let _ = pl
-                        .log(
-                            &ctx.user,
-                            &ctx.host,
-                            &pv_name,
-                            &value_str,
-                            PutOutcome::Denied,
-                        )
-                        .await;
-                }
-                return Err(CaError::ReadOnlyField(pv_name));
+                env.stats.record_readonly_reject();
+                log_denial(&env, &ctx, &pv_name, &value_str).await;
+                return Err(CaError::PutDisabled(format!(
+                    "{pv_name} (host {} denied by pvlist)",
+                    ctx.host
+                )));
             }
-            drop(pvlist);
 
-            // 3. AccessConfig
+            // 3. AccessConfig — the actual ACF access-rights check.
             let access = env.access.read().await.clone();
             let asg_ref = asg.as_deref().unwrap_or("DEFAULT");
             if !access.can_write(asg_ref, asl, &ctx.user, &ctx.host) {
-                if let Some(pl) = &env.putlog {
-                    let _ = pl
-                        .log(
-                            &ctx.user,
-                            &ctx.host,
-                            &pv_name,
-                            &value_str,
-                            PutOutcome::Denied,
-                        )
-                        .await;
-                }
-                return Err(CaError::ReadOnlyField(pv_name));
+                env.stats.record_readonly_reject();
+                log_denial(&env, &ctx, &pv_name, &value_str).await;
+                return Err(CaError::ReadOnlyField(format!(
+                    "{pv_name} (asg {asg_ref}, user {})",
+                    ctx.user
+                )));
             }
-            drop(access);
 
             // 4. Forward upstream — propagate CaError directly so the
             // CA TCP write path surfaces the right ECA status to the
             // caller (e.g. ECA_TIMEOUT, ECA_DISCONN).
             let result = channel.put(&new_value).await;
 
-            // 5. Putlog + stats
+            // 5. Putlog + stats. PutLog write errors are surfaced via
+            // tracing (not just `let _ =`) so a disk-full audit
+            // trail is visible to operators.
             if let Some(pl) = &env.putlog {
                 let outcome = if result.is_ok() {
                     PutOutcome::Ok
                 } else {
                     PutOutcome::Failed
                 };
-                let _ = pl
+                if let Err(e) = pl
                     .log(&ctx.user, &ctx.host, &pv_name, &value_str, outcome)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        target: "ca_gateway::putlog",
+                        error = %e,
+                        "ca-gateway-rs: putlog write failed"
+                    );
+                }
             }
             if result.is_ok() {
                 env.stats.record_put();
@@ -500,6 +523,51 @@ fn build_write_hook(
             result
         })
     })
+}
+
+/// Helper: emit a single `Denied` putlog line. Called from each
+/// rejection branch in the WriteHook so the structure is uniform
+/// (timestamp, user@host, pv, value, DENIED). Errors from the log
+/// write itself are surfaced via `tracing` (debounced via target)
+/// so a disk-full putlog doesn't silently disappear the audit
+/// trail.
+async fn log_denial(env: &WriteHookEnv, ctx: &WriteContext, pv: &str, value: &str) {
+    if let Some(pl) = &env.putlog {
+        if let Err(e) = pl
+            .log(&ctx.user, &ctx.host, pv, value, PutOutcome::Denied)
+            .await
+        {
+            tracing::warn!(
+                target: "ca_gateway::putlog",
+                error = %e,
+                "ca-gateway-rs: putlog write failed"
+            );
+        }
+    }
+}
+
+/// Render an `EpicsValue` for the put-audit log, truncating to at
+/// most `max_len` characters with an ellipsis suffix when needed.
+/// Putlog lines are shipped to disk synchronously per put, so a
+/// 1M-element waveform with the default `Display` would balloon to
+/// tens of MB per write — both a perf disaster and a disk-fill
+/// vector. The truncated form is enough to distinguish scalar puts
+/// in operator-facing audits; full-fidelity tracing belongs
+/// elsewhere.
+fn format_value_for_audit(v: &EpicsValue, max_len: usize) -> String {
+    let s = format!("{v}");
+    if s.len() <= max_len {
+        s
+    } else {
+        // Truncate at a char boundary so we don't split a UTF-8
+        // codepoint mid-byte (rare for numeric arrays but cheap
+        // safety).
+        let mut end = max_len.saturating_sub(3);
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
 }
 
 #[cfg(test)]

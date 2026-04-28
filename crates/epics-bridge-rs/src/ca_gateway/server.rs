@@ -439,10 +439,19 @@ impl GatewayServer {
         //   Without this wiring the `Active` state is unreachable and
         //   the C-gateway parity is incomplete (see review §3).
         //
-        // The subscriber-id passed into `add_subscriber` is a synthetic
-        // hash of (peer, pv_name) — sufficient for refcounting because
-        // every CREATE_CHAN gets a unique pair (one CA channel per PV
-        // per client).
+        // Subscriber-id passed into `add_subscriber`/`remove_subscriber`
+        // is a synthetic hash of `(peer, pv_name, cid)`. Including the
+        // CA cid is critical: a single client can open multiple
+        // channels to the same PV (camonitor + caget loop, etc.), and
+        // hashing only `(peer, pv_name)` would collapse N channels
+        // into one refcount slot — `Active` would flip back to
+        // `Inactive` on the first CLEAR even with channels still open.
+        //
+        // `Lagged` does NOT just `continue`: with bounded broadcast
+        // buffer, lagged events would silently desync the per-PV
+        // refcount. On lag we conservatively emit a warning so the
+        // operator notices; structural fix (replay on lag) is
+        // tracked as future work.
         let conn_rx = downstream.connection_events().await;
         let conn_handle = if let Some(mut rx) = conn_rx {
             let stats_for_conn = stats.clone();
@@ -451,10 +460,11 @@ impl GatewayServer {
                 use epics_ca_rs::server::ServerConnectionEvent;
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
-                fn synthetic_sid(peer: std::net::SocketAddr, pv: &str) -> u32 {
+                fn synthetic_sid(peer: std::net::SocketAddr, pv: &str, cid: u32) -> u32 {
                     let mut h = DefaultHasher::new();
                     peer.hash(&mut h);
                     pv.hash(&mut h);
+                    cid.hash(&mut h);
                     h.finish() as u32
                 }
                 loop {
@@ -465,19 +475,36 @@ impl GatewayServer {
                         Ok(ServerConnectionEvent::Disconnected(addr)) => {
                             stats_for_conn.forget_host(&addr.ip().to_string()).await;
                         }
-                        Ok(ServerConnectionEvent::ChannelCreated { peer, pv_name }) => {
+                        Ok(ServerConnectionEvent::ChannelCreated {
+                            peer,
+                            pv_name,
+                            cid,
+                        }) => {
                             if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
-                                let sid = synthetic_sid(peer, &pv_name);
+                                let sid = synthetic_sid(peer, &pv_name, cid);
                                 entry.write().await.add_subscriber(sid);
                             }
                         }
-                        Ok(ServerConnectionEvent::ChannelCleared { peer, pv_name }) => {
+                        Ok(ServerConnectionEvent::ChannelCleared {
+                            peer,
+                            pv_name,
+                            cid,
+                        }) => {
                             if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
-                                let sid = synthetic_sid(peer, &pv_name);
+                                let sid = synthetic_sid(peer, &pv_name, cid);
                                 entry.write().await.remove_subscriber(sid);
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                missed = n,
+                                "ca-gateway-rs: connection events lagged — \
+                                 per-PV refcount may be transiently off until \
+                                 the next CREATE/CLEAR cycle"
+                            );
+                            continue;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }

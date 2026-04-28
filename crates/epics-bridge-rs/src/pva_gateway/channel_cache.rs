@@ -144,6 +144,24 @@ impl ChannelCache {
         &self.client
     }
 
+    /// Cheap, non-spawning probe for "is this PV in the cache right
+    /// now?". Returns the cached entry if present (and pokes its
+    /// recency bit), or `None` without inserting / spawning.
+    ///
+    /// Used by `is_writable` and similar advisory paths so a
+    /// downstream client probing N random PV names cannot trigger N
+    /// upstream search-and-spawn cycles. The full `lookup` path
+    /// remains for `has_pv`/`get_value`/`subscribe` etc. that
+    /// genuinely need to resolve.
+    pub async fn peek(&self, pv_name: &str) -> Option<Arc<UpstreamEntry>> {
+        let map = self.entries.lock().await;
+        let existing = map.get(pv_name).cloned();
+        if let Some(ref e) = existing {
+            e.poke();
+        }
+        existing
+    }
+
     /// Look up or create the entry for `pv_name`. Waits up to
     /// `connect_timeout` for the first upstream event so downstream
     /// callers see a populated `snapshot()` before this returns.
@@ -161,6 +179,11 @@ impl ChannelCache {
     /// search storm vector where a typo'd PV name would otherwise
     /// pin an upstream-monitor task on every `has_pv` call until the
     /// next 30 s cleanup tick (review §3f).
+    ///
+    /// **Cancel safety**: cleanup of the freshly-inserted entry uses
+    /// a drop guard so an awaiting future being cancelled
+    /// (`tokio::select!` losing, deadline-exceeded wrapper, etc.) does
+    /// not leave the cache pinned.
     pub async fn lookup(
         &self,
         pv_name: &str,
@@ -177,17 +200,43 @@ impl ChannelCache {
                 (fresh, true)
             }
         };
-        match self.await_first_event(entry, connect_timeout).await {
-            Ok(e) => Ok(e),
-            Err(e) => {
-                // Only the lookup that actually inserted the entry is
-                // responsible for cleanup; concurrent waiters that
-                // raced onto the same entry can simply retry.
-                if was_fresh {
-                    self.entries.lock().await.remove(pv_name);
-                }
-                Err(e)
+
+        // Drop guard: removes the entry on early-exit (timeout OR
+        // cancellation). Disarmed on success.
+        struct CleanupGuard<'a> {
+            cache: &'a ChannelCache,
+            pv_name: &'a str,
+            armed: bool,
+        }
+        impl<'a> CleanupGuard<'a> {
+            fn disarm(&mut self) {
+                self.armed = false;
             }
+        }
+        impl<'a> Drop for CleanupGuard<'a> {
+            fn drop(&mut self) {
+                if self.armed {
+                    // Best-effort: if the lock is contended at drop
+                    // time we'd block, so we use try_lock and fall
+                    // back to letting the next cleanup tick mop up.
+                    if let Ok(mut map) = self.cache.entries.try_lock() {
+                        map.remove(self.pv_name);
+                    }
+                }
+            }
+        }
+
+        let mut guard = CleanupGuard {
+            cache: self,
+            pv_name,
+            armed: was_fresh,
+        };
+        match self.await_first_event(entry, connect_timeout).await {
+            Ok(e) => {
+                guard.disarm();
+                Ok(e)
+            }
+            Err(e) => Err(e), // guard fires on drop
         }
     }
 
@@ -243,8 +292,11 @@ impl ChannelCache {
                     .await;
 
                 // Reset backoff on a clean end (e.g. server restart);
-                // grow it on consecutive errors.
-                if result.is_ok() {
+                // grow it on consecutive errors. A clean end also
+                // skips the backoff sleep below — for a fast IOC
+                // restart this avoids ~250ms unnecessary downtime.
+                let was_clean = result.is_ok();
+                if was_clean {
                     backoff = Duration::from_millis(250);
                 } else {
                     tracing::warn!(
@@ -254,18 +306,29 @@ impl ChannelCache {
                     );
                 }
 
-                // If nobody is listening AND we have no cached state,
-                // there's no point thrashing the upstream — exit.
+                // Exit when nobody is listening. The earlier version
+                // also required `latest.is_none()` ("no cached state")
+                // — but `latest` becomes `Some` after the very first
+                // event and stays that way forever, so the task would
+                // retry indefinitely after every disconnect even with
+                // zero subscribers. The cleanup tick eventually drops
+                // the cache entry (`drop_poke=false` AND `subscriber_count=0`),
+                // which fires `AbortOnDrop` on the JoinHandle and ends
+                // the task definitively. Until then a fresh subscriber
+                // can re-attach via `subscribe()`, so we keep retrying
+                // upstream — but only while someone is still listening.
                 if tx_for_task.receiver_count() == 0 {
-                    let stale = state_for_task.read().latest.is_none();
-                    if stale {
-                        tracing::debug!(pv = %pv_name_owned, "pva-gateway: monitor exit (no subs, no state)");
-                        return;
-                    }
+                    tracing::debug!(
+                        pv = %pv_name_owned,
+                        "pva-gateway: monitor exit (no subscribers)"
+                    );
+                    return;
                 }
 
-                tokio::time::sleep(backoff).await;
-                backoff = std::cmp::min(backoff * 2, max_backoff);
+                if !was_clean {
+                    tokio::time::sleep(backoff).await;
+                    backoff = std::cmp::min(backoff * 2, max_backoff);
+                }
             }
         });
 

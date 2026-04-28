@@ -686,9 +686,9 @@ impl CaServer {
                         }
                         // Per-channel events are observable by ca_gateway
                         // and similar consumers; stats here only track
-                        // connection-level counters.
-                        crate::server::tcp::ServerConnectionEvent::ChannelCreated { .. }
-                        | crate::server::tcp::ServerConnectionEvent::ChannelCleared { .. } => {}
+                        // connection-level counters. Catch-all because
+                        // `ServerConnectionEvent` is `#[non_exhaustive]`.
+                        _ => {}
                     }
                 }
             });

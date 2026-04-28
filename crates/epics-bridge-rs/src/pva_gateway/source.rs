@@ -102,12 +102,16 @@ impl ChannelSource for GatewayChannelSource {
     }
 
     async fn is_writable(&self, name: &str) -> bool {
-        // Only report writable when the upstream actually has the PV
-        // resolvable (cache hit OR a successful lookup). For an
-        // unknown name, returning `true` would invite the downstream
-        // client to issue PUT requests that we'd then have to reject —
-        // pvxs convention is to advertise PUT capability honestly.
-        self.cache.lookup(name, self.connect_timeout).await.is_ok()
+        // Peek-only: report writable iff the entry is already in the
+        // cache. We deliberately do NOT trigger a fresh upstream
+        // lookup here. If we did, a malicious or buggy client could
+        // probe N random names against `is_writable` and force N
+        // upstream search-and-subscribe cycles, each holding an
+        // upstream-monitor task open until `connect_timeout` fires
+        // (search-storm vector). The honest answer for an unseen PV
+        // is "I don't know yet" — pvxs convention treats that as
+        // not-writable, which is what we return.
+        self.cache.peek(name).await.is_some()
     }
 
     /// Forward an RPC request through the upstream client. The default
