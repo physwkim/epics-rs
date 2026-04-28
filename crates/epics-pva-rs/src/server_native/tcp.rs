@@ -28,10 +28,7 @@ use crate::proto::{
     BitSet, ByteOrder, Command, ControlCommand, PVA_VERSION, PvaHeader, Status, WriteExt,
     encode_size_into, encode_string_into,
 };
-use crate::pvdata::encode::{
-    EncodeTypeCache, decode_pv_field, decode_type_desc, encode_pv_field, encode_type_desc,
-    encode_type_desc_cached,
-};
+use crate::pvdata::encode::{decode_pv_field, decode_type_desc, encode_pv_field, encode_type_desc};
 use crate::pvdata::{FieldDesc, PvField};
 
 use super::runtime::PvaServerConfig;
@@ -216,7 +213,6 @@ async fn handle_connection_io(
     // Per-connection type-cache for emit-side TypeStore. Repeat compound
     // descriptors collapse to 3-byte 0xFE references — big win when many
     // channels share the same NTScalar/NTTable shape on one client.
-    let mut encode_type_cache = EncodeTypeCache::new();
 
     loop {
         let frame = read_frame(&mut reader, &mut rx_buf, op_timeout).await?;
@@ -318,7 +314,6 @@ async fn handle_connection_io(
                     order,
                     OpKind::Get,
                     &config,
-                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -331,7 +326,6 @@ async fn handle_connection_io(
                     order,
                     OpKind::Put,
                     &config,
-                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -344,7 +338,6 @@ async fn handle_connection_io(
                     order,
                     OpKind::Monitor,
                     &config,
-                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -357,7 +350,6 @@ async fn handle_connection_io(
                     order,
                     OpKind::Rpc,
                     &config,
-                    &mut encode_type_cache,
                 )
                 .await?;
             }
@@ -508,7 +500,8 @@ async fn handle_create_channel(
     payload.put_u32(cid, order);
     payload.put_u32(sid, order);
     Status::ok().write_into(order, &mut payload);
-    // Access rights byte (omitted — pvxs accepts none).
+    // pvxs serverchan.cpp:349-351 emits `cid + sid + status` only —
+    // no access_rights field follows.
     let h = PvaHeader::application(
         true,
         order,
@@ -584,7 +577,6 @@ async fn handle_op(
     order: ByteOrder,
     kind: OpKind,
     config: &PvaServerConfig,
-    encode_cache: &mut EncodeTypeCache,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
     let sid = cur
@@ -633,7 +625,13 @@ async fn handle_op(
         payload.put_u32(ioid, order);
         payload.put_u8(subcmd);
         Status::ok().write_into(order, &mut payload);
-        encode_type_desc_cached(&intro, order, encode_cache, &mut payload);
+        // RPC INIT carries no type descriptor (pvxs serverget.cpp:97 —
+        // `if (cmd != CMD_RPC) to_wire(R, type)`). For GET/PUT/MONITOR,
+        // emit the introspection inline (no 0xFD/0xFE cache markers) so
+        // pvAccessCPP clients can parse it.
+        if !matches!(kind, OpKind::Rpc) {
+            encode_type_desc(&intro, order, &mut payload);
+        }
         let h = PvaHeader::application(true, order, cmd.code(), payload.len() as u32);
         let mut buf = Vec::new();
         h.write_into(&mut buf);
@@ -698,7 +696,20 @@ async fn handle_op(
             payload.put_u32(ioid, order);
             payload.put_u8(0x00);
             match result {
-                Ok(()) => Status::ok().write_into(order, &mut payload),
+                Ok(()) => {
+                    Status::ok().write_into(order, &mut payload);
+                    // PUT_GET (subcmd bit 0x40 set on the request): client
+                    // wants the post-put value back. Per pvxs serverget.cpp:103
+                    // the response carries `bitset + partial value` after the
+                    // status.
+                    if subcmd & 0x40 != 0 {
+                        if let Some(v) = source.get_value(&pv_name).await {
+                            let bits = BitSet::all_set(intro.total_bits());
+                            bits.write_into(order, &mut payload);
+                            encode_pv_field(&v, &intro, order, &mut payload);
+                        }
+                    }
+                }
                 Err(msg) => Status::error(msg).write_into(order, &mut payload),
             }
             let h = PvaHeader::application(true, order, Command::Put.code(), payload.len() as u32);
@@ -797,7 +808,7 @@ async fn handle_op(
             match result {
                 Ok((resp_desc, resp_value)) => {
                     Status::ok().write_into(order, &mut payload);
-                    encode_type_desc_cached(&resp_desc, order, encode_cache, &mut payload);
+                    encode_type_desc(&resp_desc, order, &mut payload);
                     encode_pv_field(&resp_value, &resp_desc, order, &mut payload);
                 }
                 Err(msg) => Status::error(msg).write_into(order, &mut payload),
@@ -912,9 +923,12 @@ fn build_monitor_payload(
     let mut payload = Vec::new();
     payload.put_u32(ioid, order);
     payload.put_u8(0x00);
-    let bits = BitSet::all_set(intro.total_bits());
-    bits.write_into(order, &mut payload);
+    // PVA monitor data: changed bitset + partial value + overrun bitset.
+    let changed = BitSet::all_set(intro.total_bits());
+    changed.write_into(order, &mut payload);
     encode_pv_field(value, intro, order, &mut payload);
+    let overrun = BitSet::new(); // no overruns
+    overrun.write_into(order, &mut payload);
     let h = PvaHeader::application(true, order, Command::Monitor.code(), payload.len() as u32);
     let mut buf = Vec::with_capacity(8 + payload.len());
     h.write_into(&mut buf);
@@ -928,4 +942,45 @@ fn now_nanos() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client_native::decode::{OpResponse, decode_op_response, try_parse_frame};
+    use crate::pvdata::{PvStructure, ScalarType, ScalarValue};
+
+    #[test]
+    fn monitor_payload_orders_overrun_after_value() {
+        let order = ByteOrder::Little;
+        let ioid = 0x1234;
+        let intro = FieldDesc::Structure {
+            struct_id: "epics:nt/NTScalar:1.0".into(),
+            fields: vec![("value".into(), FieldDesc::Scalar(ScalarType::Double))],
+        };
+        let mut value = PvStructure::new("epics:nt/NTScalar:1.0");
+        value
+            .fields
+            .push(("value".into(), PvField::Scalar(ScalarValue::Double(42.5))));
+
+        let bytes = build_monitor_payload(ioid, &intro, &PvField::Structure(value), order);
+        let (frame, used) = try_parse_frame(&bytes).unwrap().expect("complete frame");
+        assert_eq!(used, bytes.len());
+
+        match decode_op_response(&frame, Some(&intro)).unwrap() {
+            OpResponse::Data(data) => {
+                assert_eq!(data.ioid, ioid);
+                match data.value {
+                    PvField::Structure(s) => {
+                        assert_eq!(
+                            s.get_field("value"),
+                            Some(&PvField::Scalar(ScalarValue::Double(42.5)))
+                        );
+                    }
+                    other => panic!("expected structure, got {other:?}"),
+                }
+            }
+            other => panic!("expected monitor data, got {other:?}"),
+        }
+    }
 }

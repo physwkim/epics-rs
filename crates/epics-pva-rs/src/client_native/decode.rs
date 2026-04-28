@@ -347,6 +347,11 @@ pub fn decode_op_response_cached(
     let value =
         crate::pvdata::encode::decode_pv_field_with_bitset(intro, &changed, 0, &mut cur, order)
             .map_err(|e| PvaError::Decode(e.to_string()))?;
+    // MONITOR data carries the overrun BitSet after the partial value.
+    if cmd == Command::Monitor {
+        let _overrun =
+            BitSet::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
+    }
     Ok(OpResponse::Data(OpDataResponse {
         ioid,
         subcmd,

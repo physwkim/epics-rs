@@ -177,7 +177,7 @@ impl BitSet {
         }
     }
 
-    /// Decode the next BitSet from `cur`.
+    /// Decode the next BitSet from `cur` (pvxs byte-count format).
     pub fn decode(cur: &mut Cursor<&[u8]>, order: ByteOrder) -> Result<Self, DecodeError> {
         let nbytes = decode_size(cur, order)?
             .ok_or_else(|| DecodeError("bitset size cannot be null".into()))?
