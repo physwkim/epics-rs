@@ -193,6 +193,44 @@ pub async fn op_put(
 
 // ── MONITOR (with reconnect) ───────────────────────────────────────────
 
+/// Typed monitor event delivered to callers of [`op_monitor_events`].
+/// Mirrors pvxs's separation of `Connected` / `Disconnect` / `Finished`
+/// / data exceptions thrown from `Subscription::pop()` (client.h:209).
+#[derive(Debug, Clone)]
+pub enum MonitorEvent {
+    /// Channel just transitioned to Active and the server has
+    /// confirmed our INIT/START. Fires once per connect cycle.
+    Connected,
+    /// Server pushed a value update.
+    Data { intro: FieldDesc, value: PvField },
+    /// Channel left Active (TCP closed, op error, channel closed).
+    Disconnected,
+    /// Server signalled end-of-stream via subcmd=0x10 (no further
+    /// updates will arrive for this monitor).
+    Finished,
+}
+
+/// Per-call configuration for [`op_monitor_events`] / handle variants.
+/// Mirrors pvxs `MonitorBuilder::maskConnected/maskDisconnected`.
+#[derive(Debug, Clone, Copy)]
+pub struct MonitorEventMask {
+    /// When true, suppress [`MonitorEvent::Connected`].
+    pub mask_connected: bool,
+    /// When true, suppress [`MonitorEvent::Disconnected`] and
+    /// [`MonitorEvent::Finished`].
+    pub mask_disconnected: bool,
+}
+
+impl Default for MonitorEventMask {
+    fn default() -> Self {
+        // pvxs defaults: maskConnected=true, maskDisconnected=false.
+        Self {
+            mask_connected: true,
+            mask_disconnected: false,
+        }
+    }
+}
+
 /// Per-subscription metrics. Mirrors pvxs `SubscriptionStat`
 /// (client.h:166). Values are observable via [`SubscriptionHandle::stats`]
 /// — queue counters reflect the local async pipeline; client-squash
@@ -243,7 +281,7 @@ struct SubscriptionState {
 /// level.
 pub struct SubscriptionHandle {
     state: Arc<SubscriptionState>,
-    _task: tokio::task::JoinHandle<PvaResult<()>>,
+    task: Option<tokio::task::JoinHandle<PvaResult<()>>>,
 }
 
 impl SubscriptionHandle {
@@ -301,12 +339,24 @@ impl SubscriptionHandle {
         snap
     }
 
-    /// Signal the inner task to terminate at its next opportunity.
-    /// Drop alone does not stop the task — call this explicitly.
+    /// Signal the inner task to terminate at its next opportunity
+    /// (async — pvxs `syncCancel(false)` analog). Drop alone does not
+    /// stop the task — call this explicitly.
     pub fn stop(&self) {
         self.state
             .stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Stop and await termination. pvxs `syncCancel(true)` analog —
+    /// once this returns no further callbacks will fire.
+    pub async fn stop_sync(mut self) {
+        self.state
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.task.take() {
+            let _ = t.await;
+        }
     }
 }
 
@@ -437,7 +487,89 @@ where
         }
     });
 
-    SubscriptionHandle { state, _task: task }
+    SubscriptionHandle {
+        state,
+        task: Some(task),
+    }
+}
+
+/// Run a monitor and deliver [`MonitorEvent`] values to `callback`.
+/// Bridges the per-update `(FieldDesc, PvField)` shape of the inner
+/// loop to pvxs's typed event stream. The mask flags control whether
+/// `Connected`/`Disconnected`/`Finished` events surface or stay
+/// suppressed (pvxs `maskConnected` / `maskDisconnected`).
+pub async fn op_monitor_events<F>(
+    channel: &Arc<Channel>,
+    fields: &[&str],
+    pipeline_size: u32,
+    mask: MonitorEventMask,
+    mut callback: F,
+) -> PvaResult<()>
+where
+    F: FnMut(MonitorEvent) + Send,
+{
+    let fields_owned: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+    loop {
+        let (server, sid) = match channel.ensure_active().await {
+            Ok(p) => p,
+            Err(e) => {
+                if matches!(
+                    channel.current_state(),
+                    super::channel::ChannelState::Closed
+                ) {
+                    return Ok(());
+                }
+                debug!(pv = %channel.pv_name, err = %e, "monitor reconnect failed; retrying in 500ms");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        if !mask.mask_connected {
+            callback(MonitorEvent::Connected);
+        }
+        let mut data_callback = |intro: &FieldDesc, value: &PvField| {
+            callback(MonitorEvent::Data {
+                intro: intro.clone(),
+                value: value.clone(),
+            });
+        };
+        let result = run_monitor_loop(
+            server.clone(),
+            sid,
+            &fields_owned,
+            pipeline_size,
+            &mut data_callback,
+            None,
+        )
+        .await;
+        match result {
+            Ok(()) => {
+                if !mask.mask_disconnected {
+                    callback(MonitorEvent::Finished);
+                }
+                return Ok(());
+            }
+            Err(MonitorEnd::ChannelClosed) => {
+                if !mask.mask_disconnected {
+                    callback(MonitorEvent::Disconnected);
+                }
+                return Ok(());
+            }
+            Err(MonitorEnd::ConnectionLost) => {
+                if !mask.mask_disconnected {
+                    callback(MonitorEvent::Disconnected);
+                }
+                if matches!(
+                    channel.current_state(),
+                    super::channel::ChannelState::Closed
+                ) {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(MonitorEnd::Fatal(e)) => return Err(e),
+        }
+    }
 }
 
 #[derive(Debug)]

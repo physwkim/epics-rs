@@ -84,6 +84,14 @@ pub enum SearchCommand {
     /// pvxs `Context::ignoreServerGUIDs` (client.cpp:453, consulted
     /// at procSearchReply client.cpp:857).
     IgnoreServerGuids { guids: Vec<[u8; 12]> },
+    /// Send a "discover" SEARCH (no PV names; flags bit
+    /// SEARCH_DISCOVER set) to broadcast targets so any reachable
+    /// server replies with a SEARCH_RESPONSE we can convert into
+    /// `Discovered::Online`. Mirrors pvxs
+    /// `DiscoverBuilder::pingAll(true)` exec path. Effective when the
+    /// caller is set up for active discovery rather than passive
+    /// beacon listening.
+    DiscoverPing,
 }
 
 /// Discovery event delivered to subscribers of [`SearchEngine::discover`].
@@ -91,7 +99,19 @@ pub enum SearchCommand {
 pub enum Discovered {
     /// A beacon arrived for a (server, guid) pair we hadn't seen before,
     /// or a known server reported a different GUID (i.e. restarted).
-    Online { server: SocketAddr, guid: [u8; 12] },
+    ///
+    /// `peer` is the UDP source address (origin of the beacon datagram)
+    /// while `server` is the advertised TCP endpoint. They differ when
+    /// the server binds 0.0.0.0 — the beacon's payload `server` slot is
+    /// 0.0.0.0:port and we rewrite it to the peer's IP. `proto` carries
+    /// the advertised protocol string ("tcp" / "tls"). pvxs
+    /// `Discovered` exposes the same four fields (client.h:967).
+    Online {
+        server: SocketAddr,
+        guid: [u8; 12],
+        peer: SocketAddr,
+        proto: String,
+    },
     /// A server we were tracking has stopped sending beacons for at
     /// least `BEACON_TIMEOUT`. Mirrors pvxs `Discovered::Timeout`
     /// (client.cpp:1272) — operators / dashboards use this to mark
@@ -216,6 +236,15 @@ impl SearchEngine {
             .cmd_tx
             .send(SearchCommand::IgnoreServerGuids { guids })
             .await;
+    }
+
+    /// Send a discover ping to broadcast targets — actively solicit
+    /// SEARCH_RESPONSE from every reachable server. Pair with
+    /// [`Self::discover`] to get `Discovered::Online` events without
+    /// waiting for the next beacon. Mirrors pvxs
+    /// `DiscoverBuilder::pingAll`.
+    pub async fn ping_all(&self) {
+        let _ = self.cmd_tx.send(SearchCommand::DiscoverPing).await;
     }
 
     /// Subscribe to beacon-driven discovery events. The receiver yields a
@@ -476,7 +505,18 @@ async fn run_engine(
                         }
                     }
                     if first_announce {
-                        let evt = Discovered::Online { server, guid };
+                        // BeaconObserved is the in-process injection
+                        // path (e.g., a co-located server) — there's
+                        // no UDP datagram, so peer == server and proto
+                        // defaults to "tcp". Real beacons go through
+                        // handle_beacon below where the proto string
+                        // is parsed off the wire.
+                        let evt = Discovered::Online {
+                            server,
+                            guid,
+                            peer: server,
+                            proto: "tcp".into(),
+                        };
                         subscribers.retain(|tx| tx.try_send(evt.clone()).is_ok());
                     }
                 }
@@ -520,6 +560,20 @@ async fn run_engine(
                         announced.retain(|(_, g)| !ignore_guids.contains(g));
                     }
                 }
+                Some(SearchCommand::DiscoverPing) => {
+                    // pvxs DiscoverBuilder::pingAll: send an empty
+                    // SEARCH (no PV names) to broadcast targets. Any
+                    // reachable server replies with a SEARCH_RESPONSE
+                    // we'll route through handle_search_response, and
+                    // its beacon-equivalent (server, guid) will fall
+                    // out via the announced set on the next beacon
+                    // round-trip. The empty SEARCH itself triggers
+                    // server-side DISCOVER reply per pvxs convention.
+                    let probe_id = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
+                    let pkt =
+                        codec.build_search(0, probe_id, "", [0, 0, 0, 0], response_port, false);
+                    broadcast(&search_socket, &pkt, &extra_targets).await;
+                }
                 None => break,
             },
 
@@ -532,12 +586,12 @@ async fn run_engine(
             }
 
             res = beacon_recv => {
-                if let Ok((n, _from)) = res {
+                if let Ok((n, from)) = res {
                     let mut poke = false;
                     handle_beacon(
                         &beacon_buf[..n], &beacons, &mut pending,
                         &mut subscribers, &mut announced, &mut poke,
-                        &ignore_guids,
+                        &ignore_guids, from,
                     );
                     if poke && fast_ticks_remaining == 0 {
                         tick = interval(Duration::from_millis(200));
@@ -709,6 +763,7 @@ fn handle_search_response(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_beacon(
     bytes: &[u8],
     beacons: &Arc<BeaconTracker>,
@@ -717,6 +772,7 @@ fn handle_beacon(
     announced: &mut std::collections::HashSet<(SocketAddr, [u8; 12])>,
     poke_request: &mut bool,
     ignore_guids: &std::collections::HashSet<[u8; 12]>,
+    peer: SocketAddr,
 ) {
     let Ok(Some((frame, _))) = try_parse_frame(bytes) else {
         return;
@@ -747,7 +803,10 @@ fn handle_beacon(
     let Ok(port) = cur.get_u16(order) else {
         return;
     };
-    let _proto = decode_string(&mut cur, order).ok();
+    let proto = decode_string(&mut cur, order)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "tcp".into());
     let _status_size = decode_size(&mut cur, order).ok();
 
     let mut guid_arr = [0u8; 12];
@@ -757,7 +816,13 @@ fn handle_beacon(
     let Some(ip) = ip_from_bytes(&addr_arr) else {
         return;
     };
-    let server = SocketAddr::new(ip, port);
+    // pvxs udp_collector.cpp:480: when the beacon's advertised server
+    // address is 0.0.0.0 (server bound wildcard), substitute the UDP
+    // datagram's source address. Without this, we'd try to connect
+    // back to 0.0.0.0:port — only valid loopback substitution catches
+    // the same-host case.
+    let resolved_ip = if ip.is_unspecified() { peer.ip() } else { ip };
+    let server = SocketAddr::new(resolved_ip, port);
 
     if ignore_guids.contains(&guid_arr) {
         return;
@@ -781,6 +846,8 @@ fn handle_beacon(
         let evt = Discovered::Online {
             server,
             guid: guid_arr,
+            peer,
+            proto,
         };
         subscribers.retain(|tx| tx.try_send(evt.clone()).is_ok());
     }

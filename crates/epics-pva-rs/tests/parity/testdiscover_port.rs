@@ -25,7 +25,9 @@ async fn pvxs_discover_emits_online_for_first_observed_beacon() {
         .expect("timeout")
         .expect("channel closed");
     match evt {
-        Discovered::Online { server: s, guid: g } => {
+        Discovered::Online {
+            server: s, guid: g, ..
+        } => {
             assert_eq!(s, server);
             assert_eq!(g, guid);
         }

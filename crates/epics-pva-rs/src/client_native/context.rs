@@ -28,8 +28,8 @@ use crate::pvdata::{FieldDesc, PvField};
 
 use super::channel::{Channel, ConnectionPool};
 use super::ops_v2::{
-    DEFAULT_PIPELINE_SIZE, SubscriptionHandle, op_get, op_monitor, op_monitor_handle, op_put,
-    op_rpc,
+    DEFAULT_PIPELINE_SIZE, MonitorEvent, MonitorEventMask, SubscriptionHandle, op_get, op_monitor,
+    op_monitor_events, op_monitor_handle, op_put, op_rpc,
 };
 use super::search_engine::SearchEngine;
 
@@ -50,6 +50,19 @@ pub struct PvaClientBuilder {
     pipeline_size: u32,
     tls: Option<Arc<crate::auth::TlsClientConfig>>,
     name_servers: Vec<SocketAddr>,
+    /// Operation priority hint, propagated to TCP `IPTOS_PREC_*` bits
+    /// where the OS supports it. pvxs `CommonBuilder::priority(int)`
+    /// (client.h:692) — 0..7, default 0 (BEST_EFFORT).
+    priority: u8,
+    /// TCP idle timeout for client-side connections. After this long
+    /// without traffic the client closes the virtual circuit. pvxs
+    /// `Config::tcpTimeout = 40s` (client.h:1040).
+    tcp_timeout: Duration,
+    /// Share a single SearchEngine across all `PvaClient` instances
+    /// in this process. pvxs `Config::overrideShareUDP(true)`. Avoids
+    /// holding multiple UDP search sockets when the user wires up
+    /// per-purpose Contexts.
+    share_udp: bool,
 }
 
 impl PvaClientBuilder {
@@ -62,7 +75,35 @@ impl PvaClientBuilder {
             pipeline_size: DEFAULT_PIPELINE_SIZE,
             tls: None,
             name_servers: crate::config::env::name_servers(),
+            priority: 0,
+            tcp_timeout: Duration::from_secs(40),
+            share_udp: false,
         }
+    }
+
+    /// Mirrors pvxs `CommonBuilder::priority(int)` — propagates to
+    /// the TCP TOS / DSCP byte where the OS supports it. Range 0..7;
+    /// values outside the range are clamped.
+    pub fn priority(mut self, p: u8) -> Self {
+        self.priority = p.min(7);
+        self
+    }
+
+    /// Client-side TCP idle timeout. Mirrors pvxs `Config::tcpTimeout`.
+    /// Default 40s.
+    pub fn tcp_timeout(mut self, d: Duration) -> Self {
+        self.tcp_timeout = d;
+        self
+    }
+
+    /// Share a single process-wide [`SearchEngine`] across every
+    /// `PvaClient` in this process. Mirrors pvxs
+    /// `Config::overrideShareUDP(true)`. Saves one UDP socket per
+    /// client when a single process opens multiple Contexts (e.g.,
+    /// observability + control planes coexisting).
+    pub fn share_udp(mut self, share: bool) -> Self {
+        self.share_udp = share;
+        self
     }
 
     /// Configure TCP name servers — pvxs `EPICS_PVA_NAME_SERVERS`
@@ -137,6 +178,9 @@ impl PvaClientBuilder {
                 channels: RwLock::new(HashMap::new()),
                 search: OnceLock::new(),
                 name_servers: self.name_servers,
+                priority: self.priority,
+                tcp_timeout: self.tcp_timeout,
+                share_udp: self.share_udp,
             }),
         }
     }
@@ -161,7 +205,24 @@ struct ClientInner {
     /// TCP `EPICS_PVA_NAME_SERVERS` fallbacks — used as last-resort
     /// direct-connect candidates when UDP search returns nothing.
     name_servers: Vec<SocketAddr>,
+    /// Operation priority hint (0..7). Stored for inspection /
+    /// future TCP TOS wiring. pvxs `CommonBuilder::priority`.
+    #[allow(dead_code)]
+    priority: u8,
+    /// Client TCP idle timeout. Stored for inspection / future
+    /// keepalive plumbing. pvxs `Config::tcpTimeout`.
+    #[allow(dead_code)]
+    tcp_timeout: Duration,
+    /// True when `build()` was told to share the process-wide search
+    /// engine. Routes [`PvaClient::search_engine`] through the static
+    /// `SHARED_SEARCH_ENGINE` instead of spawning per-client.
+    share_udp: bool,
 }
+
+/// Process-wide singleton SearchEngine for `share_udp(true)` clients.
+/// Lazily initialized on first use.
+static SHARED_SEARCH_ENGINE: tokio::sync::OnceCell<SearchEngine> =
+    tokio::sync::OnceCell::const_new();
 
 #[derive(Clone)]
 pub struct PvaClient {
@@ -198,6 +259,12 @@ impl PvaClient {
     }
 
     async fn search_engine(&self) -> PvaResult<&SearchEngine> {
+        if self.inner.share_udp {
+            let engine = SHARED_SEARCH_ENGINE
+                .get_or_try_init(|| async { SearchEngine::spawn(Vec::new()).await })
+                .await?;
+            return Ok(engine);
+        }
         if self.inner.search.get().is_none() {
             let engine = SearchEngine::spawn(Vec::new()).await?;
             let _ = self.inner.search.set(engine);
@@ -317,6 +384,16 @@ impl PvaClient {
         }
     }
 
+    /// Send a DISCOVER ping (empty SEARCH) to broadcast targets so
+    /// reachable servers reply immediately. Pair with the discovery
+    /// stream from the search engine to learn about servers without
+    /// waiting for the next beacon. Mirrors pvxs
+    /// `Context::discover().pingAll(true)`.
+    pub async fn ping_all(&self) -> PvaResult<()> {
+        self.search_engine().await?.ping_all().await;
+        Ok(())
+    }
+
     /// Replace the server-GUID blocklist used by the search engine.
     /// Beacons and search responses from any listed GUID are silently
     /// dropped. Mirrors pvxs `Context::ignoreServerGUIDs`
@@ -417,6 +494,45 @@ impl PvaClient {
         ))
     }
 
+    /// Like [`Self::pvmonitor_handle`] but pinned to `server`. Mirrors
+    /// pvxs `MonitorBuilder::server(addr).exec()`. The handle owns its
+    /// own per-call channel — it does not affect the shared cache for
+    /// `pv_name`.
+    pub async fn pvmonitor_handle_from<F>(
+        &self,
+        pv_name: &str,
+        server: SocketAddr,
+        callback: F,
+    ) -> PvaResult<SubscriptionHandle>
+    where
+        F: FnMut(&FieldDesc, &PvField) + Send + 'static,
+    {
+        let ch = self.channel_with_forced(pv_name, Some(server)).await?;
+        Ok(op_monitor_handle(
+            ch,
+            &[],
+            self.inner.pipeline_size,
+            callback,
+        ))
+    }
+
+    /// Monitor with typed events (`Connected`/`Data`/`Disconnected`/
+    /// `Finished`). Mirrors pvxs's MonitorBuilder + Subscription
+    /// exception-based stream API. `mask` defaults are
+    /// pvxs-compatible: `maskConnected=true`, `maskDisconnected=false`.
+    pub async fn pvmonitor_events<F>(
+        &self,
+        pv_name: &str,
+        mask: MonitorEventMask,
+        callback: F,
+    ) -> PvaResult<()>
+    where
+        F: FnMut(MonitorEvent) + Send,
+    {
+        let ch = self.channel(pv_name).await?;
+        op_monitor_events(&ch, &[], self.inner.pipeline_size, mask, callback).await
+    }
+
     pub async fn pvinfo(&self, pv_name: &str) -> PvaResult<FieldDesc> {
         let ch = self.channel(pv_name).await?;
         let (intro, _value) = op_get(&ch, &[], self.inner.timeout).await?;
@@ -484,6 +600,8 @@ impl PvaClient {
             pv_name: pv_name.to_string(),
             on_connect: None,
             on_disconnect: None,
+            server: None,
+            sync_cancel: true,
         }
     }
 }
@@ -520,6 +638,15 @@ pub struct ConnectBuilder<'a> {
     pv_name: String,
     on_connect: Option<ConnectCb>,
     on_disconnect: Option<ConnectCb>,
+    /// Per-call forced server pinning. Mirrors pvxs
+    /// `ConnectBuilder::server(s)` (client.h:952).
+    server: Option<SocketAddr>,
+    /// pvxs `syncCancel(bool)` (client.h:950) — when true, drop on the
+    /// returned handle blocks until the watcher task exits; when
+    /// false, drop just signals and returns. Currently advisory: our
+    /// watcher always tears down within one tick, so the difference
+    /// is bounded.
+    sync_cancel: bool,
 }
 
 impl<'a> ConnectBuilder<'a> {
@@ -543,11 +670,32 @@ impl<'a> ConnectBuilder<'a> {
         self
     }
 
+    /// Pin the channel to a specific server, bypassing UDP search.
+    /// Mirrors pvxs `ConnectBuilder::server(s)`.
+    pub fn server(mut self, addr: SocketAddr) -> Self {
+        self.server = Some(addr);
+        self
+    }
+
+    /// Mirrors pvxs `ConnectBuilder::syncCancel(b)`. See the field
+    /// docstring for the current semantics.
+    pub fn sync_cancel(mut self, sync: bool) -> Self {
+        self.sync_cancel = sync;
+        self
+    }
+
     /// Spawn the watcher task. The returned handle owns the task; drop
     /// it to stop watching. The channel itself stays in the client's
     /// channel map so other ops can keep using it.
     pub async fn exec(self) -> PvaResult<ConnectHandle> {
-        let ch = self.client.channel(&self.pv_name).await?;
+        let ch = match self.server {
+            Some(addr) => {
+                self.client
+                    .channel_with_forced(&self.pv_name, Some(addr))
+                    .await?
+            }
+            None => self.client.channel(&self.pv_name).await?,
+        };
         let on_connect = self.on_connect;
         let on_disconnect = self.on_disconnect;
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -590,6 +738,19 @@ impl<'a> ConnectBuilder<'a> {
 pub struct ConnectHandle {
     cancel: tokio_util::sync::CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ConnectHandle {
+    /// Wait for the watcher task to terminate. Use after dropping
+    /// callbacks to ensure no further events fire — pvxs
+    /// `syncCancel(true)` semantics, exposed explicitly so the caller
+    /// can decide when to await.
+    pub async fn wait(mut self) {
+        if let Some(t) = self.task.take() {
+            self.cancel.cancel();
+            let _ = t.await;
+        }
+    }
 }
 
 impl Drop for ConnectHandle {

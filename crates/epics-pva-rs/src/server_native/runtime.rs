@@ -126,6 +126,22 @@ impl Default for PvaServerConfig {
 }
 
 impl PvaServerConfig {
+    /// Loopback-only configuration with random ports — pvxs
+    /// `Config::isolated()` (config.cpp:445). The OS picks free TCP
+    /// and UDP ports; auto-beacon is disabled so the server doesn't
+    /// leak datagrams onto the LAN. Matching client side: see
+    /// [`crate::client_native::context::PvaClient::isolated_for`].
+    pub fn isolated() -> Self {
+        Self {
+            tcp_port: 0,
+            udp_port: 0,
+            bind_ip: Ipv4Addr::LOCALHOST,
+            auto_beacon: false,
+            beacon_destinations: Vec::new(),
+            ..Default::default()
+        }
+    }
+
     /// Apply standard EPICS_PVAS_* / EPICS_PVA_* env vars on top of an
     /// existing config. Only fields backed by the recognised vars are
     /// touched — others stay at their existing values.
@@ -183,6 +199,40 @@ pub struct PvaServer {
 }
 
 impl PvaServer {
+    /// Convenience factory: a loopback-only server with auto-picked
+    /// free ports. Mirrors pvxs `Config::isolated().build()`. Useful
+    /// for self-contained tests where a UDP-discoverable production
+    /// config would interfere with concurrent runs.
+    pub fn isolated<S>(source: Arc<S>) -> Self
+    where
+        S: ChannelSource + 'static,
+    {
+        // Pre-bind ephemeral ports so the listeners come up on known
+        // ports we can hand to clients via `client_config()`. Without
+        // this we'd have to plumb the real port out of the listener
+        // task after start() returns.
+        let pick_port = || {
+            let l = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("isolated tcp port");
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let pick_udp = || {
+            let l = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("isolated udp port");
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let cfg = PvaServerConfig {
+            tcp_port: pick_port(),
+            udp_port: pick_udp(),
+            ..PvaServerConfig::isolated()
+        };
+        Self::start(source, cfg)
+    }
+
     /// Spawn the UDP responder and TCP listener; return a handle.
     pub fn start<S>(source: Arc<S>, config: PvaServerConfig) -> Self
     where

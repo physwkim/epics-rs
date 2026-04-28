@@ -197,6 +197,64 @@ pub enum RequestMaskError {
 
 // ── pvRequest expression parser (mirrors pvxs PVRParser) ─────────────────
 
+/// Fluent builder for pvRequest expressions. Mirrors pvxs's
+/// `Context::request()` (client.h:525) / `RequestBuilder` API:
+///
+/// ```ignore
+/// let req = PvRequestBuilder::new()
+///     .field("value")
+///     .field("alarm.severity")
+///     .record("pipeline", "true")
+///     .build();
+/// ```
+///
+/// Result is a fully-parsed [`PvRequestExpr`] you can `.encode()` to
+/// wire bytes or `.to_field_desc()` for further composition.
+#[derive(Debug, Clone, Default)]
+pub struct PvRequestBuilder {
+    expr: PvRequestExpr,
+}
+
+impl PvRequestBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a dotted field selector. Repeatable. pvxs `RequestBuilder::field`.
+    pub fn field(mut self, path: impl Into<String>) -> Self {
+        self.expr.fields.push(path.into());
+        self
+    }
+
+    /// Set a record-level option (key=value). pvxs `RequestBuilder::record`.
+    pub fn record(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.expr.record_options.push((key.into(), value.into()));
+        self
+    }
+
+    /// Replace the builder state by parsing a pvRequest string in
+    /// pvxs syntax (`field(a,b)record[pipeline=true]`). Mirrors
+    /// pvxs `RequestBuilder::pvRequest(str)`.
+    pub fn pv_request(mut self, expr: &str) -> Result<Self, PvRequestParseError> {
+        self.expr = PvRequestExpr::parse(expr)?;
+        Ok(self)
+    }
+
+    /// Replace the builder state with a hand-built [`PvRequestExpr`].
+    /// Mirrors pvxs `RequestBuilder::rawRequest(Value)` — the escape
+    /// hatch for callers who already constructed the request tree.
+    pub fn raw_request(mut self, expr: PvRequestExpr) -> Self {
+        self.expr = expr;
+        self
+    }
+
+    /// Materialize the parsed expression. Equivalent to chaining
+    /// `.encode(big_endian)` on the result.
+    pub fn build(self) -> PvRequestExpr {
+        self.expr
+    }
+}
+
 /// Parsed pvRequest expression.
 ///
 /// Captures the field selectors and record options as parsed from a

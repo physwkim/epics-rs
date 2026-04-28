@@ -29,6 +29,26 @@ use tokio::sync::mpsc;
 
 use crate::pvdata::{FieldDesc, PvField};
 
+/// User-provided put handler. Mirrors pvxs `SharedPV::onPut`
+/// (sharedpv.cpp:329). Handler receives the new value; returning Err
+/// causes the server to reply with a non-success Status. Returning
+/// Ok(()) lets the server post the value to subscribers — handlers
+/// that want to coerce / transform should do so via [`SharedPV::post`]
+/// inside the closure and return Ok.
+pub type OnPutFn = Arc<dyn Fn(&SharedPV, PvField) -> Result<(), String> + Send + Sync>;
+
+/// User-provided RPC handler. Mirrors pvxs `SharedPV::onRPC`. Handler
+/// receives `(request_desc, request_value)` and returns the response
+/// pair or an error message.
+pub type OnRpcFn = Arc<
+    dyn Fn(&SharedPV, FieldDesc, PvField) -> Result<(FieldDesc, PvField), String> + Send + Sync,
+>;
+
+/// Lifecycle callback fired when the first subscriber connects or the
+/// last one disappears. pvxs `SharedPV::onFirstConnect` /
+/// `SharedPV::onLastDisconnect` (sharedpv.cpp:303-323).
+pub type LifecycleFn = Arc<dyn Fn(&SharedPV) + Send + Sync>;
+
 /// Per-PV state stored inside [`SharedPV`].
 struct Inner {
     /// Type descriptor declared at open() — None when not opened.
@@ -47,6 +67,16 @@ struct Inner {
     pub high_watermark: usize,
     /// `is_open` is required to reject GETs after close().
     is_open: bool,
+    /// Optional user put handler; when None the default "store and
+    /// post" behavior runs. pvxs `onPut` parity.
+    on_put: Option<OnPutFn>,
+    /// Optional user RPC handler; when None RPC returns "not
+    /// supported". pvxs `onRPC` parity.
+    on_rpc: Option<OnRpcFn>,
+    /// First-subscriber-arrived hook.
+    on_first_connect: Option<LifecycleFn>,
+    /// Last-subscriber-left hook.
+    on_last_disconnect: Option<LifecycleFn>,
 }
 
 impl Default for Inner {
@@ -58,6 +88,10 @@ impl Default for Inner {
             low_watermark: 4,
             high_watermark: 64,
             is_open: false,
+            on_put: None,
+            on_rpc: None,
+            on_first_connect: None,
+            on_last_disconnect: None,
         }
     }
 }
@@ -165,30 +199,139 @@ impl SharedPV {
     /// Drops on the receiver side translate to subscriber removal on
     /// the next post().
     pub fn subscribe(&self, monitor_queue_depth: usize) -> Option<mpsc::Receiver<PvField>> {
-        let mut g = self.inner.lock();
-        if !g.is_open {
-            return None;
+        // Latch onFirstConnect callback to run *after* releasing the
+        // lock — handlers may call back into post() / current() and we
+        // can't recurse on parking_lot Mutex.
+        let cb = {
+            let mut g = self.inner.lock();
+            if !g.is_open {
+                return None;
+            }
+            let depth = monitor_queue_depth.max(1);
+            let (tx, rx) = mpsc::channel(depth);
+            if let Some(v) = &g.value {
+                let _ = tx.try_send(v.clone());
+            }
+            let was_empty = g.subscribers.is_empty();
+            g.subscribers.push(tx);
+            let cb = if was_empty {
+                g.on_first_connect.clone()
+            } else {
+                None
+            };
+            (rx, cb)
+        };
+        if let Some(f) = cb.1 {
+            f(self);
         }
-        let depth = monitor_queue_depth.max(1);
-        let (tx, rx) = mpsc::channel(depth);
-        // Send the initial value so subscribers see current state on connect.
-        if let Some(v) = &g.value {
-            let _ = tx.try_send(v.clone());
-        }
-        g.subscribers.push(tx);
-        Some(rx)
+        Some(cb.0)
     }
 
-    /// Apply a PUT. Defaults to "wholesale replace" — the new value is
-    /// posted to all subscribers and stored as `current()`. Callers
-    /// who want validation/coercion should wrap SharedPV in a custom
-    /// ChannelSource impl.
+    /// Apply a PUT. By default, the new value is posted to all
+    /// subscribers and stored as `current()`. When [`Self::on_put`]
+    /// has been set, the user handler runs instead and is responsible
+    /// for any side-effects / re-posting. Mirrors pvxs `onPut`
+    /// dispatch.
     pub fn put(&self, value: PvField) -> Result<(), String> {
         if !self.is_open() {
             return Err("SharedPV not open".into());
         }
+        let on_put = self.inner.lock().on_put.clone();
+        if let Some(f) = on_put {
+            return f(self, value);
+        }
         let _ = self.try_post(value);
         Ok(())
+    }
+
+    /// Dispatch an RPC request. Falls back to "RPC not supported" when
+    /// no [`Self::on_rpc`] handler has been installed.
+    pub fn rpc(
+        &self,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> Result<(FieldDesc, PvField), String> {
+        let on_rpc = self.inner.lock().on_rpc.clone();
+        match on_rpc {
+            Some(f) => f(self, request_desc, request_value),
+            None => Err("RPC not supported by this SharedPV".into()),
+        }
+    }
+
+    /// Install a put handler. Pass `None` to clear. Mirrors pvxs
+    /// `SharedPV::onPut`.
+    pub fn on_put<F>(&self, handler: F)
+    where
+        F: Fn(&SharedPV, PvField) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.inner.lock().on_put = Some(Arc::new(handler));
+    }
+
+    /// Install an RPC handler. Mirrors pvxs `SharedPV::onRPC`.
+    pub fn on_rpc<F>(&self, handler: F)
+    where
+        F: Fn(&SharedPV, FieldDesc, PvField) -> Result<(FieldDesc, PvField), String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.inner.lock().on_rpc = Some(Arc::new(handler));
+    }
+
+    /// Hook fired when the *first* subscriber connects (subscribers
+    /// 0 → 1). Mirrors pvxs `SharedPV::onFirstConnect` —
+    /// applications hook here to start a producer task on demand.
+    pub fn on_first_connect<F>(&self, handler: F)
+    where
+        F: Fn(&SharedPV) + Send + Sync + 'static,
+    {
+        self.inner.lock().on_first_connect = Some(Arc::new(handler));
+    }
+
+    /// Hook fired when the *last* subscriber leaves (subscribers
+    /// N → 0). Mirrors pvxs `SharedPV::onLastDisconnect` — pair with
+    /// `on_first_connect` to gate cost-of-production on actual
+    /// listener interest.
+    pub fn on_last_disconnect<F>(&self, handler: F)
+    where
+        F: Fn(&SharedPV) + Send + Sync + 'static,
+    {
+        self.inner.lock().on_last_disconnect = Some(Arc::new(handler));
+    }
+
+    /// Non-allocating snapshot — copies the current value into `out`
+    /// without cloning if the descriptors match. Returns false when
+    /// the PV isn't opened or has no value yet. Mirrors pvxs
+    /// `SharedPV::fetch`.
+    pub fn fetch(&self, out: &mut Option<PvField>) -> bool {
+        let g = self.inner.lock();
+        match (&g.value, g.is_open) {
+            (Some(v), true) => {
+                *out = Some(v.clone());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drop dead (closed-receiver) subscribers and fire
+    /// `on_last_disconnect` if the set just became empty. Called by
+    /// the per-channel TCP task on monitor close so SharedPV can
+    /// notice subscribers leaving without waiting for the next post().
+    pub fn prune_subscribers(&self) {
+        let cb = {
+            let mut g = self.inner.lock();
+            let was_nonempty = !g.subscribers.is_empty();
+            g.subscribers.retain(|tx| !tx.is_closed());
+            if was_nonempty && g.subscribers.is_empty() {
+                g.on_last_disconnect.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(f) = cb {
+            f(self);
+        }
     }
 
     /// Set the low watermark hint (advisory).
@@ -292,6 +435,21 @@ impl super::source::ChannelSource for SharedSource {
     ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send {
         let pv = self.pvs.lock().get(name).cloned();
         async move { pv.and_then(|p| p.subscribe(64)) }
+    }
+
+    fn rpc(
+        &self,
+        name: &str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> impl std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send {
+        let pv = self.pvs.lock().get(name).cloned();
+        async move {
+            match pv {
+                Some(p) => p.rpc(request_desc, request_value),
+                None => Err(format!("no such PV: {name}")),
+            }
+        }
     }
 }
 
