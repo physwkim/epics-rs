@@ -344,7 +344,7 @@ impl PvDatabase {
         hook: crate::server::pv::WriteHook,
     ) {
         let pv = Arc::new(ProcessVariable::new(name.to_string(), initial));
-        pv.set_write_hook(hook).await;
+        pv.set_write_hook(hook);
         self.inner
             .simple_pvs
             .write()

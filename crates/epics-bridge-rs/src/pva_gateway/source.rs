@@ -18,10 +18,6 @@ use epics_pva_rs::server_native::source::ChannelSource;
 
 use super::channel_cache::ChannelCache;
 
-/// Default operation timeout for forwarded RPC calls. Matches the
-/// upstream `PvaClient::pvrpc` timeout so we don't double-wait.
-const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// `ChannelSource` impl handed to the downstream `PvaServer`. Cheap
 /// to clone (Arc-backed cache + a couple of `Duration`s).
 #[derive(Clone)]
@@ -36,6 +32,10 @@ pub struct GatewayChannelSource {
     /// mpsc; an overrun causes the next event to be dropped. Pick a
     /// generous default (matches pvxs queue size 64).
     pub subscriber_queue: usize,
+    /// Per-call timeout for forwarded RPC requests. Configurable so
+    /// long-running channelArchiver-style RPCs don't get cut off at
+    /// an arbitrary 30 s ceiling. Default 30 s (matches pvxs).
+    pub rpc_timeout: Duration,
 }
 
 impl GatewayChannelSource {
@@ -44,6 +44,7 @@ impl GatewayChannelSource {
             cache,
             connect_timeout: Duration::from_secs(5),
             subscriber_queue: 64,
+            rpc_timeout: Duration::from_secs(30),
         }
     }
 
@@ -131,7 +132,7 @@ impl ChannelSource for GatewayChannelSource {
             .await
             .map_err(|e| e.to_string())?;
         let result = tokio::time::timeout(
-            DEFAULT_RPC_TIMEOUT,
+            self.rpc_timeout,
             self.cache
                 .client()
                 .pvrpc(name, &request_desc, &request_value),

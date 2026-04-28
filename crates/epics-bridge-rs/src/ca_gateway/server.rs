@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use epics_base_rs::server::database::PvDatabase;
 use tokio::sync::RwLock;
 
@@ -34,7 +35,7 @@ use super::downstream::DownstreamServer;
 use super::putlog::PutLog;
 use super::pvlist::PvList;
 use super::stats::Stats;
-use super::upstream::UpstreamManager;
+use super::upstream::{UpstreamManager, UpstreamManagerConfig};
 
 /// Configuration for [`GatewayServer`].
 #[derive(Debug, Clone)]
@@ -103,13 +104,16 @@ impl Default for GatewayConfig {
 /// to start the daemon.
 pub struct GatewayServer {
     config: GatewayConfig,
-    /// Wrapped in `RwLock<Arc<...>>` so live reload can swap the pvlist
-    /// atomically (via SIGUSR1 PVL command).
-    pvlist: Arc<RwLock<Arc<PvList>>>,
-    /// Same hot-reload pattern as `pvlist` — SIGUSR1 `AS` command swaps
-    /// this in place; every WriteHook reads it via `read().await.clone()`
-    /// so live puts pick up the new ACF without restart.
-    access: Arc<RwLock<Arc<AccessConfig>>>,
+    /// `ArcSwap` so live reload (SIGUSR1 `PVL`) can swap the pvlist
+    /// atomically without taking a write lock against the put-hot-path.
+    /// Every WriteHook reads via `load_full()` (wait-free).
+    pvlist: Arc<ArcSwap<PvList>>,
+    /// Same hot-reload pattern as `pvlist` — SIGUSR1 `AS` command
+    /// stores a fresh `Arc<AccessConfig>` here; in-flight puts that
+    /// already loaded the previous one continue with the old rules
+    /// (acceptable; matches the pvlist semantics and what C ca-gateway
+    /// does on reload).
+    access: Arc<ArcSwap<AccessConfig>>,
     cache: Arc<RwLock<PvCache>>,
     shadow_db: Arc<PvDatabase>,
     upstream: Arc<RwLock<UpstreamManager>>,
@@ -135,16 +139,16 @@ impl GatewayServer {
             // Empty pvlist allows nothing
             PvList::new()
         };
-        let pvlist = Arc::new(RwLock::new(Arc::new(pvlist)));
+        let pvlist = Arc::new(ArcSwap::from_pointee(pvlist));
 
-        // Load .access (optional). Wrapped in RwLock<Arc<...>> for the
-        // same atomic-hot-reload pattern as `pvlist`.
+        // Load .access (optional). `ArcSwap` for the same lock-free
+        // hot-reload pattern as `pvlist`.
         let access = if let Some(path) = &config.access_path {
             AccessConfig::from_file(path)?
         } else {
             AccessConfig::allow_all()
         };
-        let access = Arc::new(RwLock::new(Arc::new(access)));
+        let access = Arc::new(ArcSwap::from_pointee(access));
 
         // Cache + shadow database
         let cache = Arc::new(RwLock::new(PvCache::new()));
@@ -163,15 +167,15 @@ impl GatewayServer {
         // Upstream manager — receives the full WriteHook environment so
         // every PV's hook can enforce read_only / ACL / host-deny / putlog
         // before forwarding the put to upstream.
-        let upstream = UpstreamManager::new(
-            cache.clone(),
-            shadow_db.clone(),
-            access.clone(),
-            pvlist.clone(),
-            putlog.clone(),
-            stats.clone(),
-            config.read_only,
-        )
+        let upstream = UpstreamManager::new(UpstreamManagerConfig {
+            cache: cache.clone(),
+            shadow_db: shadow_db.clone(),
+            access: access.clone(),
+            pvlist: pvlist.clone(),
+            putlog: putlog.clone(),
+            stats: stats.clone(),
+            read_only: config.read_only,
+        })
         .await?;
         let upstream = Arc::new(RwLock::new(upstream));
 
@@ -251,7 +255,7 @@ impl GatewayServer {
                 Box::pin(async move {
                     // 1. Check pvlist
                     let m = {
-                        let pvlist = pvlist.read().await;
+                        let pvlist = pvlist.load_full();
                         pvlist.match_name(&name)
                     };
                     let m = match m {
@@ -300,7 +304,7 @@ impl GatewayServer {
 
             // Resolve through pvlist (alias or allow check)
             let m = {
-                let pvlist = self.pvlist.read().await;
+                let pvlist = self.pvlist.load_full();
                 pvlist.match_name(name)
             };
             let m = match m {
@@ -327,16 +331,16 @@ impl GatewayServer {
         &self.cache
     }
 
-    /// Access the pvlist (wrapped in RwLock for hot reload).
-    pub fn pvlist(&self) -> &Arc<RwLock<Arc<PvList>>> {
+    /// Access the pvlist slot (`ArcSwap` for atomic hot reload).
+    pub fn pvlist(&self) -> &Arc<ArcSwap<PvList>> {
         &self.pvlist
     }
 
-    /// Access the access security config slot. Wrapped in
-    /// `RwLock<Arc<...>>` so the SIGUSR1 `AS` (RELOAD_ACCESS) command
-    /// can swap it atomically — every WriteHook reads through the
-    /// `RwLock` so live puts pick up the new ACF without restart.
-    pub fn access(&self) -> &Arc<RwLock<Arc<AccessConfig>>> {
+    /// Access the access-security config slot. SIGUSR1 `AS`
+    /// (RELOAD_ACCESS) `store`s a fresh `Arc<AccessConfig>` here;
+    /// in-flight puts that already loaded the previous one continue
+    /// with the old rules, while later puts pick up the new ones.
+    pub fn access(&self) -> &Arc<ArcSwap<AccessConfig>> {
         &self.access
     }
 
@@ -612,7 +616,7 @@ mod tests {
             ..Default::default()
         };
         let server = GatewayServer::build(config).await.unwrap();
-        let pvlist = server.pvlist().read().await.clone();
+        let pvlist = server.pvlist().load_full();
         assert!(pvlist.match_name("Beam:current").is_some());
         assert!(pvlist.match_name("test:foo").is_none());
     }

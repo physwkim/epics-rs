@@ -1128,7 +1128,7 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
 
             let write_result = match &entry.target {
                 ChannelTarget::SimplePv(pv) => {
-                    if let Some(hook) = pv.write_hook().await {
+                    if let Some(hook) = pv.write_hook() {
                         let ctx = epics_base_rs::server::pv::WriteContext {
                             user: state.username.clone(),
                             host: state.hostname.clone(),

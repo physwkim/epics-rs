@@ -117,7 +117,13 @@ pub struct ProcessVariable {
     /// Optional hook consulted on client-originated writes. When set,
     /// the CA TCP write path delegates to the hook instead of doing a
     /// local `pv.set()`. See [`WriteHook`].
-    write_hook: RwLock<Option<WriteHook>>,
+    ///
+    /// Stored under `parking_lot::RwLock` (sync) rather than the
+    /// async `tokio::sync::RwLock` so the hot put-path can read it
+    /// without an `.await` round-trip — `write_hook()` is now a
+    /// constant-time clone of the optional `Arc`. The hook itself
+    /// is async (returns a `Future`); only the slot is sync.
+    write_hook: parking_lot::RwLock<Option<WriteHook>>,
 }
 
 impl ProcessVariable {
@@ -126,24 +132,27 @@ impl ProcessVariable {
             name,
             value: RwLock::new(initial),
             subscribers: Mutex::new(Vec::new()),
-            write_hook: RwLock::new(None),
+            write_hook: parking_lot::RwLock::new(None),
         }
     }
 
     /// Install a write hook. Replaces any previously-installed hook.
-    pub async fn set_write_hook(&self, hook: WriteHook) {
-        *self.write_hook.write().await = Some(hook);
+    pub fn set_write_hook(&self, hook: WriteHook) {
+        *self.write_hook.write() = Some(hook);
     }
 
     /// Remove any installed write hook.
-    pub async fn clear_write_hook(&self) {
-        *self.write_hook.write().await = None;
+    pub fn clear_write_hook(&self) {
+        *self.write_hook.write() = None;
     }
 
     /// Snapshot of the installed write hook (clone of the `Arc`), or
-    /// `None` if none. Used by the CA TCP write path; cheap.
-    pub async fn write_hook(&self) -> Option<WriteHook> {
-        self.write_hook.read().await.clone()
+    /// `None` if none. Used by the CA TCP write path; cheap and
+    /// non-async — the read lock is released before the cloned `Arc`
+    /// returns, so the caller's subsequent `await` on the hook does
+    /// not hold any lock.
+    pub fn write_hook(&self) -> Option<WriteHook> {
+        self.write_hook.read().clone()
     }
 
     /// Get the current value.

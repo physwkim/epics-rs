@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use epics_base_rs::error::CaError;
 use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::server::pv::{WriteContext, WriteHook};
@@ -76,18 +77,39 @@ struct UpstreamSubscription {
 /// Shared state every upstream subscription's WriteHook needs. Hoisted
 /// out of `UpstreamManager` so the per-subscription closure can capture
 /// a single small `Arc` instead of a long list of separate handles.
+///
+/// `access` and `pvlist` are wrapped in `ArcSwap` for lock-free reads
+/// on the put hot-path: previously each put took two sequential
+/// `tokio::RwLock::read().await.clone()` calls, which serialized
+/// against SIGUSR1 reload writes (and against each other under high
+/// contention). `ArcSwap::load_full()` is wait-free.
 #[derive(Clone)]
 struct WriteHookEnv {
     /// Read-only mode rejects all puts.
     read_only: bool,
-    /// Live access security config (hot-reloadable).
-    access: Arc<RwLock<Arc<AccessConfig>>>,
+    /// Live access security config (hot-reloadable, lock-free reads).
+    access: Arc<ArcSwap<AccessConfig>>,
     /// Live pvlist (hot-reloadable). Used for `DENY FROM host` checks.
-    pvlist: Arc<RwLock<Arc<PvList>>>,
+    pvlist: Arc<ArcSwap<PvList>>,
     /// Optional put-event log.
     putlog: Option<Arc<PutLog>>,
     /// Stats counters.
     stats: Arc<Stats>,
+}
+
+/// Configuration handed to [`UpstreamManager::new`]. Groups the
+/// 7-arg parameter list into one struct so the next caller doesn't
+/// accidentally swap `pvlist` and `access` (same type) and so adding
+/// a new policy field (e.g. monitor watermark) doesn't cascade into
+/// every call site.
+pub struct UpstreamManagerConfig {
+    pub cache: Arc<RwLock<PvCache>>,
+    pub shadow_db: Arc<PvDatabase>,
+    pub access: Arc<ArcSwap<AccessConfig>>,
+    pub pvlist: Arc<ArcSwap<PvList>>,
+    pub putlog: Option<Arc<PutLog>>,
+    pub stats: Arc<Stats>,
+    pub read_only: bool,
 }
 
 /// Manages upstream CA client connections for the gateway.
@@ -108,37 +130,28 @@ pub struct UpstreamManager {
 }
 
 impl UpstreamManager {
-    /// Create a new upstream manager.
+    /// Create a new upstream manager from the grouped config.
     ///
-    /// The `cache` is the gateway's PV cache. The `shadow_db` is the
-    /// `PvDatabase` that the downstream `CaServer` queries. The remaining
+    /// `cache` is the gateway's PV cache. `shadow_db` is the
+    /// `PvDatabase` the downstream `CaServer` queries. The remaining
     /// handles (`access`, `pvlist`, `putlog`, `stats`, `read_only`) are
     /// captured by every PV's WriteHook so client-originated puts
     /// enforce the gateway's full policy (read-only, ACL, host deny,
     /// putlog) before forwarding upstream.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn new(
-        cache: Arc<RwLock<PvCache>>,
-        shadow_db: Arc<PvDatabase>,
-        access: Arc<RwLock<Arc<AccessConfig>>>,
-        pvlist: Arc<RwLock<Arc<PvList>>>,
-        putlog: Option<Arc<PutLog>>,
-        stats: Arc<Stats>,
-        read_only: bool,
-    ) -> BridgeResult<Self> {
+    pub async fn new(cfg: UpstreamManagerConfig) -> BridgeResult<Self> {
         let client = CaClient::new()
             .await
             .map_err(|e| BridgeError::PutRejected(format!("CaClient init: {e}")))?;
         Ok(Self {
             client: Arc::new(client),
-            cache,
-            shadow_db,
+            cache: cfg.cache,
+            shadow_db: cfg.shadow_db,
             write_env: WriteHookEnv {
-                read_only,
-                access,
-                pvlist,
-                putlog,
-                stats,
+                read_only: cfg.read_only,
+                access: cfg.access,
+                pvlist: cfg.pvlist,
+                putlog: cfg.putlog,
+                stats: cfg.stats,
             },
             subs: HashMap::new(),
         })
@@ -192,7 +205,9 @@ impl UpstreamManager {
         // PV's first registered type matches upstream's native type.
         // Falls back to a Double placeholder if the get fails or
         // times out — the first monitor event will overwrite the
-        // value either way.
+        // value either way. The timeout/error is logged at INFO so
+        // an operator chasing type-mismatch confusion can correlate
+        // a confused downstream introspect with its upstream miss.
         let initial_value = match tokio::time::timeout(
             Duration::from_millis(500),
             channel.get(),
@@ -200,7 +215,21 @@ impl UpstreamManager {
         .await
         {
             Ok(Ok((_dbf, v))) => v,
-            _ => EpicsValue::Double(0.0),
+            Ok(Err(e)) => {
+                tracing::info!(
+                    pv = upstream_name,
+                    error = %e,
+                    "ca-gateway-rs: DBR negotiation get failed; using Double(0.0) placeholder"
+                );
+                EpicsValue::Double(0.0)
+            }
+            Err(_) => {
+                tracing::info!(
+                    pv = upstream_name,
+                    "ca-gateway-rs: DBR negotiation get timed out; using Double(0.0) placeholder"
+                );
+                EpicsValue::Double(0.0)
+            }
         };
 
         // Atomically register the shadow PV WITH its WriteHook
@@ -469,8 +498,8 @@ fn build_write_hook(
 
             // 2. pvlist host-based DENY — surface as PutDisabled so the
             // ECA status differs from "ACL deny" and operators can
-            // distinguish in audits.
-            let pvlist = env.pvlist.read().await.clone();
+            // distinguish in audits. `load_full` is wait-free.
+            let pvlist = env.pvlist.load_full();
             if pvlist.is_host_denied(&pv_name, &ctx.host) {
                 env.stats.record_readonly_reject();
                 log_denial(&env, &ctx, &pv_name, &value_str).await;
@@ -481,7 +510,20 @@ fn build_write_hook(
             }
 
             // 3. AccessConfig — the actual ACF access-rights check.
-            let access = env.access.read().await.clone();
+            // Empty `user` (CA client never sent CLIENT_NAME) is a
+            // protocol-violation signal: refuse the put unless the ACF
+            // is in the explicit allow-all configuration. This blocks
+            // a malformed/adversarial client that fires WRITE_NOTIFY
+            // before HOST_NAME/CLIENT_NAME from being matched as
+            // "anonymous" against UAG groups.
+            let access = env.access.load_full();
+            if ctx.user.is_empty() && access.has_rules() {
+                env.stats.record_readonly_reject();
+                log_denial(&env, &ctx, &pv_name, &value_str).await;
+                return Err(CaError::ReadOnlyField(format!(
+                    "{pv_name} (no client identity)"
+                )));
+            }
             let asg_ref = asg.as_deref().unwrap_or("DEFAULT");
             if !access.can_write(asg_ref, asl, &ctx.user, &ctx.host) {
                 env.stats.record_readonly_reject();
@@ -577,8 +619,8 @@ mod tests {
     fn dummy_env() -> WriteHookEnv {
         WriteHookEnv {
             read_only: false,
-            access: Arc::new(RwLock::new(Arc::new(AccessConfig::allow_all()))),
-            pvlist: Arc::new(RwLock::new(Arc::new(PvList::new()))),
+            access: Arc::new(ArcSwap::from_pointee(AccessConfig::allow_all())),
+            pvlist: Arc::new(ArcSwap::from_pointee(PvList::new())),
             putlog: None,
             stats: Arc::new(Stats::new("gw:".into())),
         }
@@ -589,15 +631,15 @@ mod tests {
         let cache = Arc::new(RwLock::new(PvCache::new()));
         let db = Arc::new(PvDatabase::new());
         let env = dummy_env();
-        let mgr = UpstreamManager::new(
+        let mgr = UpstreamManager::new(UpstreamManagerConfig {
             cache,
-            db,
-            env.access.clone(),
-            env.pvlist.clone(),
-            None,
-            env.stats.clone(),
-            false,
-        )
+            shadow_db: db,
+            access: env.access.clone(),
+            pvlist: env.pvlist.clone(),
+            putlog: None,
+            stats: env.stats.clone(),
+            read_only: false,
+        })
         .await;
         assert!(mgr.is_ok());
 

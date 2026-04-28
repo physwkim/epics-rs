@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tokio::sync::RwLock;
 
 use crate::error::BridgeResult;
@@ -64,11 +65,11 @@ impl GatewayCommand {
 /// Handles runtime commands against a live gateway.
 pub struct CommandHandler {
     cache: Arc<RwLock<PvCache>>,
-    pvlist: Arc<RwLock<Arc<PvList>>>,
-    /// Live access security config slot. SIGUSR1 `AS` (RELOAD_ACCESS)
-    /// re-reads the file and atomically swaps the inner `Arc` so every
-    /// per-PV WriteHook picks up the new rules without restart.
-    access: Arc<RwLock<Arc<AccessConfig>>>,
+    pvlist: Arc<ArcSwap<PvList>>,
+    /// Live access-security config slot. SIGUSR1 `AS` (RELOAD_ACCESS)
+    /// re-reads the file and `store`s the new `Arc<AccessConfig>` so
+    /// every per-PV WriteHook picks up the new rules without restart.
+    access: Arc<ArcSwap<AccessConfig>>,
     pvlist_path: Option<PathBuf>,
     access_path: Option<PathBuf>,
 }
@@ -76,8 +77,8 @@ pub struct CommandHandler {
 impl CommandHandler {
     pub fn new(
         cache: Arc<RwLock<PvCache>>,
-        pvlist: Arc<RwLock<Arc<PvList>>>,
-        access: Arc<RwLock<Arc<AccessConfig>>>,
+        pvlist: Arc<ArcSwap<PvList>>,
+        access: Arc<ArcSwap<AccessConfig>>,
         pvlist_path: Option<PathBuf>,
         access_path: Option<PathBuf>,
     ) -> Self {
@@ -117,7 +118,7 @@ impl CommandHandler {
                 Ok(out)
             }
             GatewayCommand::ReportAccess => {
-                let pvlist = self.pvlist.read().await;
+                let pvlist = self.pvlist.load_full();
                 Ok(format!(
                     "Access report: {} pvlist rules, order={:?}\n",
                     pvlist.entries.len(),
@@ -131,7 +132,7 @@ impl CommandHandler {
                 };
                 let new = parse_pvlist_file(path)?;
                 let count = new.entries.len();
-                *self.pvlist.write().await = Arc::new(new);
+                self.pvlist.store(Arc::new(new));
                 Ok(format!("Reloaded pvlist: {count} rules\n"))
             }
             GatewayCommand::ReloadAccess => {
@@ -139,13 +140,13 @@ impl CommandHandler {
                     Some(p) => p,
                     None => return Ok("No access path configured\n".to_string()),
                 };
-                // Re-parse, then atomically swap the live slot. Every
-                // per-PV WriteHook reads `access.read().await.clone()`
-                // when invoked, so puts that arrive after the swap pick
-                // up the new rules without any in-flight put being
-                // disturbed.
+                // Re-parse, then `store` the new `Arc` into the
+                // ArcSwap. In-flight puts that already loaded the
+                // previous `Arc` continue with the old rules; later
+                // puts pick up the new ones. Reload is wait-free —
+                // no lock against the put-hot-path.
                 let new_cfg = AccessConfig::from_file(path)?;
-                *self.access.write().await = Arc::new(new_cfg);
+                self.access.store(Arc::new(new_cfg));
                 Ok(format!("Reloaded access file: {}\n", path.display()))
             }
         }
@@ -211,8 +212,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_version() {
         let cache = Arc::new(RwLock::new(PvCache::new()));
-        let pvlist = Arc::new(RwLock::new(Arc::new(PvList::new())));
-        let access = Arc::new(RwLock::new(Arc::new(AccessConfig::allow_all())));
+        let pvlist = Arc::new(ArcSwap::from_pointee(PvList::new()));
+        let access = Arc::new(ArcSwap::from_pointee(AccessConfig::allow_all()));
         let handler = CommandHandler::new(cache, pvlist, access, None, None);
         let out = handler.dispatch(GatewayCommand::Version).await.unwrap();
         assert!(out.contains("ca-gateway-rs"));
@@ -221,8 +222,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_summary_empty_cache() {
         let cache = Arc::new(RwLock::new(PvCache::new()));
-        let pvlist = Arc::new(RwLock::new(Arc::new(PvList::new())));
-        let access = Arc::new(RwLock::new(Arc::new(AccessConfig::allow_all())));
+        let pvlist = Arc::new(ArcSwap::from_pointee(PvList::new()));
+        let access = Arc::new(ArcSwap::from_pointee(AccessConfig::allow_all()));
         let handler = CommandHandler::new(cache, pvlist, access, None, None);
         let out = handler
             .dispatch(GatewayCommand::ReportSummary)
