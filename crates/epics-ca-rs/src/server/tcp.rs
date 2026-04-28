@@ -39,6 +39,44 @@ fn max_subs_per_channel() -> usize {
         .max(1)
 }
 
+/// Forward-DNS verification for `EPICS_CAS_USE_HOST_NAMES=YES`.
+///
+/// Resolve `claimed` (the client-supplied hostname) to a list of IPs
+/// and require `peer` (the actual TCP peer IP) to appear among them.
+/// Returns `true` only when a match is found, `false` on resolution
+/// failure or mismatch — fail closed.
+///
+/// Done via `tokio::net::lookup_host` which dispatches to the
+/// platform resolver (getaddrinfo), so honours `/etc/hosts`, NIS,
+/// LDAP, etc. The DNS lookup is per-HOST_NAME-message so the cost
+/// is paid once per CA client connection, not per put / per
+/// channel.
+async fn host_resolves_to_peer(claimed: &str, peer: std::net::IpAddr) -> bool {
+    if claimed.is_empty() {
+        return false;
+    }
+    // `lookup_host` requires a port — a sentinel `:0` is fine since
+    // we discard everything except the IP.
+    let target = format!("{claimed}:0");
+    match tokio::net::lookup_host(target).await {
+        Ok(mut iter) => iter.any(|sa| sa.ip() == peer),
+        Err(_) => false,
+    }
+}
+
+/// Per-socket send timeout. Without this, a client that stops
+/// reading (frozen GUI, dead viewer holding the socket open) causes
+/// every server `write` to block once the kernel send buffer fills,
+/// stalling the whole per-client dispatcher task. C rsrv defaults
+/// SO_SNDTIMEO to 5 s; we honour the same default and let
+/// `EPICS_CAS_SEND_TMO` override.
+fn send_timeout() -> Duration {
+    epics_base_rs::runtime::env::get("EPICS_CAS_SEND_TMO")
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|v| Duration::from_secs_f64(v.max(0.1)))
+        .unwrap_or(Duration::from_secs(5))
+}
+
 /// Connection lifecycle event broadcast by the TCP listener.
 ///
 /// Marked `#[non_exhaustive]` so subsequent variants (e.g. per-monitor
@@ -309,6 +347,15 @@ pub async fn run_tcp_listener(
                 .with_interval(Duration::from_secs(5));
             let _ = sock.set_keepalive(true);
             let _ = sock.set_tcp_keepalive(&keepalive);
+            // SO_SNDTIMEO is set as a defence-in-depth (matches C
+            // rsrv default 5s, configurable via EPICS_CAS_SEND_TMO),
+            // but on a non-blocking tokio socket the kernel does NOT
+            // apply it — a stuck client where the kernel send buffer
+            // fills would still leave `poll_write` Pending forever.
+            // The actual stall guard is the `tokio::time::timeout`
+            // wrapping `dispatch_message` in `handle_client`'s read
+            // loop (search for "send_timeout()" below).
+            let _ = sock.set_write_timeout(Some(send_timeout()));
         }
         let _ = stream.set_nodelay(true);
 
@@ -568,16 +615,36 @@ where
                 }
             }
 
-            dispatch_message(
-                &hdr,
-                &payload,
-                &mut state,
-                &db,
-                &writer,
-                peer,
-                conn_events.as_ref(),
+            // Wrap dispatch in send_timeout so a stuck-reader client
+            // (kernel send buffer full → `write_all` Pending forever)
+            // can be detected and disconnected. Without this, one
+            // misbehaving client could deadlock its own per-client
+            // task indefinitely. On timeout we drop the connection;
+            // any in-flight reply is discarded.
+            match tokio::time::timeout(
+                send_timeout(),
+                dispatch_message(
+                    &hdr,
+                    &payload,
+                    &mut state,
+                    &db,
+                    &writer,
+                    peer,
+                    conn_events.as_ref(),
+                ),
             )
-            .await?;
+            .await
+            {
+                Ok(res) => res?,
+                Err(_) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        "CA server: dispatch send-timeout (stuck client?), closing"
+                    );
+                    state.audit("disconnect", "", "", "send_timeout").await;
+                    return Ok(());
+                }
+            }
             offset += msg_len;
         }
 
@@ -654,9 +721,35 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     .iter()
                     .position(|&b| b == 0)
                     .unwrap_or(payload.len());
-                state.hostname = String::from_utf8_lossy(&payload[..end]).to_string();
-                // Re-evaluate access rights for all existing channels
-                reeval_access_rights(state, writer).await?;
+                let claimed = String::from_utf8_lossy(&payload[..end]).to_string();
+
+                // Forward-DNS verification: resolve the client-supplied
+                // hostname back to IPs and require one of them to match
+                // the actual peer address. Without this check a hostile
+                // client could spoof an arbitrary hostname (e.g. that
+                // of a privileged operator console) and gain whatever
+                // ACF rights the ACL grants to that host. C rsrv has
+                // historically deferred this verification to operators
+                // (relying on USE_HOST_NAMES=NO in untrusted networks);
+                // we fail closed here for stricter defaults.
+                let verified = host_resolves_to_peer(&claimed, peer.ip()).await;
+                if verified {
+                    state.hostname = claimed;
+                    // Re-evaluate access rights for all existing channels
+                    reeval_access_rights(state, writer).await?;
+                } else {
+                    tracing::warn!(
+                        peer = %peer,
+                        claimed_host = %claimed,
+                        "CAS_USE_HOST_NAMES: forward-DNS mismatch, ignoring HOST_NAME"
+                    );
+                    state
+                        .audit("host_name", "", &claimed, "dns_mismatch")
+                        .await;
+                    // Keep state.hostname as the peer IP fallback set
+                    // at accept(); ACL rules continue to evaluate
+                    // against the IP rather than the spoofed hostname.
+                }
             }
         }
 

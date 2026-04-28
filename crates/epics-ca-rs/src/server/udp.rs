@@ -74,7 +74,16 @@ async fn run_single_responder(
     let socket = UdpSocket::from_std(sock.into())?;
     socket.set_broadcast(true)?;
 
-    let mut buf = [0u8; 4096];
+    // 64 KB receive buffer — IPv4 maximum datagram size. The previous
+    // 4 KB cap silently truncated bursts of multi-PV searches in
+    // active facilities (each search message is ~24 bytes inc. PV
+    // name; 4 KB held ~150 PVs while a typical site burst is many
+    // hundreds, especially during gateway restart storms). 64 KB
+    // matches the kernel ceiling without risking truncation.
+    // Heap-allocated because 64 KB on the per-task stack is large
+    // and the `Box<[u8]>` cost is amortized over the listener's
+    // lifetime — one allocation, reused on every recv.
+    let mut buf = vec![0u8; 64 * 1024];
     // Per-source-IP token bucket. Off by default; when
     // EPICS_CAS_UDP_SEARCH_RATE_LIMIT is set, drops excess packets to
     // mitigate amplification attacks where a tiny search reflects a
