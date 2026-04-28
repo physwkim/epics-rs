@@ -24,11 +24,6 @@ tempfile = "3"
 serial_test = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 
-[features]
-# Mirror epics-ca-rs feature flags so dev-dep tests can cfg on the same
-# names. Pure passthrough — epics-base-rs has no TLS code of its own.
-experimental-rust-tls = ["epics-ca-rs/experimental-rust-tls"]
-
 [[bench]]
 name = "record_bench"
 harness = false
