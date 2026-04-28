@@ -242,14 +242,16 @@ impl CaServerBuilder {
                 None
             }
         });
+        let (conn_tx, _) = tokio::sync::broadcast::channel(64);
         Ok(CaServer {
             db,
             port: self.port,
+            stats: Arc::new(ServerStats::default()),
             acf,
             acf_source_path: std::sync::Mutex::new(self.acf_path),
             autosave_config,
             autosave_manager: None,
-            conn_events: None,
+            conn_events: Some(conn_tx),
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "experimental-rust-tls")]
             tls,
@@ -283,9 +285,43 @@ impl CaServerBuilder {
 }
 
 /// A Channel Access server (IOC) that hosts process variables.
+/// Lightweight live-connection counters surfaced by [`CaServer::stats`]
+/// and the `casr` iocsh command. Mirrors RSRV's `casr` output at the
+/// summary level — total connects / disconnects since startup, plus
+/// the running active count derived from their delta.
+#[derive(Debug, Default)]
+pub struct ServerStats {
+    pub connects_total: std::sync::atomic::AtomicU64,
+    pub disconnects_total: std::sync::atomic::AtomicU64,
+    pub started_at: std::sync::OnceLock<std::time::Instant>,
+}
+
+impl ServerStats {
+    pub fn active_clients(&self) -> u64 {
+        let c = self
+            .connects_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let d = self
+            .disconnects_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        c.saturating_sub(d)
+    }
+
+    pub fn uptime(&self) -> std::time::Duration {
+        self.started_at
+            .get()
+            .map(|t| t.elapsed())
+            .unwrap_or_default()
+    }
+}
+
 pub struct CaServer {
     db: Arc<PvDatabase>,
     port: u16,
+    /// Shared stats counter — incremented by a task spawned in
+    /// `start()` that subscribes to `conn_events`. Surfaced via
+    /// [`Self::stats`] and the `casr` iocsh command.
+    stats: Arc<ServerStats>,
     /// Active access security configuration. Wrapped in `RwLock` so
     /// `reload_acf` can swap it without restarting the server. Access
     /// checks acquire a read lock; reload acquires write.
@@ -353,14 +389,21 @@ impl CaServer {
         autosave_config: Option<autosave::SaveSetConfig>,
         autosave_manager: Option<Arc<autosave::AutosaveManager>>,
     ) -> Self {
+        let stats = Arc::new(ServerStats::default());
+        // Always-on connection broadcast so the stats counter task in
+        // `run()` (and any external `connection_events()` subscriber)
+        // can attach without requiring a `&mut self` mutation. Capacity
+        // 64 matches the previous lazy default.
+        let (conn_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             db,
             port,
+            stats,
             acf: Arc::new(tokio::sync::RwLock::new(acf)),
             acf_source_path: std::sync::Mutex::new(None),
             autosave_config,
             autosave_manager,
-            conn_events: None,
+            conn_events: Some(conn_tx),
             after_init_hooks: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "experimental-rust-tls")]
             tls: None,
@@ -520,6 +563,13 @@ impl CaServer {
         &self.db
     }
 
+    /// Live connect/disconnect counters + uptime. Backs the `casr`
+    /// iocsh command. The counters update once `start()` has spawned
+    /// the connection-event subscriber; before that they read zero.
+    pub fn stats(&self) -> Arc<ServerStats> {
+        self.stats.clone()
+    }
+
     /// Run server + interactive shell. Shell exit stops server.
     pub async fn run_with_shell<F>(self, register_fn: F) -> CaResult<()>
     where
@@ -593,6 +643,33 @@ impl CaServer {
     /// Run the server (UDP + TCP + beacon + scan scheduler).
     /// This function runs indefinitely.
     pub async fn run(&self) -> CaResult<()> {
+        // Pin the started_at timestamp on first run() so subsequent
+        // re-entries don't reset uptime accounting.
+        let _ = self.stats.started_at.set(std::time::Instant::now());
+
+        // Spawn the connect/disconnect counter that backs `casr`.
+        // Subscribes to the always-on `conn_events` broadcast set up in
+        // the constructors. The receiver lives for as long as the
+        // server runs; on shutdown the broadcast sender drops and the
+        // task exits naturally.
+        if let Some(tx) = &self.conn_events {
+            let mut rx = tx.subscribe();
+            let stats_for_task = self.stats.clone();
+            tokio::spawn(async move {
+                while let Ok(evt) = rx.recv().await {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    match evt {
+                        crate::server::tcp::ServerConnectionEvent::Connected(_) => {
+                            stats_for_task.connects_total.fetch_add(1, Relaxed);
+                        }
+                        crate::server::tcp::ServerConnectionEvent::Disconnected(_) => {
+                            stats_for_task.disconnects_total.fetch_add(1, Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+
         let db_udp = self.db.clone();
         let db_tcp = self.db.clone();
         let db_scan = self.db.clone();

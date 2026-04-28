@@ -3,8 +3,11 @@ mod circuit_breaker;
 mod search;
 mod state;
 mod subscription;
+mod sync_group;
 mod transport;
 mod types;
+
+pub use sync_group::{SyncGroup, SyncGroupResults};
 
 pub use circuit_breaker::{BreakerConfig, BreakerState};
 
@@ -514,6 +517,24 @@ impl CaClient {
 
     // --- Legacy one-shot API (backwards-compatible) ---
 
+    /// Append `addr` to the search engine's working address list at
+    /// runtime. Mirrors libca `addAddrToChannelAccessAddressList`
+    /// (iocinf.cpp:45) — the new entry is consulted on the next
+    /// scheduled search round. Use when the application learns of
+    /// a new IOC after `CaClient::new()` (e.g., service-discovery
+    /// callback). Idempotent; duplicates are skipped.
+    pub fn add_address(&self, addr: SocketAddr) {
+        let _ = self.search_tx.send(SearchRequest::AddAddress(addr));
+    }
+
+    /// Replace the search engine's working address list. Mirrors
+    /// libca `configureChannelAccessAddressList` (iocinf.cpp:166).
+    /// Use when the application has authoritative knowledge of the
+    /// IOC topology and wants to override env-derived state.
+    pub fn set_address_list(&self, list: Vec<SocketAddr>) {
+        let _ = self.search_tx.send(SearchRequest::SetAddressList(list));
+    }
+
     pub async fn caget(&self, pv_name: &str) -> CaResult<(DbFieldType, EpicsValue)> {
         let ch = self.create_channel(pv_name);
         ch.wait_connected(Duration::from_secs(3)).await?;
@@ -931,8 +952,39 @@ impl CaChannel {
         })
     }
 
+    /// Subscribe to per-channel lifecycle events:
+    /// `Connected` / `Disconnected` / `Unresponsive` and
+    /// `AccessRightsChanged { access }`. Mirrors libca's
+    /// `ca_create_channel(... connection_callback ...)` plus
+    /// `ca_replace_access_rights_event` at a single broadcast
+    /// surface — a `tokio::sync::broadcast::Receiver` so multiple
+    /// subscribers per channel are cheap.
+    ///
+    /// The receiver is bounded (16); slow consumers see
+    /// `RecvError::Lagged` and should re-subscribe after polling
+    /// the current state via [`Self::access_rights`] /
+    /// [`Self::is_connected`].
     pub fn connection_events(&self) -> broadcast::Receiver<ConnectionEvent> {
         self.conn_tx.subscribe()
+    }
+
+    /// Convenience wrapper around [`Self::connection_events`] that
+    /// invokes `cb` on every `AccessRightsChanged`. Returns a
+    /// [`tokio::task::JoinHandle`] you can drop to stop watching.
+    /// Mirrors libca `ca_replace_access_rights_event` at the
+    /// callback-registration shape.
+    pub fn on_access_rights_change<F>(&self, mut cb: F) -> tokio::task::JoinHandle<()>
+    where
+        F: FnMut(AccessRights) + Send + 'static,
+    {
+        let mut rx = self.conn_tx.subscribe();
+        epics_base_rs::runtime::task::spawn(async move {
+            while let Ok(evt) = rx.recv().await {
+                if let ConnectionEvent::AccessRightsChanged { read, write } = evt {
+                    cb(AccessRights { read, write });
+                }
+            }
+        })
     }
 }
 

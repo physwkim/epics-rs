@@ -5,6 +5,7 @@ pub mod beacon;
 pub mod ca_server;
 pub mod introspection;
 pub mod ioc_app;
+pub mod iocsh;
 pub mod monitor;
 pub mod rate_limit;
 #[cfg(feature = "cap-tokens")]
@@ -12,7 +13,7 @@ pub mod signed_beacon;
 pub mod tcp;
 pub mod udp;
 
-pub use ca_server::{CaServer, CaServerBuilder};
+pub use ca_server::{CaServer, CaServerBuilder, ServerStats};
 pub use tcp::ServerConnectionEvent;
 
 use epics_base_rs::error::CaResult;
@@ -41,8 +42,10 @@ pub async fn run_ca_ioc(config: IocRunConfig) -> CaResult<()> {
         config.autosave_manager,
     );
     server.set_after_init_hooks(config.after_init_hooks);
+    let casr = iocsh::casr_command(server.stats());
     server
         .run_with_shell(move |shell| {
+            shell.register(casr);
             for cmd in config.shell_commands {
                 shell.register(cmd);
             }

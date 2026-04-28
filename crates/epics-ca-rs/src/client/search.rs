@@ -244,7 +244,7 @@ fn lane_period(lane_index: u32, base_rtte: Duration, max_period: Duration) -> Du
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run_search_engine(
-    addr_list: Vec<SocketAddr>,
+    mut addr_list: Vec<SocketAddr>,
     nameserver_addrs: Vec<SocketAddr>,
     mut request_rx: mpsc::UnboundedReceiver<SearchRequest>,
     response_tx: mpsc::UnboundedSender<SearchResponse>,
@@ -300,11 +300,11 @@ pub(crate) async fn run_search_engine(
         tokio::select! {
             req = request_rx.recv() => {
                 let Some(req) = req else { return };
-                handle_request(&mut state, req);
+                handle_request_or_addr(&mut state, &mut addr_list, req);
                 // Drain any additional queued requests before sending,
                 // so a burst of Schedule messages gets batched together.
                 while let Ok(req) = request_rx.try_recv() {
-                    handle_request(&mut state, req);
+                    handle_request_or_addr(&mut state, &mut addr_list, req);
                 }
                 send_due_searches(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
             }
@@ -439,6 +439,29 @@ async fn run_nameserver_connection(
 // Request handling
 // ---------------------------------------------------------------------------
 
+/// Wrapper that handles the address-list mutation variants
+/// inline (they need mutable access to `addr_list` which
+/// `handle_request` doesn't have) and delegates everything else.
+fn handle_request_or_addr(
+    state: &mut SearchEngineState,
+    addr_list: &mut Vec<SocketAddr>,
+    req: SearchRequest,
+) {
+    match req {
+        SearchRequest::AddAddress(addr) => {
+            if !addr_list.contains(&addr) {
+                addr_list.push(addr);
+                tracing::info!(?addr, "ca-rs: addr_list += (programmatic)");
+            }
+        }
+        SearchRequest::SetAddressList(list) => {
+            tracing::info!(count = list.len(), "ca-rs: addr_list replaced");
+            *addr_list = list;
+        }
+        other => handle_request(state, other),
+    }
+}
+
 fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
     match req {
         SearchRequest::Schedule {
@@ -516,6 +539,11 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
                 }
             }
         }
+        // Address-list variants are intercepted by
+        // `handle_request_or_addr` before they reach this match.
+        // Defensive no-op so adding new variants doesn't crash if
+        // future code paths plumb them straight to handle_request.
+        SearchRequest::AddAddress(_) | SearchRequest::SetAddressList(_) => {}
     }
 }
 

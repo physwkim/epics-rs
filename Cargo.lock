@@ -838,6 +838,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "epics-base-rs",
+ "futures-util",
  "hickory-client",
  "hickory-proto",
  "hickory-resolver",

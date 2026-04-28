@@ -32,6 +32,20 @@ pub(crate) enum SearchRequest {
         success: bool,
         server_addr: SocketAddr,
     },
+    /// Append a unicast address to the search engine's working
+    /// address list. Mirrors libca
+    /// `addAddrToChannelAccessAddressList` (iocinf.cpp:45). The
+    /// new entry is consulted on the next scheduled search round;
+    /// already-pending searches do NOT auto-restart against the
+    /// new address — call [`super::CaClient::hurry_up`] (or wait
+    /// for the natural retry) for that.
+    AddAddress(SocketAddr),
+    /// Replace the entire working address list. Mirrors libca
+    /// `configureChannelAccessAddressList` (iocinf.cpp:166). Use
+    /// when the application has authoritative knowledge of the
+    /// IOC topology and wants to override env-derived state at
+    /// runtime.
+    SetAddressList(Vec<SocketAddr>),
 }
 
 pub(crate) enum SearchResponse {
