@@ -105,6 +105,12 @@ struct ClientState {
     /// configured strike threshold.
     rate_limit_strikes: u32,
     rate_limit_strike_threshold: u32,
+    /// Capability-token verifier shared across all clients on this
+    /// listener. When set, CLIENT_NAME payloads beginning with `cap:`
+    /// are verified before the resolved subject is used as the ACF
+    /// username.
+    #[cfg(feature = "cap-tokens")]
+    cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
 }
 
 impl ClientState {
@@ -126,6 +132,8 @@ impl ClientState {
             rate_limiter: None,
             rate_limit_strikes: 0,
             rate_limit_strike_threshold: 0,
+            #[cfg(feature = "cap-tokens")]
+            cap_token_verifier: None,
         }
     }
 
@@ -212,6 +220,7 @@ pub async fn run_tcp_listener(
     #[cfg(feature = "experimental-rust-tls")] tls: Option<
         Arc<std::sync::RwLock<Arc<tokio_rustls::rustls::ServerConfig>>>,
     >,
+    #[cfg(feature = "cap-tokens")] cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
 ) -> CaResult<()> {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -274,6 +283,8 @@ pub async fn run_tcp_listener(
         }
         let _ = stream.set_nodelay(true);
 
+        #[cfg(feature = "cap-tokens")]
+        let cap_token_verifier_for_client = cap_token_verifier.clone();
         epics_base_rs::runtime::task::spawn(async move {
             // TLS dispatch: when configured, wrap the accepted TCP
             // stream in a TlsAcceptor handshake. The client cert (if
@@ -304,6 +315,8 @@ pub async fn run_tcp_listener(
                                     actual_port,
                                     identity,
                                     audit,
+                                    #[cfg(feature = "cap-tokens")]
+                                    cap_token_verifier_for_client.clone(),
                                 )
                                 .await
                             }
@@ -314,12 +327,34 @@ pub async fn run_tcp_listener(
                             }
                         }
                     } else {
-                        handle_client(stream, peer, db, acf, actual_port, None, audit).await
+                        handle_client(
+                            stream,
+                            peer,
+                            db,
+                            acf,
+                            actual_port,
+                            None,
+                            audit,
+                            #[cfg(feature = "cap-tokens")]
+                            cap_token_verifier_for_client.clone(),
+                        )
+                        .await
                     }
                 }
                 #[cfg(not(feature = "experimental-rust-tls"))]
                 {
-                    handle_client(stream, peer, db, acf, actual_port, None, audit).await
+                    handle_client(
+                        stream,
+                        peer,
+                        db,
+                        acf,
+                        actual_port,
+                        None,
+                        audit,
+                        #[cfg(feature = "cap-tokens")]
+                        cap_token_verifier_for_client.clone(),
+                    )
+                    .await
                 }
             };
             beacon_reset.notify_one();
@@ -366,6 +401,7 @@ async fn handle_client<S>(
     tcp_port: u16,
     initial_hostname: Option<String>,
     audit: Option<crate::audit::AuditLogger>,
+    #[cfg(feature = "cap-tokens")] cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
 ) -> CaResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -373,6 +409,10 @@ where
     let (reader, writer) = tokio::io::split(stream);
     let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
     let mut state = ClientState::new(acf, tcp_port);
+    #[cfg(feature = "cap-tokens")]
+    {
+        state.cap_token_verifier = cap_token_verifier;
+    }
     // Default hostname: verified TLS identity if present, otherwise the
     // peer IP. Matches C rsrv default with EPICS_CAS_USE_HOST_NAMES=NO,
     // upgraded transparently when mTLS is in effect.
@@ -536,7 +576,35 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                 .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(payload.len());
-            state.username = String::from_utf8_lossy(&payload[..end]).to_string();
+            let raw = String::from_utf8_lossy(&payload[..end]).to_string();
+            // When a capability-token verifier is configured AND the
+            // payload arrives in `cap:<token>` form, verify the token
+            // and store the resolved subject. Unverifiable tokens are
+            // logged and replaced with an `unverified:` sentinel that
+            // ACF rules can deliberately deny. Plain (non-`cap:`)
+            // usernames pass through unchanged for backwards compat.
+            #[cfg(feature = "cap-tokens")]
+            {
+                state.username = match (&state.cap_token_verifier, raw.strip_prefix("cap:")) {
+                    (Some(v), Some(token)) => match v.verify(token) {
+                        Ok(claims) => {
+                            tracing::debug!(peer = %state.peer, sub = %claims.sub,
+                                "cap-token verified");
+                            claims.sub
+                        }
+                        Err(e) => {
+                            tracing::warn!(peer = %state.peer, error = %e,
+                                "cap-token verification failed");
+                            format!("unverified:{}", &raw)
+                        }
+                    },
+                    _ => raw,
+                };
+            }
+            #[cfg(not(feature = "cap-tokens"))]
+            {
+                state.username = raw;
+            }
             // Re-evaluate access rights for all existing channels
             reeval_access_rights(state, writer).await?;
         }

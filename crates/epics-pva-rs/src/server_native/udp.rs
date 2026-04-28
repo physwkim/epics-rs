@@ -113,12 +113,25 @@ pub async fn run_udp_responder_with_config(
     let beacon_guid = guid;
     let _beacon = tokio::spawn(async move {
         let mut tick = interval(beacon_period);
+        // Per-emitter monotonically advancing beacon sequence + change
+        // counter. Matches pvxs `server.cpp::doBeacons` so clients can
+        // detect missed beacons (sequence gaps) and topology changes
+        // (change_count mismatch). Sequence is u8 with natural wrap.
+        let mut beacon_seq: u8 = 0;
+        let change_count: u16 = 0;
         loop {
             tick.tick().await;
-            let beacon = build_beacon(beacon_guid, tcp_port, ByteOrder::Little);
+            let beacon = build_beacon(
+                beacon_guid,
+                tcp_port,
+                ByteOrder::Little,
+                beacon_seq,
+                change_count,
+            );
             for dest in &beacon_destinations {
                 let _ = beacon_socket.send_to(&beacon, dest).await;
             }
+            beacon_seq = beacon_seq.wrapping_add(1);
         }
     });
 
@@ -203,13 +216,19 @@ pub async fn run_udp_responder(
     run_udp_responder_proto(source, udp_port, tcp_port, guid, "tcp").await
 }
 
-fn build_beacon(guid: [u8; 12], tcp_port: u16, order: ByteOrder) -> Vec<u8> {
+fn build_beacon(
+    guid: [u8; 12],
+    tcp_port: u16,
+    order: ByteOrder,
+    sequence: u8,
+    change_count: u16,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&guid);
     // pvxs server.cpp::doBeacons: flags(u8) + seq(u8) + change(u16) = 4 bytes
     payload.put_u8(0); // flags / QoS (undefined, 0)
-    payload.put_u8(0); // beacon sequence (u8)
-    payload.put_u16(0, order); // change count (u16)
+    payload.put_u8(sequence);
+    payload.put_u16(change_count, order);
     let addr = ip_to_bytes(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     payload.extend_from_slice(&addr);
     payload.put_u16(tcp_port, order);

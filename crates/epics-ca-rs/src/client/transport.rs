@@ -54,10 +54,13 @@ pub(crate) async fn run_transport_manager(
     mut command_rx: mpsc::UnboundedReceiver<TransportCommand>,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
     #[cfg(feature = "experimental-rust-tls")] tls: Option<ClientTlsConfig>,
+    #[cfg(feature = "experimental-rust-tls")] tls_server_name: Option<String>,
 ) {
     let mut connections: HashMap<SocketAddr, ServerConnection> = HashMap::new();
     #[cfg(feature = "experimental-rust-tls")]
     let tls = tls;
+    #[cfg(feature = "experimental-rust-tls")]
+    let tls_server_name = tls_server_name;
 
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
@@ -71,7 +74,7 @@ pub(crate) async fn run_transport_manager(
                     let result = {
                         #[cfg(feature = "experimental-rust-tls")]
                         {
-                            connect_server(server_addr, event_tx.clone(), tls.as_ref()).await
+                            connect_server(server_addr, event_tx.clone(), tls.as_ref(), tls_server_name.as_deref()).await
                         }
                         #[cfg(not(feature = "experimental-rust-tls"))]
                         {
@@ -104,7 +107,7 @@ pub(crate) async fn run_transport_manager(
                     let result = {
                         #[cfg(feature = "experimental-rust-tls")]
                         {
-                            connect_server(server_addr, event_tx.clone(), tls.as_ref()).await
+                            connect_server(server_addr, event_tx.clone(), tls.as_ref(), tls_server_name.as_deref()).await
                         }
                         #[cfg(not(feature = "experimental-rust-tls"))]
                         {
@@ -316,6 +319,7 @@ async fn connect_server(
     server_addr: SocketAddr,
     event_tx: mpsc::UnboundedSender<TransportEvent>,
     #[cfg(feature = "experimental-rust-tls")] tls: Option<&ClientTlsConfig>,
+    #[cfg(feature = "experimental-rust-tls")] tls_server_name: Option<&str>,
 ) -> Option<ServerConnection> {
     tracing::debug!(server = %server_addr, "establishing TCP virtual circuit");
     let stream = match tokio::time::timeout(
@@ -380,9 +384,16 @@ async fn connect_server(
     // raw TcpStream. Both feed identical-shape generic loops.
     #[cfg(feature = "experimental-rust-tls")]
     let (read_task, write_task) = if let Some(tls_cfg) = tls {
-        let server_name = match tokio_rustls::rustls::pki_types::ServerName::try_from(
-            server_addr.ip().to_string(),
-        ) {
+        // Prefer the operator-supplied SNI / cert-hostname-verification
+        // name (e.g. EPICS_CA_TLS_SERVER_NAME=ioc.example.com); fall back
+        // to the server's IP literal when nothing is configured. The IP
+        // literal only validates against IP-bound certs, so hostname-bound
+        // certs require the explicit override.
+        let sni_str: String = match tls_server_name {
+            Some(n) if !n.is_empty() => n.to_owned(),
+            _ => server_addr.ip().to_string(),
+        };
+        let server_name = match tokio_rustls::rustls::pki_types::ServerName::try_from(sni_str) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(server = %server_addr, error = %e, "invalid TLS server name");

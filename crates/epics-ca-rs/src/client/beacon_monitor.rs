@@ -80,9 +80,15 @@ async fn run_beacon_monitor_inner(
     // When `verifier` is set, this map remembers which
     // (server_ip, server_port, beacon_id) tuples have been
     // authenticated by a recent companion datagram. Beacons whose
-    // tuple isn't here within `max_age_secs` get dropped.
+    // tuple isn't here within `max_age_secs` get dropped (or merely
+    // counted, when `require_signed` is false).
     #[cfg(feature = "cap-tokens")]
     let mut verified_tuples: HashMap<(u32, u16, u32), std::time::Instant> = HashMap::new();
+    #[cfg(feature = "cap-tokens")]
+    let require_signed = !matches!(
+        epics_base_rs::runtime::env::get("EPICS_CA_BEACON_REQUIRE_SIGNED").as_deref(),
+        Some("NO" | "no" | "0" | "false" | "FALSE")
+    );
     let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
     // Beacons are 16 B but the repeater may concatenate VERSION + RSRV_IS_UP
     // and forward client-noop traffic. Use 4 KB so chained datagrams are
@@ -145,10 +151,16 @@ async fn run_beacon_monitor_inner(
                 continue;
             }
 
-            // Verifier policy: drop unauthenticated beacons. The
-            // companion can arrive ~simultaneously; we check against
-            // the verified-tuple set populated above. GC stale
-            // entries every iteration to keep the map bounded.
+            // Verifier policy: by default, drop unauthenticated
+            // beacons when a verifier is configured. The companion
+            // signed-beacon datagram can arrive ~simultaneously; we
+            // check against the verified-tuple set populated above and
+            // GC stale entries every iteration to keep the map bounded.
+            //
+            // EPICS_CA_BEACON_REQUIRE_SIGNED=NO opts out — unsigned
+            // beacons are accepted (with a counter increment) so
+            // operators can run mixed deployments where some servers
+            // have rolled out signing and some haven't yet.
             #[cfg(feature = "cap-tokens")]
             if let Some(ref v) = verifier {
                 let max_age = std::time::Duration::from_secs(v.max_age_secs.max(1));
@@ -157,7 +169,9 @@ async fn run_beacon_monitor_inner(
                 let key = (hdr.available, hdr.count, hdr.cid);
                 if !verified_tuples.contains_key(&key) {
                     metrics::counter!("ca_client_unsigned_beacon_drops_total").increment(1);
-                    continue;
+                    if require_signed {
+                        continue;
+                    }
                 }
             }
 

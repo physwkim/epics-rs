@@ -125,3 +125,61 @@ impl PvaMonitor for BridgeMonitor {
         self.initial_snapshot = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use epics_base_rs::server::records::ai::AiRecord;
+    use std::time::Duration;
+
+    /// Lifecycle invariants:
+    /// - `start()` opens a subscription (poll yields the initial snapshot).
+    /// - `stop()` drops the subscription so the underlying DbSubscription
+    ///   is released (poll returns None — the broadcast sender was dropped).
+    /// - Stopping is idempotent and leaves no spawned task lingering.
+    #[tokio::test]
+    async fn monitor_stop_releases_subscription() {
+        let db = Arc::new(PvDatabase::new());
+        db.add_record("MON_LIFECYCLE", Box::new(AiRecord::new(1.0)))
+            .await;
+
+        let mut mon = BridgeMonitor::new(
+            db.clone(),
+            "MON_LIFECYCLE".into(),
+            NtType::Scalar,
+        );
+        mon.start().await.expect("start ok");
+        assert!(mon.running);
+
+        // First poll yields the recorded initial snapshot.
+        let initial = tokio::time::timeout(Duration::from_secs(1), mon.poll())
+            .await
+            .expect("initial poll did not time out");
+        assert!(initial.is_some(), "initial snapshot should be present");
+
+        // Drop the underlying record's only owner of the broadcast
+        // sender. After `stop()` the subscription is None, so subsequent
+        // polls short-circuit; the broadcast subscriber is also released
+        // (verified indirectly: a fresh subscribe must succeed without
+        // contention).
+        mon.stop().await;
+        assert!(!mon.running);
+        assert!(mon.subscription.is_none());
+
+        // A second `stop()` is idempotent.
+        mon.stop().await;
+        assert!(!mon.running);
+
+        // After stop, a fresh BridgeMonitor against the same record
+        // re-subscribes cleanly (regression for "leaked sender keeps
+        // the broadcast at saturated subscriber count" issues).
+        let mut mon2 = BridgeMonitor::new(
+            db.clone(),
+            "MON_LIFECYCLE".into(),
+            NtType::Scalar,
+        );
+        mon2.start().await.expect("re-subscribe ok");
+        assert!(mon2.running);
+        mon2.stop().await;
+    }
+}

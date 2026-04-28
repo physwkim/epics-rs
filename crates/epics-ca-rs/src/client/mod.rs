@@ -286,6 +286,15 @@ pub struct CaClientConfig {
     #[cfg(feature = "experimental-rust-tls")]
     pub tls: Option<crate::tls::TlsConfig>,
 
+    /// Override SNI / cert-hostname-verification name for TLS
+    /// connections. When `None`, the client falls back to the server's
+    /// IP address (which only works for IP-bound certs / wildcard
+    /// fallbacks). Set this to the DNS name embedded in the server
+    /// certificate when verifying hostname-bound certs. Picked up
+    /// from `EPICS_CA_TLS_SERVER_NAME` by default.
+    #[cfg(feature = "experimental-rust-tls")]
+    pub tls_server_name: Option<String>,
+
     /// Service-discovery configuration. When `Some`, the client
     /// merges the addresses returned by every active backend into
     /// its `EPICS_CA_ADDR_LIST` at startup. Falls back to the
@@ -317,6 +326,12 @@ impl CaClient {
                         "EPICS_CA_TLS_* configuration is invalid; using plaintext");
                 }
             }
+            // Pick up an explicit SNI / cert-hostname-verification name
+            // for hostname-bound certs. Without this, the SNI falls back
+            // to the server's IP literal — which only validates against
+            // IP-bound certs.
+            c.tls_server_name =
+                epics_base_rs::runtime::env::get("EPICS_CA_TLS_SERVER_NAME");
             c
         };
         #[cfg(not(feature = "experimental-rust-tls"))]
@@ -408,6 +423,7 @@ impl CaClient {
                     transport_rx,
                     transport_evt_tx,
                     tls_arc,
+                    config.tls_server_name.clone(),
                 ))
             }
             #[cfg(not(feature = "experimental-rust-tls"))]

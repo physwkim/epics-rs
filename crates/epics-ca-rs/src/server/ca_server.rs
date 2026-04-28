@@ -52,6 +52,12 @@ pub struct CaServerBuilder {
     /// Grace period (seconds) for graceful drain on signal or admin
     /// request.
     drain_grace_secs: u64,
+    /// Optional capability-token verifier. When set, the CLIENT_NAME
+    /// payload is treated as a `cap:<token>` and verified before its
+    /// resolved subject is used for ACF matching. Unset = legacy
+    /// "trust the username string" behaviour.
+    #[cfg(feature = "cap-tokens")]
+    cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
 }
 
 impl CaServerBuilder {
@@ -70,6 +76,8 @@ impl CaServerBuilder {
             audit: audit_from_env(),
             introspection_addr: introspection_from_env(),
             drain_grace_secs: drain_grace_from_env(),
+            #[cfg(feature = "cap-tokens")]
+            cap_token_verifier: None,
         }
     }
 
@@ -254,7 +262,23 @@ impl CaServerBuilder {
             audit: self.audit,
             introspection_addr: self.introspection_addr,
             drain_grace_secs: self.drain_grace_secs,
+            #[cfg(feature = "cap-tokens")]
+            cap_token_verifier: self.cap_token_verifier,
         })
+    }
+
+    /// Install a capability-token verifier. When set, CLIENT_NAME
+    /// payloads beginning with `cap:` are passed to
+    /// [`crate::cap_token::TokenVerifier::verify`]; the resolved
+    /// `sub` claim becomes the ACF-matched username. Unprefixed
+    /// CLIENT_NAME values still pass through unchanged.
+    #[cfg(feature = "cap-tokens")]
+    pub fn with_cap_token_verifier(
+        mut self,
+        verifier: Arc<crate::cap_token::TokenVerifier>,
+    ) -> Self {
+        self.cap_token_verifier = Some(verifier);
+        self
     }
 }
 
@@ -307,6 +331,11 @@ pub struct CaServer {
     /// Grace period in seconds applied when drain is requested.
     /// Default 30 s; configurable via EPICS_CAS_DRAIN_GRACE_SECS.
     drain_grace_secs: u64,
+    /// Optional capability-token verifier; threaded into per-client
+    /// state at accept time so CLIENT_NAME `cap:<token>` payloads
+    /// resolve to a verified subject before ACF lookup.
+    #[cfg(feature = "cap-tokens")]
+    cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
 }
 
 impl CaServer {
@@ -344,6 +373,8 @@ impl CaServer {
             audit: audit_from_env(),
             introspection_addr: introspection_from_env(),
             drain_grace_secs: drain_grace_from_env(),
+            #[cfg(feature = "cap-tokens")]
+            cap_token_verifier: None,
         }
     }
 
@@ -634,6 +665,8 @@ impl CaServer {
         // route (sets when triggered).
         let drain = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let drain_for_tcp = drain.clone();
+        #[cfg(feature = "cap-tokens")]
+        let cap_token_verifier_for_tcp = self.cap_token_verifier.clone();
         let tcp_handle = epics_base_rs::runtime::task::spawn(async move {
             #[cfg(feature = "experimental-rust-tls")]
             {
@@ -647,6 +680,8 @@ impl CaServer {
                     audit_for_tcp,
                     drain_for_tcp,
                     tls,
+                    #[cfg(feature = "cap-tokens")]
+                    cap_token_verifier_for_tcp,
                 )
                 .await
             }
@@ -661,6 +696,8 @@ impl CaServer {
                     conn_events,
                     audit_for_tcp,
                     drain_for_tcp,
+                    #[cfg(feature = "cap-tokens")]
+                    cap_token_verifier_for_tcp,
                 )
                 .await
             }

@@ -226,9 +226,30 @@ pub struct BridgeProvider {
     /// Avoids repeated record introspection on every create_channel() call.
     /// Corresponds to C++ PDBProvider's transient_pv_map.
     record_cache: tokio::sync::RwLock<HashMap<String, (NtType, DbFieldType)>>,
-    /// Access control policy. Shared with channels via `Arc` so a single
-    /// policy serves all channels and can be swapped atomically.
-    access: Arc<dyn AccessControl>,
+    /// Live access-control cell. Channels and AccessContexts hold an
+    /// `Arc<LiveAccessProxy>` that points at this cell, so
+    /// `set_access_control` is observed by all existing channels on
+    /// their *next* check (matches C++ QSRV — ACF reload takes effect
+    /// without recreating channels).
+    access_cell: Arc<parking_lot::RwLock<Arc<dyn AccessControl>>>,
+}
+
+/// Proxy that re-reads the live access-control policy on every check.
+/// Wraps an `Arc<RwLock<Arc<dyn AccessControl>>>` shared with the
+/// owning [`BridgeProvider`] — `set_access_control` swaps the inner
+/// `Arc` and existing AccessContexts pick up the new policy on their
+/// next [`can_read`] / [`can_write`] call.
+struct LiveAccessProxy {
+    cell: Arc<parking_lot::RwLock<Arc<dyn AccessControl>>>,
+}
+
+impl AccessControl for LiveAccessProxy {
+    fn can_read(&self, channel: &str, user: &str, host: &str) -> bool {
+        self.cell.read().can_read(channel, user, host)
+    }
+    fn can_write(&self, channel: &str, user: &str, host: &str) -> bool {
+        self.cell.read().can_write(channel, user, host)
+    }
 }
 
 impl BridgeProvider {
@@ -237,28 +258,39 @@ impl BridgeProvider {
             db,
             groups: HashMap::new(),
             record_cache: tokio::sync::RwLock::new(HashMap::new()),
-            access: Arc::new(AllowAllAccess),
+            access_cell: Arc::new(parking_lot::RwLock::new(Arc::new(AllowAllAccess))),
         }
     }
 
-    /// Set a custom access control policy.
+    /// Replace the current access-control policy. All AccessContexts
+    /// vended from this provider — including those already attached to
+    /// existing channels — observe the swap on their next access check.
     pub fn set_access_control(&mut self, access: Arc<dyn AccessControl>) {
-        self.access = access;
+        *self.access_cell.write() = access;
     }
 
     /// Get a clone of the current access control policy.
     pub fn access_control(&self) -> Arc<dyn AccessControl> {
-        self.access.clone()
+        self.access_cell.read().clone()
+    }
+
+    /// Hand out a live-tracking access wrapper. Use when constructing
+    /// an [`AccessContext`] for a new channel so it observes future
+    /// `set_access_control` swaps.
+    pub fn live_access(&self) -> Arc<dyn AccessControl> {
+        Arc::new(LiveAccessProxy {
+            cell: self.access_cell.clone(),
+        })
     }
 
     /// Check if a client can write to a channel.
     pub fn can_write(&self, channel: &str, user: &str, host: &str) -> bool {
-        self.access.can_write(channel, user, host)
+        self.access_cell.read().can_write(channel, user, host)
     }
 
     /// Check if a client can read from a channel.
     pub fn can_read(&self, channel: &str, user: &str, host: &str) -> bool {
-        self.access.can_read(channel, user, host)
+        self.access_cell.read().can_read(channel, user, host)
     }
 
     /// Load group PV definitions from a JSON config string.
@@ -339,7 +371,7 @@ impl BridgeProvider {
         host: &str,
     ) -> BridgeResult<AnyChannel> {
         let access_ctx =
-            AccessContext::with_identity(self.access.clone(), user.to_string(), host.to_string());
+            AccessContext::with_identity(self.live_access(), user.to_string(), host.to_string());
 
         // Check group PVs first
         if let Some(def) = self.groups.get(name) {
