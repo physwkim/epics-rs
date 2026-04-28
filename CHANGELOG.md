@@ -1,5 +1,142 @@
 # Changelog
 
+## v0.10.1 — 2026-04-28 — pvxs / pvAccessCPP wire-format interop
+
+`epics-pva-rs` server and client are now byte-exact compatible with
+the upstream EPICS C++ implementations (`pvxs` 1.x and `pvAccessCPP`
+shipping with EPICS Base 7.x). The push came from a real-world
+deployment where Base's `pvmonitor` either disconnected immediately
+or printed garbled values against our server. A walk through pvxs
+`servermon.cpp` / `serverget.cpp` / `serverchan.cpp` /
+`clientget.cpp` exposed five separate wire-format mismatches. All
+are fixed; e2e and unit tests cover each one.
+
+### Wire-format fixes (server)
+
+- **MONITOR data field order** — the payload is now `changed bitset →
+  partial value → overrun bitset`, matching pvxs `servermon.cpp:173-
+  175`. The previous order (`changed → overrun → value`) shifted the
+  client's value-decode cursor by one byte whenever overrun was
+  empty, corrupting timestamps and double values for every Base
+  client.
+- **MONITOR FINISH** — when the source's broadcast channel is
+  dropped the subscriber task now emits `subcmd 0x10 + Status::OK`
+  before exiting (pvxs `servermon.cpp:148`). Clients receive a
+  graceful end-of-stream instead of waiting for a TCP timeout.
+- **INIT type-descriptor encoding** — RPC INIT no longer emits the
+  type descriptor (pvxs `serverget.cpp:97` —
+  `if (cmd != CMD_RPC) to_wire(R, type)`). For
+  GET/PUT/MONITOR it defaults to inline; the
+  `0xFD` / `0xFE` cache markers are now opt-in via
+  `PvaServerConfig::emit_type_cache` because pvAccessCPP doesn't
+  parse them and reads past the payload boundary, breaking the next
+  frame.
+- **PUT_GET (`subcmd & 0x40`)** — the response now carries
+  `bitset + partial value` after the status (pvxs
+  `serverget.cpp:103-104`). Previously only `Status::OK` was sent and
+  the client got no readback.
+- **CreateChannel access_rights** — drop the unnecessary `u16`
+  trailing the status. pvxs `serverchan.cpp:349-351` emits
+  `cid + sid + status` only.
+- **RPC DATA request** — server now decodes `type(arg) +
+  full_value(arg)` instead of treating the channel introspection
+  from INIT as the argument shape (pvxs `serverget.cpp:444-446`,
+  `from_wire_type_value`).
+- **MESSAGE / CancelRequest** — now dispatched. MESSAGE (cmd 18) is
+  surfaced through `tracing` at the matching severity. CancelRequest
+  (cmd 21) aborts the in-flight monitor task and resets
+  `monitor_started` so a re-START respawns cleanly. Both previously
+  fell through to a no-op catchall.
+- **`request_to_mask`** — an empty pvRequest with no `field`
+  substructure now selects every field (pvxs convention) instead of
+  "root only". This was silently dropping every leaf for the
+  canonical no-filter sentinel `[0xFD,0x02,0x00,0x80,0x00,0x00]` the
+  Rust client sends by default.
+
+### Wire-format fixes (client)
+
+- **RPC INIT response** — the type descriptor is no longer expected
+  (mirrors the server fix above).
+- **RPC DATA response** — decoded as `status + type + full_value`
+  (pvxs `clientget.cpp:415-421`). The previous bitset-driven path
+  could not parse RPC replies at all.
+- **RPC DATA request** — sends `type(arg) + full_value(arg)`. v1
+  (`ops.rs`) and v2 (`ops_v2.rs`) paths both updated.
+- **Monitor data overrun bitset** — the trailing `BitSet` is now
+  consumed.
+- **`OpResponse::Status` from `subcmd & 0x10`** — the FINISH frame
+  is routed to the status path so `pvmonitor` returns `Ok(())`
+  instead of hanging.
+- **`OpDataResponse.response_desc: Option<FieldDesc>`** — new field
+  carrying the server-side response type for RPC, so callers can
+  reconstruct the result without relying on the now-empty INIT
+  introspection.
+
+### pvData decode tightening
+
+- **Structure-array presence byte** — strict `0x00` (null) / `0x01`
+  (present) per pvxs `dataencode.cpp:359-361`. The previous code
+  also accepted `0xFF` and silently rewound the cursor on unknown
+  markers; both branches were defensive guesses with no pvxs
+  counterpart and could mask real protocol errors.
+- **Union / UnionArray selector** — the manual peek-and-pushback was
+  replaced by a direct `decode_size` match. `decode_size` already
+  returns `None` for the 0xFF null marker, so the rewind dance was
+  redundant and made the future "selector ≥ 254" extended-Size case
+  awkward to handle.
+
+### Server lifecycle / resource management
+
+- **Spawned MONITOR subscribers are now cancelled deterministically**
+  on DestroyRequest, DestroyChannel, CancelRequest, and connection
+  end. The abort handle is wrapped in `Arc<AbortOnDrop>` and stashed
+  on `OpState`; dropping the OpState (via HashMap removal or
+  HashMap drop on connection teardown) fires the abort
+  automatically. Previously, orphaned monitor tasks ran until their
+  next write tripped on a closed socket — keeping the source's
+  broadcast subscription alive in the meantime.
+- **Per-connection write queue** — replaced
+  `Arc<Mutex<SrvWrite>>` with a bounded `mpsc::channel` plus a
+  single dedicated writer task. Producers (main read loop,
+  heartbeat, monitor subscribers) `tx.send(buf).await` instead of
+  serialising on the writer Mutex across `write_all().await`.
+  A slow client now backpressures monitor delivery rather than
+  blocking the heartbeat or other channels' writes.
+  Configurable via `PvaServerConfig::write_queue_depth` (default
+  1024). Writer-task I/O failures are logged at `debug!` with
+  peer info before the connection tears down.
+
+### pvRequest field filtering
+
+- The pvRequest sent at INIT time is now translated through
+  `request_to_mask` and stored on the OpState. GET and MONITOR
+  emission consult the mask via `encode_pv_field_with_bitset`, so
+  the server only ships the fields the client asked for. Previously
+  the request was decoded and discarded; the wire always carried
+  every field.
+
+### Tests
+
+- `parity/test_pvrequest_filter.rs` — e2e: empty pvRequest returns
+  every field; `pvget_fields(["value"])` omits alarm/timeStamp on the
+  wire.
+- `parity/test_monitor_finish.rs` — e2e: dropping the source's
+  broadcast sender mid-stream causes the client `pvmonitor` to
+  return `Ok(())` via the FINISH frame.
+- `server_native::tcp::tests` — synthetic-frame unit coverage for
+  `handle_message` (every severity, truncated payload guard) and
+  `handle_cancel_request` (abort guard fires, `monitor_started`
+  resets).
+- `server_native::tcp::tests::monitor_payload_orders_overrun_after_value`
+  — round-trip regression for the corrected MONITOR layout.
+
+### Configuration additions
+
+- `PvaServerConfig::emit_type_cache: bool` (default `false`) — opt
+  in to `0xFD`/`0xFE` type-cache markers in INIT and RPC responses.
+- `PvaServerConfig::write_queue_depth: usize` (default `1024`) —
+  bounded write queue capacity per connection.
+
 ## v0.9.4 — 2026-04-16
 
 ### Async / reliable plugin data path
