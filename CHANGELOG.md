@@ -1,5 +1,71 @@
 # Changelog
 
+## v0.10.5 — 2026-04-28 — libca/RSRV deeper parity + kodex-driven review fixes
+
+Continues the v0.10.4 line by closing the deeper libca/RSRV gaps surfaced
+by kodex 0.9.0 analysis, then applying the actionable items from a
+layer-by-layer code review across `pva-rs`, `ca-rs`, and `bridge-rs`.
+
+### epics-ca-rs — libca/RSRV API parity
+
+**Round 1 (commit `957d506`)**
+- `SyncGroup` (`ca_sg_create`/`get`/`put`/`block` analog) — batch async
+  ops with collective wait via `try_join_all`.
+- Runtime address-list mutation: `CaClient::add_address(addr)` /
+  `set_address_list(addrs)` (libca `addAddrToChannelAccessAddressList` /
+  `configureChannelAccessAddressList`).
+- `casr` iocsh command (RSRV `casr` analog) on `epics_ca_rs::server::iocsh`,
+  reading from `Arc<ServerStats>` (connects/disconnects/uptime).
+- `Channel::on_access_rights_change(cb)` callback wrapper.
+
+**Round 2 (commit `007346e`)**
+- `Channel::on_connection_change(cb)` — libca `ca_change_connection_event`
+  analog. Filters Connected / Disconnected events from the broadcast.
+- `Channel::host_name()` — libca `ca_host_name` analog returning the
+  resolved server address.
+- `Channel::receive_watchdog_delay() -> Duration` — libca
+  `ca_receive_watchdog_delay`. New `CoordRequest::GetWatchdogDelay`
+  variant; coordinator tracks per-server `last_rx_at` updated from every
+  TransportEvent that implies an inbound frame.
+- `CaClient::ioc_connection_count() -> usize` — libca
+  `ca_get_ioc_connection_count`.
+- Server-side ACF reload broadcast (RSRV `sendAllUpdateAS` analog):
+  `CaServer.acf_reload_tx: broadcast::Sender<()>`; each accepted TCP
+  client races read against reload notifications via `tokio::select!`,
+  re-pushing `CA_PROTO_ACCESS_RIGHTS` for every open channel on signal.
+  Both `reload_acf*()` and the introspection `POST /reload-acf` route
+  fire it.
+
+### Review-driven fixes
+
+- **Dead code removal**: `epics-pva-rs/src/client_native/{ops.rs, conn.rs}`
+  deleted (~750 LOC). The legacy one-shot `Connection`+`op_*` path was
+  superseded by `ops_v2` (Channel-aware with auto-reconnect) months ago;
+  only a stale doc comment in `channel.rs:19` referenced it.
+- **bridge-rs group `field[N]` indexing semantic fix**: `qsrv::group::get_nested_field`
+  changed return type from `Option<&PvField>` to `Option<Cow<PvField>>`.
+  `field[N]` on a `ScalarArray` now returns the indexed element wrapped
+  as `PvField::Scalar`; `field[N].child` on a `StructureArray` descends
+  into the element and continues navigating. Previously both cases
+  silently returned the whole array, breaking NTTable column[N] paths.
+- **bridge-rs gateway PUT/GET channel reuse**: `UpstreamManager` now stores
+  `UpstreamSubscription { channel: Arc<CaChannel>, task }` per upstream
+  PV. Direct put/get reuse the subscribed channel instead of opening a
+  fresh one — 3 round-trips → 1 RT per write/read.
+- **CaChannel clone safety**: `CaChannel` was `Clone` but its `Drop` impl
+  fired `CoordRequest::DropChannel` per drop, so cloning + dropping the
+  clone tore down the original. Introduced a private `ChannelLifecycle`
+  guard wrapped in `Arc`; `DropChannel` now fires exactly once when the
+  last clone is dropped. Fixes a latent bug in `SyncGroup::get/put`
+  where each scheduled future cloned the channel.
+- **pvalink resolver sync fast path**: added `PvaLink::try_read_cached()`
+  and `PvaLinkRegistry::try_get()` so the record-link `ExternalPvResolver`
+  closure (and `LinkSet::get_value` / `is_connected`) hit a sync
+  `parking_lot` cache without ever calling `block_on` when the monitor
+  has already delivered. `block_on` is only paid on first-open / first-event.
+- **pvalink scheme tightening**: `strip_scheme` no longer accepts `ca://`
+  — pvalink handles PVA only; `ca://` belongs to the libca link scheme.
+
 ## v0.10.4 — 2026-04-28 — pvxs API parity (src + ioc + tools) and lset abstraction
 
 A nine-commit pass closing every kodex-flagged gap relative to the
