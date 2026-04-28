@@ -16,5 +16,8 @@ quote = "1"
 proc-macro2 = "1"
 proc-macro-crate = "3"
 
+# Dev-only — `path` (no `version`) so `cargo publish` strips this from
+# the uploaded manifest. Tests against the live workspace tree work
+# locally; the published .crate doesn't carry tests anyway.
 [dev-dependencies]
-epics-base-rs = { workspace = true }
+epics-base-rs = { path = "../epics-base-rs" }
