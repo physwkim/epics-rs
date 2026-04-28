@@ -13,7 +13,7 @@
 //! | [`qsrv`] | `qsrv` (default) | Record → pvAccess channels (C++ QSRV equivalent) |
 //! | `ca_gateway` | `ca-gateway` | CA fan-out gateway (C++ ca-gateway equivalent) — *planned* |
 //! | `pvalink` | `pvalink` | PVA links for record INP/OUT — *planned* |
-//! | `pva_gateway` | `pva-gateway` | PVA-to-PVA proxy — *planned* |
+//! | [`pva_gateway`] | `pva-gateway` | PVA-to-PVA proxy (mirrors `pva2pva/p2pApp`) |
 //!
 //! ## QSRV (Record ↔ PVA bridge)
 //!
@@ -42,6 +42,9 @@ pub mod ca_gateway;
 
 #[cfg(feature = "pvalink")]
 pub mod pvalink;
+
+#[cfg(feature = "pva-gateway")]
+pub mod pva_gateway;
 
 // Convenience re-exports for the QSRV bridge (default feature).
 // External users can write `epics_bridge_rs::BridgeProvider` directly.

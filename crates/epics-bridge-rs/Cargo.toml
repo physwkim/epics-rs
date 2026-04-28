@@ -34,10 +34,12 @@ ca-gateway-tls = [
 ]
 # PVA links for record INP/OUT (planned)
 pvalink = ["dep:epics-pva-rs"]
-# PVA-to-PVA proxy (planned, requires PVA server)
+# PVA-to-PVA proxy — mirrors C++ pva2pva/p2pApp.
 pva-gateway = ["dep:epics-pva-rs", "dep:regex"]
+# PVA gateway daemon binary (pva-gateway-rs).
+pva-gateway-bin = ["pva-gateway", "dep:clap", "dep:tracing-subscriber"]
 # Convenience: enable all bridges + binaries
-all-bridges = ["qsrv", "qsrv-bin", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway"]
+all-bridges = ["qsrv", "qsrv-bin", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway", "pva-gateway-bin"]
 # Dual-protocol IOC: serves the same PV database over both CA and PVA
 # from a single process. Drops in for sites whose tooling mix is
 # transitioning to PVA.
@@ -75,3 +77,8 @@ required-features = ["qsrv-bin"]
 name = "dual-ioc-rs"
 path = "src/bin/dual_ioc_rs.rs"
 required-features = ["dual-ioc-bin"]
+
+[[bin]]
+name = "pva-gateway-rs"
+path = "src/bin/pva_gateway_rs.rs"
+required-features = ["pva-gateway-bin"]
