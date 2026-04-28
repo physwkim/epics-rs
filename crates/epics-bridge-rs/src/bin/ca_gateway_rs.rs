@@ -136,7 +136,7 @@ fn build_tls(
 }
 
 async fn run_once(config: GatewayConfig) -> Result<(), String> {
-    eprintln!("[ca-gateway-rs] starting...");
+    tracing::info!("ca-gateway-rs: starting");
     let server = GatewayServer::build(config)
         .await
         .map_err(|e| format!("build failed: {e}"))?;
@@ -148,6 +148,17 @@ async fn run_once(config: GatewayConfig) -> Result<(), String> {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
+    // Initialize structured logging — RUST_LOG controls verbosity. The
+    // gateway's hot paths (cache eviction, command processing, signal
+    // handler, conn-event dispatch) all emit via `tracing` so a
+    // single env-filter governs the lot.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+
     let args = Args::parse();
 
     let config = GatewayConfig {
@@ -174,7 +185,7 @@ async fn main() -> ExitCode {
         read_only: args.read_only,
         #[cfg(feature = "ca-gateway-tls")]
         tls: build_tls(&args).unwrap_or_else(|e| {
-            eprintln!("ca-gateway-rs: TLS init failed: {e}");
+            tracing::error!(error = %e, "ca-gateway-rs: TLS init failed");
             std::process::exit(2);
         }),
     };
@@ -185,10 +196,10 @@ async fn main() -> ExitCode {
             window: std::time::Duration::from_secs(args.restart_window),
             delay: std::time::Duration::from_secs(args.restart_delay),
         };
-        eprintln!(
-            "[ca-gateway-rs] running under supervisor: max {} restarts in {:?}",
-            args.max_restarts,
-            std::time::Duration::from_secs(args.restart_window),
+        tracing::info!(
+            max_restarts = args.max_restarts,
+            window_secs = args.restart_window,
+            "ca-gateway-rs: running under supervisor"
         );
         let result = supervise(policy, || {
             let cfg = config.clone();
@@ -199,7 +210,7 @@ async fn main() -> ExitCode {
         match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("[ca-gateway-rs] supervisor exit: {e}");
+                tracing::error!(error = %e, "ca-gateway-rs: supervisor exit");
                 ExitCode::FAILURE
             }
         }
@@ -207,7 +218,7 @@ async fn main() -> ExitCode {
         match run_once(config).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("[ca-gateway-rs] {e}");
+                tracing::error!(error = %e, "ca-gateway-rs: error");
                 ExitCode::FAILURE
             }
         }

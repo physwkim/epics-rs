@@ -18,6 +18,10 @@ use epics_pva_rs::server_native::source::ChannelSource;
 
 use super::channel_cache::ChannelCache;
 
+/// Default operation timeout for forwarded RPC calls. Matches the
+/// upstream `PvaClient::pvrpc` timeout so we don't double-wait.
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// `ChannelSource` impl handed to the downstream `PvaServer`. Cheap
 /// to clone (Arc-backed cache + a couple of `Duration`s).
 #[derive(Clone)]
@@ -97,10 +101,43 @@ impl ChannelSource for GatewayChannelSource {
             .map_err(|e| e.to_string())
     }
 
-    async fn is_writable(&self, _name: &str) -> bool {
-        // pvxs gateway is permit-by-default; ACL belongs in the
-        // downstream server's auth-complete hook (future work).
-        true
+    async fn is_writable(&self, name: &str) -> bool {
+        // Only report writable when the upstream actually has the PV
+        // resolvable (cache hit OR a successful lookup). For an
+        // unknown name, returning `true` would invite the downstream
+        // client to issue PUT requests that we'd then have to reject —
+        // pvxs convention is to advertise PUT capability honestly.
+        self.cache.lookup(name, self.connect_timeout).await.is_ok()
+    }
+
+    /// Forward an RPC request through the upstream client. The default
+    /// trait impl returns "RPC not supported", which is a major p2pApp
+    /// parity gap (review §1). With this override, RPC requests pass
+    /// through transparently — `pvrpc` reuses the cached channel
+    /// connection-pool entry so we don't pay a fresh search per call.
+    async fn rpc(
+        &self,
+        name: &str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> Result<(FieldDesc, PvField), String> {
+        let _entry = self
+            .cache
+            .lookup(name, self.connect_timeout)
+            .await
+            .map_err(|e| e.to_string())?;
+        let result = tokio::time::timeout(
+            DEFAULT_RPC_TIMEOUT,
+            self.cache
+                .client()
+                .pvrpc(name, &request_desc, &request_value),
+        )
+        .await;
+        match result {
+            Ok(Ok(pair)) => Ok(pair),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err(format!("upstream rpc timeout for {name}")),
+        }
     }
 
     async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
@@ -140,9 +177,20 @@ impl ChannelSource for GatewayChannelSource {
     }
 }
 
-/// Convert a `PvField` into the string form pvput accepts. Limited
-/// to the scalar / scalar-array shapes the gateway covers today;
-/// returns `None` otherwise so the caller can surface a typed error.
+/// Convert a `PvField` into the string form pvput accepts. Covers:
+/// * `Scalar` / `ScalarArray` directly
+/// * `Structure` containing a `.value` field (NTScalar / NTScalarArray /
+///   NTEnum index — anything where the put target is the canonical
+///   `value` subfield)
+/// * `Variant` and `Union` by recursively unwrapping the inner field
+///
+/// Returns `None` for shapes pvput cannot represent in string form
+/// (e.g. nested structures with no `value` field). Callers surface
+/// the `None` to the downstream client as a typed error so the user
+/// gets a clear "unsupported PvField shape" message instead of a
+/// silent drop. Without `pvput_field` (typed PUT through the client
+/// API) on `PvaClient` this is the best the gateway can do today;
+/// see review §3d for the longer-term plan.
 fn pvfield_to_pvput_string(v: &PvField) -> Option<String> {
     match v {
         PvField::Scalar(sv) => Some(scalar_to_string(sv)),
@@ -152,13 +200,22 @@ fn pvfield_to_pvput_string(v: &PvField) -> Option<String> {
             Some(parts.join(" "))
         }
         PvField::Structure(s) => {
-            // Common case: NTScalar `.value` field. Drill in.
             for (name, field) in &s.fields {
                 if name == "value" {
                     return pvfield_to_pvput_string(field);
                 }
             }
             None
+        }
+        PvField::Variant(boxed) => pvfield_to_pvput_string(&boxed.value),
+        PvField::Union {
+            selector, value, ..
+        } => {
+            if *selector < 0 {
+                None
+            } else {
+                pvfield_to_pvput_string(value)
+            }
         }
         _ => None,
     }

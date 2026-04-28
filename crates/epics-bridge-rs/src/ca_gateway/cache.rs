@@ -240,23 +240,50 @@ impl PvCache {
     /// Sweep expired entries based on timeouts.
     /// Returns the names of removed entries.
     ///
-    /// Corresponds to C++ `gateServer::connectCleanup` and
-    /// `gateServer::inactiveDeadCleanup`.
+    /// Mirrors `gateServer::connectCleanup` + `inactiveDeadCleanup`. The
+    /// FSM is two-stage for the connect-failure path: a `Connecting`
+    /// entry that times out is *demoted* to `Dead` first (so a fresh
+    /// search from the same client can reuse the upstream subscription
+    /// once the IOC reappears) and only evicted after `dead_timeout`
+    /// further elapses. Same for `Disconnect` → kept as-is and only
+    /// evicted after `disconnect_timeout`.
     pub async fn cleanup(&mut self, timeouts: &CacheTimeouts) -> Vec<String> {
         let mut to_remove = Vec::new();
+        let mut to_demote: Vec<String> = Vec::new();
 
         for (name, entry) in &self.entries {
-            let entry = entry.read().await;
-            let elapsed = entry.time_in_state();
-            let expired = match entry.state {
-                PvState::Connecting => elapsed > timeouts.connect_timeout,
-                PvState::Inactive => elapsed > timeouts.inactive_timeout,
-                PvState::Dead => elapsed > timeouts.dead_timeout,
-                PvState::Disconnect => elapsed > timeouts.disconnect_timeout,
-                PvState::Active => false, // Active PVs are never evicted
-            };
-            if expired {
-                to_remove.push(name.clone());
+            let entry_guard = entry.read().await;
+            let elapsed = entry_guard.time_in_state();
+            match entry_guard.state {
+                PvState::Connecting => {
+                    if elapsed > timeouts.connect_timeout {
+                        to_demote.push(name.clone());
+                    }
+                }
+                PvState::Inactive => {
+                    if elapsed > timeouts.inactive_timeout {
+                        to_remove.push(name.clone());
+                    }
+                }
+                PvState::Dead => {
+                    if elapsed > timeouts.dead_timeout {
+                        to_remove.push(name.clone());
+                    }
+                }
+                PvState::Disconnect => {
+                    if elapsed > timeouts.disconnect_timeout {
+                        to_remove.push(name.clone());
+                    }
+                }
+                PvState::Active => { /* Active PVs are never evicted */ }
+            }
+        }
+
+        // Demote connect-timeouts to Dead (resets state_since so the
+        // dead_timeout window starts now).
+        for name in &to_demote {
+            if let Some(arc) = self.entries.get(name) {
+                arc.write().await.set_state(PvState::Dead);
             }
         }
 
@@ -393,5 +420,34 @@ mod tests {
         assert_eq!(removed, vec!["DEAD".to_string()]);
         assert!(cache.get("DEAD").is_none());
         assert!(cache.get("ALIVE").is_some());
+    }
+
+    #[tokio::test]
+    async fn cache_cleanup_demotes_connecting_to_dead() {
+        let mut cache = PvCache::new();
+        let stuck = cache.insert(GwPvEntry::new_connecting("STUCK"));
+
+        // Backdate so connect_timeout (1s default) has elapsed.
+        {
+            let mut e = stuck.write().await;
+            e.state_since = Instant::now() - Duration::from_secs(5);
+        }
+
+        let timeouts = CacheTimeouts::default();
+        let removed = cache.cleanup(&timeouts).await;
+
+        // First sweep: still in cache, but now in Dead state.
+        assert!(removed.is_empty());
+        assert!(cache.get("STUCK").is_some());
+        assert_eq!(stuck.read().await.state, PvState::Dead);
+
+        // Second sweep with backdated state_since past dead_timeout: evicts.
+        {
+            let mut e = stuck.write().await;
+            e.state_since = Instant::now() - Duration::from_secs(60 * 5);
+        }
+        let removed = cache.cleanup(&timeouts).await;
+        assert_eq!(removed, vec!["STUCK".to_string()]);
+        assert!(cache.get("STUCK").is_none());
     }
 }

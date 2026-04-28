@@ -684,6 +684,11 @@ impl CaServer {
                         crate::server::tcp::ServerConnectionEvent::Disconnected(_) => {
                             stats_for_task.disconnects_total.fetch_add(1, Relaxed);
                         }
+                        // Per-channel events are observable by ca_gateway
+                        // and similar consumers; stats here only track
+                        // connection-level counters.
+                        crate::server::tcp::ServerConnectionEvent::ChannelCreated { .. }
+                        | crate::server::tcp::ServerConnectionEvent::ChannelCleared { .. } => {}
                     }
                 }
             });

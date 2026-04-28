@@ -103,10 +103,13 @@ impl Default for GatewayConfig {
 /// to start the daemon.
 pub struct GatewayServer {
     config: GatewayConfig,
-    /// Wrapped in RwLock<Arc<...>> so live reload can swap the pvlist
+    /// Wrapped in `RwLock<Arc<...>>` so live reload can swap the pvlist
     /// atomically (via SIGUSR1 PVL command).
     pvlist: Arc<RwLock<Arc<PvList>>>,
-    access: Arc<AccessConfig>,
+    /// Same hot-reload pattern as `pvlist` — SIGUSR1 `AS` command swaps
+    /// this in place; every WriteHook reads it via `read().await.clone()`
+    /// so live puts pick up the new ACF without restart.
+    access: Arc<RwLock<Arc<AccessConfig>>>,
     cache: Arc<RwLock<PvCache>>,
     shadow_db: Arc<PvDatabase>,
     upstream: Arc<RwLock<UpstreamManager>>,
@@ -134,20 +137,42 @@ impl GatewayServer {
         };
         let pvlist = Arc::new(RwLock::new(Arc::new(pvlist)));
 
-        // Load .access (optional)
+        // Load .access (optional). Wrapped in RwLock<Arc<...>> for the
+        // same atomic-hot-reload pattern as `pvlist`.
         let access = if let Some(path) = &config.access_path {
             AccessConfig::from_file(path)?
         } else {
             AccessConfig::allow_all()
         };
-        let access = Arc::new(access);
+        let access = Arc::new(RwLock::new(Arc::new(access)));
 
         // Cache + shadow database
         let cache = Arc::new(RwLock::new(PvCache::new()));
         let shadow_db = Arc::new(PvDatabase::new());
 
-        // Upstream manager
-        let upstream = UpstreamManager::new(cache.clone(), shadow_db.clone()).await?;
+        // Stats — needed before UpstreamManager so per-PV WriteHook
+        // closures can capture the same Arc.
+        let stats = Arc::new(Stats::new(config.stats_prefix.clone()));
+
+        // Put-event logger (optional) — also captured by every WriteHook.
+        let putlog = config
+            .putlog_path
+            .as_ref()
+            .map(|p| Arc::new(PutLog::new(p.clone())));
+
+        // Upstream manager — receives the full WriteHook environment so
+        // every PV's hook can enforce read_only / ACL / host-deny / putlog
+        // before forwarding the put to upstream.
+        let upstream = UpstreamManager::new(
+            cache.clone(),
+            shadow_db.clone(),
+            access.clone(),
+            pvlist.clone(),
+            putlog.clone(),
+            stats.clone(),
+            config.read_only,
+        )
+        .await?;
         let upstream = Arc::new(RwLock::new(upstream));
 
         // Downstream server — wrap each accepted client in TLS when
@@ -172,15 +197,6 @@ impl GatewayServer {
                 DownstreamServer::new(shadow_db.clone(), config.server_port)
             }
         });
-
-        // Stats
-        let stats = Arc::new(Stats::new(config.stats_prefix.clone()));
-
-        // Put-event logger (optional)
-        let putlog = config
-            .putlog_path
-            .as_ref()
-            .map(|p| Arc::new(PutLog::new(p.clone())));
 
         // Beacon anomaly throttle
         let beacon_anomaly = Arc::new(BeaconAnomaly::new());
@@ -244,9 +260,15 @@ impl GatewayServer {
                     };
 
                     // 2. Subscribe upstream — this also adds the PV to the
-                    //    shadow database via UpstreamManager::ensure_subscribed
+                    //    shadow database via UpstreamManager::ensure_subscribed.
+                    //    Pass the matched ASG/ASL through so the per-PV
+                    //    WriteHook can do the right ACL check.
                     let mut up = upstream.write().await;
-                    if up.ensure_subscribed(&m.resolved_name).await.is_err() {
+                    if up
+                        .ensure_subscribed(&m.resolved_name, m.asg.clone(), m.asl.unwrap_or(0))
+                        .await
+                        .is_err()
+                    {
                         return false;
                     }
                     drop(up);
@@ -287,7 +309,8 @@ impl GatewayServer {
             };
 
             let mut up = self.upstream.write().await;
-            up.ensure_subscribed(&m.resolved_name).await?;
+            up.ensure_subscribed(&m.resolved_name, m.asg.clone(), m.asl.unwrap_or(0))
+                .await?;
             count += 1;
         }
 
@@ -309,8 +332,11 @@ impl GatewayServer {
         &self.pvlist
     }
 
-    /// Access the access security config.
-    pub fn access(&self) -> &Arc<AccessConfig> {
+    /// Access the access security config slot. Wrapped in
+    /// `RwLock<Arc<...>>` so the SIGUSR1 `AS` (RELOAD_ACCESS) command
+    /// can swap it atomically — every WriteHook reads through the
+    /// `RwLock` so live puts pick up the new ACF without restart.
+    pub fn access(&self) -> &Arc<RwLock<Arc<AccessConfig>>> {
         &self.access
     }
 
@@ -333,7 +359,7 @@ impl GatewayServer {
     pub async fn run(self) -> BridgeResult<()> {
         // Pre-load configured upstream PVs
         let preloaded = self.preload_pvs().await?;
-        eprintln!("[ca-gateway-rs] preloaded {preloaded} upstream PVs");
+        tracing::info!(preloaded, "ca-gateway-rs: preloaded upstream PVs");
 
         let downstream = self.downstream.clone();
         let cache = self.cache.clone();
@@ -357,7 +383,10 @@ impl GatewayServer {
                 if !removed.is_empty() {
                     let mut up = upstream_for_cleanup.write().await;
                     up.sweep_orphaned().await;
-                    eprintln!("[ca-gateway-rs] evicted {} expired PVs", removed.len());
+                    tracing::info!(
+                        evicted = removed.len(),
+                        "ca-gateway-rs: cache eviction"
+                    );
                 }
             }
         });
@@ -399,12 +428,35 @@ impl GatewayServer {
         // SIGUSR1 → command file processing (Unix only)
         let signal_handle = self.spawn_signal_handler();
 
-        // Connection event subscriber (per-host tracking)
+        // Connection event subscriber.
+        //
+        // - `Connected`/`Disconnected`: per-host stats tracking (matches
+        //   the C ca-gateway "connected client count" diagnostic PV).
+        // - `ChannelCreated`/`ChannelCleared`: per-PV subscriber tracking
+        //   for the cache FSM. A channel-create flips the corresponding
+        //   `GwPvEntry` from `Inactive` → `Active`; a channel-clear
+        //   reverses the transition once subscribers drop to zero.
+        //   Without this wiring the `Active` state is unreachable and
+        //   the C-gateway parity is incomplete (see review §3).
+        //
+        // The subscriber-id passed into `add_subscriber` is a synthetic
+        // hash of (peer, pv_name) — sufficient for refcounting because
+        // every CREATE_CHAN gets a unique pair (one CA channel per PV
+        // per client).
         let conn_rx = downstream.connection_events().await;
         let conn_handle = if let Some(mut rx) = conn_rx {
             let stats_for_conn = stats.clone();
+            let cache_for_conn = self.cache.clone();
             Some(tokio::spawn(async move {
                 use epics_ca_rs::server::ServerConnectionEvent;
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                fn synthetic_sid(peer: std::net::SocketAddr, pv: &str) -> u32 {
+                    let mut h = DefaultHasher::new();
+                    peer.hash(&mut h);
+                    pv.hash(&mut h);
+                    h.finish() as u32
+                }
                 loop {
                     match rx.recv().await {
                         Ok(ServerConnectionEvent::Connected(addr)) => {
@@ -412,6 +464,18 @@ impl GatewayServer {
                         }
                         Ok(ServerConnectionEvent::Disconnected(addr)) => {
                             stats_for_conn.forget_host(&addr.ip().to_string()).await;
+                        }
+                        Ok(ServerConnectionEvent::ChannelCreated { peer, pv_name }) => {
+                            if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
+                                let sid = synthetic_sid(peer, &pv_name);
+                                entry.write().await.add_subscriber(sid);
+                            }
+                        }
+                        Ok(ServerConnectionEvent::ChannelCleared { peer, pv_name }) => {
+                            if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
+                                let sid = synthetic_sid(peer, &pv_name);
+                                entry.write().await.remove_subscriber(sid);
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -450,34 +514,36 @@ impl GatewayServer {
         let access_path = self.config.access_path.clone();
         let cache = self.cache.clone();
         let pvlist = self.pvlist.clone();
+        let access = self.access.clone();
 
         Some(tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
             let mut sigusr1 = match signal(SignalKind::user_defined1()) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[ca-gateway-rs] failed to install SIGUSR1 handler: {e}");
+                    tracing::error!(error = %e, "ca-gateway-rs: failed to install SIGUSR1 handler");
                     return;
                 }
             };
-            let handler = CommandHandler::new(cache, pvlist, pvlist_path, access_path);
-            eprintln!(
-                "[ca-gateway-rs] SIGUSR1 handler armed (command file: {})",
-                cmd_path.display()
+            let handler =
+                CommandHandler::new(cache, pvlist, access, pvlist_path, access_path);
+            tracing::info!(
+                command_file = %cmd_path.display(),
+                "ca-gateway-rs: SIGUSR1 handler armed"
             );
             loop {
                 if sigusr1.recv().await.is_none() {
                     break;
                 }
-                eprintln!("[ca-gateway-rs] SIGUSR1 received — processing command file");
+                tracing::info!("ca-gateway-rs: SIGUSR1 received — processing command file");
                 match handler.process_file(&cmd_path).await {
                     Ok(out) => {
                         if !out.is_empty() {
-                            print!("{out}");
+                            tracing::info!(output = %out.trim_end(), "ca-gateway-rs: command output");
                         }
                     }
                     Err(e) => {
-                        eprintln!("[ca-gateway-rs] command file error: {e}");
+                        tracing::warn!(error = %e, "ca-gateway-rs: command file error");
                     }
                 }
             }

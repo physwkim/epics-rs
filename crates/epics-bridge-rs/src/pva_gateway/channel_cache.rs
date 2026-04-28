@@ -154,29 +154,56 @@ impl ChannelCache {
     /// upstream monitor task. The wait for the first upstream event
     /// happens AFTER the lock is released so the lock is never held
     /// across the network round-trip.
+    ///
+    /// **Negative-result handling**: if the upstream never delivers a
+    /// first event within `connect_timeout`, the freshly-inserted
+    /// entry is removed before returning the error. This prevents a
+    /// search storm vector where a typo'd PV name would otherwise
+    /// pin an upstream-monitor task on every `has_pv` call until the
+    /// next 30 s cleanup tick (review §3f).
     pub async fn lookup(
         &self,
         pv_name: &str,
         connect_timeout: Duration,
     ) -> GwResult<Arc<UpstreamEntry>> {
-        let entry = {
+        let (entry, was_fresh) = {
             let mut map = self.entries.lock().await;
             if let Some(existing) = map.get(pv_name) {
                 existing.poke();
-                existing.clone()
+                (existing.clone(), false)
             } else {
                 let fresh = self.spawn_upstream_monitor(pv_name);
                 map.insert(pv_name.to_string(), fresh.clone());
-                fresh
+                (fresh, true)
             }
         };
-        self.await_first_event(entry, connect_timeout).await
+        match self.await_first_event(entry, connect_timeout).await {
+            Ok(e) => Ok(e),
+            Err(e) => {
+                // Only the lookup that actually inserted the entry is
+                // responsible for cleanup; concurrent waiters that
+                // raced onto the same entry can simply retry.
+                if was_fresh {
+                    self.entries.lock().await.remove(pv_name);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Spawn an upstream monitor task and return a populated
     /// `UpstreamEntry`. The task writes directly into shared `Arc`s
     /// (state + first_event signal + broadcast sender) so the entry
     /// itself doesn't have to exist before the task is spawned.
+    ///
+    /// **Auto-restart**: `pvmonitor_typed` returns when the upstream
+    /// channel ends (transient I/O, IOC restart). Without restart,
+    /// the cache entry would happily serve a stale `snapshot()`
+    /// forever (review §3a). We wrap the call in a backoff loop so a
+    /// re-subscribe is attempted on every drop. When the backoff hits
+    /// the configured ceiling without a successful subscribe AND
+    /// nobody is listening anymore, the loop exits and the cleanup
+    /// tick eventually evicts the orphan entry.
     fn spawn_upstream_monitor(&self, pv_name: &str) -> Arc<UpstreamEntry> {
         let (tx, _rx0) = broadcast::channel::<PvField>(BROADCAST_CAPACITY);
         let first_event = Arc::new(Notify::new());
@@ -189,26 +216,57 @@ impl ChannelCache {
         let first_event_for_task = first_event.clone();
 
         let join = tokio::spawn(async move {
-            let _ = client
-                .pvmonitor_typed(&pv_name_owned, move |desc, value| {
-                    let was_first;
-                    {
-                        let mut s = state_for_task.write();
-                        was_first = s.latest.is_none();
-                        if s.introspection.is_none() {
-                            s.introspection = Some(desc.clone());
+            let mut backoff = Duration::from_millis(250);
+            let max_backoff = Duration::from_secs(30);
+            loop {
+                let tx_inner = tx_for_task.clone();
+                let state_inner = state_for_task.clone();
+                let first_event_inner = first_event_for_task.clone();
+
+                let result = client
+                    .pvmonitor_typed(&pv_name_owned, move |desc, value| {
+                        let was_first;
+                        {
+                            let mut s = state_inner.write();
+                            was_first = s.latest.is_none();
+                            if s.introspection.is_none() {
+                                s.introspection = Some(desc.clone());
+                            }
+                            s.latest = Some(value.clone());
                         }
-                        s.latest = Some(value.clone());
+                        if was_first {
+                            first_event_inner.notify_waiters();
+                        }
+                        // Fan out (drop on full / no subscribers).
+                        let _ = tx_inner.send(value.clone());
+                    })
+                    .await;
+
+                // Reset backoff on a clean end (e.g. server restart);
+                // grow it on consecutive errors.
+                if result.is_ok() {
+                    backoff = Duration::from_millis(250);
+                } else {
+                    tracing::warn!(
+                        pv = %pv_name_owned,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "pva-gateway: upstream monitor ended, will retry"
+                    );
+                }
+
+                // If nobody is listening AND we have no cached state,
+                // there's no point thrashing the upstream — exit.
+                if tx_for_task.receiver_count() == 0 {
+                    let stale = state_for_task.read().latest.is_none();
+                    if stale {
+                        tracing::debug!(pv = %pv_name_owned, "pva-gateway: monitor exit (no subs, no state)");
+                        return;
                     }
-                    if was_first {
-                        first_event_for_task.notify_waiters();
-                    }
-                    // Fan out (drop on full / no subscribers).
-                    let _ = tx_for_task.send(value.clone());
-                })
-                .await;
-            // pvmonitor_typed returns when the channel ends or the
-            // client closes; nothing more to do here.
+                }
+
+                tokio::time::sleep(backoff).await;
+                backoff = std::cmp::min(backoff * 2, max_backoff);
+            }
         });
 
         Arc::new(UpstreamEntry {

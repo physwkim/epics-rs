@@ -3,8 +3,52 @@ use std::sync::Mutex as StdMutex;
 
 use crate::runtime::sync::{Mutex, RwLock, mpsc};
 
+use crate::error::CaError;
 use crate::server::snapshot::Snapshot;
 use crate::types::{DbFieldType, EpicsValue};
+
+/// Identity of the client driving a `WriteHook` invocation. Carries
+/// the user/host/peer fields the CA TCP handler already tracks for
+/// audit + access security, so a proxy hook (gateway, ACL filter,
+/// putlog) can make decisions without re-deriving them.
+#[derive(Debug, Clone, Default)]
+pub struct WriteContext {
+    /// CA `CLIENT_NAME` username, or empty if unknown.
+    pub user: String,
+    /// CA `HOST_NAME` hostname (or peer IP fallback), used for ACF
+    /// matching against `HAG(...)` groups.
+    pub host: String,
+    /// Raw `peer.ip():peer.port()` string, retained for audit/log use.
+    pub peer: String,
+}
+
+/// Async hook invoked by client-originated writes (CA `caput`, CA
+/// `WRITE_NOTIFY`) before the PV's local value is set. Used by the CA
+/// gateway and similar proxies to forward writes upstream instead of
+/// landing them in the local `ProcessVariable`.
+///
+/// The hook receives the proposed new value plus a [`WriteContext`]
+/// identifying the client, and must return either:
+/// * `Ok(())` — the write was accepted (e.g. forwarded to upstream).
+///   The caller does NOT update the local `value` field — the
+///   subsequent upstream-monitor event is expected to do that. This
+///   matches CA-gateway semantics where the cached value reflects
+///   reality after the round-trip.
+/// * `Err(CaError)` — the write was rejected. The caller surfaces
+///   the error to the CA client (`WRITE_NOTIFY` carries the ECA
+///   status). The hook itself decides whether to update local state
+///   on rejection.
+///
+/// The hook is consulted only on the client → server path. Internal
+/// callers (`ProcessVariable::set`, `put_pv_and_post`) bypass it so
+/// the upstream-monitor forwarder can update local state without
+/// recursing into itself.
+pub type WriteHook = Arc<
+    dyn Fn(EpicsValue, WriteContext) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), CaError>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 /// A monitor event sent to subscribers when a PV value changes.
 /// Carries a full Snapshot so GR/CTRL metadata (PREC, EGU, limits) is available.
@@ -42,6 +86,10 @@ pub struct ProcessVariable {
     pub name: String,
     pub value: RwLock<EpicsValue>,
     pub subscribers: Mutex<Vec<Subscriber>>,
+    /// Optional hook consulted on client-originated writes. When set,
+    /// the CA TCP write path delegates to the hook instead of doing a
+    /// local `pv.set()`. See [`WriteHook`].
+    write_hook: RwLock<Option<WriteHook>>,
 }
 
 impl ProcessVariable {
@@ -50,7 +98,24 @@ impl ProcessVariable {
             name,
             value: RwLock::new(initial),
             subscribers: Mutex::new(Vec::new()),
+            write_hook: RwLock::new(None),
         }
+    }
+
+    /// Install a write hook. Replaces any previously-installed hook.
+    pub async fn set_write_hook(&self, hook: WriteHook) {
+        *self.write_hook.write().await = Some(hook);
+    }
+
+    /// Remove any installed write hook.
+    pub async fn clear_write_hook(&self) {
+        *self.write_hook.write().await = None;
+    }
+
+    /// Snapshot of the installed write hook (clone of the `Arc`), or
+    /// `None` if none. Used by the CA TCP write path; cheap.
+    pub async fn write_hook(&self) -> Option<WriteHook> {
+        self.write_hook.read().await.clone()
     }
 
     /// Get the current value.

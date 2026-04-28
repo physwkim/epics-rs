@@ -166,61 +166,40 @@ impl Stats {
         let heartbeat = self.heartbeat.load(Ordering::Relaxed);
         let host_count = self.host_count().await;
 
+        // Fan all 12 stats PV writes out concurrently. Each
+        // `put_pv_and_post` is independent (no shared lock between them
+        // beyond the per-PV `RwLock`), so a single `tokio::join!` cuts
+        // refresh latency from `12 × put_latency` to `max(put_latency)`.
         let p = &self.prefix;
-        let _ = db
-            .put_pv_and_post(&format!("{p}totalPvs"), EpicsValue::Long(cache_size as i32))
-            .await;
-        let _ = db
-            .put_pv_and_post(
-                &format!("{p}upstreamCount"),
-                EpicsValue::Long(upstream_count as i32),
-            )
-            .await;
-        let _ = db
-            .put_pv_and_post(
-                &format!("{p}connectingCount"),
-                EpicsValue::Long(connecting as i32),
-            )
-            .await;
-        let _ = db
-            .put_pv_and_post(&format!("{p}activeCount"), EpicsValue::Long(active as i32))
-            .await;
-        let _ = db
-            .put_pv_and_post(
-                &format!("{p}inactiveCount"),
-                EpicsValue::Long(inactive as i32),
-            )
-            .await;
-        let _ = db
-            .put_pv_and_post(&format!("{p}deadCount"), EpicsValue::Long(dead as i32))
-            .await;
-        let _ = db
-            .put_pv_and_post(&format!("{p}eventRate"), EpicsValue::Double(event_rate))
-            .await;
-        let _ = db
-            .put_pv_and_post(
-                &format!("{p}totalEvents"),
-                EpicsValue::Long(total_events as i32),
-            )
-            .await;
-        let _ = db
-            .put_pv_and_post(&format!("{p}heartbeat"), EpicsValue::Long(heartbeat as i32))
-            .await;
-        let _ = db
-            .put_pv_and_post(&format!("{p}putCount"), EpicsValue::Long(put_count as i32))
-            .await;
-        let _ = db
-            .put_pv_and_post(
-                &format!("{p}readOnlyRejects"),
-                EpicsValue::Long(readonly as i32),
-            )
-            .await;
-        let _ = db
-            .put_pv_and_post(
-                &format!("{p}perHostConnections"),
-                EpicsValue::Long(host_count as i32),
-            )
-            .await;
+        // Bind names to locals so the futures inside `join!` borrow them
+        // for long enough; bare `&format!(...)` would be dropped at the
+        // end of the macro line.
+        let n_total = format!("{p}totalPvs");
+        let n_upstream = format!("{p}upstreamCount");
+        let n_connecting = format!("{p}connectingCount");
+        let n_active = format!("{p}activeCount");
+        let n_inactive = format!("{p}inactiveCount");
+        let n_dead = format!("{p}deadCount");
+        let n_rate = format!("{p}eventRate");
+        let n_events = format!("{p}totalEvents");
+        let n_heartbeat = format!("{p}heartbeat");
+        let n_put = format!("{p}putCount");
+        let n_readonly = format!("{p}readOnlyRejects");
+        let n_hosts = format!("{p}perHostConnections");
+        let _ = tokio::join!(
+            db.put_pv_and_post(&n_total, EpicsValue::Long(cache_size as i32)),
+            db.put_pv_and_post(&n_upstream, EpicsValue::Long(upstream_count as i32)),
+            db.put_pv_and_post(&n_connecting, EpicsValue::Long(connecting as i32)),
+            db.put_pv_and_post(&n_active, EpicsValue::Long(active as i32)),
+            db.put_pv_and_post(&n_inactive, EpicsValue::Long(inactive as i32)),
+            db.put_pv_and_post(&n_dead, EpicsValue::Long(dead as i32)),
+            db.put_pv_and_post(&n_rate, EpicsValue::Double(event_rate)),
+            db.put_pv_and_post(&n_events, EpicsValue::Long(total_events as i32)),
+            db.put_pv_and_post(&n_heartbeat, EpicsValue::Long(heartbeat as i32)),
+            db.put_pv_and_post(&n_put, EpicsValue::Long(put_count as i32)),
+            db.put_pv_and_post(&n_readonly, EpicsValue::Long(readonly as i32)),
+            db.put_pv_and_post(&n_hosts, EpicsValue::Long(host_count as i32)),
+        );
     }
 
     /// Increment the heartbeat counter and post to the heartbeat PV.

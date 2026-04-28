@@ -21,7 +21,7 @@ qsrv-bin = ["qsrv", "dep:clap", "dep:tracing-subscriber"]
 # CA fan-out gateway (C++ ca-gateway equivalent)
 ca-gateway = ["dep:epics-ca-rs", "dep:regex"]
 # CA gateway daemon binary (ca-gateway-rs)
-ca-gateway-bin = ["ca-gateway", "dep:clap"]
+ca-gateway-bin = ["ca-gateway", "dep:clap", "dep:tracing-subscriber"]
 # CA gateway with TLS termination on the downstream side. Clients
 # present certificates to the gateway, the gateway forwards plaintext
 # (or TLS, see upstream side) to the upstream IOC. Layered on the

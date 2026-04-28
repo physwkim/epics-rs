@@ -28,7 +28,10 @@
 //! - Backreference substitution is implemented manually because Rust
 //!   `regex` doesn't support backreferences in the pattern, but
 //!   capture groups are available for replacement.
-//! - The DENY `FROM host` clause is parsed but not enforced in the
+//! - The DENY `FROM host` clause is enforced via [`PvList::is_host_denied`]
+//!   (consulted from the put-hook path). The UDP search responder still
+//!   uses [`PvList::match_name`] only — it has no client identity to
+//!   match against. Earlier note about "parsed but not enforced" in the
 //!   skeleton phase (host filtering is a future addition).
 
 use std::path::Path;
@@ -119,6 +122,38 @@ impl PvList {
             order: EvaluationOrder::default(),
             entries: Vec::new(),
         }
+    }
+
+    /// Whether `name` is denied for the given client `host`.
+    ///
+    /// Considers `DENY` rules with a `FROM host …` clause: a rule matches
+    /// when the PV name pattern matches AND the supplied host appears in
+    /// the rule's `from_hosts` list (case-insensitive). Rules with an
+    /// empty `from_hosts` list (`pattern DENY`) deny unconditionally and
+    /// are also returned here so a single call covers both shapes.
+    ///
+    /// Used by the put-hook path; UDP search responder does not have the
+    /// client identity and therefore relies on `match_name` alone.
+    pub fn is_host_denied(&self, name: &str, host: &str) -> bool {
+        let host_lc = host.to_ascii_lowercase();
+        for entry in &self.entries {
+            if let PvListEntry::Deny {
+                pattern,
+                from_hosts,
+            } = entry
+            {
+                if !pattern.is_match(name) {
+                    continue;
+                }
+                if from_hosts.is_empty() {
+                    return true;
+                }
+                if from_hosts.iter().any(|h| h.eq_ignore_ascii_case(&host_lc)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Match a PV name against the rule list.

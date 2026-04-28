@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 
 use crate::error::BridgeResult;
 
+use super::access::AccessConfig;
 use super::cache::PvCache;
 use super::pvlist::{PvList, parse_pvlist_file};
 
@@ -64,6 +65,10 @@ impl GatewayCommand {
 pub struct CommandHandler {
     cache: Arc<RwLock<PvCache>>,
     pvlist: Arc<RwLock<Arc<PvList>>>,
+    /// Live access security config slot. SIGUSR1 `AS` (RELOAD_ACCESS)
+    /// re-reads the file and atomically swaps the inner `Arc` so every
+    /// per-PV WriteHook picks up the new rules without restart.
+    access: Arc<RwLock<Arc<AccessConfig>>>,
     pvlist_path: Option<PathBuf>,
     access_path: Option<PathBuf>,
 }
@@ -72,12 +77,14 @@ impl CommandHandler {
     pub fn new(
         cache: Arc<RwLock<PvCache>>,
         pvlist: Arc<RwLock<Arc<PvList>>>,
+        access: Arc<RwLock<Arc<AccessConfig>>>,
         pvlist_path: Option<PathBuf>,
         access_path: Option<PathBuf>,
     ) -> Self {
         Self {
             cache,
             pvlist,
+            access,
             pvlist_path,
             access_path,
         }
@@ -132,11 +139,14 @@ impl CommandHandler {
                     Some(p) => p,
                     None => return Ok("No access path configured\n".to_string()),
                 };
-                // Just verify it parses; the live AccessConfig is harder to
-                // swap atomically without restructuring the server. Skeleton
-                // logs the reload intent.
-                let _ = super::access::AccessConfig::from_file(path)?;
-                Ok(format!("Verified access file: {}\n", path.display()))
+                // Re-parse, then atomically swap the live slot. Every
+                // per-PV WriteHook reads `access.read().await.clone()`
+                // when invoked, so puts that arrive after the swap pick
+                // up the new rules without any in-flight put being
+                // disturbed.
+                let new_cfg = AccessConfig::from_file(path)?;
+                *self.access.write().await = Arc::new(new_cfg);
+                Ok(format!("Reloaded access file: {}\n", path.display()))
             }
         }
     }
@@ -202,7 +212,8 @@ mod tests {
     async fn dispatch_version() {
         let cache = Arc::new(RwLock::new(PvCache::new()));
         let pvlist = Arc::new(RwLock::new(Arc::new(PvList::new())));
-        let handler = CommandHandler::new(cache, pvlist, None, None);
+        let access = Arc::new(RwLock::new(Arc::new(AccessConfig::allow_all())));
+        let handler = CommandHandler::new(cache, pvlist, access, None, None);
         let out = handler.dispatch(GatewayCommand::Version).await.unwrap();
         assert!(out.contains("ca-gateway-rs"));
     }
@@ -211,7 +222,8 @@ mod tests {
     async fn dispatch_summary_empty_cache() {
         let cache = Arc::new(RwLock::new(PvCache::new()));
         let pvlist = Arc::new(RwLock::new(Arc::new(PvList::new())));
-        let handler = CommandHandler::new(cache, pvlist, None, None);
+        let access = Arc::new(RwLock::new(Arc::new(AccessConfig::allow_all())));
+        let handler = CommandHandler::new(cache, pvlist, access, None, None);
         let out = handler
             .dispatch(GatewayCommand::ReportSummary)
             .await

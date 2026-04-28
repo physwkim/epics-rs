@@ -46,6 +46,19 @@ pub enum ServerConnectionEvent {
     Connected(SocketAddr),
     /// Client connection closed.
     Disconnected(SocketAddr),
+    /// `CA_PROTO_CREATE_CHAN` succeeded for `pv_name` on `peer`. Used by
+    /// the CA gateway to drive per-PV `Inactive` → `Active` transitions
+    /// (see `ca_gateway::cache::GwPvEntry::add_subscriber`).
+    ChannelCreated {
+        peer: SocketAddr,
+        pv_name: String,
+    },
+    /// `CA_PROTO_CLEAR_CHANNEL` (or implicit teardown) closed a channel
+    /// for `pv_name` on `peer`. Reverse of [`Self::ChannelCreated`].
+    ChannelCleared {
+        peer: SocketAddr,
+        pv_name: String,
+    },
 }
 
 use crate::protocol::*;
@@ -69,6 +82,10 @@ enum ChannelTarget {
 struct ChannelEntry {
     target: ChannelTarget,
     cid: u32,
+    /// PV name as the client originally requested it (with any
+    /// `.FIELD` suffix). Retained so the `ChannelCleared` lifecycle
+    /// event can emit the same name as `ChannelCreated`.
+    pv_name: String,
 }
 
 struct SubscriptionEntry {
@@ -318,6 +335,7 @@ pub async fn run_tcp_listener(
                                     actual_port,
                                     identity,
                                     audit,
+                                    conn_events.clone(),
                                     #[cfg(feature = "cap-tokens")]
                                     cap_token_verifier_for_client.clone(),
                                 )
@@ -339,6 +357,7 @@ pub async fn run_tcp_listener(
                             actual_port,
                             None,
                             audit,
+                            conn_events.clone(),
                             #[cfg(feature = "cap-tokens")]
                             cap_token_verifier_for_client.clone(),
                         )
@@ -356,6 +375,7 @@ pub async fn run_tcp_listener(
                         actual_port,
                         None,
                         audit,
+                        conn_events.clone(),
                         #[cfg(feature = "cap-tokens")]
                         cap_token_verifier_for_client.clone(),
                     )
@@ -408,6 +428,7 @@ async fn handle_client<S>(
     tcp_port: u16,
     initial_hostname: Option<String>,
     audit: Option<crate::audit::AuditLogger>,
+    conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
     #[cfg(feature = "cap-tokens")] cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
 ) -> CaResult<()>
 where
@@ -537,7 +558,16 @@ where
                 }
             }
 
-            dispatch_message(&hdr, &payload, &mut state, &db, &writer).await?;
+            dispatch_message(
+                &hdr,
+                &payload,
+                &mut state,
+                &db,
+                &writer,
+                peer,
+                conn_events.as_ref(),
+            )
+            .await?;
             offset += msg_len;
         }
 
@@ -569,6 +599,8 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
     state: &mut ClientState,
     db: &Arc<PvDatabase>,
     writer: &Arc<Mutex<BufWriter<W>>>,
+    peer: SocketAddr,
+    conn_events: Option<&broadcast::Sender<ServerConnectionEvent>>,
 ) -> CaResult<()> {
     match hdr.cmmd {
         CA_PROTO_VERSION => {
@@ -753,6 +785,7 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     ChannelEntry {
                         target,
                         cid: client_cid,
+                        pv_name: pv_name.clone(),
                     },
                 );
                 state.channel_access.insert(sid, access_level);
@@ -778,6 +811,15 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     _ => "ok",
                 };
                 state.audit("create_chan", &pv_name, "", result).await;
+
+                // Notify subscribers (e.g. ca_gateway tracking PV → client
+                // attachments for `Active`/`Inactive` state transitions).
+                if let Some(tx) = &conn_events {
+                    let _ = tx.send(ServerConnectionEvent::ChannelCreated {
+                        peer,
+                        pv_name: pv_name.clone(),
+                    });
+                }
             } else {
                 // PV not found — send CREATE_CH_FAIL
                 let mut fail = CaHeader::new(CA_PROTO_CREATE_CH_FAIL);
@@ -1054,8 +1096,17 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
 
             let write_result = match &entry.target {
                 ChannelTarget::SimplePv(pv) => {
-                    pv.set(new_value).await;
-                    Ok(None)
+                    if let Some(hook) = pv.write_hook().await {
+                        let ctx = epics_base_rs::server::pv::WriteContext {
+                            user: state.username.clone(),
+                            host: state.hostname.clone(),
+                            peer: state.peer.clone(),
+                        };
+                        hook(new_value, ctx).await.map(|()| None)
+                    } else {
+                        pv.set(new_value).await;
+                        Ok(None)
+                    }
                 }
                 ChannelTarget::RecordField { record, field } => {
                     let name = record.read().await.name.clone();
@@ -1376,8 +1427,14 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
         CA_PROTO_CLEAR_CHANNEL => {
             let sid = hdr.cid;
             let cid = hdr.available;
-            if let Some(_entry) = state.channels.remove(&sid) {
+            if let Some(entry) = state.channels.remove(&sid) {
                 state.channel_access.remove(&sid);
+                if let Some(tx) = &conn_events {
+                    let _ = tx.send(ServerConnectionEvent::ChannelCleared {
+                        peer,
+                        pv_name: entry.pv_name.clone(),
+                    });
+                }
 
                 // Clean up subscriptions that belong to this channel
                 let sub_ids: Vec<u32> = state
