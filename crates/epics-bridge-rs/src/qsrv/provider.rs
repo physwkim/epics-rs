@@ -586,6 +586,42 @@ mod tests {
         }
     }
 
+    /// LiveAccessProxy regression: an AccessContext vended from
+    /// `BridgeProvider::live_access()` must observe `set_access_control`
+    /// on its very next can_read / can_write call, without channel
+    /// recreation. The earlier `Arc<dyn AccessControl>` direct-clone
+    /// pattern pinned each channel to the policy at creation time.
+    #[test]
+    fn live_access_proxy_observes_policy_swap() {
+        let db = Arc::new(PvDatabase::new());
+        let mut provider = BridgeProvider::new(db);
+
+        // Hand out an AccessContext bound to the LIVE proxy. Default is
+        // AllowAllAccess.
+        let ctx = AccessContext::with_identity(
+            provider.live_access(),
+            "alice".into(),
+            "host1".into(),
+        );
+        assert!(ctx.can_read("ANY"));
+        assert!(ctx.can_write("ANY"));
+
+        // Swap to a deny-specific policy AFTER the context was created.
+        provider.set_access_control(Arc::new(DenySpecific("SECRET".into())));
+        assert!(ctx.can_read("ALLOWED"));
+        assert!(!ctx.can_read("SECRET"), "swap must be observed live");
+        assert!(!ctx.can_write("SECRET"));
+
+        // Swap to read-only — same context, fresh decision.
+        provider.set_access_control(Arc::new(ReadOnly));
+        assert!(ctx.can_read("X"));
+        assert!(!ctx.can_write("X"), "policy swap must take effect immediately");
+
+        // Swap back to allow-all — proxy still tracks.
+        provider.set_access_control(Arc::new(AllowAllAccess));
+        assert!(ctx.can_write("X"));
+    }
+
     #[tokio::test]
     async fn bridge_monitor_start_blocks_when_read_denied() {
         // Defense-in-depth: even if a monitor is constructed via with_access

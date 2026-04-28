@@ -155,6 +155,80 @@ pub async fn run_tcp_server(
     }
 }
 
+/// Identity extracted from the client's CONNECTION_VALIDATION reply.
+/// Mirrors pvxs `server::ClientCredentials` (serverconn.cpp:73-234) at
+/// the wire-parse level — we don't currently feed it into ACF, but the
+/// structured form is ready for future per-op authorisation hooks and
+/// already lands in `tracing` for audit.
+#[derive(Debug, Clone)]
+pub struct ClientCredentials {
+    /// Selected auth method ("anonymous" / "ca" / "x509" / ...).
+    pub method: String,
+    /// Account name (e.g., the `ca` auth's `user` field). Empty when
+    /// the auth method does not carry one.
+    pub account: String,
+    /// Host name claim from the `ca` auth, when present. Informational
+    /// only — never trust it for access decisions over the network
+    /// hostname / mTLS-verified peer.
+    pub host: String,
+}
+
+impl ClientCredentials {
+    fn anonymous() -> Self {
+        Self {
+            method: "anonymous".into(),
+            account: "anonymous".into(),
+            host: String::new(),
+        }
+    }
+}
+
+/// Parse `CONNECTION_VALIDATION` reply payload (pvxs serverconn.cpp:200).
+/// Layout: `buffer_size:u32 + intro_size:u16 + qos:u16 + method:String +
+/// auth_type + auth_value`. Returns `None` on truncation; callers fall
+/// back to anonymous credentials.
+fn parse_client_credentials(frame: &Frame, order: ByteOrder) -> Option<ClientCredentials> {
+    let mut cur = frame.cursor();
+    let _buffer_size = cur.get_u32(order).ok()?;
+    let _intro_size = cur.get_u16(order).ok()?;
+    let _qos = cur.get_u16(order).ok()?;
+    let method = crate::proto::decode_string(&mut cur, order)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if method.is_empty() {
+        return Some(ClientCredentials::anonymous());
+    }
+    // Auth value: type descriptor + full value. We only care about
+    // the `user` / `host` fields when method is "ca"; for any other
+    // method the structured payload is opaque to us and we just store
+    // the method name.
+    let mut creds = ClientCredentials {
+        method: method.clone(),
+        account: String::new(),
+        host: String::new(),
+    };
+    if let Ok(desc) = decode_type_desc(&mut cur, order) {
+        if let Ok(value) = decode_pv_field(&desc, &mut cur, order) {
+            if let PvField::Structure(s) = value {
+                for (name, field) in &s.fields {
+                    if let PvField::Scalar(crate::pvdata::ScalarValue::String(v)) = field {
+                        match name.as_str() {
+                            "user" => creds.account = v.clone(),
+                            "host" => creds.host = v.clone(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if creds.account.is_empty() {
+        creds.account = method;
+    }
+    Some(creds)
+}
+
 /// Type-erased read/write halves so the same handler works for plain TCP
 /// and TLS-wrapped streams.
 type SrvRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
@@ -246,6 +320,12 @@ async fn handle_connection_io(
     let mut rx_buf: Vec<u8> = Vec::with_capacity(8192);
     let mut channels: HashMap<u32, ChannelState> = HashMap::new();
     let mut handshake_complete = false;
+    // Client identity carried for the rest of the connection lifetime.
+    // Extracted from the CONNECTION_VALIDATION reply; falls back to
+    // anonymous when the client either skips the exchange (some legacy
+    // clients) or sends an unparseable payload. Available for future
+    // per-op authorisation hooks; today only logged at handshake time.
+    let mut cred = ClientCredentials::anonymous();
     // Per-connection emit-side TypeStore. Only consulted when
     // `config.emit_type_cache` is true (off by default for pvAccessCPP
     // compatibility — that client does not parse 0xFD/0xFE markers).
@@ -275,6 +355,16 @@ async fn handle_connection_io(
         // and respond CONNECTION_VALIDATED.
         if !handshake_complete {
             if frame.header.command == Command::ConnectionValidation.code() {
+                // Parse the client's auth payload: skip buffer_size (u32),
+                // introspection_size (u16), qos (u16); read selected method
+                // (string); when method == "ca", read the type+value of the
+                // auth Value and pull out the `user` / `host` fields. Pure
+                // metadata for audit/logging — we still respond OK either
+                // way (matches pvxs serverconn.cpp:200-234, which also
+                // doesn't gate the ack on auth content).
+                cred = parse_client_credentials(&frame, order).unwrap_or(cred);
+                debug!(?peer, method = %cred.method, account = %cred.account,
+                    "PVA client credentials");
                 let mut payload = Vec::new();
                 Status::ok().write_into(order, &mut payload);
                 let h = PvaHeader::application(

@@ -111,16 +111,37 @@ pub async fn run_udp_responder_with_config(
 
     let beacon_socket = socket.clone();
     let beacon_guid = guid;
+    let beacon_source = source.clone();
     let _beacon = tokio::spawn(async move {
         let mut tick = interval(beacon_period);
         // Per-emitter monotonically advancing beacon sequence + change
         // counter. Matches pvxs `server.cpp::doBeacons` so clients can
         // detect missed beacons (sequence gaps) and topology changes
         // (change_count mismatch). Sequence is u8 with natural wrap.
+        //
+        // change_count tracks PV-set churn: incremented whenever the
+        // set of names returned by `list_pvs()` differs from the
+        // previous tick. Clients re-issue searches on change_count
+        // mismatch even when their beacon sequence is in lock-step.
         let mut beacon_seq: u8 = 0;
-        let change_count: u16 = 0;
+        let mut change_count: u16 = 0;
+        let mut last_set_hash: u64 = 0;
         loop {
             tick.tick().await;
+            // Compute a stable hash of the current PV set so we don't
+            // hold an allocated Vec across the await above.
+            let pvs = beacon_source.list_pvs().await;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            use std::hash::{Hash, Hasher};
+            let mut sorted = pvs;
+            sorted.sort();
+            sorted.hash(&mut h);
+            let cur_hash = h.finish();
+            if cur_hash != last_set_hash && last_set_hash != 0 {
+                change_count = change_count.wrapping_add(1);
+            }
+            last_set_hash = cur_hash;
+
             let beacon = build_beacon(
                 beacon_guid,
                 tcp_port,
@@ -286,4 +307,30 @@ fn parse_search_request(frame: &[u8]) -> Option<SearchRequest> {
         byte_order: order,
         queries,
     })
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// build_beacon writes the supplied sequence + change_count into
+    /// the payload at the documented offsets (after the 12-byte GUID +
+    /// flags byte). Locks in the field order so a refactor cannot swap
+    /// them silently.
+    #[test]
+    fn beacon_payload_carries_sequence_and_change_count() {
+        let guid = [0x11; 12];
+        let bytes = build_beacon(guid, 5075, ByteOrder::Little, 42, 0xBEEF);
+        // 8-byte PVA header + 12-byte GUID = 20 bytes prefix.
+        let payload = &bytes[8..];
+        assert_eq!(&payload[0..12], &guid);
+        assert_eq!(payload[12], 0); // flags byte
+        assert_eq!(payload[13], 42, "beacon sequence at offset 13");
+        assert_eq!(
+            u16::from_le_bytes([payload[14], payload[15]]),
+            0xBEEF,
+            "change_count at offset 14"
+        );
+    }
 }

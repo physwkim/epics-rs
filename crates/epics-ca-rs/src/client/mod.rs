@@ -1758,3 +1758,20 @@ fn parse_addr_list() -> CaResult<Vec<SocketAddr>> {
 
     Ok(addrs)
 }
+
+#[cfg(test)]
+mod tls_sni_config_tests {
+    use super::*;
+
+    /// `tls_server_name` defaults to `None` and accepts `Some(...)` so
+    /// callers can pin the SNI / cert-hostname-verification name when
+    /// the server cert is hostname-bound.
+    #[cfg(feature = "experimental-rust-tls")]
+    #[test]
+    fn tls_server_name_round_trip() {
+        let mut cfg = CaClientConfig::default();
+        assert!(cfg.tls_server_name.is_none(), "default must be None");
+        cfg.tls_server_name = Some("ioc.example.com".into());
+        assert_eq!(cfg.tls_server_name.as_deref(), Some("ioc.example.com"));
+    }
+}

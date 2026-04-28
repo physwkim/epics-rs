@@ -1,5 +1,98 @@
 # Changelog
 
+## v0.10.2 — 2026-04-28 — kodex-driven cross-crate review pass
+
+A self-review using the kodex knowledge graph as a baseline (so we
+didn't re-examine the v0.10.1 wire-format fixes) plus three parallel
+agent reviews surfaced a set of polish + correctness items that
+weren't worth blocking v0.10.1 on but accumulate now into a clean
+release.
+
+### ca-rs (client TLS)
+
+- `CaClientConfig::tls_server_name: Option<String>` (env
+  `EPICS_CA_TLS_SERVER_NAME`) overrides the SNI / cert-hostname-
+  verification name when wrapping a TCP virtual circuit in rustls.
+  Without it, SNI fell back to the server's IP literal — which only
+  validates against IP-bound certs. The override unblocks
+  hostname-bound rustls cert verification for hostname-bound deployments.
+
+### ca-rs (server cap-token verification)
+
+- `CaServerBuilder::with_cap_token_verifier(verifier)` (feature
+  `cap-tokens`) installs a `TokenVerifier` on the listener. CLIENT_NAME
+  payloads beginning with `cap:` now flow through the verifier; the
+  resolved `sub` claim becomes the ACF username. Verification failure
+  yields an `unverified:<raw>` sentinel that ACF can deliberately deny.
+  Plain (non-`cap:`) usernames pass through unchanged for legacy compat.
+  Earlier code stored the raw payload as the username regardless of
+  prefix — closing this loophole was the original intent of cap-tokens
+  but the wiring was missing.
+
+### ca-rs (signed beacon mixed mode)
+
+- `EPICS_CA_BEACON_REQUIRE_SIGNED=NO` opts the verifier into a soft
+  mode where unsigned beacons are accepted (with a counter increment)
+  alongside signed ones. Lets operators run mixed deployments while
+  servers roll out signing instead of forcing a flag day. Default
+  remains strict.
+
+### pva-rs (server identity + beacons)
+
+- `ClientCredentials` parsed from CONNECTION_VALIDATION reply (method,
+  account, host) and logged at handshake. Mirrors pvxs serverconn.cpp
+  `server::ClientCredentials` at the wire-parse level. Available for
+  future per-op authorisation hooks; today's use is `tracing` audit.
+- Beacon `change_count` (u16) now increments whenever the source's
+  `list_pvs()` set churns between ticks (compared via stable hash of
+  the sorted name list). Sequence (u8) was already incrementing;
+  together they let clients re-issue searches on PV-set churn even
+  when the beacon stream is otherwise in lock-step (pvxs
+  `server.cpp::doBeacons`).
+
+### bridge-rs (live ACF reload)
+
+- `BridgeProvider` now stores access policy in
+  `Arc<parking_lot::RwLock<Arc<dyn AccessControl>>>` and vends an
+  `Arc<LiveAccessProxy>` to each `AccessContext`. `set_access_control`
+  swaps the inner Arc and is picked up by every existing channel on
+  its next can_read / can_write call — matches C++ QSRV "ACF reload
+  takes effect without recreating channels". The earlier direct-clone
+  pattern pinned each channel to the policy at creation time.
+- `BridgeProvider::live_access()` is a public helper for downstream
+  code that constructs its own AccessContexts.
+
+### bridge-rs (rename + lifecycle test)
+
+- `qsrv::spvirit_adapter` → `qsrv::pva_adapter` (the file's own header
+  comment already noted "no spvirit_* types appear in this module" —
+  the name was the last remaining `spvirit_*` artifact in the
+  workspace).
+- `qsrv::monitor::tests::monitor_stop_releases_subscription` —
+  start → poll → stop → idempotent stop → re-subscribe round-trip
+  against a fresh BridgeMonitor on the same record. Locks in Drop
+  semantics so a future refactor can't silently leak DbSubscription
+  senders.
+
+### Tests
+
+- `qsrv::provider::tests::live_access_proxy_observes_policy_swap` —
+  AccessContext bound to `live_access()` observes
+  `set_access_control` mid-flight (regression for the cached-Arc
+  pattern this release replaces).
+- `server_native::udp::tests::beacon_payload_carries_sequence_and_change_count`
+  — beacon byte layout regression: sequence at offset 13, change_count
+  little-endian at offsets 14-15.
+- `client::tls_sni_config_tests::tls_server_name_round_trip` —
+  `CaClientConfig::tls_server_name` default + assignment.
+
+### Build / publish hygiene
+
+- `epics-base-rs` dropped the `experimental-rust-tls` feature
+  passthrough into a dev-dep. `cargo publish` strips dev-deps before
+  parsing features, so the passthrough broke `cargo workspaces
+  publish`. Nothing outside the crate referenced it.
+
 ## v0.10.1 — 2026-04-28 — pvxs / pvAccessCPP wire-format interop
 
 `epics-pva-rs` server and client are now byte-exact compatible with
