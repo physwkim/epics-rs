@@ -228,6 +228,15 @@ pub struct BridgeProvider {
     /// only at config-load time and once per channel-find / list, so
     /// the contention cost is negligible.
     groups: parking_lot::RwLock<HashMap<String, GroupPvDef>>,
+    /// Cumulative channel-creation counter. Tagged onto the provider
+    /// so `qsrvStats` can report total throughput. Mirrors pvxs
+    /// `qStats` (singlesourcehooks.cpp:88) total-channels metric.
+    /// Counters never decrement; restart the IOC for a clean slate.
+    channels_created: std::sync::atomic::AtomicU64,
+    /// Cumulative GET / PUT / SUBSCRIBE counters. Same caveats.
+    ops_get: std::sync::atomic::AtomicU64,
+    ops_put: std::sync::atomic::AtomicU64,
+    ops_subscribe: std::sync::atomic::AtomicU64,
     /// Metadata cache for single-record channels: (NtType, DbFieldType).
     /// Avoids repeated record introspection on every create_channel() call.
     /// Corresponds to C++ PDBProvider's transient_pv_map.
@@ -265,9 +274,67 @@ impl BridgeProvider {
             groups: parking_lot::RwLock::new(HashMap::new()),
             record_cache: tokio::sync::RwLock::new(HashMap::new()),
             access_cell: Arc::new(parking_lot::RwLock::new(Arc::new(AllowAllAccess))),
+            channels_created: std::sync::atomic::AtomicU64::new(0),
+            ops_get: std::sync::atomic::AtomicU64::new(0),
+            ops_put: std::sync::atomic::AtomicU64::new(0),
+            ops_subscribe: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
+    /// Snapshot of cumulative QSRV throughput counters (channels
+    /// created, GET / PUT / SUBSCRIBE issued). Mirrors pvxs's
+    /// `qStats` aggregate output. Per-channel breakdown is not
+    /// currently tracked — pvxs's per-channel counters require a
+    /// channel-registry that we can add in a follow-up; for now
+    /// callers get the IOC-wide totals.
+    pub fn op_stats(&self) -> ProviderOpStats {
+        use std::sync::atomic::Ordering::Relaxed;
+        ProviderOpStats {
+            channels_created: self.channels_created.load(Relaxed),
+            gets: self.ops_get.load(Relaxed),
+            puts: self.ops_put.load(Relaxed),
+            subscribes: self.ops_subscribe.load(Relaxed),
+        }
+    }
+
+    /// Bump the channel-creation counter. Called from `create_channel_for`.
+    pub fn note_channel_created(&self) {
+        self.channels_created
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Increment the cumulative GET counter. Channel implementations
+    /// call this once per successful get. Held public so external
+    /// `Channel` impls (outside this crate) can participate in
+    /// `qsrvStats` totals.
+    pub fn note_get(&self) {
+        self.ops_get
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Increment the cumulative PUT counter.
+    pub fn note_put(&self) {
+        self.ops_put
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Increment the cumulative SUBSCRIBE counter.
+    pub fn note_subscribe(&self) {
+        self.ops_subscribe
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Snapshot returned by [`BridgeProvider::op_stats`].
+#[derive(Debug, Clone, Default)]
+pub struct ProviderOpStats {
+    pub channels_created: u64,
+    pub gets: u64,
+    pub puts: u64,
+    pub subscribes: u64,
+}
+
+impl BridgeProvider {
     /// Replace the current access-control policy. All AccessContexts
     /// vended from this provider — including those already attached to
     /// existing channels — observe the swap on their next access check.
@@ -375,6 +442,86 @@ impl BridgeProvider {
         self.groups.read().len()
     }
 
+    /// Drop every registered group definition. Mirrors pvxs
+    /// `resetGroups` (groupsourcehooks.cpp:222) — used between
+    /// `iocInit` cycles in tests so the second run starts clean. The
+    /// underlying records are unaffected.
+    pub fn reset_groups(&self) -> usize {
+        let mut g = self.groups.write();
+        let n = g.len();
+        g.clear();
+        n
+    }
+
+    /// Resolve a single member of a group by `(group_name, field)`.
+    /// Returns the backing record name (`record.field`) and the
+    /// member's [`super::group_config::FieldMapping`] so callers can
+    /// route a get/put through the existing single-record path.
+    /// Mirrors pvxs `getGroupField` / `putGroupField`
+    /// (groupsource.cpp:408/497) at the lookup level — the actual
+    /// db_get / db_put is delegated to the caller.
+    pub fn group_member(
+        &self,
+        group: &str,
+        field: &str,
+    ) -> Option<(String, super::pvif::FieldMapping)> {
+        let g = self.groups.read();
+        let def = g.get(group)?;
+        let m = def.members.iter().find(|m| m.field_name == field)?;
+        Some((m.channel.clone(), m.mapping))
+    }
+
+    /// Read a single field of a group as an [`EpicsValue`]. Mirrors
+    /// pvxs `getGroupField`. Returns `None` when the group/field
+    /// pair is unknown or the backing record can't be read.
+    pub async fn get_group_field(
+        &self,
+        group: &str,
+        field: &str,
+    ) -> Option<epics_base_rs::types::EpicsValue> {
+        let (channel, mapping) = self.group_member(group, field)?;
+        if matches!(
+            mapping,
+            super::pvif::FieldMapping::Structure | super::pvif::FieldMapping::Const
+        ) {
+            return None;
+        }
+        self.db.get_pv(&channel).await.ok()
+    }
+
+    /// Write a single field of a group. Mirrors pvxs `putGroupField`.
+    /// Honors the BridgeProvider's live access policy at
+    /// `group_name` granularity (matching whole-group put semantics).
+    pub async fn put_group_field(
+        &self,
+        group: &str,
+        field: &str,
+        value: epics_base_rs::types::EpicsValue,
+        user: &str,
+        host: &str,
+    ) -> BridgeResult<()> {
+        if !self.can_write(group, user, host) {
+            return Err(crate::error::BridgeError::PutRejected(format!(
+                "write denied for group {group} (user='{user}' host='{host}')"
+            )));
+        }
+        let (channel, mapping) = self
+            .group_member(group, field)
+            .ok_or_else(|| crate::error::BridgeError::RecordNotFound(format!("{group}.{field}")))?;
+        if matches!(
+            mapping,
+            super::pvif::FieldMapping::Structure | super::pvif::FieldMapping::Const
+        ) {
+            return Err(crate::error::BridgeError::PutRejected(format!(
+                "{group}.{field}: Structure/Const members are not writable"
+            )));
+        }
+        self.db
+            .put_pv(&channel, value)
+            .await
+            .map_err(|e| crate::error::BridgeError::PutRejected(e.to_string()))
+    }
+
     /// Clear the record metadata cache.
     pub async fn clear_cache(&self) {
         self.record_cache.write().await.clear();
@@ -420,6 +567,7 @@ impl BridgeProvider {
         user: &str,
         host: &str,
     ) -> BridgeResult<AnyChannel> {
+        self.note_channel_created();
         let access_ctx =
             AccessContext::with_identity(self.live_access(), user.to_string(), host.to_string());
 

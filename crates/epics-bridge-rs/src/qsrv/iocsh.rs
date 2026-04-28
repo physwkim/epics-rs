@@ -39,10 +39,10 @@ use super::provider::BridgeProvider;
 
 /// `dbLoadGroup <jsonFilename> [<macros>]` — load a JSON group config
 /// file into the [`BridgeProvider`]. Mirrors pvxs `dbLoadGroup`
-/// (groupsourcehooks.cpp:99). The `macros` argument is currently
-/// accepted but ignored (pvxs uses it for substitution against
-/// `${name}` tokens in the JSON; we don't yet implement
-/// substitution — file contents are loaded verbatim).
+/// (groupsourcehooks.cpp:99). The `macros` argument supports the
+/// pvxs/iocsh `name=value,...` form — `${name}` tokens in the JSON
+/// expand to the supplied value, and any unbound `${X}` falls back
+/// to `std::env::var("X")` so site configs can pull in shell vars.
 pub fn db_load_group_command(provider: Arc<BridgeProvider>) -> CommandDef {
     CommandDef::new(
         "dbLoadGroup",
@@ -64,7 +64,16 @@ pub fn db_load_group_command(provider: Arc<BridgeProvider>) -> CommandDef {
                 Some(ArgValue::String(s)) => s.clone(),
                 _ => return Err("dbLoadGroup: missing filename".into()),
             };
-            match provider.load_group_file(&filename) {
+            let macros = match args.get(1) {
+                Some(ArgValue::String(s)) => parse_macros(s),
+                _ => Default::default(),
+            };
+            let raw = match std::fs::read_to_string(&filename) {
+                Ok(s) => s,
+                Err(e) => return Err(format!("dbLoadGroup '{filename}': {e}")),
+            };
+            let expanded = expand_macros(&raw, &macros);
+            match provider.load_group_config(&expanded) {
                 Ok(()) => {
                     ctx.println(&format!(
                         "dbLoadGroup: loaded '{filename}' ({} groups total)",
@@ -76,6 +85,55 @@ pub fn db_load_group_command(provider: Arc<BridgeProvider>) -> CommandDef {
             }
         },
     )
+}
+
+/// Parse a `name=value,name=value` string into a map. Whitespace
+/// around tokens is stripped. Empty entries are skipped.
+fn parse_macros(s: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for tok in s.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = tok.split_once('=') {
+            out.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    out
+}
+
+/// Expand `${NAME}` tokens in `s` against `macros`, falling back to
+/// `std::env::var("NAME")`. Unbound names are left literal so the
+/// downstream JSON parser surfaces them as parse errors.
+fn expand_macros(s: &str, macros: &std::collections::HashMap<String, String>) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'{'
+            && let Some(end) = s[i + 2..].find('}')
+        {
+            let name = &s[i + 2..i + 2 + end];
+            if let Some(v) = macros.get(name) {
+                out.push_str(v);
+            } else if let Ok(v) = std::env::var(name) {
+                out.push_str(&v);
+            } else {
+                // Leave the token literal so the JSON parser
+                // errors on the unbound macro instead of silently
+                // producing wrong output.
+                out.push_str(&s[i..i + 3 + end]);
+            }
+            i += 3 + end;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// `processGroups` — finalize group config after `dbLoadGroup` calls
@@ -134,7 +192,15 @@ pub fn qsrv_stats_command(provider: Arc<BridgeProvider>) -> CommandDef {
                     }
                 }
                 _ => {
-                    ctx.println(&format!("qsrvStats: {} group(s) registered", groups.len()));
+                    let stats = provider.op_stats();
+                    ctx.println(&format!(
+                        "qsrvStats: {} group(s), {} channels created (cumulative), {} get / {} put / {} subscribe",
+                        groups.len(),
+                        stats.channels_created,
+                        stats.gets,
+                        stats.puts,
+                        stats.subscribes,
+                    ));
                     let mut names: Vec<&String> = groups.keys().collect();
                     names.sort();
                     for n in names {
@@ -153,14 +219,32 @@ pub fn qsrv_stats_command(provider: Arc<BridgeProvider>) -> CommandDef {
     )
 }
 
+/// `resetGroups` — clear the group-PV registry. Mirrors pvxs
+/// `resetGroups` (groupsourcehooks.cpp:222). Used between IOC reload
+/// cycles in tests.
+pub fn reset_groups_command(provider: Arc<BridgeProvider>) -> CommandDef {
+    CommandDef::new(
+        "resetGroups",
+        vec![],
+        "resetGroups",
+        move |_args: &[ArgValue], ctx: &CommandContext| {
+            let n = provider.reset_groups();
+            ctx.println(&format!("resetGroups: dropped {n} group(s)"));
+            Ok(CommandOutcome::Continue)
+        },
+    )
+}
+
 /// Convenience: build the full QSRV iocsh command set (`dbLoadGroup`,
-/// `processGroups`, `qsrvStats`) bound to `provider`. Drop the
-/// returned vector into [`epics_base_rs::server::ioc_app::IocRunConfig::shell_commands`].
+/// `processGroups`, `qsrvStats`, `resetGroups`) bound to `provider`.
+/// Drop the returned vector into
+/// [`epics_base_rs::server::ioc_app::IocRunConfig::shell_commands`].
 pub fn register_qsrv_commands(provider: Arc<BridgeProvider>) -> Vec<CommandDef> {
     vec![
         db_load_group_command(provider.clone()),
         process_groups_command(provider.clone()),
-        qsrv_stats_command(provider),
+        qsrv_stats_command(provider.clone()),
+        reset_groups_command(provider),
     ]
 }
 
@@ -195,14 +279,54 @@ mod tests {
     }
 
     #[test]
-    fn register_qsrv_commands_returns_three() {
+    fn register_qsrv_commands_returns_four() {
         let db = Arc::new(PvDatabase::new());
         let provider = Arc::new(BridgeProvider::new(db));
         let cmds = register_qsrv_commands(provider);
-        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds.len(), 4);
         let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"dbLoadGroup"));
         assert!(names.contains(&"processGroups"));
         assert!(names.contains(&"qsrvStats"));
+        assert!(names.contains(&"resetGroups"));
+    }
+
+    #[test]
+    fn macro_substitution_replaces_tokens() {
+        let mut m = std::collections::HashMap::new();
+        m.insert("PVNAME".to_string(), "TEST:val".to_string());
+        m.insert("UNIT".to_string(), "deg".to_string());
+        let s = expand_macros(r#"{"+id": "${PVNAME}_${UNIT}", "+atomic": false}"#, &m);
+        assert_eq!(s, r#"{"+id": "TEST:val_deg", "+atomic": false}"#);
+    }
+
+    #[test]
+    fn macro_unbound_left_literal() {
+        let m = std::collections::HashMap::new();
+        let s = expand_macros("${MISSING}", &m);
+        assert_eq!(s, "${MISSING}");
+    }
+
+    #[test]
+    fn parse_macros_strips_whitespace() {
+        let m = parse_macros(" name = TEST:val , unit = deg ,, ");
+        assert_eq!(m.get("name"), Some(&"TEST:val".to_string()));
+        assert_eq!(m.get("unit"), Some(&"deg".to_string()));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn reset_groups_clears_registry() {
+        let db = Arc::new(PvDatabase::new());
+        let provider = Arc::new(BridgeProvider::new(db));
+        provider
+            .load_group_config(
+                r#"{ "G:a": { "+atomic": false, "v": { "+channel": "X.VAL", "+type": "plain" } } }"#,
+            )
+            .unwrap();
+        assert_eq!(provider.group_count(), 1);
+        let dropped = provider.reset_groups();
+        assert_eq!(dropped, 1);
+        assert_eq!(provider.group_count(), 0);
     }
 }

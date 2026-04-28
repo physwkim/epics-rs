@@ -102,13 +102,45 @@ pub fn dbpvxr_command(resolver: PvaLinkResolver) -> CommandDef {
     )
 }
 
+/// `pvalink_enable` / `pvalink_disable` — master switch for pvalink
+/// resolution. When disabled, the resolver returns None for every
+/// lookup. Mirrors pvxs `pvalink_enable` / `pvalink_disable`
+/// (pvalink.cpp:328).
+pub fn pvalink_enable_command(resolver: PvaLinkResolver) -> CommandDef {
+    CommandDef::new(
+        "pvalink_enable",
+        vec![],
+        "pvalink_enable",
+        move |_args: &[ArgValue], ctx: &CommandContext| {
+            resolver.set_enabled(true);
+            ctx.println("pvalink_enable: pvalink resolution ENABLED");
+            Ok(CommandOutcome::Continue)
+        },
+    )
+}
+
+pub fn pvalink_disable_command(resolver: PvaLinkResolver) -> CommandDef {
+    CommandDef::new(
+        "pvalink_disable",
+        vec![],
+        "pvalink_disable",
+        move |_args: &[ArgValue], ctx: &CommandContext| {
+            resolver.set_enabled(false);
+            ctx.println("pvalink_disable: pvalink resolution DISABLED");
+            Ok(CommandOutcome::Continue)
+        },
+    )
+}
+
 /// Convenience: build the full pvalink iocsh command set bound to
 /// `resolver`. Drop the result into [`epics_base_rs::server::ioc_app::IocRunConfig::shell_commands`].
 pub fn register_pvalink_commands(resolver: PvaLinkResolver) -> Vec<CommandDef> {
     vec![
         db_pvxr_command(resolver.clone()),
         pvxrefdiff_command(resolver.clone()),
-        dbpvxr_command(resolver),
+        dbpvxr_command(resolver.clone()),
+        pvalink_enable_command(resolver.clone()),
+        pvalink_disable_command(resolver),
     ]
 }
 
@@ -121,13 +153,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_pvalink_commands_returns_three() {
+    async fn register_pvalink_commands_returns_five() {
         let r = dummy_resolver();
         let cmds = register_pvalink_commands(r);
-        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds.len(), 5);
         let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"pvxr"));
         assert!(names.contains(&"pvxrefdiff"));
         assert!(names.contains(&"dbpvxr"));
+        assert!(names.contains(&"pvalink_enable"));
+        assert!(names.contains(&"pvalink_disable"));
+    }
+
+    #[tokio::test]
+    async fn enable_flag_round_trip() {
+        let r = dummy_resolver();
+        assert!(r.is_enabled());
+        r.set_enabled(false);
+        assert!(!r.is_enabled());
+        r.set_enabled(true);
+        assert!(r.is_enabled());
     }
 }

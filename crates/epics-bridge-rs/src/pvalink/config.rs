@@ -35,6 +35,12 @@ pub struct PvaLinkConfig {
     /// True iff the link reports DBE_VALUE notifications back to the local
     /// record (INP, monitor mode).
     pub notify: bool,
+    /// When true, every monitor update triggers `process()` on the
+    /// owning record (INP-side equivalent of the legacy
+    /// `record(... CP)` flag). Mirrors pvxs `pvaLink::scanOnUpdate`
+    /// (pvalink_link.cpp:122). Default `false` — record must be
+    /// scanned externally.
+    pub scan_on_update: bool,
     /// Direction inferred from caller, not parsed.
     pub direction: LinkDirection,
 }
@@ -80,6 +86,7 @@ impl PvaLinkConfig {
             monitor: false,
             process: false,
             notify: false,
+            scan_on_update: false,
             direction,
         };
 
@@ -94,6 +101,9 @@ impl PvaLinkConfig {
         }
         if let Some(v) = opts.get("notify") {
             cfg.notify = parse_bool(v)?;
+        }
+        if let Some(v) = opts.get("scan_on_update") {
+            cfg.scan_on_update = parse_bool(v)?;
         }
 
         // Apply legacy bare modifiers

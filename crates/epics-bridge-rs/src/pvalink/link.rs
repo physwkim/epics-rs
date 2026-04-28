@@ -112,6 +112,67 @@ impl PvaLink {
         self.client.pvput(&self.config.pv_name, value_str).await?;
         Ok(())
     }
+
+    /// True when the link's monitor has received at least one update
+    /// (i.e., the upstream PV is reachable and has emitted a value).
+    /// Mirrors pvxs `pvaIsConnected` (pvalink_lset.cpp:186).
+    pub fn is_connected(&self) -> bool {
+        self.latest.lock().is_some()
+    }
+
+    /// Best-effort alarm message for the linked PV. Returns the
+    /// `alarm.message` field of the latest cached NT structure, or
+    /// `None` when unavailable. Mirrors pvxs `pvaGetAlarmMsg`
+    /// (pvalink_lset.cpp:536) at the message-string level (severity
+    /// / status are reported alongside via the standard NT alarm
+    /// substructure — surface-able via `latest_value()`).
+    pub fn alarm_message(&self) -> Option<String> {
+        let v = self.latest.lock().clone()?;
+        let PvField::Structure(s) = v else {
+            return None;
+        };
+        let alarm = s.get_field("alarm")?;
+        let PvField::Structure(a) = alarm else {
+            return None;
+        };
+        match a.get_field("message")? {
+            PvField::Scalar(ScalarValue::String(m)) => Some(m.clone()),
+            _ => None,
+        }
+    }
+
+    /// Latest cached NT value, if any. Returned as the raw [`PvField`]
+    /// so callers can pull whichever sub-field they need (alarm,
+    /// timeStamp, value, etc.). pvxs `pvaGetTimeStampTag`
+    /// (pvalink_lset.cpp:571) lives on top of this.
+    pub fn latest_value(&self) -> Option<PvField> {
+        self.latest.lock().clone()
+    }
+
+    /// Latest `(seconds, nanoseconds)` from the NT timeStamp slot, if
+    /// the cached value carries one. Mirrors pvxs
+    /// `pvaGetTimeStampTag`.
+    pub fn time_stamp(&self) -> Option<(i64, i32)> {
+        let v = self.latest.lock().clone()?;
+        let PvField::Structure(s) = v else {
+            return None;
+        };
+        let ts = s.get_field("timeStamp")?;
+        let PvField::Structure(t) = ts else {
+            return None;
+        };
+        let secs = match t.get_field("secondsPastEpoch")? {
+            PvField::Scalar(ScalarValue::Long(v)) => *v,
+            PvField::Scalar(ScalarValue::ULong(v)) => *v as i64,
+            _ => return None,
+        };
+        let nsec = match t.get_field("nanoseconds")? {
+            PvField::Scalar(ScalarValue::Int(v)) => *v,
+            PvField::Scalar(ScalarValue::UInt(v)) => *v as i32,
+            _ => return None,
+        };
+        Some((secs, nsec))
+    }
 }
 
 /// Walk a dotted field path through a [`PvField`] and return the leaf value.

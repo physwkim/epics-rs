@@ -37,6 +37,12 @@ pub struct PvaLinkResolver {
     /// `pvxrefdiff` to report "links touched since last call". Wraps
     /// at u64::MAX.
     reads: Arc<std::sync::atomic::AtomicU64>,
+    /// Master enable flag. Set false via [`Self::set_enabled`] (or
+    /// the `pvalink_disable` iocsh command) to make every resolve
+    /// return None — useful for site-level pvalink kill switches.
+    /// Mirrors pvxs `pvalink_enable` / `pvalink_disable` iocsh
+    /// commands (pvalink.cpp:328).
+    enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PvaLinkResolver {
@@ -45,7 +51,21 @@ impl PvaLinkResolver {
             registry: Arc::new(PvaLinkRegistry::new()),
             handle,
             reads: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
+    }
+
+    /// Master enable / disable. When disabled, the resolver closure
+    /// returns `None` for every lookup so dependent records see
+    /// LINK/INVALID alarms but no stale cached values bleed through.
+    /// Mirrors pvxs `pvalink_enable(false)` / `pvalink_disable`.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Read the current enable flag.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Open / cache a link for `pv_name` in INP+monitor mode. Mirrors
@@ -59,6 +79,7 @@ impl PvaLinkResolver {
             monitor: true,
             process: false,
             notify: false,
+            scan_on_update: false,
             direction: LinkDirection::Inp,
         };
         self.registry.get_or_open(cfg).await
@@ -111,6 +132,9 @@ impl PvaLinkResolver {
     pub fn build_resolver(self) -> ExternalPvResolver {
         let resolver = self;
         Arc::new(move |name: &str| -> Option<EpicsValue> {
+            if !resolver.is_enabled() {
+                return None;
+            }
             // Strip optional pva:// prefix — the resolver receives the
             // bare PV name in some link forms but the prefixed form in
             // others.
@@ -124,6 +148,7 @@ impl PvaLinkResolver {
                 monitor: true,
                 process: false,
                 notify: false,
+                scan_on_update: false,
                 direction: LinkDirection::Inp,
             };
             // Open-or-fetch then read. open() is idempotent via the
