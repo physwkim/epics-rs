@@ -407,8 +407,13 @@ async fn run_engine(
     // `Discovered::Timeout`. Mirrors pvxs tickBeaconClean.
     let mut beacon_clean_tick = interval(BEACON_CLEAN_INTERVAL);
     beacon_clean_tick.tick().await; // skip immediate fire
-    let mut search_buf = vec![0u8; 4096];
-    let mut beacon_buf = vec![0u8; 4096];
+    // 64 KB UDP receive buffers — IPv4 maximum. Search responses
+    // can be chained (multiple SEARCH replies per datagram) and
+    // beacons can include large server-hello payloads on TLS-aware
+    // servers; the previous 4 KB cap silently truncated either case.
+    // Matches the new server-side recv buffer (server_native/udp.rs).
+    let mut search_buf = vec![0u8; 64 * 1024];
+    let mut beacon_buf = vec![0u8; 64 * 1024];
 
     loop {
         // Build a beacon-recv future regardless of whether we bound it

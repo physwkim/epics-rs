@@ -107,6 +107,18 @@ pub fn conn_timeout_secs() -> u64 {
         .unwrap_or(30)
 }
 
+/// `EPICS_PVAS_SEND_TMO` — server-side per-write timeout (default 5s).
+/// Floored at 0.1s so a misconfigured `0` doesn't make every send
+/// instantly fail. See `PvaServerConfig::send_timeout` for full
+/// rationale (stuck-client detection on non-blocking tokio sockets).
+pub fn send_timeout_secs() -> f64 {
+    std::env::var("EPICS_PVAS_SEND_TMO")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|v| v.max(0.1))
+        .unwrap_or(5.0)
+}
+
 /// Parse `EPICS_PVA_NAME_SERVERS` into TCP socket addresses. Default
 /// port 5075. Empty when the variable is unset.
 pub fn name_servers() -> Vec<SocketAddr> {

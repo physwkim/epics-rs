@@ -55,6 +55,23 @@ pub trait ChannelSource: Send + Sync + 'static {
         let _ = (name, request_desc, request_value);
         async move { Err("RPC not supported by this source".to_string()) }
     }
+
+    /// Notify the source that the per-connection monitor outbox for
+    /// `name` just crossed UP through its high watermark. Producers
+    /// can throttle their post() rate in response. Default impl is
+    /// a no-op; [`crate::server_native::shared_pv::SharedSource`]
+    /// overrides to fire the per-PV `on_high_mark` callback.
+    /// Mirrors pvxs `MonitorControlOp::onHighMark`.
+    fn notify_watermark_high(&self, name: &str) {
+        let _ = name;
+    }
+
+    /// Companion to [`Self::notify_watermark_high`]: fired when the
+    /// outbox drained back to empty. Producers should un-throttle.
+    /// Default no-op.
+    fn notify_watermark_low(&self, name: &str) {
+        let _ = name;
+    }
 }
 
 /// Type-erased handle so the server runtime can hold heterogeneous sources
@@ -103,6 +120,8 @@ pub trait ChannelSourceObj: Send + Sync {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send + 'a>,
     >;
+    fn notify_watermark_high(&self, name: &str);
+    fn notify_watermark_low(&self, name: &str);
 }
 
 impl<T: ChannelSource + 'static> ChannelSourceObj for T {
@@ -164,5 +183,11 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
             request_desc,
             request_value,
         ))
+    }
+    fn notify_watermark_high(&self, name: &str) {
+        <Self as ChannelSource>::notify_watermark_high(self, name);
+    }
+    fn notify_watermark_low(&self, name: &str) {
+        <Self as ChannelSource>::notify_watermark_low(self, name);
     }
 }

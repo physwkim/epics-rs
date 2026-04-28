@@ -130,6 +130,21 @@ pub async fn run_tcp_server(
                 let acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
                     stream.set_nodelay(true).ok();
+                    // Enable OS-level TCP keepalive so half-open connections
+                    // (NAT timeout, dead client) are detected within ~30s
+                    // even when the protocol-level Echo path can't fire
+                    // (e.g. peer hasn't initialized control plane yet).
+                    // Mirrors the `tcp_keepalive` libevent setting pvxs
+                    // applies in serverconn.cpp. Defence-in-depth on top of
+                    // the heartbeat ECHO timer.
+                    {
+                        let sock = socket2::SockRef::from(&stream);
+                        let keepalive = socket2::TcpKeepalive::new()
+                            .with_time(std::time::Duration::from_secs(15))
+                            .with_interval(std::time::Duration::from_secs(5));
+                        let _ = sock.set_keepalive(true);
+                        let _ = sock.set_tcp_keepalive(&keepalive);
+                    }
                     let result = match acceptor {
                         Some(a) => match a.accept(stream).await {
                             Ok(tls_stream) => {
@@ -297,17 +312,39 @@ async fn handle_connection_io(
     let idle_timeout = config.idle_timeout;
 
     // Spawn the dedicated writer task. All emit sites push framed bytes
-    // into `tx`; the task drains and writes serially. On any I/O error
-    // it exits, closing the receiver. Subsequent `tx.send(...)` calls
-    // succeed silently (we don't bubble) — the read loop independently
-    // notices the dead socket via EOF or its idle timeout.
+    // into `tx`; the task drains and writes serially. Two failure
+    // modes are detected:
+    // 1. Hard I/O error — the underlying socket returned an error.
+    //    `write_all` returns Err; we exit and the receiver closes,
+    //    so subsequent `tx.send(...)` calls fail immediately.
+    // 2. Stuck client — the kernel send buffer is full because the
+    //    peer stopped reading. `write_all` returns Pending forever
+    //    on a non-blocking socket; without a guard the writer task
+    //    would hang and back-pressure both the heartbeat and the
+    //    read-side dispatcher (since both push into the same mpsc).
+    //    We wrap `write_all` in `tokio::time::timeout(send_timeout)`
+    //    so a stalled write breaks the task, closes the mpsc, and
+    //    fails fast. Mirrors the parallel guard in `epics-ca-rs`'s
+    //    server-side dispatch wrap (the CA G1 audit fix).
+    let send_tmo = config.send_timeout;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(config.write_queue_depth);
     let writer_peer = peer;
     let _writer_task = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
-            if let Err(e) = writer_raw.write_all(&frame).await {
-                debug!(peer = ?writer_peer, error = %e, "writer task: TCP write failed, dropping connection");
-                break;
+            match tokio::time::timeout(send_tmo, writer_raw.write_all(&frame)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    debug!(peer = ?writer_peer, error = %e, "writer task: TCP write failed, dropping connection");
+                    break;
+                }
+                Err(_) => {
+                    warn!(
+                        peer = ?writer_peer,
+                        timeout_secs = send_tmo.as_secs_f64(),
+                        "writer task: send timeout (stuck client?), dropping connection"
+                    );
+                    break;
+                }
             }
         }
     });
@@ -984,12 +1021,17 @@ async fn handle_op(
                             debug!(pv = %pv_name, squashed, "monitor squashed events");
                             squashing = false;
                         }
-                        // Watermark crossing diagnostics. pvxs uses
-                        // `onHighMark`/`onLowMark` callbacks; we emit
-                        // a `tracing` event the user-facing
-                        // observability path can pick up. Counter is
-                        // tx_clone.capacity() - tx_clone.max_capacity()
-                        // approximation since mpsc doesn't expose len.
+                        // Watermark crossing diagnostics + producer
+                        // notification. pvxs fires `onHighMark` /
+                        // `onLowMark` callbacks at these transitions so
+                        // sources can throttle/un-throttle their post()
+                        // rate; we mirror that via
+                        // `ChannelSource::notify_watermark_{high,low}`.
+                        // The default trait impl is a no-op; SharedSource
+                        // overrides it to dispatch the per-PV callback
+                        // registered via `SharedPv::set_on_high_mark`.
+                        // Counter is max_capacity - capacity since mpsc
+                        // doesn't expose len directly.
                         let pending = tx_clone.max_capacity() - tx_clone.capacity();
                         if pending >= high_watermark && !over_high {
                             over_high = true;
@@ -999,9 +1041,11 @@ async fn handle_op(
                                 high_watermark,
                                 "monitor outbound queue crossed high watermark"
                             );
+                            src.notify_watermark_high(&pv_name);
                         } else if pending == 0 && over_high {
                             over_high = false;
                             debug!(pv = %pv_name, "monitor outbound queue drained below low watermark");
+                            src.notify_watermark_low(&pv_name);
                         }
                         let payload =
                             build_monitor_payload(ioid, &intro_clone, &value, &mask_clone, order);
