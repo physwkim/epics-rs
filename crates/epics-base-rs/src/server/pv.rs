@@ -1,11 +1,44 @@
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::runtime::sync::{Mutex, RwLock, mpsc};
 
 use crate::error::CaError;
 use crate::server::snapshot::Snapshot;
 use crate::types::{DbFieldType, EpicsValue};
+
+/// Per-subscriber bounded mpsc depth. Lifted from
+/// `EPICS_CAS_MAX_EVENTS_PER_CHAN`, default 64. Floor 4 so even
+/// hostile env values (`0`/`1`) leave room for last-value
+/// coalescing to make progress.
+fn per_channel_event_depth() -> usize {
+    crate::runtime::env::get("EPICS_CAS_MAX_EVENTS_PER_CHAN")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(64)
+        .max(4)
+}
+
+/// Process-global counter of monitor events dropped because the
+/// per-channel mpsc was full AND the coalesce slot was already
+/// occupied by an even-newer overflow value. Exposed for the
+/// `/queues` admin endpoint and the `dropped_events` Prometheus
+/// metric. Mirrors the pattern of `dropped_monitors` on the client
+/// side (subscribe_with_deadband).
+static DROPPED_MONITOR_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Read the cumulative count. Used by introspection / Prometheus
+/// scrape.
+pub fn dropped_monitor_events() -> u64 {
+    DROPPED_MONITOR_EVENTS.load(Ordering::Relaxed)
+}
+
+/// Internal: record a dropped event. Called from
+/// `notify_subscribers` when both the bounded mpsc and the
+/// coalesce slot are full.
+fn record_dropped_monitor() {
+    DROPPED_MONITOR_EVENTS.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Identity of the client driving a `WriteHook` invocation. Carries
 /// the user/host/peer fields the CA TCP handler already tracks for
@@ -191,6 +224,13 @@ impl ProcessVariable {
                 // the newest event. The consumer will pick it up via
                 // `pop_coalesced` after the next normal recv.
                 if let Ok(mut slot) = sub.coalesced.lock() {
+                    if slot.is_some() {
+                        // Previous overflow value being replaced before
+                        // the consumer ever observed it — that value is
+                        // genuinely lost. Bump the diag counter so the
+                        // operator can spot a slow viewer.
+                        record_dropped_monitor();
+                    }
                     *slot = Some(event);
                 }
             }
@@ -198,13 +238,19 @@ impl ProcessVariable {
     }
 
     /// Add a subscriber. Returns the receiver for monitor events.
+    ///
+    /// Channel depth defaults to 64 events; the operator can lift the
+    /// cap via `EPICS_CAS_MAX_EVENTS_PER_CHAN` for sites that need
+    /// deeper coalescing buffers. C rsrv does not advertise this knob
+    /// (its queue is internally fixed) — exposing it lets us tune
+    /// memory vs latency for slow-viewer workloads.
     pub async fn add_subscriber(
         &self,
         sid: u32,
         data_type: DbFieldType,
         mask: u16,
     ) -> mpsc::Receiver<MonitorEvent> {
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(per_channel_event_depth());
         let sub = Subscriber {
             sid,
             data_type,

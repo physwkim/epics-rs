@@ -67,6 +67,15 @@ pub struct PvaServerConfig {
     /// monitor subscribers / read loop instead of letting memory grow
     /// unbounded for slow clients. Default: 1024.
     pub write_queue_depth: usize,
+    /// Per-write timeout enforced by the dedicated writer task. A
+    /// stuck client (kernel send buffer full because the peer
+    /// stopped reading) would otherwise leave `write_all` Pending
+    /// forever on a non-blocking tokio socket, blocking the
+    /// heartbeat task and back-pressuring the read-side dispatcher.
+    /// On expiry the writer task exits, closing the outbound mpsc
+    /// so subsequent producers fail fast. Default: 5 s, override
+    /// via `EPICS_PVAS_SEND_TMO`.
+    pub send_timeout: Duration,
     /// Inbound peer ACL. Each entry is `(IpAddr, port_or_zero)` —
     /// matching connections (TCP) and search packets (UDP) are silently
     /// dropped. `port == 0` matches any port from that IP. Mirrors
@@ -138,6 +147,7 @@ impl Default for PvaServerConfig {
             monitor_high_watermark: 48, // 64 * 3 / 4 default
             monitor_low_watermark: 0,
             auth_complete: None,
+            send_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -170,6 +180,7 @@ impl PvaServerConfig {
         self.beacon_destinations = env::server_beacon_addr_list();
         self.auto_beacon = env::auto_beacon_addr_list_enabled();
         self.interfaces = env::server_intf_addr_list();
+        self.send_timeout = Duration::from_secs_f64(env::send_timeout_secs());
         self
     }
 }

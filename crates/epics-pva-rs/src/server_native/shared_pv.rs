@@ -49,6 +49,27 @@ pub type OnRpcFn = Arc<
 /// `SharedPV::onLastDisconnect` (sharedpv.cpp:303-323).
 pub type LifecycleFn = Arc<dyn Fn(&SharedPV) + Send + Sync>;
 
+/// Watermark-crossing callback fired when ANY of this SharedPV's
+/// monitor outboxes fills past `high_watermark` (transition into
+/// over-high) or drains back to empty (transition out of over-high
+/// — "low mark").
+///
+/// Mirrors pvxs `MonitorControlOp::onHighMark` / `onLowMark`
+/// (sharedpv.cpp:354-371). Producers use these to throttle their
+/// post-rate when the consumer falls behind, instead of relying on
+/// the lossy default (drop or squash). Typical use:
+///
+/// ```ignore
+/// shared.set_on_high_mark(Arc::new(|pv| {
+///     // Slow viewer detected — back off polling
+///     PRODUCER_RATE.store(LOW_RATE, Ordering::Relaxed);
+/// }));
+/// shared.set_on_low_mark(Arc::new(|pv| {
+///     PRODUCER_RATE.store(NORMAL_RATE, Ordering::Relaxed);
+/// }));
+/// ```
+pub type WatermarkFn = Arc<dyn Fn(&SharedPV) + Send + Sync>;
+
 /// Per-PV state stored inside [`SharedPV`].
 struct Inner {
     /// Type descriptor declared at open() — None when not opened.
@@ -77,6 +98,12 @@ struct Inner {
     on_first_connect: Option<LifecycleFn>,
     /// Last-subscriber-left hook.
     on_last_disconnect: Option<LifecycleFn>,
+    /// Outbox crossed `high_watermark` going up. Producer throttle
+    /// hint. See [`WatermarkFn`].
+    on_high_mark: Option<WatermarkFn>,
+    /// Outbox drained back to zero (or below `low_watermark`).
+    /// Producer un-throttle hint.
+    on_low_mark: Option<WatermarkFn>,
 }
 
 impl Default for Inner {
@@ -92,6 +119,8 @@ impl Default for Inner {
             on_rpc: None,
             on_first_connect: None,
             on_last_disconnect: None,
+            on_high_mark: None,
+            on_low_mark: None,
         }
     }
 }
@@ -349,6 +378,30 @@ impl SharedPV {
         let g = self.inner.lock();
         (g.low_watermark, g.high_watermark)
     }
+
+    /// Install a high-mark callback. The callback fires when ANY
+    /// monitor outbox of this SharedPV transitions from below to
+    /// above `high_watermark`. Producers can use this to throttle
+    /// their `post()` rate when the slow consumer is falling
+    /// behind. See [`WatermarkFn`] for the typical pattern.
+    pub fn set_on_high_mark(&self, cb: WatermarkFn) {
+        self.inner.lock().on_high_mark = Some(cb);
+    }
+
+    /// Install a low-mark callback (paired with `on_high_mark`).
+    /// Fires when an outbox drains back to empty after having
+    /// crossed `high_watermark`. Use to un-throttle the producer.
+    pub fn set_on_low_mark(&self, cb: WatermarkFn) {
+        self.inner.lock().on_low_mark = Some(cb);
+    }
+
+    /// Internal: snapshot the current high-mark / low-mark callbacks
+    /// so the per-connection monitor task can fire them without
+    /// holding the inner mutex across `.await`. Returns `(high, low)`.
+    pub(crate) fn watermark_handlers(&self) -> (Option<WatermarkFn>, Option<WatermarkFn>) {
+        let g = self.inner.lock();
+        (g.on_high_mark.clone(), g.on_low_mark.clone())
+    }
 }
 
 impl Default for SharedPV {
@@ -448,6 +501,30 @@ impl super::source::ChannelSource for SharedSource {
             match pv {
                 Some(p) => p.rpc(request_desc, request_value),
                 None => Err(format!("no such PV: {name}")),
+            }
+        }
+    }
+
+    /// Override default no-op: when an outbox crosses up through the
+    /// high watermark, fire the per-PV `on_high_mark` callback so
+    /// the producer can throttle. Mirrors pvxs `MonitorControlOp`
+    /// pipeline-pause semantics.
+    fn notify_watermark_high(&self, name: &str) {
+        let pv = self.pvs.lock().get(name).cloned();
+        if let Some(p) = pv {
+            let (high, _low) = p.watermark_handlers();
+            if let Some(cb) = high {
+                cb(&p);
+            }
+        }
+    }
+
+    fn notify_watermark_low(&self, name: &str) {
+        let pv = self.pvs.lock().get(name).cloned();
+        if let Some(p) = pv {
+            let (_high, low) = p.watermark_handlers();
+            if let Some(cb) = low {
+                cb(&p);
             }
         }
     }

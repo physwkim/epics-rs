@@ -164,7 +164,14 @@ pub async fn run_udp_responder_with_config(
         }
     });
 
-    let mut buf = vec![0u8; 1500];
+    // 64 KB receive buffer — IPv4 maximum. The previous 1500-byte
+    // (Ethernet MTU) cap silently truncated large multi-PV searches:
+    // pvxs clients pack many SEARCH messages into one datagram and a
+    // gateway-restart storm can easily exceed 1500 bytes. 64 KB
+    // matches the kernel ceiling without truncation. Heap-allocated
+    // because 64 KB on the per-task stack is large; one allocation
+    // amortized across the listener's lifetime.
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         let (n, peer) = match socket.recv_from(&mut buf).await {
             Ok(t) => t,
