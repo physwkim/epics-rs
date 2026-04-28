@@ -1,5 +1,132 @@
 # Changelog
 
+## v0.10.4 — 2026-04-28 — pvxs API parity (src + ioc + tools) and lset abstraction
+
+A nine-commit pass closing every kodex-flagged gap relative to the
+pvxs upstream. The `pva-rs` ↔ `pvxs/src` surface is now functionally
+equivalent (modulo C++ STL idioms that don't translate to Rust);
+`bridge-rs` ↔ `pvxs/ioc` covers QSRV + pvalink at iocsh + record-link
+levels; new CLIs in `pva-rs/src/bin` mirror `pvxs/tools`.
+
+### epics-pva-rs — pvxs API parity (3 rounds)
+
+**Round 1 — lifecycle, multi-source, monitor handle, name servers**
+- `PvaClient`: `close`, `hurry_up`, `cache_clear`,
+  `ignore_server_guids`, per-call forced server (`pvget_from`,
+  `pvput_to`), `name_servers` env wired (`EPICS_PVA_NAME_SERVERS`),
+  multicast UDP join, `report` snapshot.
+- `PvaServer`: `start` / `stop` / `wait` / `run` / `interrupt` (SIGINT
+  trap), `client_config()`, `config()`, `report()`, `ignore_addrs`
+  ACL, `monitor_*_watermark` diagnostics.
+- `CompositeSource` multi-source registry with priority order.
+- `pvmonitor_handle` returns `SubscriptionHandle` (pause/resume/
+  stats/stop). `SubscriptionStat` metrics.
+- Wire: `build_monitor_pause` / `build_monitor_resume` (subcmd
+  0x04/0x44).
+
+**Round 2 — SharedPV callbacks, builders, Discover**
+- `SharedPV`: `on_first_connect`, `on_last_disconnect`, `on_put`,
+  `on_rpc`, `attach`, `fetch`, `prune_subscribers`.
+- `MonitorBuilder::server` → `pvmonitor_handle_from(pv, addr, cb)`.
+- `ConnectBuilder`: `server()`, `sync_cancel(bool)`,
+  `ConnectHandle::wait()`. `SubscriptionHandle::stop_sync` (pvxs
+  syncCancel(true) analog).
+- `PvaClientBuilder`: `priority(0..7)`, `tcp_timeout(Duration)`,
+  `share_udp(bool)` (process-wide search engine via OnceCell),
+  `MonitorEvent` / `MonitorEventMask` typed events.
+- Discover: `Discovered::Online` carries `peer` + `proto`; beacon
+  parser rewrites 0.0.0.0 → peer.ip(). `SearchEngine::ping_all()` /
+  `PvaClient::ping_all()` (`DiscoverBuilder::pingAll`).
+- `PvaServerConfig::isolated()` + `PvaServer::isolated()` factories.
+- `PvRequestBuilder` (`field`/`record`/`pv_request`/`raw_request`/
+  `build`) — pvxs RequestBuilder parity.
+
+**Round 3 — TypeDef, Value coercion, ca-auth roles, log reload**
+- `Value::clone_empty()` (pvxs `cloneEmpty` parity).
+- `Value::copy_in` / `copy_out` / `try_copy_in` / `try_copy_out`
+  (pvxs naming aliases).
+- `TypeDef` + `Member` fluent builder for `FieldDesc` trees.
+- `crate::log` module: `init_filter` (reload::Layer), `set_global_handle`,
+  `set_log_filter(spec)`, `set_log_level(target, level)`. pvxs
+  `logger_config_str` / `logger_level_set` parity.
+- `auth::posix_groups()` POSIX `getgrouplist(2)` wrapper.
+- ca-auth wire payload now advertises `groups: string[]`; server-side
+  `ClientCredentials.roles` reads `groups`/`roles` either name.
+- `ClientCredentials::peer_label(peer)` formatter.
+- `PvaServerConfig::auth_complete` post-validation hook.
+- `version_int()` const fn + `VERSION` const.
+
+### epics-bridge-rs — QSRV + pvalink (3 rounds)
+
+**Round 1 — iocsh integration**
+- `dbLoadGroup` / `processGroups` / `qsrvStats` iocsh commands,
+  bound to a shared `Arc<BridgeProvider>`. `BridgeProvider.groups`
+  switched to `parking_lot::RwLock` for interior mutability.
+
+**Round 2 — pvalink record-link wiring**
+- `PvaLinkResolver` wraps the registry + tokio handle + read counter.
+  `install_pvalink_resolver(db, handle)` registers both an
+  `ExternalPvResolver` closure and (in round 3) the new
+  `LinkSet`.
+- `pvxr` / `pvxrefdiff` / `dbpvxr` iocsh commands.
+- `wait_for_link_connected(pv, timeout)` (pvxs
+  `testqsrvWaitForLinkConnected` analog).
+
+**Round 3 — completeness pass**
+- `resetGroups` iocsh + `BridgeProvider::reset_groups()`.
+- `dbLoadGroup` macros arg now expands `${NAME}` against the
+  `name=value,...` macros string with `std::env::var` fallback.
+- `BridgeProvider::group_member` / `get_group_field` /
+  `put_group_field` (pvxs `getGroupField`/`putGroupField`).
+- `op_stats()` cumulative counters (channels created, GET, PUT,
+  SUBSCRIBE) surfaced via `qsrvStats`.
+- `PvaLinkConfig::scan_on_update`. `PvaLink::is_connected` /
+  `alarm_message` / `time_stamp` / `latest_value` (pvxs lset
+  helpers).
+- `PvaLinkResolver::set_enabled` / `is_enabled`. `pvalink_enable`
+  / `pvalink_disable` iocsh.
+
+### epics-base-rs — LinkSet abstraction
+
+- New `LinkSet` trait + `LinkSetRegistry` keyed on URL scheme.
+- `PvDatabase::register_link_set(scheme, lset)` /
+  `link_set(scheme)` / `registered_link_schemes()`.
+- `resolve_external_pv` dispatches through the lset registry first,
+  falls back to the legacy `ExternalPvResolver`. Backward-compat.
+- `PvDatabase::record_link_fields(name)` enumerates link-shaped
+  String fields by parsing each value through `parse_link_v2` —
+  underpins per-record `dbpvxr`.
+- `dbpvxr <record>` is now a real per-record dump: connected /
+  value / alarm / timeStamp for each `pva://` link, plus single-line
+  descriptions of `ca://` / db / constant links.
+
+### epics-pva-rs/src/bin — pvxs/tools parity
+
+- `pvcall-rs`: RPC client. `field=value` → NTURI request → `pvrpc`.
+- `pvlist-rs`: server discovery via `SearchEngine::discover` +
+  optional `ping_all`. Verbose mode adds GUID / proto / peer.
+- `pvxvct-rs`: PVA Virtual Cable Tester. Decodes SEARCH / BEACON
+  frames. `-C` / `-S` direction filter, `-H` host filter.
+- `mshim-rs`: beacon / search multicast shim. `-L listen` /
+  `-F forward` endpoints, auto multicast join, same-peer feedback
+  guard. Bug found via `testudpfwd` integration test: send_sock
+  needs `set_nonblocking(true)` for tokio::UdpSocket::from_std.
+
+### Tests — pvxs test/* parity (final round)
+
+- 9 `testTypeDef` parity unit tests (TypeDef + Member builder).
+- 6 `testqsingle` parity tests (BridgeChannel get/put e2e: ai /
+  longin / stringin / waveform).
+- 4 `testqgroup` parity tests (atomic + non-atomic group put-then-get,
+  config parse + finalize).
+- 2 `testudpfwd` integration tests (mshim-rs binary forwarding,
+  invalid-endpoint exit code).
+- 7 inline `parse_endpoint` unit tests in mshim-rs.
+
+### Workspace bump
+
+- `0.10.3` → `0.10.4` across workspace + dependency pins.
+
 ## v0.10.3 — 2026-04-28 — pva-rs reconnect machinery brought up to pvxs parity
 
 A focused pass on `epics-pva-rs` client-side reconnect: the v0.10.2
