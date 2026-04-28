@@ -76,6 +76,14 @@ pub struct PvaServerConfig {
     /// so subsequent producers fail fast. Default: 5 s, override
     /// via `EPICS_PVAS_SEND_TMO`.
     pub send_timeout: Duration,
+    /// Hard cap on a single inbound message's payload length.
+    /// `read_frame` rejects (and drops the connection) any header
+    /// claiming more than this. Without a cap a malicious peer
+    /// can announce a 4 GiB payload and force the server to grow
+    /// its rx_buf until OOM. Default: 64 MiB — large enough for
+    /// legitimate huge structures (NTTable bulk transfers) but
+    /// well below address-space exhaustion.
+    pub max_message_size: usize,
     /// Inbound peer ACL. Each entry is `(IpAddr, port_or_zero)` —
     /// matching connections (TCP) and search packets (UDP) are silently
     /// dropped. `port == 0` matches any port from that IP. Mirrors
@@ -148,6 +156,7 @@ impl Default for PvaServerConfig {
             monitor_low_watermark: 0,
             auth_complete: None,
             send_timeout: Duration::from_secs(5),
+            max_message_size: 64 * 1024 * 1024,
         }
     }
 }
@@ -181,6 +190,17 @@ impl PvaServerConfig {
         self.auto_beacon = env::auto_beacon_addr_list_enabled();
         self.interfaces = env::server_intf_addr_list();
         self.send_timeout = Duration::from_secs_f64(env::send_timeout_secs());
+        // Effective inactivity timeout = configured CONN_TMO × 4/3.
+        // pvxs config.cpp:187 applies the same scaling so a client
+        // sending ECHO every CONN_TMO/2 (the protocol convention)
+        // gets a margin against scheduling jitter — without it, a
+        // server with idle_timeout = exactly CONN_TMO would race
+        // with a healthy client's second ECHO and disconnect it.
+        // Floor at 2s mirrors pvxs `enforceTimeout`.
+        let configured = env::conn_timeout_secs() as f64;
+        let scaled = (configured * 4.0 / 3.0).max(2.0);
+        self.idle_timeout = Duration::from_secs_f64(scaled);
+        self.ignore_addrs = env::server_ignore_addr_list();
         self
     }
 }

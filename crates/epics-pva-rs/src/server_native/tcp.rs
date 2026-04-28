@@ -134,9 +134,12 @@ pub async fn run_tcp_server(
                     // (NAT timeout, dead client) are detected within ~30s
                     // even when the protocol-level Echo path can't fire
                     // (e.g. peer hasn't initialized control plane yet).
-                    // Mirrors the `tcp_keepalive` libevent setting pvxs
-                    // applies in serverconn.cpp. Defence-in-depth on top of
-                    // the heartbeat ECHO timer.
+                    // Defence-in-depth on top of the heartbeat ECHO timer:
+                    // pvxs itself does NOT set SO_KEEPALIVE — it relies on
+                    // libevent's `bufferevent_set_timeouts` for inactivity
+                    // detection. We add OS keepalive (CA-libca style) so a
+                    // pre-handshake half-open peer still gets reaped even
+                    // before the application timer arms.
                     {
                         let sock = socket2::SockRef::from(&stream);
                         let keepalive = socket2::TcpKeepalive::new()
@@ -409,8 +412,9 @@ async fn handle_connection_io(
     // compatibility — that client does not parse 0xFD/0xFE markers).
     let mut encode_type_cache = crate::pvdata::encode::EncodeTypeCache::new();
 
+    let max_msg_size = config.max_message_size;
     loop {
-        let frame = read_frame(&mut reader, &mut rx_buf, op_timeout).await?;
+        let frame = read_frame(&mut reader, &mut rx_buf, op_timeout, max_msg_size).await?;
         last_rx.store(now_nanos(), Ordering::SeqCst);
         if frame.header.flags.is_control() {
             // Handle echo etc., otherwise ignore.
@@ -591,11 +595,28 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     rx_buf: &mut Vec<u8>,
     op_timeout: Duration,
+    max_msg_size: usize,
 ) -> PvaResult<Frame> {
     loop {
         if let Some((frame, n)) = try_parse_frame(rx_buf)? {
             rx_buf.drain(..n);
             return Ok(frame);
+        }
+        // Peek the header length once we have 8 bytes — if the peer
+        // claimed a payload larger than `max_msg_size`, drop the
+        // connection before growing rx_buf any further. Without this
+        // a malicious header announcing 4 GiB would force us to
+        // OOM-loop here. pvxs enforces the same cap implicitly via
+        // libevent's evbuffer_setwatermark; we do it explicitly.
+        if rx_buf.len() >= PvaHeader::SIZE {
+            if let Ok(hdr) = PvaHeader::decode(&mut std::io::Cursor::new(&rx_buf[..])) {
+                if !hdr.flags.is_control() && hdr.payload_length as usize > max_msg_size {
+                    return Err(PvaError::Protocol(format!(
+                        "inbound payload {} exceeds max_message_size {}",
+                        hdr.payload_length, max_msg_size
+                    )));
+                }
+            }
         }
         let mut chunk = [0u8; 4096];
         let n = match tokio::time::timeout(op_timeout, reader.read(&mut chunk)).await {
