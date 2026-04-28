@@ -46,9 +46,17 @@ pub struct PvaGatewayConfig {
 
 impl Default for PvaGatewayConfig {
     fn default() -> Self {
+        // PG-G13: gateways control both ends of the encode path
+        // (server-side PVA, downstream pvxs/pvAccessJava clients
+        // are common); enable type-cache marker emission so a
+        // repeating-shape monitor stream collapses repeated 100+
+        // byte introspection blocks to 3-byte 0xFE references.
+        // Operators with old pvAccessCPP downstream can override.
+        let mut server_config = PvaServerConfig::default();
+        server_config.emit_type_cache = true;
         Self {
             upstream_client: None,
-            server_config: PvaServerConfig::default(),
+            server_config,
             cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
             connect_timeout: Duration::from_secs(5),
             max_cache_entries: super::channel_cache::DEFAULT_MAX_ENTRIES,

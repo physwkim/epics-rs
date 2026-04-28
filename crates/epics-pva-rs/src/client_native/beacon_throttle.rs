@@ -84,6 +84,13 @@ impl BeaconTracker {
         }
     }
 
+    /// Most recent GUID observed for `server`, or `None` if we
+    /// haven't seen a beacon from it yet. Used by Channel reconnect
+    /// to detect server replacement at the same address (P-G12).
+    pub fn guid_for(&self, server: SocketAddr) -> Option<[u8; 12]> {
+        self.inner.read().get(&server).map(|e| e.guid)
+    }
+
     /// True iff the server is currently in the throttle window.
     pub fn is_throttled(&self, server: SocketAddr) -> bool {
         let map = self.inner.read();

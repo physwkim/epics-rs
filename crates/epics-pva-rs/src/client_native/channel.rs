@@ -38,7 +38,19 @@ pub enum ChannelState {
     Idle,
     Searching,
     Connecting,
-    Active { server: Arc<ServerConn>, sid: u32 },
+    Active {
+        server: Arc<ServerConn>,
+        sid: u32,
+        /// GUID expected for this server, captured from the
+        /// SEARCH_RESPONSE that resolved the address. P-G12: on
+        /// reconnect via beacon-poke, we compare this against the
+        /// current `BeaconTracker` view; if a different GUID is
+        /// observed at the same address (server replacement at the
+        /// same host:port within the channel's reconnect window) we
+        /// log a warning and invalidate — the next ensure_active
+        /// will re-search instead of reconnecting blind.
+        expected_guid: Option<[u8; 12]>,
+    },
     Closed,
 }
 
@@ -87,6 +99,20 @@ enum Resolver {
     Search(SearchEngine),
     /// Connect directly to a known address (used by `PvaClientBuilder::server_addr`).
     Direct(std::net::SocketAddr),
+}
+
+impl Resolver {
+    /// Return the most recent GUID the SearchEngine's BeaconTracker
+    /// has observed at `addr`, or None for direct-connect resolvers
+    /// (we never learn a GUID for a hard-coded address). Used by
+    /// `ChannelState::Active::expected_guid` to detect server
+    /// replacement at the same address (P-G12).
+    fn last_guid_for(&self, addr: std::net::SocketAddr) -> Option<[u8; 12]> {
+        match self {
+            Resolver::Search(se) => se.beacon_guid_for(addr),
+            Resolver::Direct(_) => None,
+        }
+    }
 }
 
 /// Pool of live `ServerConn`s, keyed by server address.
@@ -253,17 +279,44 @@ impl Channel {
     /// Searching → Connecting as needed. Returns the live `(ServerConn, sid)`
     /// pair.
     pub async fn ensure_active(&self) -> PvaResult<(Arc<ServerConn>, u32)> {
-        // Quick happy-path check.
+        // Quick happy-path check. P-G12: also verify that the
+        // current server's GUID still matches the GUID we expected
+        // for its address. If beacons report a different GUID at the
+        // same address, the upstream server was replaced — drop the
+        // cached state and fall through to a fresh search.
+        let mut force_research = false;
         {
             let s = self.state.read();
-            if let ChannelState::Active { server, sid } = &*s {
+            if let ChannelState::Active {
+                server,
+                sid,
+                expected_guid,
+            } = &*s
+            {
                 if server.is_alive() {
-                    return Ok((server.clone(), *sid));
+                    let mismatched = match (expected_guid.as_ref(), self.resolver.last_guid_for(server.addr)) {
+                        (Some(exp), Some(obs)) => exp != &obs,
+                        _ => false,
+                    };
+                    if mismatched {
+                        tracing::warn!(
+                            addr = %server.addr,
+                            "PVA server identity changed at same address; \
+                             re-searching to validate channel"
+                        );
+                        force_research = true;
+                    } else {
+                        return Ok((server.clone(), *sid));
+                    }
                 }
             }
             if let ChannelState::Closed = &*s {
                 return Err(PvaError::Protocol("channel closed".into()));
             }
+        }
+        if force_research {
+            self.set_state(ChannelState::Idle);
+            self.alternatives.lock().clear();
         }
 
         // Serialize transitions across concurrent callers.
@@ -295,7 +348,7 @@ impl Channel {
         // Re-check after acquiring the lock.
         {
             let s = self.state.read();
-            if let ChannelState::Active { server, sid } = &*s {
+            if let ChannelState::Active { server, sid, .. } = &*s {
                 if server.is_alive() {
                     return Ok((server.clone(), *sid));
                 }
@@ -369,6 +422,12 @@ impl Channel {
                         self.set_state(ChannelState::Active {
                             server: server.clone(),
                             sid,
+                            // P-G12: capture the GUID our search
+                            // engine recorded for this address. If a
+                            // future reconnect to the same address
+                            // observes a different beacon GUID, the
+                            // ensure_active path can detect it.
+                            expected_guid: self.resolver.last_guid_for(server.addr),
                         });
                         // Successful Active — clear holdoff state so the
                         // next eventual disconnect starts the backoff
