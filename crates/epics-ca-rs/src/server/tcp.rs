@@ -149,6 +149,14 @@ struct ClientState {
     subscriptions: HashMap<u32, SubscriptionEntry>,
     channel_access: HashMap<u32, AccessLevel>,
     next_sid: AtomicU32,
+    /// Recycled SIDs from channels destroyed via CLEAR_CHANNEL. C-G9:
+    /// without recycling, `next_sid` would wrap after 2³² channel
+    /// creations and start handing out SIDs that collide with live
+    /// channels. epics-base `rsrv/camessage.c` uses
+    /// `freeListItemPvt` for the same reason. We use a Vec stack
+    /// (LIFO) so the most-recently-freed SID is reused first —
+    /// keeps the active set's SIDs clustered near the low end.
+    free_sids: Vec<u32>,
     hostname: String,
     username: String,
     acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
@@ -185,6 +193,7 @@ impl ClientState {
             subscriptions: HashMap::new(),
             channel_access: HashMap::new(),
             next_sid: AtomicU32::new(1),
+            free_sids: Vec::new(),
             hostname: String::new(),
             username: String::new(),
             acf,
@@ -218,8 +227,21 @@ impl ClientState {
         }
     }
 
-    fn alloc_sid(&self) -> u32 {
+    fn alloc_sid(&mut self) -> u32 {
+        // C-G9: prefer recycled SIDs from CLEAR_CHANNEL'd channels.
+        // Falls back to monotonic counter only when the free list is
+        // empty, which prevents wraparound collisions on long-uptime
+        // high-churn servers (epics-base rsrv `freeListItemPvt`
+        // parity).
+        if let Some(sid) = self.free_sids.pop() {
+            return sid;
+        }
         self.next_sid.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Return a SID to the free list when its channel is destroyed.
+    fn release_sid(&mut self, sid: u32) {
+        self.free_sids.push(sid);
     }
 
     /// Compute access rights bits for a channel target.
@@ -1554,6 +1576,7 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
             let cid = hdr.available;
             if let Some(entry) = state.channels.remove(&sid) {
                 state.channel_access.remove(&sid);
+                state.release_sid(sid);
                 if let Some(tx) = &conn_events {
                     let _ = tx.send(ServerConnectionEvent::ChannelCleared {
                         peer,
