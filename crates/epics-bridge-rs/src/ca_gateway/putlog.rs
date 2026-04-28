@@ -19,6 +19,12 @@ use tokio::sync::Mutex;
 
 use crate::error::BridgeResult;
 
+/// Default rotation threshold: 100 MiB. Rolls `path` to `path.1`
+/// (overwriting any prior `.1`) and re-opens. Operators typically
+/// run logrotate on top; this is the in-process safety net so the
+/// gateway doesn't fill the partition between cron ticks.
+const DEFAULT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Outcome of a put attempt for logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PutOutcome {
@@ -43,21 +49,39 @@ impl PutOutcome {
 /// Put-event logger.
 ///
 /// Writes to a file with line-buffered async I/O. Multiple concurrent
-/// writers are serialized via an internal mutex.
+/// writers are serialized via an internal mutex. When the file grows
+/// past `max_bytes`, it is renamed to `<path>.1` (overwriting any
+/// existing `.1`) and a fresh file is opened. Operators are still
+/// expected to run logrotate; this is the in-process backstop so a
+/// chatty gateway can't fill its disk between rotation ticks.
 pub struct PutLog {
     path: PathBuf,
     /// Mutex around the file handle so concurrent writers are serialized.
     file: Mutex<Option<tokio::fs::File>>,
+    /// Approximate byte count of the current file (tracked since open
+    /// so we don't `metadata()` on every write). Reset to 0 after
+    /// rotation.
+    bytes_written: Mutex<u64>,
+    max_bytes: u64,
 }
 
 impl PutLog {
     /// Create a new logger writing to `path`. Opens (or creates) the file
-    /// in append mode lazily on the first write.
+    /// in append mode lazily on the first write. Default rotation
+    /// threshold is 100 MiB; override with [`Self::with_max_bytes`].
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
             file: Mutex::new(None),
+            bytes_written: Mutex::new(0),
+            max_bytes: DEFAULT_MAX_BYTES,
         }
+    }
+
+    /// Override the rotation threshold (bytes).
+    pub fn with_max_bytes(mut self, n: u64) -> Self {
+        self.max_bytes = n;
+        self
     }
 
     /// Log a put event.
@@ -87,6 +111,10 @@ impl PutLog {
                 .append(true)
                 .open(&self.path)
                 .await?;
+            // Initialise byte counter from existing file size so a
+            // restart picks up the rotation threshold mid-cycle.
+            let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+            *self.bytes_written.lock().await = len;
             *guard = Some(f);
         }
 
@@ -94,6 +122,34 @@ impl PutLog {
             f.write_all(line.as_bytes()).await?;
             f.flush().await?;
         }
+        let mut counter = self.bytes_written.lock().await;
+        *counter = counter.saturating_add(line.len() as u64);
+
+        if *counter >= self.max_bytes {
+            // Drop current handle, rename, re-open lazily on next log().
+            *guard = None;
+            *counter = 0;
+            drop(guard);
+            drop(counter);
+            let backup = self.path.with_extension(
+                self.path
+                    .extension()
+                    .map(|e| format!("{}.1", e.to_string_lossy()))
+                    .unwrap_or_else(|| "1".to_string()),
+            );
+            // Best-effort rename; failure (e.g. backup path on a
+            // different fs) just means the next write keeps appending
+            // to the original file. Operators get a warning to fix.
+            if let Err(e) = tokio::fs::rename(&self.path, &backup).await {
+                tracing::warn!(
+                    error = %e,
+                    src = %self.path.display(),
+                    dst = %backup.display(),
+                    "putlog rotation rename failed; continuing without rotation"
+                );
+            }
+        }
+
         Ok(())
     }
 

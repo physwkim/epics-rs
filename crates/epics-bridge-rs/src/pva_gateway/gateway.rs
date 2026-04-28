@@ -35,6 +35,13 @@ pub struct PvaGatewayConfig {
     /// `get_value` / `subscribe` wait for the upstream IOC to deliver
     /// a first monitor event. Default 5 s.
     pub connect_timeout: Duration,
+    /// Hard cap on the number of cached upstream entries. Past this,
+    /// new lookups return `GwError::CacheFull` instead of growing the
+    /// cache further (PG-G1 DoS defence). Default 50 000.
+    pub max_cache_entries: usize,
+    /// Hard cap on simultaneous downstream subscriber bridge tasks
+    /// across all peers (PG-G3). Default 100 000.
+    pub max_subscribers: usize,
 }
 
 impl Default for PvaGatewayConfig {
@@ -44,7 +51,54 @@ impl Default for PvaGatewayConfig {
             server_config: PvaServerConfig::default(),
             cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
             connect_timeout: Duration::from_secs(5),
+            max_cache_entries: super::channel_cache::DEFAULT_MAX_ENTRIES,
+            max_subscribers: 100_000,
         }
+    }
+}
+
+impl PvaGatewayConfig {
+    /// Apply gateway-specific environment variables on top of an
+    /// existing config. Recognised:
+    ///
+    /// - `EPICS_PVA_GW_CLEANUP_INTERVAL` (seconds, float)
+    /// - `EPICS_PVA_GW_CONNECT_TMO` (seconds, float)
+    /// - `EPICS_PVA_GW_MAX_CACHE_ENTRIES` (usize)
+    /// - `EPICS_PVA_GW_MAX_SUBSCRIBERS` (usize)
+    ///
+    /// The underlying `PvaServerConfig` is left untouched — call
+    /// `.with_env()` on it separately if you also want
+    /// `EPICS_PVA[S]_*` applied to the downstream server.
+    pub fn with_env(mut self) -> Self {
+        if let Ok(s) = std::env::var("EPICS_PVA_GW_CLEANUP_INTERVAL") {
+            if let Ok(secs) = s.parse::<f64>() {
+                if secs > 0.0 && secs.is_finite() {
+                    self.cleanup_interval = Duration::from_secs_f64(secs);
+                }
+            }
+        }
+        if let Ok(s) = std::env::var("EPICS_PVA_GW_CONNECT_TMO") {
+            if let Ok(secs) = s.parse::<f64>() {
+                if secs > 0.0 && secs.is_finite() {
+                    self.connect_timeout = Duration::from_secs_f64(secs);
+                }
+            }
+        }
+        if let Ok(s) = std::env::var("EPICS_PVA_GW_MAX_CACHE_ENTRIES") {
+            if let Ok(n) = s.parse::<usize>() {
+                if n > 0 {
+                    self.max_cache_entries = n;
+                }
+            }
+        }
+        if let Ok(s) = std::env::var("EPICS_PVA_GW_MAX_SUBSCRIBERS") {
+            if let Ok(n) = s.parse::<usize>() {
+                if n > 0 {
+                    self.max_subscribers = n;
+                }
+            }
+        }
+        self
     }
 }
 
@@ -68,9 +122,14 @@ impl PvaGateway {
         let client = config
             .upstream_client
             .unwrap_or_else(|| Arc::new(PvaClient::builder().build()));
-        let cache = ChannelCache::new(client, config.cleanup_interval);
+        let cache = ChannelCache::with_max_entries(
+            client,
+            config.cleanup_interval,
+            config.max_cache_entries,
+        );
         let mut source = GatewayChannelSource::new(cache.clone());
         source.connect_timeout = config.connect_timeout;
+        source.max_subscribers = config.max_subscribers;
         let server = PvaServer::start(Arc::new(source.clone()), config.server_config);
         Ok(Self {
             cache,

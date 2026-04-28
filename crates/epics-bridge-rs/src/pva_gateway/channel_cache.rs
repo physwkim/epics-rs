@@ -14,9 +14,9 @@
 //! re-set `drop_poke = true` so a repeatedly-asked PV stays alive even
 //! between bursts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use tokio::sync::{Mutex, Notify, broadcast};
@@ -34,6 +34,22 @@ pub const BROADCAST_CAPACITY: usize = 16;
 
 /// Default cache cleanup period — matches p2pApp `cacheClean` 30 s.
 pub const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Default ceiling on cached entries. A misbehaving client searching
+/// random PV names would otherwise cause the cache to grow until
+/// `cleanup_interval` fires, holding one upstream-monitor task per
+/// entry. 50 000 is comfortably above any real IOC's PV count and
+/// well below typical heap/socket budgets.
+pub const DEFAULT_MAX_ENTRIES: usize = 50_000;
+
+/// Negative-result LRU bound + TTL. After a `lookup` fails (timeout
+/// or upstream error), we record the name with a timestamp so the
+/// next ~30 s of `has_pv` / `is_writable` probes for the same name
+/// short-circuit to "not found" instead of re-spawning an upstream
+/// monitor task. Mirrors p2pApp `chancache.h:118` `dropPoke`
+/// semantics but bounded so a probe-storm cannot grow it forever.
+const NEG_CACHE_MAX: usize = 1024;
+const NEG_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Per-PV upstream entry. One entry → one upstream channel → one
 /// upstream monitor task → N downstream subscribers via broadcast.
@@ -112,17 +128,42 @@ pub struct ChannelCache {
     entries: Mutex<HashMap<String, Arc<UpstreamEntry>>>,
     /// Cleanup-tick handle. Aborted on `ChannelCache` drop.
     cleanup_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Hard cap on `entries.len()` — defends against probe-storm DoS
+    /// where a client searches N random names and forces N upstream
+    /// monitor tasks. New inserts past this limit return
+    /// `GwError::CacheFull` so the downstream sees a clean error.
+    max_entries: usize,
+    /// Bounded LRU of recently-failed lookups (name + when failure
+    /// was recorded). VecDeque + linear scan is fine at NEG_CACHE_MAX
+    /// = 1024 entries; we trade a constant-factor cost for not
+    /// pulling in an LRU crate. Entries past NEG_CACHE_TTL are
+    /// pruned lazily on the next negative-cache hit.
+    negative_cache: parking_lot::Mutex<VecDeque<(String, Instant)>>,
 }
 
 impl ChannelCache {
     /// Build a cache that will route upstream requests through `client`.
     /// Spawns a periodic cleanup task with the given interval; pass
-    /// [`DEFAULT_CLEANUP_INTERVAL`] to match p2pApp's 30 s.
+    /// [`DEFAULT_CLEANUP_INTERVAL`] to match p2pApp's 30 s. The
+    /// resulting cache uses [`DEFAULT_MAX_ENTRIES`] for its ceiling;
+    /// override via [`Self::with_max_entries`] before publishing the
+    /// `Arc` if a larger or smaller cap is needed.
     pub fn new(client: Arc<PvaClient>, cleanup_interval: Duration) -> Arc<Self> {
+        Self::with_max_entries(client, cleanup_interval, DEFAULT_MAX_ENTRIES)
+    }
+
+    /// Variant of [`Self::new`] with an explicit max-entries cap.
+    pub fn with_max_entries(
+        client: Arc<PvaClient>,
+        cleanup_interval: Duration,
+        max_entries: usize,
+    ) -> Arc<Self> {
         let cache = Arc::new(Self {
             client,
             entries: Mutex::new(HashMap::new()),
             cleanup_task: parking_lot::Mutex::new(None),
+            max_entries,
+            negative_cache: parking_lot::Mutex::new(VecDeque::with_capacity(NEG_CACHE_MAX)),
         });
         let weak = Arc::downgrade(&cache);
         let task = tokio::spawn(async move {
@@ -136,6 +177,35 @@ impl ChannelCache {
         });
         *cache.cleanup_task.lock() = Some(task);
         cache
+    }
+
+    /// True if `name` is in the negative-result LRU and its entry is
+    /// still within `NEG_CACHE_TTL`. Lazily prunes expired entries.
+    fn is_recently_failed(&self, name: &str) -> bool {
+        let now = Instant::now();
+        let mut neg = self.negative_cache.lock();
+        // Lazy prune (cheap at 1024 entries).
+        while let Some((_, t)) = neg.front() {
+            if now.duration_since(*t) >= NEG_CACHE_TTL {
+                neg.pop_front();
+            } else {
+                break;
+            }
+        }
+        neg.iter().any(|(n, _)| n == name)
+    }
+
+    /// Record `name` as recently-failed. FIFO eviction past
+    /// [`NEG_CACHE_MAX`].
+    fn record_failure(&self, name: &str) {
+        let mut neg = self.negative_cache.lock();
+        if neg.iter().any(|(n, _)| n == name) {
+            return; // already there
+        }
+        if neg.len() >= NEG_CACHE_MAX {
+            neg.pop_front();
+        }
+        neg.push_back((name.to_string(), Instant::now()));
     }
 
     /// Public accessor for the underlying client. Used by the source
@@ -189,12 +259,27 @@ impl ChannelCache {
         pv_name: &str,
         connect_timeout: Duration,
     ) -> GwResult<Arc<UpstreamEntry>> {
+        // Negative-result short-circuit: if this name failed recently
+        // we don't pay for another upstream search. Saves a per-name
+        // upstream-monitor task in probe-storm scenarios.
+        if self.is_recently_failed(pv_name) {
+            return Err(GwError::UpstreamTimeout(pv_name.to_string()));
+        }
         let (entry, was_fresh) = {
             let mut map = self.entries.lock().await;
             if let Some(existing) = map.get(pv_name) {
                 existing.poke();
                 (existing.clone(), false)
             } else {
+                if map.len() >= self.max_entries {
+                    tracing::warn!(
+                        pv = %pv_name,
+                        len = map.len(),
+                        cap = self.max_entries,
+                        "pva-gateway: channel cache full, refusing new entry"
+                    );
+                    return Err(GwError::CacheFull(self.max_entries));
+                }
                 let fresh = self.spawn_upstream_monitor(pv_name);
                 map.insert(pv_name.to_string(), fresh.clone());
                 (fresh, true)
@@ -236,7 +321,14 @@ impl ChannelCache {
                 guard.disarm();
                 Ok(e)
             }
-            Err(e) => Err(e), // guard fires on drop
+            Err(e) => {
+                // Negative-result LRU: record so a probe-storm of N
+                // bad names doesn't keep paying the connect_timeout
+                // cost. Guard still fires on drop to remove the
+                // pinned entry.
+                self.record_failure(pv_name);
+                Err(e)
+            }
         }
     }
 

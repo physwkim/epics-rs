@@ -12,6 +12,8 @@ pub enum GwError {
     Upstream(#[from] epics_pva_rs::error::PvaError),
     #[error("gateway not running")]
     NotRunning,
+    #[error("channel cache full (cap = {0})")]
+    CacheFull(usize),
     #[error("{0}")]
     Other(String),
 }

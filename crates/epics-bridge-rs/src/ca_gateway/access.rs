@@ -27,10 +27,12 @@
 //!
 //! ## Status
 //!
-//! The current implementation parses the file (via [`epics_base_rs`] ACF
-//! parser) and provides allow-all defaults. Per-rule enforcement requires
-//! integration with the downstream CaServer's per-client credential
-//! tracking, which is wired in a later phase.
+//! Per-rule enforcement is live: every PUT goes through
+//! [`super::upstream::build_write_hook`], which calls [`Self::can_write`]
+//! with the ASG from `.pvlist`, the rule's ASL, and the (user, host)
+//! pair the CA server attaches to the WriteContext. Rejected puts
+//! return `ECA_NORDACCESS` to the client and are recorded in the
+//! putlog with outcome=DENIED.
 
 use std::path::Path;
 

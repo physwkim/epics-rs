@@ -43,10 +43,31 @@ use super::decode::{
 };
 
 /// How often we send heartbeat ECHO_REQUEST.
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-/// Maximum time we'll wait between any incoming bytes before declaring the
-/// connection dead.
-pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Resolved at call time from `EPICS_PVA_CONN_TMO`: pvxs convention is
+/// ECHO every `CONN_TMO / 2` so two heartbeats fit inside the timeout
+/// window. Default 15 s when the env var is unset (CONN_TMO defaults
+/// to 30 s).
+pub fn heartbeat_interval() -> Duration {
+    let configured = crate::config::env::conn_timeout_secs() as f64;
+    Duration::from_secs_f64((configured / 2.0).max(1.0))
+}
+
+/// Maximum time we'll wait between any incoming bytes before declaring
+/// the connection dead. pvxs effective timeout = configured × 4/3
+/// (config.cpp:187 tmoScale) — without the margin a healthy client
+/// races with its second ECHO. Floored at 2 s like pvxs `enforceTimeout`.
+pub fn heartbeat_timeout() -> Duration {
+    let configured = crate::config::env::conn_timeout_secs() as f64;
+    Duration::from_secs_f64((configured * 4.0 / 3.0).max(2.0))
+}
+
+/// Hard cap on a single inbound message's payload length on the
+/// client side. Mirrors `PvaServerConfig::max_message_size` — without
+/// it, a malicious or compromised server announcing a 4 GiB header
+/// would force the client to OOM-loop growing rx_buf. 64 MiB matches
+/// the server-side default. Override compile-time only for now.
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// One framed message dispatched to a per-IOID waiter.
 type FrameTx = mpsc::UnboundedSender<Frame>;
@@ -225,6 +246,27 @@ impl ServerConn {
                         Ok(n) => {
                             buf.extend_from_slice(&chunk[..n]);
                             last_rx_reader.store(now_nanos(), Ordering::SeqCst);
+                            // Peek the header once we have 8 bytes — drop
+                            // the connection if the announced payload
+                            // exceeds MAX_MESSAGE_SIZE. Defends against a
+                            // malicious or compromised server announcing a
+                            // 4 GiB header to OOM the client.
+                            if buf.len() >= crate::proto::PvaHeader::SIZE {
+                                if let Ok(hdr) = crate::proto::PvaHeader::decode(
+                                    &mut std::io::Cursor::new(&buf[..])
+                                ) {
+                                    if !hdr.flags.is_control()
+                                        && hdr.payload_length as usize > MAX_MESSAGE_SIZE
+                                    {
+                                        warn!(
+                                            payload = hdr.payload_length,
+                                            cap = MAX_MESSAGE_SIZE,
+                                            "PVA inbound payload exceeds cap, closing"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
                             while let Ok(Some((frame, fn_)) ) = try_parse_frame(&buf) {
                                 buf.drain(..fn_);
                                 if frame.header.flags.is_control() {
@@ -257,7 +299,9 @@ impl ServerConn {
         let writer_tx_hb = writer_tx.clone();
         let order_hb = byte_order;
         tokio::spawn(async move {
-            let mut tick = interval(HEARTBEAT_INTERVAL);
+            let hb_interval = heartbeat_interval();
+            let hb_timeout = heartbeat_timeout();
+            let mut tick = interval(hb_interval);
             tick.tick().await; // skip first immediate tick
             loop {
                 tokio::select! {
@@ -266,8 +310,8 @@ impl ServerConn {
                         // Liveness check: are we receiving anything?
                         let last = last_rx_hb.load(Ordering::SeqCst);
                         let elapsed = now_nanos().saturating_sub(last);
-                        if elapsed > HEARTBEAT_TIMEOUT.as_nanos() as u64 {
-                            warn!("PVA connection idle > {HEARTBEAT_TIMEOUT:?}, closing");
+                        if elapsed > hb_timeout.as_nanos() as u64 {
+                            warn!("PVA connection idle > {hb_timeout:?}, closing");
                             break;
                         }
                         // Send ECHO_REQUEST control message.
@@ -425,6 +469,21 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
         if let Some((frame, n)) = try_parse_frame(rx_buf)? {
             rx_buf.drain(..n);
             return Ok(frame);
+        }
+        // Same MAX_MESSAGE_SIZE peek as the streaming reader (P-G8).
+        if rx_buf.len() >= crate::proto::PvaHeader::SIZE {
+            if let Ok(hdr) =
+                crate::proto::PvaHeader::decode(&mut std::io::Cursor::new(&rx_buf[..]))
+            {
+                if !hdr.flags.is_control()
+                    && hdr.payload_length as usize > MAX_MESSAGE_SIZE
+                {
+                    return Err(PvaError::Protocol(format!(
+                        "inbound payload {} exceeds MAX_MESSAGE_SIZE {}",
+                        hdr.payload_length, MAX_MESSAGE_SIZE
+                    )));
+                }
+            }
         }
         let mut chunk = [0u8; 4096];
         let n = match timeout(op_timeout, reader.read(&mut chunk)).await {

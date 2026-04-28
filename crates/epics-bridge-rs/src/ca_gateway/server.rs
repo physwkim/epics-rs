@@ -462,6 +462,7 @@ impl GatewayServer {
             let cache_for_conn = self.cache.clone();
             Some(tokio::spawn(async move {
                 use epics_ca_rs::server::ServerConnectionEvent;
+                use std::collections::HashMap;
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
                 fn synthetic_sid(peer: std::net::SocketAddr, pv: &str, cid: u32) -> u32 {
@@ -471,6 +472,17 @@ impl GatewayServer {
                     cid.hash(&mut h);
                     h.finish() as u32
                 }
+                // Per-peer subscription registry. On a hard close
+                // (TCP RST, process kill) the underlying CaServer may
+                // emit only `Disconnected(addr)` without the matching
+                // ChannelCleared events — leaving cache subscriber
+                // refcounts inflated and entries stuck in the Active
+                // state. We mirror every Created here and drain the
+                // peer's entries on Disconnected as a safety net.
+                let mut peer_channels: HashMap<
+                    std::net::SocketAddr,
+                    Vec<(String, u32)>,
+                > = HashMap::new();
                 loop {
                     match rx.recv().await {
                         Ok(ServerConnectionEvent::Connected(addr)) => {
@@ -478,25 +490,43 @@ impl GatewayServer {
                         }
                         Ok(ServerConnectionEvent::Disconnected(addr)) => {
                             stats_for_conn.forget_host(&addr.ip().to_string()).await;
+                            if let Some(channels) = peer_channels.remove(&addr) {
+                                let cache = cache_for_conn.read().await;
+                                for (pv_name, sid) in channels {
+                                    if let Some(entry) = cache.get(&pv_name) {
+                                        entry.write().await.remove_subscriber(sid);
+                                    }
+                                }
+                            }
                         }
                         Ok(ServerConnectionEvent::ChannelCreated {
                             peer,
                             pv_name,
                             cid,
                         }) => {
+                            let sid = synthetic_sid(peer, &pv_name, cid);
                             if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
-                                let sid = synthetic_sid(peer, &pv_name, cid);
                                 entry.write().await.add_subscriber(sid);
                             }
+                            peer_channels
+                                .entry(peer)
+                                .or_default()
+                                .push((pv_name, sid));
                         }
                         Ok(ServerConnectionEvent::ChannelCleared {
                             peer,
                             pv_name,
                             cid,
                         }) => {
+                            let sid = synthetic_sid(peer, &pv_name, cid);
                             if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
-                                let sid = synthetic_sid(peer, &pv_name, cid);
                                 entry.write().await.remove_subscriber(sid);
+                            }
+                            if let Some(channels) = peer_channels.get_mut(&peer) {
+                                channels.retain(|(p, s)| !(p == &pv_name && *s == sid));
+                                if channels.is_empty() {
+                                    peer_channels.remove(&peer);
+                                }
                             }
                         }
                         Ok(_) => {}
