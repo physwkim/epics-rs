@@ -109,8 +109,14 @@ pub fn request_to_mask(
     let request_field = match request_field {
         Some((_, FieldDesc::Structure { fields, .. })) => fields,
         _ => {
-            // No `field` sub-structure → select root only.
-            mask.set(0);
+            // No `field` sub-structure (e.g., the standard "empty
+            // pvRequest" the Rust client sends as a 6-byte 0xFD-cached
+            // empty struct). Per pvxs convention this means "send the
+            // whole structure".
+            let total = value_desc.total_bits();
+            for i in 0..total {
+                mask.set(i);
+            }
             return Ok(mask);
         }
     };

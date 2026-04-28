@@ -53,6 +53,14 @@ pub struct PvaServerConfig {
     /// Interfaces to bind UDP responder on. When empty, bind 0.0.0.0.
     /// From `EPICS_PVAS_INTF_ADDR_LIST`.
     pub interfaces: Vec<std::net::IpAddr>,
+    /// Emit `0xFD` / `0xFE` type-cache markers in INIT and RPC responses
+    /// so repeated compound descriptors collapse to a 3-byte reference
+    /// (saves 100-500 bytes per repeat for NTScalar / NTTable channels).
+    /// pvxs and pvAccessJava both understand the markers; pvAccessCPP
+    /// (EPICS Base 7.x) does NOT — leave this off when interop with old
+    /// `pvmonitor` / `pvget` is required. Default: `false` for maximum
+    /// compatibility.
+    pub emit_type_cache: bool,
 }
 
 impl Default for PvaServerConfig {
@@ -72,6 +80,7 @@ impl Default for PvaServerConfig {
             beacon_destinations: Vec::new(),
             auto_beacon: true,
             interfaces: Vec::new(),
+            emit_type_cache: false,
         }
     }
 }
