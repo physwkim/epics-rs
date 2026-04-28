@@ -193,6 +193,123 @@ pub async fn op_put(
 
 // ── MONITOR (with reconnect) ───────────────────────────────────────────
 
+/// Per-subscription metrics. Mirrors pvxs `SubscriptionStat`
+/// (client.h:166). Values are observable via [`SubscriptionHandle::stats`]
+/// — queue counters reflect the local async pipeline; client-squash
+/// is the count of `MonitorOp::Data` frames the loop coalesced
+/// because the consumer was slower than the network feed.
+#[derive(Debug, Clone, Default)]
+pub struct SubscriptionStat {
+    /// Total updates delivered to the user callback.
+    pub n_delivered: u64,
+    /// Total events dropped due to consumer back-pressure (when the
+    /// callback can't keep up — currently always zero since the user
+    /// callback is synchronous and serial; reserved for future async
+    /// flow control).
+    pub n_cli_squash: u64,
+    /// Number of squash-on-server events reported by the wire (CMD
+    /// MONITOR overrun bitset). pvxs surfaces the same field.
+    pub n_srv_squash: u64,
+    /// Number of MONITOR_ACK frames sent (pipelined window cycles).
+    pub n_acks: u64,
+    /// Highest events-since-ack value the loop saw. With a healthy
+    /// `pipeline_size` this stays close to `pipeline_size`.
+    pub max_queue: u32,
+    /// Configured `pipeline_size` (call it `limitQueue` in pvxs).
+    pub limit_queue: u32,
+}
+
+/// Internal shared state — the monitor loop publishes to this on every
+/// reconnect / event / pause toggle, and [`SubscriptionHandle`] reads
+/// from it.
+struct SubscriptionState {
+    /// Active `(ServerConn, sid, ioid)` triple. Refreshed on every
+    /// reconnect cycle. None when in the gap between connections.
+    active: parking_lot::Mutex<
+        Option<(
+            Arc<super::server_conn::ServerConn>,
+            u32, /*sid*/
+            u32, /*ioid*/
+        )>,
+    >,
+    paused: std::sync::atomic::AtomicBool,
+    stop: std::sync::atomic::AtomicBool,
+    stats: parking_lot::Mutex<SubscriptionStat>,
+}
+
+/// User-facing handle returned by [`op_monitor_handle`]. Drops cleanly
+/// without aborting the inner task — call [`Self::stop`] explicitly to
+/// signal teardown. Mirrors pvxs `Subscription` at the public-method
+/// level.
+pub struct SubscriptionHandle {
+    state: Arc<SubscriptionState>,
+    _task: tokio::task::JoinHandle<PvaResult<()>>,
+}
+
+impl SubscriptionHandle {
+    /// Pause server emissions on this subscription. Safe to call
+    /// multiple times; second call is a no-op when already paused.
+    /// Mirrors pvxs `Subscription::pause(true)` (clientmon.cpp:115).
+    /// Best-effort — if the underlying connection is gone we set the
+    /// flag and the loop applies it on next reconnect.
+    pub async fn pause(&self) {
+        let was_paused = self
+            .state
+            .paused
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+        if was_paused {
+            return;
+        }
+        let snapshot = self.state.active.lock().clone();
+        if let Some((server, sid, ioid)) = snapshot {
+            let big_endian = matches!(server.byte_order, ByteOrder::Big);
+            let codec = PvaCodec { big_endian };
+            let _ = server.send(codec.build_monitor_pause(sid, ioid)).await;
+        }
+    }
+
+    /// Resume a paused subscription. Mirrors pvxs
+    /// `Subscription::pause(false)`.
+    pub async fn resume(&self) {
+        let was_paused = self
+            .state
+            .paused
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        if !was_paused {
+            return;
+        }
+        let snapshot = self.state.active.lock().clone();
+        if let Some((server, sid, ioid)) = snapshot {
+            let big_endian = matches!(server.byte_order, ByteOrder::Big);
+            let codec = PvaCodec { big_endian };
+            let _ = server.send(codec.build_monitor_resume(sid, ioid)).await;
+        }
+    }
+
+    /// Snapshot the per-subscription metrics. pvxs `Subscription::stats`
+    /// equivalent. The optional `reset` flag (pvxs 1.1.0+) zeros
+    /// counters after read.
+    pub fn stats(&self, reset: bool) -> SubscriptionStat {
+        let mut lock = self.state.stats.lock();
+        let snap = lock.clone();
+        if reset {
+            *lock = SubscriptionStat {
+                limit_queue: lock.limit_queue,
+                ..Default::default()
+            };
+        }
+        snap
+    }
+
+    /// Signal the inner task to terminate at its next opportunity.
+    /// Drop alone does not stop the task — call this explicitly.
+    pub fn stop(&self) {
+        self.state
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub async fn op_monitor<F>(
     channel: &Arc<Channel>,
     fields: &[&str],
@@ -225,6 +342,7 @@ where
             &fields_owned,
             pipeline_size,
             &mut callback,
+            None,
         )
         .await
         {
@@ -245,6 +363,83 @@ where
     }
 }
 
+/// Like [`op_monitor`] but returns a [`SubscriptionHandle`] for
+/// pause/resume/stats. The inner monitor loop runs in a spawned task
+/// and stops when the handle's `stop()` is called or when the channel
+/// is closed.
+pub fn op_monitor_handle<F>(
+    channel: Arc<Channel>,
+    fields: &[&str],
+    pipeline_size: u32,
+    mut callback: F,
+) -> SubscriptionHandle
+where
+    F: FnMut(&FieldDesc, &PvField) + Send + 'static,
+{
+    let fields_owned: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+    let state = Arc::new(SubscriptionState {
+        active: parking_lot::Mutex::new(None),
+        paused: std::sync::atomic::AtomicBool::new(false),
+        stop: std::sync::atomic::AtomicBool::new(false),
+        stats: parking_lot::Mutex::new(SubscriptionStat {
+            limit_queue: pipeline_size,
+            ..Default::default()
+        }),
+    });
+    let state_for_task = state.clone();
+
+    let task = tokio::spawn(async move {
+        loop {
+            if state_for_task
+                .stop
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Ok(());
+            }
+            let (server, sid) = match channel.ensure_active().await {
+                Ok(p) => p,
+                Err(e) => {
+                    if matches!(
+                        channel.current_state(),
+                        super::channel::ChannelState::Closed
+                    ) {
+                        return Ok(());
+                    }
+                    debug!(pv = %channel.pv_name, err = %e, "monitor reconnect failed; retrying in 500ms");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
+            match run_monitor_loop(
+                server.clone(),
+                sid,
+                &fields_owned,
+                pipeline_size,
+                &mut callback,
+                Some(state_for_task.clone()),
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(MonitorEnd::ChannelClosed) => return Ok(()),
+                Err(MonitorEnd::ConnectionLost) => {
+                    state_for_task.active.lock().take();
+                    if matches!(
+                        channel.current_state(),
+                        super::channel::ChannelState::Closed
+                    ) {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                Err(MonitorEnd::Fatal(e)) => return Err(e),
+            }
+        }
+    });
+
+    SubscriptionHandle { state, _task: task }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 enum MonitorEnd {
@@ -259,6 +454,7 @@ async fn run_monitor_loop<F>(
     fields: &[String],
     pipeline_size: u32,
     callback: &mut F,
+    state: Option<Arc<SubscriptionState>>,
 ) -> Result<(), MonitorEnd>
 where
     F: FnMut(&FieldDesc, &PvField) + Send,
@@ -307,19 +503,42 @@ where
     }
     let intro = init.introspection;
 
-    // START with pipeline ack window.
-    let start = codec.build_monitor_start(sid, ioid, pipeline_size);
+    // START with pipeline ack window — unless the handle was paused
+    // before this reconnect cycle, in which case start in STOP state
+    // so the server doesn't begin emitting until resume() is called.
+    let initially_paused = state
+        .as_ref()
+        .map(|s| s.paused.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false);
+    let start = if initially_paused {
+        codec.build_monitor_pause(sid, ioid)
+    } else {
+        codec.build_monitor_start(sid, ioid, pipeline_size)
+    };
     server
         .send(start)
         .await
         .map_err(|_| MonitorEnd::ConnectionLost)?;
 
+    if let Some(s) = &state {
+        *s.active.lock() = Some((server.clone(), sid, ioid));
+    }
+
     let mut events_since_ack: u32 = 0;
     loop {
+        if let Some(s) = &state {
+            if s.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                server.unregister_ioid(ioid);
+                return Err(MonitorEnd::ChannelClosed);
+            }
+        }
         let frame = match stream.recv().await {
             Some(f) => f,
             None => {
                 server.unregister_ioid(ioid);
+                if let Some(s) = &state {
+                    s.active.lock().take();
+                }
                 return Err(MonitorEnd::ConnectionLost);
             }
         };
@@ -327,17 +546,31 @@ where
             Ok(OpResponse::Data(d)) => {
                 callback(&intro, &d.value);
                 events_since_ack += 1;
+                if let Some(s) = &state {
+                    let mut st = s.stats.lock();
+                    st.n_delivered += 1;
+                    if events_since_ack > st.max_queue {
+                        st.max_queue = events_since_ack;
+                    }
+                }
+                let _ = &d; // silence unused-on-some-cfg warning
                 if pipeline_size > 0 && events_since_ack >= pipeline_size {
                     let ack = codec.build_monitor_ack(sid, ioid, events_since_ack);
                     if server.send(ack).await.is_err() {
                         server.unregister_ioid(ioid);
                         return Err(MonitorEnd::ConnectionLost);
                     }
+                    if let Some(s) = &state {
+                        s.stats.lock().n_acks += 1;
+                    }
                     events_since_ack = 0;
                 }
             }
             Ok(OpResponse::Status(s)) => {
                 server.unregister_ioid(ioid);
+                if let Some(st) = &state {
+                    st.active.lock().take();
+                }
                 if s.status.is_success() {
                     return Ok(());
                 } else {

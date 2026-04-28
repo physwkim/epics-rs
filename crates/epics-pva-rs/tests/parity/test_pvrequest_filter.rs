@@ -88,9 +88,10 @@ impl ChannelSource for NTScalarSource {
             alarm
                 .fields
                 .push(("status".into(), PvField::Scalar(ScalarValue::Int(0))));
-            alarm
-                .fields
-                .push(("message".into(), PvField::Scalar(ScalarValue::String("HIHI".into()))));
+            alarm.fields.push((
+                "message".into(),
+                PvField::Scalar(ScalarValue::String("HIHI".into())),
+            ));
             s.fields.push(("alarm".into(), PvField::Structure(alarm)));
             let mut ts = PvStructure::new("time_t");
             ts.fields.push((

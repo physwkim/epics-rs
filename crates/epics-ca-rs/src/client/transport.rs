@@ -57,10 +57,6 @@ pub(crate) async fn run_transport_manager(
     #[cfg(feature = "experimental-rust-tls")] tls_server_name: Option<String>,
 ) {
     let mut connections: HashMap<SocketAddr, ServerConnection> = HashMap::new();
-    #[cfg(feature = "experimental-rust-tls")]
-    let tls = tls;
-    #[cfg(feature = "experimental-rust-tls")]
-    let tls_server_name = tls_server_name;
 
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
@@ -74,7 +70,13 @@ pub(crate) async fn run_transport_manager(
                     let result = {
                         #[cfg(feature = "experimental-rust-tls")]
                         {
-                            connect_server(server_addr, event_tx.clone(), tls.as_ref(), tls_server_name.as_deref()).await
+                            connect_server(
+                                server_addr,
+                                event_tx.clone(),
+                                tls.as_ref(),
+                                tls_server_name.as_deref(),
+                            )
+                            .await
                         }
                         #[cfg(not(feature = "experimental-rust-tls"))]
                         {
@@ -107,7 +109,13 @@ pub(crate) async fn run_transport_manager(
                     let result = {
                         #[cfg(feature = "experimental-rust-tls")]
                         {
-                            connect_server(server_addr, event_tx.clone(), tls.as_ref(), tls_server_name.as_deref()).await
+                            connect_server(
+                                server_addr,
+                                event_tx.clone(),
+                                tls.as_ref(),
+                                tls_server_name.as_deref(),
+                            )
+                            .await
                         }
                         #[cfg(not(feature = "experimental-rust-tls"))]
                         {

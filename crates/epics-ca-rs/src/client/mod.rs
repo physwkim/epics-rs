@@ -330,8 +330,7 @@ impl CaClient {
             // for hostname-bound certs. Without this, the SNI falls back
             // to the server's IP literal — which only validates against
             // IP-bound certs.
-            c.tls_server_name =
-                epics_base_rs::runtime::env::get("EPICS_CA_TLS_SERVER_NAME");
+            c.tls_server_name = epics_base_rs::runtime::env::get("EPICS_CA_TLS_SERVER_NAME");
             c
         };
         #[cfg(not(feature = "experimental-rust-tls"))]

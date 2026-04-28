@@ -42,6 +42,12 @@ fn bind_udp(port: u16) -> PvaResult<UdpSocket> {
     sock.set_nonblocking(true)?;
     let bind: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
     sock.bind(&bind.into())?;
+    // pvxs server.cpp joins multicast groups listed in
+    // EPICS_PVAS_INTF_ADDR_LIST / EPICS_PVA_ADDR_LIST so SEARCH packets
+    // sent to those groups reach the responder. We do the same here —
+    // the call is idempotent on each restart and silently skips
+    // non-multicast entries.
+    crate::client_native::search_engine::join_addr_list_multicast(&sock);
     let std_sock: StdUdpSocket = sock.into();
     UdpSocket::from_std(std_sock).map_err(PvaError::Io)
 }
@@ -68,6 +74,7 @@ pub async fn run_udp_responder_proto(
         Duration::from_secs(15),
         Vec::new(),
         true,
+        Vec::new(),
     )
     .await
 }
@@ -87,6 +94,7 @@ pub async fn run_udp_responder_with_config(
     beacon_period: Duration,
     destinations: Vec<SocketAddr>,
     auto_beacon: bool,
+    ignore_addrs: Vec<(IpAddr, u16)>,
 ) -> PvaResult<()> {
     let socket = bind_udp(udp_port)?;
     let socket = Arc::new(socket);
@@ -165,6 +173,15 @@ pub async fn run_udp_responder_with_config(
                 continue;
             }
         };
+        // ignore_addrs: drop search packets from blocklisted peers
+        // *before* we spend time decoding. Mirrors pvxs serverconn.cpp
+        // ignoreAddrs check on inbound search.
+        let ignored = ignore_addrs
+            .iter()
+            .any(|(ip, port)| peer.ip() == *ip && (*port == 0 || peer.port() == *port));
+        if ignored {
+            continue;
+        }
         let frame = &buf[..n];
         if let Some(req) = parse_search_request(frame) {
             for cid_name in &req.queries {
@@ -308,7 +325,6 @@ fn parse_search_request(frame: &[u8]) -> Option<SearchRequest> {
         queries,
     })
 }
-
 
 #[cfg(test)]
 mod tests {

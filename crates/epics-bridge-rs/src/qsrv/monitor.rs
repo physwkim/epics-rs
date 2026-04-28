@@ -143,11 +143,7 @@ mod tests {
         db.add_record("MON_LIFECYCLE", Box::new(AiRecord::new(1.0)))
             .await;
 
-        let mut mon = BridgeMonitor::new(
-            db.clone(),
-            "MON_LIFECYCLE".into(),
-            NtType::Scalar,
-        );
+        let mut mon = BridgeMonitor::new(db.clone(), "MON_LIFECYCLE".into(), NtType::Scalar);
         mon.start().await.expect("start ok");
         assert!(mon.running);
 
@@ -173,11 +169,7 @@ mod tests {
         // After stop, a fresh BridgeMonitor against the same record
         // re-subscribes cleanly (regression for "leaked sender keeps
         // the broadcast at saturated subscriber count" issues).
-        let mut mon2 = BridgeMonitor::new(
-            db.clone(),
-            "MON_LIFECYCLE".into(),
-            NtType::Scalar,
-        );
+        let mut mon2 = BridgeMonitor::new(db.clone(), "MON_LIFECYCLE".into(), NtType::Scalar);
         mon2.start().await.expect("re-subscribe ok");
         assert!(mon2.running);
         mon2.stop().await;

@@ -67,6 +67,36 @@ pub struct PvaServerConfig {
     /// monitor subscribers / read loop instead of letting memory grow
     /// unbounded for slow clients. Default: 1024.
     pub write_queue_depth: usize,
+    /// Inbound peer ACL. Each entry is `(IpAddr, port_or_zero)` —
+    /// matching connections (TCP) and search packets (UDP) are silently
+    /// dropped. `port == 0` matches any port from that IP. Mirrors
+    /// pvxs `Config::ignoreAddrs`. Empty = allow all (default).
+    pub ignore_addrs: Vec<(std::net::IpAddr, u16)>,
+    /// Per-monitor "high" watermark — emit a `tracing::warn!` when an
+    /// outbound monitor queue grows past this many items. Default:
+    /// `monitor_queue_depth * 3 / 4`. Mirrors pvxs
+    /// `MonitorControlOp::setWatermarks` `high` argument; high-mark
+    /// callbacks (`onHighMark`) aren't surfaced yet — the watermark
+    /// drives diagnostics only.
+    pub monitor_high_watermark: usize,
+    /// Per-monitor "low" watermark — companion to `high`, currently
+    /// unused (pvxs notes the `onLowMark` callback isn't fully
+    /// implemented either). Reserved for future flow-control logic.
+    pub monitor_low_watermark: usize,
+}
+
+impl PvaServerConfig {
+    /// True when `peer` matches an entry in `ignore_addrs`. Port 0 in
+    /// the entry is a wildcard. O(n) over the list; n is expected to
+    /// be small (single-digit) in practice.
+    pub fn is_ignored_peer(&self, peer: std::net::SocketAddr) -> bool {
+        for (ip, port) in &self.ignore_addrs {
+            if peer.ip() == *ip && (*port == 0 || peer.port() == *port) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Default for PvaServerConfig {
@@ -88,6 +118,9 @@ impl Default for PvaServerConfig {
             interfaces: Vec::new(),
             emit_type_cache: false,
             write_queue_depth: 1024,
+            ignore_addrs: Vec::new(),
+            monitor_high_watermark: 48, // 64 * 3 / 4 default
+            monitor_low_watermark: 0,
         }
     }
 }
@@ -119,34 +152,173 @@ pub async fn run_pva_server<S>(source: Arc<S>, config: PvaServerConfig) -> PvaRe
 where
     S: ChannelSource + 'static,
 {
-    let dyn_source: DynSource = source as Arc<dyn ChannelSourceObj>;
-    let guid = random_guid();
-    let bind_addr = SocketAddr::new(std::net::IpAddr::V4(config.bind_ip), config.tcp_port);
+    let server = PvaServer::start(source, config);
+    server.wait().await
+}
 
-    // Advertise "tls" in SEARCH_RESPONSE when the server requires TLS, so
-    // pvxs clients with TLS configured connect via `pvas://`.
-    let protocol: &'static str = if config.tls.is_some() { "tls" } else { "tcp" };
-    let udp_handle = tokio::spawn(run_udp_responder_with_config(
-        dyn_source.clone(),
-        config.udp_port,
-        config.tcp_port,
-        guid,
-        protocol,
-        config.beacon_period,
-        config.beacon_destinations.clone(),
-        config.auto_beacon,
-    ));
-    let tcp_handle = tokio::spawn(run_tcp_server(dyn_source, bind_addr, config.clone()));
+/// Handle to a running PVA server returned by [`PvaServer::start`].
+///
+/// Holds the JoinHandles for the UDP responder and TCP listener tasks
+/// plus a shutdown channel. Use [`PvaServer::stop`] for graceful
+/// shutdown — accept loop exits immediately so no new connections, and
+/// existing per-client handler tasks unwind on their next read/write
+/// (TCP keepalive plus the read-loop's `op_timeout` bound the stragglers).
+/// [`PvaServer::wait`] blocks until both tasks have observed the
+/// shutdown and returned.
+pub struct PvaServer {
+    udp_handle: tokio::task::JoinHandle<PvaResult<()>>,
+    tcp_handle: tokio::task::JoinHandle<PvaResult<()>>,
+    /// Effective config the server is running under. Captured at
+    /// `start()` so [`Self::client_config`] can hand back a builder
+    /// pre-pointed at the actual bound TCP port without re-reading env
+    /// vars (which may have changed since startup).
+    effective_config: PvaServerConfig,
+    /// Bound TCP socket address — useful when the configured port was
+    /// 0 and the OS picked one.  We capture the configured value here;
+    /// callers needing the post-bind port should query the listener
+    /// directly (future work).
+    bound_tcp_port: u16,
+    /// Programmatic interrupt for [`Self::run`]. Not used by `wait()`.
+    interrupt: Arc<tokio::sync::Notify>,
+}
 
-    // Either subsystem failing is fatal.
-    tokio::select! {
-        r = udp_handle => match r {
-            Ok(res) => res,
-            Err(e) => Err(crate::error::PvaError::Protocol(format!("udp task panic: {e}"))),
-        },
-        r = tcp_handle => match r {
-            Ok(res) => res,
-            Err(e) => Err(crate::error::PvaError::Protocol(format!("tcp task panic: {e}"))),
-        },
+impl PvaServer {
+    /// Spawn the UDP responder and TCP listener; return a handle.
+    pub fn start<S>(source: Arc<S>, config: PvaServerConfig) -> Self
+    where
+        S: ChannelSource + 'static,
+    {
+        let dyn_source: DynSource = source as Arc<dyn ChannelSourceObj>;
+        let guid = random_guid();
+        let bind_addr = SocketAddr::new(std::net::IpAddr::V4(config.bind_ip), config.tcp_port);
+
+        let protocol: &'static str = if config.tls.is_some() { "tls" } else { "tcp" };
+        let udp_handle = tokio::spawn(run_udp_responder_with_config(
+            dyn_source.clone(),
+            config.udp_port,
+            config.tcp_port,
+            guid,
+            protocol,
+            config.beacon_period,
+            config.beacon_destinations.clone(),
+            config.auto_beacon,
+            config.ignore_addrs.clone(),
+        ));
+        let tcp_handle = tokio::spawn(run_tcp_server(dyn_source, bind_addr, config.clone()));
+        let bound_tcp_port = config.tcp_port;
+
+        Self {
+            udp_handle,
+            tcp_handle,
+            effective_config: config,
+            bound_tcp_port,
+            interrupt: Arc::new(tokio::sync::Notify::new()),
+        }
     }
+
+    /// Build a [`crate::client_native::context::PvaClient`] pointed at
+    /// this server on loopback. Mirrors pvxs `Server::clientConfig` —
+    /// useful for self-contained tests where you want a client that
+    /// talks to the in-process server without UDP discovery.
+    pub fn client_config(&self) -> crate::client_native::context::PvaClient {
+        let addr = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            self.bound_tcp_port,
+        );
+        crate::client_native::context::PvaClient::builder()
+            .server_addr(addr)
+            .build()
+    }
+
+    /// Effective config snapshot. pvxs `Server::config` parity.
+    pub fn config(&self) -> &PvaServerConfig {
+        &self.effective_config
+    }
+
+    /// Block on this server until it stops, SIGINT/SIGTERM is received,
+    /// or [`Self::interrupt`] is called. pvxs `Server::run` for CLI
+    /// daemons. Returns Ok on graceful shutdown, Err if a subsystem
+    /// task panicked or exited abnormally.
+    pub async fn run(self) -> PvaResult<()> {
+        let interrupt = self.interrupt.clone();
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        tokio::select! {
+            _ = ctrl_c => Ok(()),
+            _ = interrupt.notified() => Ok(()),
+            r = self.udp_handle => match r {
+                Ok(res) => res,
+                Err(e) if e.is_cancelled() => Ok(()),
+                Err(e) => Err(crate::error::PvaError::Protocol(format!("udp task panic: {e}"))),
+            },
+            r = self.tcp_handle => match r {
+                Ok(res) => res,
+                Err(e) if e.is_cancelled() => Ok(()),
+                Err(e) => Err(crate::error::PvaError::Protocol(format!("tcp task panic: {e}"))),
+            },
+        }
+    }
+
+    /// Trip [`Self::run`] from another task. Mirrors pvxs
+    /// `Server::interrupt`.
+    pub fn interrupt(&self) {
+        self.interrupt.notify_waiters();
+    }
+
+    /// Snapshot summary-level diagnostics. pvxs `Server::report`
+    /// counterpart at the "is the server up, how is it configured"
+    /// level. Per-peer / per-channel counters require book-keeping the
+    /// TCP loop doesn't yet maintain; surface what we have today.
+    pub fn report(&self) -> ServerReport {
+        ServerReport {
+            tcp_port: self.bound_tcp_port,
+            udp_port: self.effective_config.udp_port,
+            tls_enabled: self.effective_config.tls.is_some(),
+            ignore_addrs: self.effective_config.ignore_addrs.len(),
+            beacon_period_secs: self.effective_config.beacon_period.as_secs(),
+            udp_alive: !self.udp_handle.is_finished(),
+            tcp_alive: !self.tcp_handle.is_finished(),
+        }
+    }
+
+    /// Stop accepting new connections. Aborts both background tasks;
+    /// per-client tasks already spawned continue independently and
+    /// unwind on their next failed I/O. Mirrors pvxs `Server::stop`
+    /// (server.cpp:616) at the "no new connections" granularity. For
+    /// hard-stop semantics drop the entire `PvaServer` instead.
+    pub fn stop(&self) {
+        self.tcp_handle.abort();
+        self.udp_handle.abort();
+    }
+
+    /// Block until either task returns. Either subsystem exiting is
+    /// treated as fatal — an Err here means the server is no longer
+    /// serving even if `stop()` wasn't called.
+    pub async fn wait(self) -> PvaResult<()> {
+        tokio::select! {
+            r = self.udp_handle => match r {
+                Ok(res) => res,
+                Err(e) if e.is_cancelled() => Ok(()),
+                Err(e) => Err(crate::error::PvaError::Protocol(format!("udp task panic: {e}"))),
+            },
+            r = self.tcp_handle => match r {
+                Ok(res) => res,
+                Err(e) if e.is_cancelled() => Ok(()),
+                Err(e) => Err(crate::error::PvaError::Protocol(format!("tcp task panic: {e}"))),
+            },
+        }
+    }
+}
+
+/// Snapshot returned by [`PvaServer::report`].
+#[derive(Debug, Clone)]
+pub struct ServerReport {
+    pub tcp_port: u16,
+    pub udp_port: u16,
+    pub tls_enabled: bool,
+    pub ignore_addrs: usize,
+    pub beacon_period_secs: u64,
+    pub udp_alive: bool,
+    pub tcp_alive: bool,
 }

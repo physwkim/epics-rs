@@ -69,6 +69,21 @@ pub enum SearchCommand {
     Subscribe {
         responder: oneshot::Sender<mpsc::Receiver<Discovered>>,
     },
+    /// Force the engine into fast-tick mode for one revolution and
+    /// bring every pending search's retry deadline forward. Mirrors
+    /// pvxs `Context::hurryUp` — same behaviour as a fresh beacon
+    /// from a new server, but driven externally (e.g. an app that
+    /// learned via OOB channel that an IOC restarted).
+    HurryUp,
+    /// Drop any cached state for a single PV name: cancel its
+    /// outstanding search if one exists. The next `find()` call
+    /// starts a fresh search round. Mirrors pvxs `Context::cacheClear`.
+    CacheClear { pv_name: String },
+    /// Replace the GUID blocklist. Beacons / search responses whose
+    /// server GUID matches an entry are silently ignored. Mirrors
+    /// pvxs `Context::ignoreServerGUIDs` (client.cpp:453, consulted
+    /// at procSearchReply client.cpp:857).
+    IgnoreServerGuids { guids: Vec<[u8; 12]> },
 }
 
 /// Discovery event delivered to subscribers of [`SearchEngine::discover`].
@@ -172,6 +187,37 @@ impl SearchEngine {
             .await;
     }
 
+    /// Force the engine into fast-tick mode (200 ms × 30 ticks ≈ 6 s)
+    /// and reset every pending search's retry deadline. Equivalent to
+    /// pvxs `Context::hurryUp`: lets an application kick all pending
+    /// searches when it has out-of-band evidence the network changed
+    /// (link bounce, new IOC announced over a side channel, etc.).
+    pub async fn hurry_up(&self) {
+        let _ = self.cmd_tx.send(SearchCommand::HurryUp).await;
+    }
+
+    /// Drop any cached state for `pv_name` — cancels its outstanding
+    /// search and removes the name → search-id mapping. The next
+    /// `find()` re-runs from scratch. Mirrors pvxs `cacheClear`.
+    pub async fn cache_clear(&self, pv_name: &str) {
+        let _ = self
+            .cmd_tx
+            .send(SearchCommand::CacheClear {
+                pv_name: pv_name.to_string(),
+            })
+            .await;
+    }
+
+    /// Set the server-GUID blocklist. Beacons and search responses
+    /// from any server whose GUID is on this list are silently
+    /// ignored. Mirrors pvxs `Context::ignoreServerGUIDs`.
+    pub async fn ignore_server_guids(&self, guids: Vec<[u8; 12]>) {
+        let _ = self
+            .cmd_tx
+            .send(SearchCommand::IgnoreServerGuids { guids })
+            .await;
+    }
+
     /// Subscribe to beacon-driven discovery events. The receiver yields a
     /// [`Discovered::Online`] for every (server, guid) pair the
     /// [`BeaconTracker`] regards as new or restarted. Mirrors pvxs's
@@ -220,8 +266,41 @@ fn bind_beacon_udp() -> Option<UdpSocket> {
         debug!("beacon socket bind to {port} failed (likely in-use); fast-reconnect disabled");
         return None;
     }
+    // pvxs udp_collector.cpp:140 binds wildcard so we also receive
+    // multicast packets — but only for groups we've explicitly joined.
+    // Join any multicast groups present in EPICS_PVA_ADDR_LIST (and the
+    // standard PVA `224.0.2.3` group is left to user opt-in to avoid
+    // surprising multicast traffic from a default config).
+    join_addr_list_multicast(&sock);
     let std_sock: StdUdpSocket = sock.into();
     UdpSocket::from_std(std_sock).ok()
+}
+
+/// Walk `EPICS_PVA_ADDR_LIST` and join every IPv4 multicast group on
+/// `sock` (interface = 0.0.0.0 / ANY, kernel routes by group). Errors
+/// are logged but not propagated — a single failed join shouldn't
+/// disable the rest of the discovery path.
+pub(crate) fn join_addr_list_multicast(sock: &Socket) {
+    let Ok(env) = std::env::var("EPICS_PVA_ADDR_LIST") else {
+        return;
+    };
+    for tok in env.split(|c: char| c == ',' || c.is_whitespace()) {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let ip_str = tok.split(':').next().unwrap_or(tok);
+        let Ok(ip) = ip_str.parse::<Ipv4Addr>() else {
+            continue;
+        };
+        if ip.is_multicast() {
+            if let Err(e) = sock.join_multicast_v4(&ip, &Ipv4Addr::UNSPECIFIED) {
+                debug!("join_multicast_v4 for {ip} failed: {e}");
+            } else {
+                debug!("joined multicast group {ip}");
+            }
+        }
+    }
 }
 
 // ── Engine main loop ────────────────────────────────────────────────────
@@ -240,7 +319,6 @@ struct Pending {
     responder: Responder,
     last_attempt: Instant,
     attempt: usize,
-    search_id: u32,
     /// Which search bucket this pending occupies. Set on first insert
     /// and rotated forward by `nBuckets` after each retry.
     bucket: usize,
@@ -278,6 +356,10 @@ async fn run_engine(
     // tick regardless of how many channels are pending.
     let mut search_buckets: Vec<Vec<u32>> = vec![Vec::new(); N_SEARCH_BUCKETS];
     let mut current_bucket: usize = 0;
+    // Server-GUID blocklist (pvxs `ignoreServerGUIDs`). Beacons and
+    // search responses with a matching GUID are silently dropped.
+    // HashSet lookup keeps the steady-state cost negligible.
+    let mut ignore_guids: std::collections::HashSet<[u8; 12]> = std::collections::HashSet::new();
     // After a `poke()` (fresh server identity discovered) we run one
     // 30-bucket revolution at fast 200 ms cadence so all pending
     // searches retry within 6 s instead of up to 30 s. Counter
@@ -323,7 +405,6 @@ async fn run_engine(
                         responder: Responder::Single(responder),
                         last_attempt: Instant::now(),
                         attempt: 0,
-                        search_id: sid,
                         bucket,
                     };
                     by_name.insert(pv_name, sid);
@@ -346,7 +427,6 @@ async fn run_engine(
                         },
                         last_attempt: Instant::now(),
                         attempt: 0,
-                        search_id: sid,
                         bucket,
                     };
                     by_name.insert(pv_name, sid);
@@ -364,6 +444,9 @@ async fn run_engine(
                     }
                 }
                 Some(SearchCommand::BeaconObserved { server, guid }) => {
+                    if ignore_guids.contains(&guid) {
+                        continue;
+                    }
                     let allow_reconnect = beacons.observe(server, guid);
                     // discover() de-dup: announce each (server, guid) pair
                     // exactly once until forgotten.
@@ -402,12 +485,49 @@ async fn run_engine(
                     subscribers.push(tx);
                     let _ = responder.send(rx);
                 }
+                Some(SearchCommand::HurryUp) => {
+                    // Same effect as a fresh-server beacon: switch to
+                    // fast-tick mode for one revolution and reset every
+                    // pending search's retry deadline / attempt
+                    // counter so they all retry within ~6 s.
+                    if fast_ticks_remaining == 0 {
+                        tick = interval(Duration::from_millis(200));
+                        tick.tick().await;
+                    }
+                    fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
+                    let now = Instant::now();
+                    for p in pending.values_mut() {
+                        p.last_attempt = now - Duration::from_secs(60);
+                        p.attempt = 0;
+                    }
+                }
+                Some(SearchCommand::CacheClear { pv_name }) => {
+                    // Same drop-the-name path as Cancel, but the name
+                    // is the public identifier.
+                    if let Some(sid) = by_name.remove(&pv_name) {
+                        if let Some(p) = pending.remove(&sid) {
+                            search_buckets[p.bucket].retain(|x| *x != sid);
+                        }
+                    }
+                }
+                Some(SearchCommand::IgnoreServerGuids { guids }) => {
+                    // Replace (not merge) so callers can also CLEAR
+                    // the list with an empty Vec. Drop tracker entries
+                    // we now want to ignore so a stale GUID doesn't
+                    // keep firing throttle decisions.
+                    ignore_guids = guids.into_iter().collect();
+                    if !ignore_guids.is_empty() {
+                        announced.retain(|(_, g)| !ignore_guids.contains(g));
+                    }
+                }
                 None => break,
             },
 
             res = search_socket.recv_from(&mut search_buf) => {
                 if let Ok((n, _from)) = res {
-                    handle_search_response(&search_buf[..n], &mut pending, &mut by_name, &beacons);
+                    handle_search_response(
+                        &search_buf[..n], &mut pending, &mut by_name, &beacons, &ignore_guids,
+                    );
                 }
             }
 
@@ -417,6 +537,7 @@ async fn run_engine(
                     handle_beacon(
                         &beacon_buf[..n], &beacons, &mut pending,
                         &mut subscribers, &mut announced, &mut poke,
+                        &ignore_guids,
                     );
                     if poke && fast_ticks_remaining == 0 {
                         tick = interval(Duration::from_millis(200));
@@ -548,6 +669,7 @@ fn handle_search_response(
     pending: &mut HashMap<u32, Pending>,
     by_name: &mut HashMap<String, u32>,
     _beacons: &Arc<BeaconTracker>,
+    ignore_guids: &std::collections::HashSet<[u8; 12]>,
 ) {
     let Ok(Some((frame, _))) = try_parse_frame(bytes) else {
         return;
@@ -556,6 +678,11 @@ fn handle_search_response(
         return;
     };
     if !resp.found {
+        return;
+    }
+    // pvxs procSearchReply (client.cpp:857-863) drops responses whose
+    // server GUID is on the blocklist.
+    if ignore_guids.contains(&resp.guid) {
         return;
     }
     for cid in resp.cids {
@@ -589,6 +716,7 @@ fn handle_beacon(
     subscribers: &mut Vec<mpsc::Sender<Discovered>>,
     announced: &mut std::collections::HashSet<(SocketAddr, [u8; 12])>,
     poke_request: &mut bool,
+    ignore_guids: &std::collections::HashSet<[u8; 12]>,
 ) {
     let Ok(Some((frame, _))) = try_parse_frame(bytes) else {
         return;
@@ -631,6 +759,9 @@ fn handle_beacon(
     };
     let server = SocketAddr::new(ip, port);
 
+    if ignore_guids.contains(&guid_arr) {
+        return;
+    }
     let allow_reconnect = beacons.observe(server, guid_arr);
     let first_announce = announced.insert((server, guid_arr));
     // pvxs poke() — only kick on FRESH server identity (mirror of the

@@ -741,9 +741,7 @@ pub fn decode_pv_field(
                             struct_id: struct_id.clone(),
                             fields: fields.clone(),
                         };
-                        if let PvField::Structure(s) =
-                            decode_pv_field(&element_desc, cur, order)?
-                        {
+                        if let PvField::Structure(s) = decode_pv_field(&element_desc, cur, order)? {
                             out.push(s);
                         }
                     }
@@ -771,9 +769,7 @@ pub fn decode_pv_field(
                     let sel = sel_u32 as i32;
                     let (variant_name, vdesc) = variants
                         .get(sel as usize)
-                        .ok_or_else(|| {
-                            DecodeError(format!("union selector {sel} out of range"))
-                        })?
+                        .ok_or_else(|| DecodeError(format!("union selector {sel} out of range")))?
                         .clone();
                     let value = decode_pv_field(&vdesc, cur, order)?;
                     PvField::Union {
@@ -803,9 +799,7 @@ pub fn decode_pv_field(
                         let (variant_name, vdesc) = variants
                             .get(sel as usize)
                             .ok_or_else(|| {
-                                DecodeError(format!(
-                                    "union array selector {sel} out of range"
-                                ))
+                                DecodeError(format!("union array selector {sel} out of range"))
                             })?
                             .clone();
                         let value = decode_pv_field(&vdesc, cur, order)?;

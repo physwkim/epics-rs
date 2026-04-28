@@ -598,11 +598,8 @@ mod tests {
 
         // Hand out an AccessContext bound to the LIVE proxy. Default is
         // AllowAllAccess.
-        let ctx = AccessContext::with_identity(
-            provider.live_access(),
-            "alice".into(),
-            "host1".into(),
-        );
+        let ctx =
+            AccessContext::with_identity(provider.live_access(), "alice".into(), "host1".into());
         assert!(ctx.can_read("ANY"));
         assert!(ctx.can_write("ANY"));
 
@@ -615,7 +612,10 @@ mod tests {
         // Swap to read-only — same context, fresh decision.
         provider.set_access_control(Arc::new(ReadOnly));
         assert!(ctx.can_read("X"));
-        assert!(!ctx.can_write("X"), "policy swap must take effect immediately");
+        assert!(
+            !ctx.can_write("X"),
+            "policy swap must take effect immediately"
+        );
 
         // Swap back to allow-all — proxy still tracks.
         provider.set_access_control(Arc::new(AllowAllAccess));

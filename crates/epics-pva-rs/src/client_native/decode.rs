@@ -372,10 +372,8 @@ pub fn decode_op_response_cached(
                 status,
             }));
         }
-        let resp_desc = crate::pvdata::encode::decode_type_desc_cached(
-            &mut cur, order, type_cache,
-        )
-        .map_err(|e| PvaError::Decode(e.to_string()))?;
+        let resp_desc = crate::pvdata::encode::decode_type_desc_cached(&mut cur, order, type_cache)
+            .map_err(|e| PvaError::Decode(e.to_string()))?;
         let resp_value = crate::pvdata::encode::decode_pv_field(&resp_desc, &mut cur, order)
             .map_err(|e| PvaError::Decode(e.to_string()))?;
         let mut all = BitSet::new();

@@ -393,6 +393,7 @@ pub async fn run_tcp_listener(
 /// `peer.ip()` for the `state.hostname` ACF key — the
 /// cryptographically authenticated identity is always more
 /// trustworthy than the network address.
+#[allow(clippy::too_many_arguments)]
 async fn handle_client<S>(
     stream: S,
     peer: SocketAddr,

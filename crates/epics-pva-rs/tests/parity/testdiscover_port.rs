@@ -29,6 +29,7 @@ async fn pvxs_discover_emits_online_for_first_observed_beacon() {
             assert_eq!(s, server);
             assert_eq!(g, guid);
         }
+        Discovered::Timeout { .. } => panic!("unexpected Timeout"),
     }
 }
 
@@ -79,5 +80,6 @@ async fn pvxs_discover_emits_for_guid_change_same_server() {
         .expect("second channel closed");
     match evt {
         Discovered::Online { guid, .. } => assert_eq!(guid, [2u8; 12]),
+        Discovered::Timeout { .. } => panic!("unexpected Timeout"),
     }
 }

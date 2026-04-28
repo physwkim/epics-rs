@@ -169,6 +169,22 @@ impl PvaCodec {
         self.frame(false, CMD_MONITOR, p)
     }
 
+    /// Pause an active monitor — pvxs `Subscription::pause(true)`
+    /// (clientmon.cpp:127). subcmd `0x04` (STOP) tells the server to
+    /// stop emitting updates; the channel + ioid remain alive.
+    pub fn build_monitor_pause(&self, server_channel_id: u32, ioid: u32) -> Vec<u8> {
+        let p = Self::op_payload(server_channel_id, ioid, 0x04, &[], self.order());
+        self.frame(false, CMD_MONITOR, p)
+    }
+
+    /// Resume a paused monitor — pvxs `Subscription::pause(false)`
+    /// (clientmon.cpp:127). subcmd `0x44` (START | PROCESS) restarts
+    /// updates without re-sending INIT or pipeline window.
+    pub fn build_monitor_resume(&self, server_channel_id: u32, ioid: u32) -> Vec<u8> {
+        let p = Self::op_payload(server_channel_id, ioid, 0x44, &[], self.order());
+        self.frame(false, CMD_MONITOR, p)
+    }
+
     /// Subsequent pipeline-ack message: subcmd `0x80` + ack count.
     pub fn build_monitor_ack(&self, server_channel_id: u32, ioid: u32, ack_count: u32) -> Vec<u8> {
         let order = self.order();

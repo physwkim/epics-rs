@@ -30,9 +30,9 @@ pub mod group;
 pub mod group_config;
 pub mod monitor;
 pub mod provider;
-pub mod pvif;
 #[cfg(feature = "qsrv")]
 pub mod pva_adapter;
+pub mod pvif;
 
 pub use channel::{BridgeChannel, ProcessMode, PutOptions};
 pub use group::{AnyMonitor, GroupChannel, GroupMonitor};
@@ -42,8 +42,8 @@ pub use provider::{
     AccessContext, AccessControl, AllowAllAccess, AnyChannel, BridgeProvider, Channel,
     ChannelProvider, PvaMonitor,
 };
-pub use pvif::{FieldMapping, NtType};
 #[cfg(feature = "qsrv")]
 pub use pva_adapter::{
     PvaPvHandle, QsrvPvStore, register_pva_pv_global, run_ca_pva_qsrv_ioc, take_registered_pva_pvs,
 };
+pub use pvif::{FieldMapping, NtType};

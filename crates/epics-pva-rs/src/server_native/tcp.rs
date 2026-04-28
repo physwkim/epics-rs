@@ -109,6 +109,11 @@ pub async fn run_tcp_server(
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                if config.is_ignored_peer(peer) {
+                    debug!(?peer, "rejecting connection: peer on ignore_addrs");
+                    drop(stream);
+                    continue;
+                }
                 let cur = active.fetch_add(1, Ordering::SeqCst);
                 if cur >= config.max_connections {
                     active.fetch_sub(1, Ordering::SeqCst);
@@ -209,15 +214,13 @@ fn parse_client_credentials(frame: &Frame, order: ByteOrder) -> Option<ClientCre
         host: String::new(),
     };
     if let Ok(desc) = decode_type_desc(&mut cur, order) {
-        if let Ok(value) = decode_pv_field(&desc, &mut cur, order) {
-            if let PvField::Structure(s) = value {
-                for (name, field) in &s.fields {
-                    if let PvField::Scalar(crate::pvdata::ScalarValue::String(v)) = field {
-                        match name.as_str() {
-                            "user" => creds.account = v.clone(),
-                            "host" => creds.host = v.clone(),
-                            _ => {}
-                        }
+        if let Ok(PvField::Structure(s)) = decode_pv_field(&desc, &mut cur, order) {
+            for (name, field) in &s.fields {
+                if let PvField::Scalar(crate::pvdata::ScalarValue::String(v)) = field {
+                    match name.as_str() {
+                        "user" => creds.account = v.clone(),
+                        "host" => creds.host = v.clone(),
+                        _ => {}
                     }
                 }
             }
@@ -830,7 +833,12 @@ async fn handle_op(
             // Emit only the fields the client's pvRequest selected.
             mask.write_into(order, &mut payload);
             crate::pvdata::encode::encode_pv_field_with_bitset(
-                &value, &intro, &mask, 0, order, &mut payload,
+                &value,
+                &intro,
+                &mask,
+                0,
+                order,
+                &mut payload,
             );
             let h = PvaHeader::application(true, order, Command::Get.code(), payload.len() as u32);
             let mut buf = Vec::new();
@@ -892,15 +900,16 @@ async fn handle_op(
                 let tx_clone = tx.clone();
                 let src = source.clone();
                 let queue_depth = config.monitor_queue_depth;
+                let high_watermark = config.monitor_high_watermark;
                 let join = tokio::spawn(async move {
                     let Some(mut rx) = src.subscribe(&pv_name).await else {
                         return;
                     };
+                    let mut over_high = false;
                     // Emit initial snapshot.
                     if let Some(initial) = src.get_value(&pv_name).await {
-                        let payload = build_monitor_payload(
-                            ioid, &intro_clone, &initial, &mask_clone, order,
-                        );
+                        let payload =
+                            build_monitor_payload(ioid, &intro_clone, &initial, &mask_clone, order);
                         if tx_clone.send(payload).await.is_err() {
                             return;
                         }
@@ -929,9 +938,27 @@ async fn handle_op(
                             debug!(pv = %pv_name, squashed, "monitor squashed events");
                             squashing = false;
                         }
-                        let payload = build_monitor_payload(
-                            ioid, &intro_clone, &value, &mask_clone, order,
-                        );
+                        // Watermark crossing diagnostics. pvxs uses
+                        // `onHighMark`/`onLowMark` callbacks; we emit
+                        // a `tracing` event the user-facing
+                        // observability path can pick up. Counter is
+                        // tx_clone.capacity() - tx_clone.max_capacity()
+                        // approximation since mpsc doesn't expose len.
+                        let pending = tx_clone.max_capacity() - tx_clone.capacity();
+                        if pending >= high_watermark && !over_high {
+                            over_high = true;
+                            warn!(
+                                pv = %pv_name,
+                                pending,
+                                high_watermark,
+                                "monitor outbound queue crossed high watermark"
+                            );
+                        } else if pending == 0 && over_high {
+                            over_high = false;
+                            debug!(pv = %pv_name, "monitor outbound queue drained below low watermark");
+                        }
+                        let payload =
+                            build_monitor_payload(ioid, &intro_clone, &value, &mask_clone, order);
                         if tx_clone.send(payload).await.is_err() {
                             return;
                         }
@@ -977,9 +1004,7 @@ async fn handle_op(
                 Ok((resp_desc, resp_value)) => {
                     Status::ok().write_into(order, &mut payload);
                     if config.emit_type_cache {
-                        encode_type_desc_cached(
-                            &resp_desc, order, encode_cache, &mut payload,
-                        );
+                        encode_type_desc_cached(&resp_desc, order, encode_cache, &mut payload);
                     } else {
                         encode_type_desc(&resp_desc, order, &mut payload);
                     }
@@ -1240,8 +1265,7 @@ mod tests {
             .push(("value".into(), PvField::Scalar(ScalarValue::Double(42.5))));
 
         let mask = BitSet::all_set(intro.total_bits());
-        let bytes =
-            build_monitor_payload(ioid, &intro, &PvField::Structure(value), &mask, order);
+        let bytes = build_monitor_payload(ioid, &intro, &PvField::Structure(value), &mask, order);
         let (frame, used) = try_parse_frame(&bytes).unwrap().expect("complete frame");
         assert_eq!(used, bytes.len());
 

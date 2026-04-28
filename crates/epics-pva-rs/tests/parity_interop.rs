@@ -16,6 +16,12 @@
 mod interop;
 #[path = "parity/stability_interop.rs"]
 mod stability_interop;
+#[path = "parity/test_client_server_lifecycle.rs"]
+mod test_client_server_lifecycle;
+#[path = "parity/test_monitor_finish.rs"]
+mod test_monitor_finish;
+#[path = "parity/test_pvrequest_filter.rs"]
+mod test_pvrequest_filter;
 #[path = "parity/testbitmask_port.rs"]
 mod testbitmask_port;
 #[path = "parity/testconfig_port.rs"]
@@ -40,9 +46,5 @@ mod testudp_port;
 mod testxcode_port;
 #[path = "parity/tls_interop.rs"]
 mod tls_interop;
-#[path = "parity/test_monitor_finish.rs"]
-mod test_monitor_finish;
-#[path = "parity/test_pvrequest_filter.rs"]
-mod test_pvrequest_filter;
 #[path = "parity/wire_dump.rs"]
 mod wire_dump;
