@@ -20,9 +20,9 @@
 //! - [`BridgeMonitor`] / [`GroupMonitor`] bridge `DbSubscription` events to PVA monitor updates.
 //!
 //! The `ChannelProvider`, `Channel`, and `PvaMonitor` traits are defined in
-//! this module. [`spvirit_adapter::QsrvPvStore`] bridges them to the
-//! [`spvirit_server::PvStore`] trait so that the spvirit PVA server can
-//! serve qsrv channels directly.
+//! this module. [`pva_adapter::QsrvPvStore`] bridges them to the native
+//! [`epics_pva_rs::server_native::ChannelSource`] trait so the native PVA
+//! server can serve qsrv channels directly.
 
 pub mod channel;
 pub mod convert;
@@ -32,7 +32,7 @@ pub mod monitor;
 pub mod provider;
 pub mod pvif;
 #[cfg(feature = "qsrv")]
-pub mod spvirit_adapter;
+pub mod pva_adapter;
 
 pub use channel::{BridgeChannel, ProcessMode, PutOptions};
 pub use group::{AnyMonitor, GroupChannel, GroupMonitor};
@@ -44,6 +44,6 @@ pub use provider::{
 };
 pub use pvif::{FieldMapping, NtType};
 #[cfg(feature = "qsrv")]
-pub use spvirit_adapter::{
+pub use pva_adapter::{
     PvaPvHandle, QsrvPvStore, register_pva_pv_global, run_ca_pva_qsrv_ioc, take_registered_pva_pvs,
 };
