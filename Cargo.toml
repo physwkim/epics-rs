@@ -15,6 +15,7 @@ default-members = [
     "crates/scaler-rs",
     "crates/optics-rs",
     "crates/mqtt-rs",
+    "crates/epics-tools-rs",
 ]
 resolver = "3"
 
@@ -39,4 +40,5 @@ std-rs = { path = "crates/std-rs", version = "0.10.5" }
 scaler-rs = { path = "crates/scaler-rs", version = "0.10.5" }
 optics-rs = { path = "crates/optics-rs", version = "0.10.5" }
 mqtt-rs = { path = "crates/mqtt-rs", version = "0.10.5" }
+epics-tools-rs = { path = "crates/epics-tools-rs", version = "0.10.5" }
 
