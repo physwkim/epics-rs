@@ -259,6 +259,18 @@ enum CoordRequest {
     ForceRescanServer {
         server_addr: SocketAddr,
     },
+    /// Time since this channel's circuit last received any frame.
+    /// `None` if the channel isn't operational. Mirrors libca
+    /// `ca_receive_watchdog_delay`.
+    GetWatchdogDelay {
+        cid: u32,
+        reply: oneshot::Sender<Option<Duration>>,
+    },
+    /// Number of distinct CA servers we hold a virtual circuit to.
+    /// Mirrors libca `ca_get_ioc_connection_count`.
+    GetIocConnectionCount {
+        reply: oneshot::Sender<usize>,
+    },
     /// Graceful shutdown: clear all channels on their servers before exiting.
     Shutdown {
         reply: oneshot::Sender<()>,
@@ -467,6 +479,23 @@ impl CaClient {
     /// Get a snapshot of diagnostic counters.
     pub fn diagnostics(&self) -> DiagnosticsSnapshot {
         self.diagnostics.snapshot()
+    }
+
+    /// Number of distinct CA servers this client currently holds an
+    /// operational virtual circuit to. Mirrors libca
+    /// `ca_get_ioc_connection_count()` (oldChannelNotify.cpp:891) —
+    /// a circuit-level (not channel-level) count, useful for sizing
+    /// reconnect storms after an IOC restart.
+    pub async fn ioc_connection_count(&self) -> usize {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .coord_tx
+            .send(CoordRequest::GetIocConnectionCount { reply: tx })
+            .is_err()
+        {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
     }
 
     /// Graceful shutdown: send ClearChannel for all connected channels
@@ -986,6 +1015,54 @@ impl CaChannel {
             }
         })
     }
+
+    /// Convenience wrapper around [`Self::connection_events`] that
+    /// invokes `cb(true)` on `Connected` and `cb(false)` on
+    /// `Disconnected`. Mirrors libca
+    /// `ca_change_connection_event(chid, callback)` (oldChannelNotify.cpp:229) —
+    /// drop the returned handle to stop watching.
+    pub fn on_connection_change<F>(&self, mut cb: F) -> tokio::task::JoinHandle<()>
+    where
+        F: FnMut(bool) + Send + 'static,
+    {
+        let mut rx = self.conn_tx.subscribe();
+        epics_base_rs::runtime::task::spawn(async move {
+            while let Ok(evt) = rx.recv().await {
+                match evt {
+                    ConnectionEvent::Connected => cb(true),
+                    ConnectionEvent::Disconnected => cb(false),
+                    _ => {}
+                }
+            }
+        })
+    }
+
+    /// Server's IP address as a string (e.g. `"10.0.0.5:5064"`).
+    /// Mirrors libca `ca_host_name(chid)` (oldChannelNotify.cpp:189).
+    /// Returns `Err` if the channel hasn't connected yet — pvxs
+    /// returns `"<disconnected>"` for the same case; we surface
+    /// the typed error instead so callers can decide.
+    pub async fn host_name(&self) -> CaResult<String> {
+        let info = self.info().await?;
+        Ok(info.server_addr.to_string())
+    }
+
+    /// Time since the underlying TCP virtual circuit last received
+    /// any message from the server. Mirrors libca
+    /// `ca_receive_watchdog_delay(chid)` (oldChannelNotify.cpp:703) —
+    /// hung-server detection. Returns `Duration::ZERO` when the
+    /// channel isn't operational (the watchdog isn't running).
+    pub async fn receive_watchdog_delay(&self) -> Duration {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self.coord_tx.send(CoordRequest::GetWatchdogDelay {
+            cid: self.cid,
+            reply: reply_tx,
+        });
+        match reply_rx.await {
+            Ok(Some(d)) => d,
+            _ => Duration::ZERO,
+        }
+    }
 }
 
 impl Drop for CaChannel {
@@ -1089,6 +1166,10 @@ async fn run_coordinator(
     // immediate re-search for the affected IOC.
     let mut server_channels: HashMap<SocketAddr, HashSet<u32>> = HashMap::new();
     let mut flow_control: HashMap<SocketAddr, FlowControlState> = HashMap::new();
+    // Last RX timestamp per server, bumped on every TransportEvent that
+    // implies a frame arrived from that circuit. Used to answer
+    // `ca_receive_watchdog_delay`.
+    let mut last_rx_at: HashMap<SocketAddr, std::time::Instant> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -1288,6 +1369,31 @@ async fn run_coordinator(
                     CoordRequest::WriteNotify { cid, ioid, value: _, reply } => {
                         write_waiters.insert(ioid, (cid, reply));
                     }
+                    CoordRequest::GetWatchdogDelay { cid, reply } => {
+                        let delay = channels.get(&cid).and_then(|ch| {
+                            if !ch.state.is_operational() {
+                                return None;
+                            }
+                            let addr = ch.server_addr?;
+                            let last = last_rx_at.get(&addr)?;
+                            Some(last.elapsed())
+                        });
+                        let _ = reply.send(delay);
+                    }
+                    CoordRequest::GetIocConnectionCount { reply } => {
+                        // Count distinct servers with at least one
+                        // operational channel — mirrors libca which
+                        // counts virtual circuits, not channels.
+                        let mut servers = HashSet::<SocketAddr>::new();
+                        for ch in channels.values() {
+                            if let Some(addr) = ch.server_addr {
+                                if ch.state.is_operational() {
+                                    servers.insert(addr);
+                                }
+                            }
+                        }
+                        let _ = reply.send(servers.len());
+                    }
                     CoordRequest::Shutdown { reply } => {
                         // Send ClearChannel for all connected channels
                         for ch in channels.values() {
@@ -1370,6 +1476,38 @@ async fn run_coordinator(
             }
             evt = transport_rx.recv() => {
                 let Some(evt) = evt else { return };
+                // Bump the per-server "last RX" stamp before we route
+                // the event. Used by `ca_receive_watchdog_delay`. Only
+                // events that genuinely imply a frame arrived from the
+                // remote count — TcpClosed / CircuitUnresponsive are
+                // failure signals and do not.
+                let rx_addr: Option<SocketAddr> = match &evt {
+                    TransportEvent::ChannelCreated { server_addr, .. }
+                    | TransportEvent::ServerDisconnect { server_addr, .. }
+                    | TransportEvent::CircuitResponsive { server_addr } => Some(*server_addr),
+                    TransportEvent::AccessRightsChanged { cid, .. }
+                    | TransportEvent::ChannelCreateFailed { cid } => {
+                        channels.get(cid).and_then(|ch| ch.server_addr)
+                    }
+                    TransportEvent::ReadResponse { ioid, .. }
+                    | TransportEvent::ReadError { ioid, .. } => read_waiters
+                        .get(ioid)
+                        .and_then(|(cid, _)| channels.get(cid))
+                        .and_then(|ch| ch.server_addr),
+                    TransportEvent::WriteResponse { ioid, .. } => write_waiters
+                        .get(ioid)
+                        .and_then(|(cid, _)| channels.get(cid))
+                        .and_then(|ch| ch.server_addr),
+                    TransportEvent::MonitorData { subid, .. } => {
+                        subscriptions.get(*subid).map(|rec| rec.server_addr)
+                    }
+                    TransportEvent::ServerError { .. }
+                    | TransportEvent::TcpClosed { .. }
+                    | TransportEvent::CircuitUnresponsive { .. } => None,
+                };
+                if let Some(addr) = rx_addr {
+                    last_rx_at.insert(addr, std::time::Instant::now());
+                }
                 match evt {
                     TransportEvent::ChannelCreated { cid, sid, data_type, element_count, access, server_addr } => {
                         if let Some(ch) = channels.get_mut(&cid) {
@@ -1515,6 +1653,7 @@ async fn run_coordinator(
                         tracing::warn!(server = %server_addr, channels = n_affected, "TCP circuit closed");
                         metrics::counter!("ca_client_tcp_closed_total", "server" => server_addr.to_string()).increment(1);
                         flow_control.remove(&server_addr);
+                        last_rx_at.remove(&server_addr);
                         handle_disconnect(&mut channels, &mut subscriptions, &mut server_channels, &search_tx, server_addr, &diag, &mut read_waiters, &mut write_waiters);
                     }
                     TransportEvent::ServerDisconnect { cid, server_addr } => {

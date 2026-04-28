@@ -212,6 +212,7 @@ pub async fn run_tcp_listener(
     db: Arc<PvDatabase>,
     port: u16,
     acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
+    acf_reload_tx: broadcast::Sender<()>,
     tcp_port_tx: tokio::sync::oneshot::Sender<u16>,
     beacon_reset: std::sync::Arc<tokio::sync::Notify>,
     conn_events: Option<broadcast::Sender<ServerConnectionEvent>>,
@@ -258,6 +259,7 @@ pub async fn run_tcp_listener(
             let _ = tx.send(ServerConnectionEvent::Connected(peer));
         }
         let conn_events = conn_events.clone();
+        let acf_reload_rx = acf_reload_tx.subscribe();
         let audit = audit.clone();
         // Read the latest server config under the RwLock so a
         // concurrent reload_tls() takes effect for the *next* accept
@@ -312,6 +314,7 @@ pub async fn run_tcp_listener(
                                     peer,
                                     db,
                                     acf,
+                                    acf_reload_rx,
                                     actual_port,
                                     identity,
                                     audit,
@@ -332,6 +335,7 @@ pub async fn run_tcp_listener(
                             peer,
                             db,
                             acf,
+                            acf_reload_rx,
                             actual_port,
                             None,
                             audit,
@@ -348,6 +352,7 @@ pub async fn run_tcp_listener(
                         peer,
                         db,
                         acf,
+                        acf_reload_rx,
                         actual_port,
                         None,
                         audit,
@@ -399,6 +404,7 @@ async fn handle_client<S>(
     peer: SocketAddr,
     db: Arc<PvDatabase>,
     acf: Arc<tokio::sync::RwLock<Option<AccessSecurityConfig>>>,
+    mut acf_reload_rx: broadcast::Receiver<()>,
     tcp_port: u16,
     initial_hostname: Option<String>,
     audit: Option<crate::audit::AuditLogger>,
@@ -433,16 +439,38 @@ where
     loop {
         // Bound read with inactivity timeout so a fully-silent half-open
         // connection eventually gets cleaned up even if OS keepalive failed.
-        let n = match tokio::time::timeout(inactivity, reader.read(&mut buf)).await {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                // Inactivity timeout — close the connection.
-                eprintln!(
-                    "CA server: client idle for {}s, closing",
-                    inactivity.as_secs()
-                );
-                break;
+        // Race the read against ACF reload notifications so a `reload_acf*()`
+        // call promptly re-pushes CA_PROTO_ACCESS_RIGHTS for every open
+        // channel — RSRV's `sendAllUpdateAS` analog.
+        let n = tokio::select! {
+            biased;
+            reload = acf_reload_rx.recv() => {
+                match reload {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Lagged is fine — even one missed notification still
+                        // means "rules changed", so we always recompute.
+                        reeval_access_rights(&mut state, &writer).await?;
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Sender dropped — the server is going away.
+                        break;
+                    }
+                }
+            }
+            read = tokio::time::timeout(inactivity, reader.read(&mut buf)) => {
+                match read {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => return Err(e.into()),
+                    Err(_) => {
+                        // Inactivity timeout — close the connection.
+                        eprintln!(
+                            "CA server: client idle for {}s, closing",
+                            inactivity.as_secs()
+                        );
+                        break;
+                    }
+                }
             }
         };
         if n == 0 {

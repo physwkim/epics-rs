@@ -243,12 +243,14 @@ impl CaServerBuilder {
             }
         });
         let (conn_tx, _) = tokio::sync::broadcast::channel(64);
+        let (acf_reload_tx, _) = tokio::sync::broadcast::channel(16);
         Ok(CaServer {
             db,
             port: self.port,
             stats: Arc::new(ServerStats::default()),
             acf,
             acf_source_path: std::sync::Mutex::new(self.acf_path),
+            acf_reload_tx,
             autosave_config,
             autosave_manager: None,
             conn_events: Some(conn_tx),
@@ -330,6 +332,13 @@ pub struct CaServer {
     /// `reload_acf()` knows which file to re-read. None when the server
     /// was built via the in-memory `acf(config)` setter.
     acf_source_path: std::sync::Mutex<Option<String>>,
+    /// Fan-out for ACF reload notifications. Each accepted TCP client
+    /// subscribes; on `reload_acf*()` we send `()` so every active
+    /// connection re-evaluates and re-pushes `CA_PROTO_ACCESS_RIGHTS`
+    /// for its open channels. Mirrors RSRV `sendAllUpdateAS`
+    /// (caservertask.c:1224) — the broadcast that keeps already-open
+    /// channels in sync with rule changes.
+    acf_reload_tx: tokio::sync::broadcast::Sender<()>,
     autosave_config: Option<autosave::SaveSetConfig>,
     autosave_manager: Option<Arc<autosave::AutosaveManager>>,
     /// Optional broadcast channel for connection lifecycle events.
@@ -395,12 +404,14 @@ impl CaServer {
         // can attach without requiring a `&mut self` mutation. Capacity
         // 64 matches the previous lazy default.
         let (conn_tx, _) = tokio::sync::broadcast::channel(64);
+        let (acf_reload_tx, _) = tokio::sync::broadcast::channel(16);
         Self {
             db,
             port,
             stats,
             acf: Arc::new(tokio::sync::RwLock::new(acf)),
             acf_source_path: std::sync::Mutex::new(None),
+            acf_reload_tx,
             autosave_config,
             autosave_manager,
             conn_events: Some(conn_tx),
@@ -456,7 +467,15 @@ impl CaServer {
         if let Ok(mut p) = self.acf_source_path.lock() {
             *p = Some(path.to_string());
         }
-        tracing::info!(path = %path, "ACF reloaded; new rules apply to subsequent access checks");
+        // Notify every active TCP client to recompute and push fresh
+        // CA_PROTO_ACCESS_RIGHTS for its open channels. Send-error
+        // (no live subscribers) is a normal transient state.
+        let notified = self.acf_reload_tx.send(()).unwrap_or(0);
+        tracing::info!(
+            path = %path,
+            clients = notified,
+            "ACF reloaded; pushed access-rights refresh"
+        );
         metrics::counter!("ca_server_acf_reloads_total").increment(1);
         Ok(())
     }
@@ -705,6 +724,7 @@ impl CaServer {
         let beacon_reset_tcp = beacon_reset.clone();
 
         let conn_events = self.conn_events.clone();
+        let acf_reload_tx = self.acf_reload_tx.clone();
         #[cfg(feature = "experimental-rust-tls")]
         let tls = match self.tls.clone() {
             Some(slot) => Some(slot),
@@ -751,6 +771,7 @@ impl CaServer {
                     db_tcp,
                     port,
                     acf,
+                    acf_reload_tx,
                     tcp_tx,
                     beacon_reset_tcp,
                     conn_events,
@@ -768,6 +789,7 @@ impl CaServer {
                     db_tcp,
                     port,
                     acf,
+                    acf_reload_tx,
                     tcp_tx,
                     beacon_reset_tcp,
                     conn_events,
@@ -897,6 +919,7 @@ impl CaServer {
             // built-in reload uses.
             let acf_clone = self.acf.clone();
             let acf_path_clone = self.acf_source_path.lock().ok().and_then(|g| g.clone());
+            let acf_reload_tx_clone = self.acf_reload_tx.clone();
             let reload_fn: Arc<dyn Fn() -> Result<(), String> + Send + Sync> =
                 Arc::new(move || -> Result<(), String> {
                     let path = acf_path_clone
@@ -907,10 +930,12 @@ impl CaServer {
                     let cfg = access_security::parse_acf(&content)
                         .map_err(|e| format!("parse {path}: {e}"))?;
                     // Avoid awaiting inside the closure — spawn a one-shot
-                    // task to swap the RwLock contents.
+                    // task to swap the RwLock contents and notify clients.
                     let acf = acf_clone.clone();
+                    let reload_tx = acf_reload_tx_clone.clone();
                     tokio::spawn(async move {
                         *acf.write().await = Some(cfg);
+                        let _ = reload_tx.send(());
                     });
                     Ok(())
                 });
