@@ -18,8 +18,11 @@ chrono = "0.4"
 epics-macros-rs = { workspace = true }
 rustyline = "14"
 
+# Dev-only — `path` (no `version`) so `cargo publish` strips this
+# from the uploaded manifest. Lets `epics-base-rs` publish first in
+# the dependency chain without `epics-ca-rs` already being on crates.io.
 [dev-dependencies]
-epics-ca-rs = { workspace = true }
+epics-ca-rs = { path = "../epics-ca-rs" }
 tempfile = "3"
 serial_test = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
