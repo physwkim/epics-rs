@@ -225,8 +225,16 @@ fn dummy_key() -> PrivateKeyDer<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
+    // Both tests in this module mutate process-wide env vars, so
+    // they must NOT run in parallel — cargo's default test
+    // parallelism would race the set_var/remove_var calls. Use the
+    // same `epics_env` group key as `epics-base-rs::runtime::net`
+    // tests so cross-crate env-mutating tests serialize together
+    // when the workspace runs them in one harness.
     #[test]
+    #[serial(epics_env)]
     fn tls_disabled_respects_env() {
         let prev = std::env::var("EPICS_PVA_TLS_DISABLE").ok();
         unsafe {
@@ -244,6 +252,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(epics_env)]
     fn unset_env_yields_none() {
         let prev_keychain = std::env::var("EPICS_PVAS_TLS_KEYCHAIN").ok();
         let prev_disable = std::env::var("EPICS_PVA_TLS_DISABLE").ok();
@@ -252,13 +261,11 @@ mod tests {
             std::env::remove_var("EPICS_PVA_TLS_DISABLE");
         }
         assert!(load_server_config().unwrap().is_none());
-        match prev_keychain {
-            Some(v) => unsafe { std::env::set_var("EPICS_PVAS_TLS_KEYCHAIN", v) },
-            None => {}
+        if let Some(v) = prev_keychain {
+            unsafe { std::env::set_var("EPICS_PVAS_TLS_KEYCHAIN", v) }
         }
-        match prev_disable {
-            Some(v) => unsafe { std::env::set_var("EPICS_PVA_TLS_DISABLE", v) },
-            None => {}
+        if let Some(v) = prev_disable {
+            unsafe { std::env::set_var("EPICS_PVA_TLS_DISABLE", v) }
         }
     }
 }
