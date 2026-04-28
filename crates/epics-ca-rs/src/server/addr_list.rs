@@ -50,8 +50,17 @@ pub fn from_env() -> CasUdpConfig {
         }
     }
 
-    let beacon_port = epics_base_rs::runtime::env::get("EPICS_CA_REPEATER_PORT")
+    // Server-side beacon port: EPICS_CAS_BEACON_PORT takes precedence
+    // (matches rsrv/caservertask.c:501-507 lookup order). Falls back to
+    // EPICS_CA_REPEATER_PORT, then the compiled-in default. Operators
+    // who only set the server-side variable were previously seeing it
+    // silently ignored — beacons went to the repeater port.
+    let beacon_port = epics_base_rs::runtime::env::get("EPICS_CAS_BEACON_PORT")
         .and_then(|s| s.parse::<u16>().ok())
+        .or_else(|| {
+            epics_base_rs::runtime::env::get("EPICS_CA_REPEATER_PORT")
+                .and_then(|s| s.parse::<u16>().ok())
+        })
         .unwrap_or(CA_REPEATER_PORT);
 
     // Beacon addr list: explicit EPICS_CAS_BEACON_ADDR_LIST first; otherwise

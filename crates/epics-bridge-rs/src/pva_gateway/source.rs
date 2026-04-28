@@ -9,6 +9,7 @@
 //! clients share one upstream subscription.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -36,6 +37,17 @@ pub struct GatewayChannelSource {
     /// long-running channelArchiver-style RPCs don't get cut off at
     /// an arbitrary 30 s ceiling. Default 30 s (matches pvxs).
     pub rpc_timeout: Duration,
+    /// Hard cap on simultaneous live subscribe-bridge tasks across all
+    /// downstream peers. The PvaServer enforces a per-connection
+    /// channel cap; this is the gateway-wide ceiling that defends
+    /// against a coordinated burst from many peers exhausting the
+    /// gateway's monitor-fanout machinery. Default 100 000.
+    pub max_subscribers: usize,
+    /// Live subscribe-bridge counter (decremented when the bridge
+    /// task exits). Shared via Arc so cloning the source preserves
+    /// the count across the multiple `Arc<dyn ChannelSourceObj>`
+    /// handles the runtime holds.
+    subscriber_count: Arc<AtomicUsize>,
 }
 
 impl GatewayChannelSource {
@@ -45,6 +57,8 @@ impl GatewayChannelSource {
             connect_timeout: Duration::from_secs(5),
             subscriber_queue: 64,
             rpc_timeout: Duration::from_secs(30),
+            max_subscribers: 100_000,
+            subscriber_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -56,6 +70,11 @@ impl GatewayChannelSource {
     /// Diagnostic accessor: how many entries are currently cached.
     pub async fn cached_entry_count(&self) -> usize {
         self.cache.entry_count().await
+    }
+
+    /// Diagnostic: live subscribe-bridge tasks.
+    pub fn live_subscribers(&self) -> usize {
+        self.subscriber_count.load(Ordering::Relaxed)
     }
 }
 
@@ -146,7 +165,29 @@ impl ChannelSource for GatewayChannelSource {
     }
 
     async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
-        let entry = self.cache.lookup(name, self.connect_timeout).await.ok()?;
+        // Gateway-wide subscriber cap (PG-G3). The underlying
+        // PvaServer enforces a per-connection channel cap; this is
+        // the global ceiling that defends against a coordinated
+        // burst of N peers each requesting M monitors.
+        let prev = self.subscriber_count.fetch_add(1, Ordering::Relaxed);
+        if prev >= self.max_subscribers {
+            self.subscriber_count.fetch_sub(1, Ordering::Relaxed);
+            tracing::warn!(
+                pv = %name,
+                live = prev,
+                cap = self.max_subscribers,
+                "pva-gateway: subscriber cap reached, refusing"
+            );
+            return None;
+        }
+
+        let entry = match self.cache.lookup(name, self.connect_timeout).await {
+            Ok(e) => e,
+            Err(_) => {
+                self.subscriber_count.fetch_sub(1, Ordering::Relaxed);
+                return None;
+            }
+        };
         let mut bcast_rx = entry.subscribe();
         // pvxs sends one event per subscribe so the downstream sees
         // the current value immediately; emit our cached snapshot the
@@ -154,7 +195,18 @@ impl ChannelSource for GatewayChannelSource {
         let initial = entry.snapshot();
 
         let (mpsc_tx, mpsc_rx) = mpsc::channel(self.subscriber_queue);
+        let counter = self.subscriber_count.clone();
         tokio::spawn(async move {
+            // RAII: ensure the counter is always decremented even on
+            // panic / early-return paths.
+            struct CounterGuard(Arc<AtomicUsize>);
+            impl Drop for CounterGuard {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            let _guard = CounterGuard(counter);
+
             if let Some(v) = initial {
                 if mpsc_tx.send(v).await.is_err() {
                     return;
@@ -179,6 +231,30 @@ impl ChannelSource for GatewayChannelSource {
         });
 
         Some(mpsc_rx)
+    }
+
+    /// Forward downstream-to-gateway backpressure into telemetry. The
+    /// PvaServer fires this when a per-connection monitor outbox crosses
+    /// the high watermark (downstream peer not draining fast enough).
+    /// We don't have a primitive to pause the upstream pipeline today —
+    /// PvaClient::pvmonitor_typed has no `pause()` — but the bridge
+    /// task's `mpsc.send().await` already propagates backpressure by
+    /// causing broadcast `Lagged` events upstream of the slow peer. So
+    /// the only thing left is to surface the crossing for operator
+    /// observability. PG-G4 noted true upstream pipeline cancel as
+    /// future work; logging is the action this round.
+    fn notify_watermark_high(&self, name: &str) {
+        tracing::warn!(
+            pv = %name,
+            "pva-gateway: downstream monitor outbox crossed high watermark"
+        );
+    }
+
+    fn notify_watermark_low(&self, name: &str) {
+        tracing::debug!(
+            pv = %name,
+            "pva-gateway: downstream monitor outbox drained below low watermark"
+        );
     }
 }
 

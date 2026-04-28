@@ -108,6 +108,18 @@ impl DownstreamServer {
             .await
             .map_err(|e| crate::error::BridgeError::PutRejected(format!("CaServer run: {e}")))
     }
+
+    /// Reinstall the inner [`CaServer`] after a previous [`run`] returned.
+    /// Used by the supervisor when a CA server task crashes — the outer
+    /// supervise loop reconstructs a server (with the same shadow DB)
+    /// and re-attaches it here so the next [`run`] picks it up.
+    /// Returns the previously installed server, if any.
+    pub async fn reinstall(&self, server: CaServer) -> Option<CaServer> {
+        let mut guard = self.server.lock().await;
+        let prev = guard.take();
+        *guard = Some(server);
+        prev
+    }
 }
 
 #[cfg(test)]
