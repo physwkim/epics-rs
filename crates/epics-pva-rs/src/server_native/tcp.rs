@@ -517,6 +517,8 @@ async fn handle_connection_io(
                     OpKind::Get,
                     &config,
                     &mut encode_type_cache,
+                    peer,
+                    &cred,
                 )
                 .await?;
             }
@@ -530,6 +532,8 @@ async fn handle_connection_io(
                     OpKind::Put,
                     &config,
                     &mut encode_type_cache,
+                    peer,
+                    &cred,
                 )
                 .await?;
             }
@@ -543,6 +547,8 @@ async fn handle_connection_io(
                     OpKind::Monitor,
                     &config,
                     &mut encode_type_cache,
+                    peer,
+                    &cred,
                 )
                 .await?;
             }
@@ -556,6 +562,8 @@ async fn handle_connection_io(
                     OpKind::Rpc,
                     &config,
                     &mut encode_type_cache,
+                    peer,
+                    &cred,
                 )
                 .await?;
             }
@@ -834,6 +842,8 @@ async fn handle_op(
     kind: OpKind,
     config: &PvaServerConfig,
     encode_cache: &mut EncodeTypeCache,
+    peer: std::net::SocketAddr,
+    cred: &ClientCredentials,
 ) -> PvaResult<()> {
     let mut cur = frame.cursor();
     let sid = cur
@@ -957,7 +967,17 @@ async fn handle_op(
             let value = decode_pv_field(&intro, &mut cur, order)
                 .map_err(|e| PvaError::Decode(e.to_string()))?;
             let pv_name = ch.name.clone();
-            let result = source.put_value(&pv_name, value).await;
+            // PG-G10: forward the downstream peer's credentials to
+            // the source so gateways can route the put through a
+            // per-credential upstream client pool. Default trait impl
+            // ignores the ctx so non-gateway sources are unaffected.
+            let ctx = crate::server_native::source::ChannelContext {
+                peer,
+                account: cred.account.clone(),
+                method: cred.method.clone(),
+                host: cred.host.clone(),
+            };
+            let result = source.put_value_ctx(&pv_name, value, ctx).await;
 
             let mut payload = Vec::new();
             payload.put_u32(ioid, order);

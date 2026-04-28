@@ -189,25 +189,63 @@ pub async fn run_udp_responder_with_config(
         if ignored {
             continue;
         }
+        // pvxs `udp_collector.cpp::process_one` (L329) loops over a
+        // single datagram parsing PVA messages until the buffer is
+        // drained — clients pack many SEARCH messages per datagram
+        // when many channels are searching concurrently. Without the
+        // drain loop we'd silently miss N-1 of N searches.
         let frame = &buf[..n];
-        if let Some(req) = parse_search_request(frame) {
-            for cid_name in &req.queries {
-                let exists = source.has_pv(&cid_name.1).await;
-                if !exists {
-                    continue;
+        let mut pos = 0usize;
+        while pos + PvaHeader::SIZE <= frame.len() {
+            let chunk = &frame[pos..];
+            // Consume one message + advance pos. Bail out of the
+            // drain loop if the next message header doesn't decode
+            // (truncation / non-PVA padding) — what we have is what
+            // we got.
+            let consumed = match parse_search_request(chunk) {
+                Some(req) => {
+                    let consumed = req.consumed;
+                    // Pack ALL matches for this single search into
+                    // ONE response datagram. pvxs udp_collector.cpp:570
+                    // `reply()` does the same; without it the gateway
+                    // amplifies an N-cid search into N reply datagrams.
+                    let mut matched_cids: Vec<u32> = Vec::with_capacity(req.queries.len());
+                    for (cid, name) in &req.queries {
+                        if source.has_pv(name).await {
+                            matched_cids.push(*cid);
+                        }
+                    }
+                    if !matched_cids.is_empty() {
+                        let resp = build_search_response_proto(
+                            guid,
+                            req.seq,
+                            tcp_port,
+                            &matched_cids,
+                            req.byte_order,
+                            protocol,
+                        );
+                        if let Err(e) = socket.send_to(&resp, peer).await {
+                            debug!("udp send to {peer}: {e}");
+                        }
+                    }
+                    consumed
                 }
-                let resp = build_search_response_proto(
-                    guid,
-                    req.seq,
-                    tcp_port,
-                    &[cid_name.0],
-                    req.byte_order,
-                    protocol,
-                );
-                if let Err(e) = socket.send_to(&resp, peer).await {
-                    debug!("udp send to {peer}: {e}");
+                None => {
+                    // Header didn't decode as a SEARCH request — try
+                    // to advance past it so a later beacon/etc. in the
+                    // same datagram can still be parsed. We use the
+                    // header's payload_length when we can read the
+                    // header at all; otherwise stop.
+                    match PvaHeader::decode(&mut Cursor::new(chunk)) {
+                        Ok(h) => PvaHeader::SIZE + h.payload_length as usize,
+                        Err(_) => break,
+                    }
                 }
+            };
+            if consumed == 0 {
+                break;
             }
+            pos = pos.saturating_add(consumed);
         }
     }
 
@@ -291,6 +329,10 @@ struct SearchRequest {
     seq: u32,
     byte_order: ByteOrder,
     queries: Vec<(u32, String)>,
+    /// Total bytes consumed from the input slice (header + payload),
+    /// used by the multi-message drain loop to advance to the next
+    /// chained message in the same datagram.
+    consumed: usize,
 }
 
 fn parse_search_request(frame: &[u8]) -> Option<SearchRequest> {
@@ -330,6 +372,7 @@ fn parse_search_request(frame: &[u8]) -> Option<SearchRequest> {
         seq,
         byte_order: order,
         queries,
+        consumed: PvaHeader::SIZE + payload_len,
     })
 }
 

@@ -8,14 +8,17 @@
 //! through a per-entry tokio broadcast channel so multiple downstream
 //! clients share one upstream subscription.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
+use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField};
-use epics_pva_rs::server_native::source::ChannelSource;
+use epics_pva_rs::server_native::source::{ChannelContext, ChannelSource};
 
 use super::channel_cache::ChannelCache;
 
@@ -48,6 +51,14 @@ pub struct GatewayChannelSource {
     /// the count across the multiple `Arc<dyn ChannelSourceObj>`
     /// handles the runtime holds.
     subscriber_count: Arc<AtomicUsize>,
+    /// Per-(account, method) upstream PvaClient pool (PG-G10). When
+    /// the downstream peer authenticates as `(alice, ca)` the
+    /// gateway reuses (or builds) a client whose CONNECTION_VALIDATION
+    /// to upstream advertises that same identity, so upstream ASG
+    /// rules and audit logs see the *real* client identity, not
+    /// the gateway. Empty string keys (`("", "anonymous")`) reuse
+    /// the cache's shared client.
+    upstream_pool: Arc<Mutex<HashMap<(String, String), Arc<PvaClient>>>>,
 }
 
 impl GatewayChannelSource {
@@ -59,7 +70,32 @@ impl GatewayChannelSource {
             rpc_timeout: Duration::from_secs(30),
             max_subscribers: 100_000,
             subscriber_count: Arc::new(AtomicUsize::new(0)),
+            upstream_pool: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Look up (or lazily build) the upstream client for the given
+    /// downstream credentials. PG-G10: each unique (account, method)
+    /// pair gets its own connection so upstream ASG rules see the
+    /// real client identity. Empty/anonymous credentials fall through
+    /// to the cache's shared client (no new connection allocated).
+    fn upstream_client_for(&self, ctx: &ChannelContext) -> Arc<PvaClient> {
+        if ctx.account.is_empty() || ctx.method == "anonymous" {
+            return self.cache.client().clone();
+        }
+        let key = (ctx.account.clone(), ctx.method.clone());
+        let mut pool = self.upstream_pool.lock();
+        if let Some(c) = pool.get(&key) {
+            return c.clone();
+        }
+        let client = Arc::new(
+            PvaClient::builder()
+                .user(ctx.account.clone())
+                .host(ctx.host.clone())
+                .build(),
+        );
+        pool.insert(key, client.clone());
+        client
     }
 
     /// Cache handle — useful for the gateway's own diagnostics.
@@ -119,6 +155,34 @@ impl ChannelSource for GatewayChannelSource {
             .pvput(name, &value_str)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// Credential-aware PUT (PG-G10). Routes the put through a
+    /// per-(account, method) upstream PvaClient so the upstream IOC's
+    /// ASG rules see the *real* downstream identity instead of the
+    /// gateway's. Anonymous / empty-account peers fall back to the
+    /// shared client.
+    async fn put_value_ctx(
+        &self,
+        name: &str,
+        value: PvField,
+        ctx: ChannelContext,
+    ) -> Result<(), String> {
+        let _entry = self
+            .cache
+            .lookup(name, self.connect_timeout)
+            .await
+            .map_err(|e| e.to_string())?;
+        let value_str = pvfield_to_pvput_string(&value)
+            .ok_or_else(|| "unsupported PvField shape for upstream PUT".to_string())?;
+        let client = self.upstream_client_for(&ctx);
+        tracing::debug!(
+            pv = %name,
+            account = %ctx.account,
+            method = %ctx.method,
+            "pva-gateway: forwarding PUT with downstream credentials"
+        );
+        client.pvput(name, &value_str).await.map_err(|e| e.to_string())
     }
 
     async fn is_writable(&self, name: &str) -> bool {
@@ -233,21 +297,33 @@ impl ChannelSource for GatewayChannelSource {
         Some(mpsc_rx)
     }
 
-    /// Forward downstream-to-gateway backpressure into telemetry. The
-    /// PvaServer fires this when a per-connection monitor outbox crosses
-    /// the high watermark (downstream peer not draining fast enough).
-    /// We don't have a primitive to pause the upstream pipeline today —
-    /// PvaClient::pvmonitor_typed has no `pause()` — but the bridge
-    /// task's `mpsc.send().await` already propagates backpressure by
-    /// causing broadcast `Lagged` events upstream of the slow peer. So
-    /// the only thing left is to surface the crossing for operator
-    /// observability. PG-G4 noted true upstream pipeline cancel as
-    /// future work; logging is the action this round.
+    /// Forward downstream-to-gateway backpressure into upstream
+    /// pipeline pause. The PvaServer fires this when a per-connection
+    /// monitor outbox crosses the high watermark (downstream peer not
+    /// draining fast enough). PG-G9: we now look up the per-PV
+    /// `Pauser` (installed by the auto-restart task in
+    /// `channel_cache.rs::spawn_upstream_monitor`) and spawn a task
+    /// to send the `MonitorPause` control to the upstream — pvxs
+    /// `MonitorControlOp::pipeline` parity. Best effort: if the
+    /// entry isn't currently connected to upstream we just log.
     fn notify_watermark_high(&self, name: &str) {
         tracing::warn!(
             pv = %name,
             "pva-gateway: downstream monitor outbox crossed high watermark"
         );
+        // Synchronous lookup via Mutex (no .await) — peek doesn't
+        // exist sync, but `entries` lives in tokio::sync::Mutex
+        // which only has async lock. Spawn a task that does the
+        // async pause; this trait method is sync.
+        let cache = self.cache.clone();
+        let name_owned = name.to_string();
+        tokio::spawn(async move {
+            if let Some(entry) = cache.peek(&name_owned).await {
+                if let Some(p) = entry.pauser_snapshot() {
+                    p.pause().await;
+                }
+            }
+        });
     }
 
     fn notify_watermark_low(&self, name: &str) {
@@ -255,6 +331,15 @@ impl ChannelSource for GatewayChannelSource {
             pv = %name,
             "pva-gateway: downstream monitor outbox drained below low watermark"
         );
+        let cache = self.cache.clone();
+        let name_owned = name.to_string();
+        tokio::spawn(async move {
+            if let Some(entry) = cache.peek(&name_owned).await {
+                if let Some(p) = entry.pauser_snapshot() {
+                    p.resume().await;
+                }
+            }
+        });
     }
 }
 

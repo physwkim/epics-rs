@@ -208,6 +208,37 @@ impl ProcessVariable {
         self.notify_subscribers(new_value).await;
     }
 
+    /// Push a fresh monitor event holding the current value but with
+    /// the supplied alarm severity/status. Used by the PVA / CA
+    /// gateway adapter to surface upstream-disconnect to downstream
+    /// monitor subscribers without dropping the simple PV (which
+    /// would force every downstream client into ECA_DISCONN +
+    /// reconnect storms when the upstream is just briefly
+    /// unreachable). Mirrors gatePvData::death's "alarm-post"
+    /// alternative discussed in the C++ ca-gateway audit.
+    pub async fn post_alarm(&self, severity: u16, status: u16) {
+        let value = self.value.read().await.clone();
+        let mut subs = self.subscribers.lock().await;
+        subs.retain(|sub| !sub.tx.is_closed());
+        for sub in subs.iter() {
+            let snapshot = Snapshot::new(
+                value.clone(),
+                status,
+                severity,
+                crate::runtime::time::now_wall(),
+            );
+            let event = MonitorEvent {
+                snapshot,
+                origin: 0,
+            };
+            if sub.tx.try_send(event.clone()).is_err() {
+                if let Ok(mut slot) = sub.coalesced.lock() {
+                    *slot = Some(event);
+                }
+            }
+        }
+    }
+
     /// Notify all subscribers of a new value.
     async fn notify_subscribers(&self, value: EpicsValue) {
         let mut subs = self.subscribers.lock().await;

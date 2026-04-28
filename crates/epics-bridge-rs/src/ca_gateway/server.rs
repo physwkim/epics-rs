@@ -164,6 +164,12 @@ impl GatewayServer {
             .as_ref()
             .map(|p| Arc::new(PutLog::new(p.clone())));
 
+        // Beacon anomaly throttle — constructed BEFORE UpstreamManager
+        // so every per-PV WriteHookEnv captures it (B-G9: the
+        // forwarding task fires `request()` on upstream reconnect to
+        // tell other gateway-aware downstream clients to re-search).
+        let beacon_anomaly = Arc::new(BeaconAnomaly::new());
+
         // Upstream manager — receives the full WriteHook environment so
         // every PV's hook can enforce read_only / ACL / host-deny / putlog
         // before forwarding the put to upstream.
@@ -175,6 +181,7 @@ impl GatewayServer {
             putlog: putlog.clone(),
             stats: stats.clone(),
             read_only: config.read_only,
+            beacon_anomaly: beacon_anomaly.clone(),
         })
         .await?;
         let upstream = Arc::new(RwLock::new(upstream));
@@ -201,9 +208,6 @@ impl GatewayServer {
                 DownstreamServer::new(shadow_db.clone(), config.server_port)
             }
         });
-
-        // Beacon anomaly throttle
-        let beacon_anomaly = Arc::new(BeaconAnomaly::new());
 
         let server = Self {
             config,
@@ -244,6 +248,7 @@ impl GatewayServer {
         let pvlist = self.pvlist.clone();
         let upstream = self.upstream.clone();
         let stats = self.stats.clone();
+        let beacon_anomaly = self.beacon_anomaly.clone();
 
         let resolver: epics_base_rs::server::database::SearchResolver = std::sync::Arc::new(
             move |name: String| -> std::pin::Pin<
@@ -252,6 +257,7 @@ impl GatewayServer {
                 let pvlist = pvlist.clone();
                 let upstream = upstream.clone();
                 let stats = stats.clone();
+                let beacon_anomaly = beacon_anomaly.clone();
                 Box::pin(async move {
                     // 1. Check pvlist
                     let m = {
@@ -277,7 +283,15 @@ impl GatewayServer {
                     }
                     drop(up);
 
-                    // 3. Stats: count this resolution
+                    // 3. B-G9: trigger a beacon anomaly so other
+                    //    gateway-aware downstream clients re-search
+                    //    and discover this gateway as the server for
+                    //    the just-added PV. Mirrors C++ ca-gateway
+                    //    `gateServer::generateBeaconAnomaly` on the
+                    //    add-PV path.
+                    beacon_anomaly.request();
+
+                    // 4. Stats: count this resolution
                     stats.record_event();
                     true
                 })

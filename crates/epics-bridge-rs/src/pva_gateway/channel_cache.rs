@@ -22,6 +22,7 @@ use parking_lot::RwLock;
 use tokio::sync::{Mutex, Notify, broadcast};
 
 use epics_pva_rs::client::PvaClient;
+use epics_pva_rs::client_native::ops_v2::Pauser;
 use epics_pva_rs::pvdata::{FieldDesc, PvField};
 
 use super::error::{GwError, GwResult};
@@ -72,6 +73,15 @@ pub struct UpstreamEntry {
     _monitor_task: AbortOnDrop,
     /// Sticky "recently used" bit, lowered by the cleanup tick.
     drop_poke: parking_lot::Mutex<bool>,
+    /// Pause/resume handle on the *current* upstream subscription.
+    /// Refreshed by the auto-restart loop on every successful
+    /// `pvmonitor_handle` cycle. `None` while the loop is in the gap
+    /// between disconnects. Used by [`Self::pauser_snapshot`]
+    /// (PG-G9: forward downstream watermark events into upstream
+    /// pipeline-pause control msgs). Shared between the spawned
+    /// monitor task (writer) and the source's notify_watermark_*
+    /// callbacks (reader) via Arc.
+    pauser: Arc<parking_lot::Mutex<Option<Pauser>>>,
 }
 
 #[derive(Default)]
@@ -108,6 +118,23 @@ impl UpstreamEntry {
 
     fn poke(&self) {
         *self.drop_poke.lock() = true;
+    }
+
+    /// Pause the upstream pipeline if a `Pauser` is currently
+    /// installed (the auto-restart loop refreshes this on every
+    /// cycle). Returns `None` if upstream isn't connected right now —
+    /// caller can't await anything in that case; reaction is best-
+    /// effort. The returned future, when awaited, sends the
+    /// pipeline-pause control to the upstream server.
+    pub fn pauser_snapshot(&self) -> Option<Pauser> {
+        self.pauser.lock().clone()
+    }
+
+    /// Internal accessor: the shared Arc the monitor task writes to.
+    /// Used during entry construction so the task and the entry
+    /// observe the same Mutex.
+    fn pauser_slot(&self) -> Arc<parking_lot::Mutex<Option<Pauser>>> {
+        self.pauser.clone()
     }
 }
 
@@ -272,6 +299,15 @@ impl ChannelCache {
                 (existing.clone(), false)
             } else {
                 if map.len() >= self.max_entries {
+                    // PG-G11 spurious-reject mitigation: pre-sweep
+                    // entries pinned only by the cache itself
+                    // (strong_count==1 means no other Arc holders —
+                    // no live UpstreamEntry references via subscribe,
+                    // no in-flight CleanupGuard. These are just
+                    // waiting for the next cleanup tick to evict.)
+                    map.retain(|_, e| Arc::strong_count(e) > 1);
+                }
+                if map.len() >= self.max_entries {
                     tracing::warn!(
                         pv = %pv_name,
                         len = map.len(),
@@ -349,12 +385,15 @@ impl ChannelCache {
         let (tx, _rx0) = broadcast::channel::<PvField>(BROADCAST_CAPACITY);
         let first_event = Arc::new(Notify::new());
         let state = Arc::new(RwLock::new(EntryState::default()));
+        let pauser_slot: Arc<parking_lot::Mutex<Option<Pauser>>> =
+            Arc::new(parking_lot::Mutex::new(None));
 
         let pv_name_owned = pv_name.to_string();
         let client = self.client.clone();
         let tx_for_task = tx.clone();
         let state_for_task = state.clone();
         let first_event_for_task = first_event.clone();
+        let pauser_slot_for_task = pauser_slot.clone();
 
         let join = tokio::spawn(async move {
             let mut backoff = Duration::from_millis(250);
@@ -363,17 +402,45 @@ impl ChannelCache {
                 let tx_inner = tx_for_task.clone();
                 let state_inner = state_for_task.clone();
                 let first_event_inner = first_event_for_task.clone();
+                let pv_name_for_cb = pv_name_owned.clone();
 
-                let result = client
-                    .pvmonitor_typed(&pv_name_owned, move |desc, value| {
+                // PG-G9: switch from pvmonitor_typed → pvmonitor_handle
+                // so we can install a Pauser on the entry. The handle
+                // task runs in the background; we poll is_done() and
+                // re-arm with backoff. pvmonitor_typed's blocking-
+                // until-disconnect semantics is recreated by the
+                // poll loop below.
+                let handle_res = client
+                    .pvmonitor_handle(&pv_name_owned, move |desc, value| {
                         let was_first;
+                        let mut type_changed = false;
                         {
                             let mut s = state_inner.write();
                             was_first = s.latest.is_none();
-                            if s.introspection.is_none() {
+                            // PG-G7: detect upstream type evolution.
+                            // If the IOC restarted with a different
+                            // descriptor, drop the cached snapshot so
+                            // downstream sees a fresh INIT instead of
+                            // a stale shape. pva2pva has the same gap;
+                            // this is a "stricter than reference"
+                            // improvement.
+                            if let Some(existing) = &s.introspection {
+                                if existing != desc {
+                                    type_changed = true;
+                                    s.introspection = Some(desc.clone());
+                                    s.latest = None;
+                                }
+                            } else {
                                 s.introspection = Some(desc.clone());
                             }
                             s.latest = Some(value.clone());
+                        }
+                        if type_changed {
+                            tracing::warn!(
+                                pv = %pv_name_for_cb,
+                                "pva-gateway: upstream introspection changed — \
+                                 cache descriptor and snapshot reset"
+                            );
                         }
                         if was_first {
                             first_event_inner.notify_waiters();
@@ -383,33 +450,54 @@ impl ChannelCache {
                     })
                     .await;
 
-                // Reset backoff on a clean end (e.g. server restart);
-                // grow it on consecutive errors. A clean end also
-                // skips the backoff sleep below — for a fast IOC
-                // restart this avoids ~250ms unnecessary downtime.
-                let was_clean = result.is_ok();
-                if was_clean {
-                    backoff = Duration::from_millis(250);
-                } else {
-                    tracing::warn!(
-                        pv = %pv_name_owned,
-                        backoff_ms = backoff.as_millis() as u64,
-                        "pva-gateway: upstream monitor ended, will retry"
-                    );
+                let handle = match handle_res {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(
+                            pv = %pv_name_owned,
+                            error = %e,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "pva-gateway: upstream monitor handle failed, will retry"
+                        );
+                        if tx_for_task.receiver_count() == 0 {
+                            return;
+                        }
+                        tokio::time::sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, max_backoff);
+                        continue;
+                    }
+                };
+
+                // Install the Pauser so notify_watermark_high/low can
+                // forward downstream backpressure into upstream
+                // pipeline-pause control msgs (PG-G9).
+                *pauser_slot_for_task.lock() = Some(handle.pauser());
+
+                // Poll-wait until the handle's task finishes. We
+                // can't await on the task directly without consuming
+                // the handle (and we want stop_sync to remain
+                // available); poll is_done at 50 ms — well under
+                // typical monitor-event cadence so latency to
+                // restart is bounded.
+                let mut subscribers_gone = false;
+                loop {
+                    if handle.is_done() {
+                        break;
+                    }
+                    if tx_for_task.receiver_count() == 0 {
+                        subscribers_gone = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
 
-                // Exit when nobody is listening. The earlier version
-                // also required `latest.is_none()` ("no cached state")
-                // — but `latest` becomes `Some` after the very first
-                // event and stays that way forever, so the task would
-                // retry indefinitely after every disconnect even with
-                // zero subscribers. The cleanup tick eventually drops
-                // the cache entry (`drop_poke=false` AND `subscriber_count=0`),
-                // which fires `AbortOnDrop` on the JoinHandle and ends
-                // the task definitively. Until then a fresh subscriber
-                // can re-attach via `subscribe()`, so we keep retrying
-                // upstream — but only while someone is still listening.
-                if tx_for_task.receiver_count() == 0 {
+                // Clear pauser so a stale handle isn't paused/resumed
+                // across the gap between subscriptions.
+                *pauser_slot_for_task.lock() = None;
+
+                if subscribers_gone {
+                    // Tear down upstream cleanly before exiting.
+                    handle.stop_sync().await;
                     tracing::debug!(
                         pv = %pv_name_owned,
                         "pva-gateway: monitor exit (no subscribers)"
@@ -417,9 +505,18 @@ impl ChannelCache {
                     return;
                 }
 
-                if !was_clean {
-                    tokio::time::sleep(backoff).await;
-                    backoff = std::cmp::min(backoff * 2, max_backoff);
+                // Treat task completion as "clean" (channel closed) —
+                // backoff resets so a normal IOC restart cycles
+                // quickly. Fatal errors are already logged by the
+                // op_monitor_handle internals.
+                backoff = Duration::from_millis(250);
+
+                if tx_for_task.receiver_count() == 0 {
+                    tracing::debug!(
+                        pv = %pv_name_owned,
+                        "pva-gateway: monitor exit (no subscribers)"
+                    );
+                    return;
                 }
             }
         });
@@ -431,6 +528,7 @@ impl ChannelCache {
             first_event,
             _monitor_task: AbortOnDrop(join.abort_handle()),
             drop_poke: parking_lot::Mutex::new(true),
+            pauser: pauser_slot,
         })
     }
 
@@ -519,6 +617,7 @@ mod tests {
             first_event: Arc::new(Notify::new()),
             _monitor_task: AbortOnDrop(task.abort_handle()),
             drop_poke: parking_lot::Mutex::new(false),
+            pauser: Arc::new(parking_lot::Mutex::new(None)),
         };
         assert_eq!(entry.subscriber_count(), 0);
         let _r1 = entry.subscribe();

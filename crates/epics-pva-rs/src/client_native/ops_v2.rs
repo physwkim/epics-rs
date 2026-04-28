@@ -358,6 +358,67 @@ impl SubscriptionHandle {
             let _ = t.await;
         }
     }
+
+    /// True if the inner task has finished (channel closed, fatal
+    /// error, or `stop()` was called and the loop drained). Use to
+    /// drive an auto-restart wrapper without consuming the handle.
+    pub fn is_done(&self) -> bool {
+        self.task.as_ref().map(|t| t.is_finished()).unwrap_or(true)
+    }
+
+    /// A cheap clone-able handle that can pause/resume the
+    /// subscription from an unrelated task (no ownership of the
+    /// underlying JoinHandle). Used by the PVA gateway to forward
+    /// downstream watermark events into upstream pipeline-pause
+    /// control messages — pvxs `MonitorControlOp::pipeline` parity.
+    pub fn pauser(&self) -> Pauser {
+        Pauser {
+            state: self.state.clone(),
+        }
+    }
+}
+
+/// Detached pause/resume handle — see [`SubscriptionHandle::pauser`].
+#[derive(Clone)]
+pub struct Pauser {
+    state: Arc<SubscriptionState>,
+}
+
+impl Pauser {
+    /// Same semantics as [`SubscriptionHandle::pause`]. Async because
+    /// it sends a control message to the server.
+    pub async fn pause(&self) {
+        let was_paused = self
+            .state
+            .paused
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+        if was_paused {
+            return;
+        }
+        let snapshot = self.state.active.lock().clone();
+        if let Some((server, sid, ioid)) = snapshot {
+            let big_endian = matches!(server.byte_order, ByteOrder::Big);
+            let codec = PvaCodec { big_endian };
+            let _ = server.send(codec.build_monitor_pause(sid, ioid)).await;
+        }
+    }
+
+    /// Same semantics as [`SubscriptionHandle::resume`].
+    pub async fn resume(&self) {
+        let was_paused = self
+            .state
+            .paused
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        if !was_paused {
+            return;
+        }
+        let snapshot = self.state.active.lock().clone();
+        if let Some((server, sid, ioid)) = snapshot {
+            let big_endian = matches!(server.byte_order, ByteOrder::Big);
+            let codec = PvaCodec { big_endian };
+            let _ = server.send(codec.build_monitor_resume(sid, ioid)).await;
+        }
+    }
 }
 
 pub async fn op_monitor<F>(

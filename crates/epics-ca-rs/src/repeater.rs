@@ -129,6 +129,15 @@ pub async fn run_repeater() -> io::Result<()> {
     }
 }
 
+/// Soft cap on simultaneously registered repeater clients. The
+/// in-process repeater is loopback-only, so the practical attacker
+/// is a local process opening many UDP sockets on different source
+/// ports. 1024 is comfortably above any realistic CA-client farm
+/// on a single host (one or two per Phoebus + ~hundred CSS + a
+/// handful of caget/caput) but small enough to bound memory if
+/// abused. C `caRepeater.c` has no cap; we choose to be stricter.
+const MAX_REPEATER_CLIENTS: usize = 1024;
+
 fn register_client(clients: &mut HashMap<u16, RepeaterClient>, src: SocketAddr) {
     let port = src.port();
 
@@ -136,6 +145,27 @@ fn register_client(clients: &mut HashMap<u16, RepeaterClient>, src: SocketAddr) 
     if let Some(client) = clients.get(&port) {
         client.send_confirm();
         return;
+    }
+
+    // Cap-and-prune: when full, drop entries whose verify() fails
+    // (peer process exited / port reused) to make room. This is the
+    // C-G7 fix — without it a misbehaving local process can grow the
+    // HashMap up to 65 535 entries.
+    if clients.len() >= MAX_REPEATER_CLIENTS {
+        let dead: Vec<u16> = clients
+            .iter()
+            .filter(|(_, c)| !c.verify())
+            .map(|(p, _)| *p)
+            .collect();
+        for p in dead {
+            clients.remove(&p);
+        }
+        if clients.len() >= MAX_REPEATER_CLIENTS {
+            // All slots are alive — refuse the new client. The peer
+            // sees no CONFIRM and will retry; on a typical retry
+            // window an alive client will have moved to dead by then.
+            return;
+        }
     }
 
     // Create per-client connected socket (matches C EPICS repeater)

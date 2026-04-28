@@ -119,6 +119,21 @@ impl Stats {
             ("putCount", EpicsValue::Long(0)),
             ("readOnlyRejects", EpicsValue::Long(0)),
             ("perHostConnections", EpicsValue::Long(0)),
+            // B-G10: aliases matching C++ ca-gateway (gateServer.cc:
+            // 1903-1965) so dashboards/scripts written against the C
+            // names keep working. Connected = active + inactive
+            // (both are "upstream is alive"); pvtotal/vctotal are
+            // both alias for totalPvs in the C source.
+            ("vctotal", EpicsValue::Long(0)),
+            ("pvtotal", EpicsValue::Long(0)),
+            ("connected", EpicsValue::Long(0)),
+            ("active", EpicsValue::Long(0)),
+            ("inactive", EpicsValue::Long(0)),
+            ("unconnected", EpicsValue::Long(0)),
+            ("dead", EpicsValue::Long(0)),
+            ("connecting", EpicsValue::Long(0)),
+            ("disconnected", EpicsValue::Long(0)),
+            ("clientEventRate", EpicsValue::Double(0.0)),
         ] {
             db.add_pv(&format!("{p}{suffix}"), init).await;
         }
@@ -186,6 +201,19 @@ impl Stats {
         let n_put = format!("{p}putCount");
         let n_readonly = format!("{p}readOnlyRejects");
         let n_hosts = format!("{p}perHostConnections");
+        // C++ ca-gateway aliases (B-G10).
+        let n_vctotal = format!("{p}vctotal");
+        let n_pvtotal = format!("{p}pvtotal");
+        let n_connected = format!("{p}connected");
+        let n_active_alias = format!("{p}active");
+        let n_inactive_alias = format!("{p}inactive");
+        let n_unconnected = format!("{p}unconnected");
+        let n_dead_alias = format!("{p}dead");
+        let n_connecting_alias = format!("{p}connecting");
+        let n_disconnected = format!("{p}disconnected");
+        let n_client_event_rate = format!("{p}clientEventRate");
+        let connected = (active + inactive) as i32;
+        let unconnected = (connecting + dead) as i32;
         let _ = tokio::join!(
             db.put_pv_and_post(&n_total, EpicsValue::Long(cache_size as i32)),
             db.put_pv_and_post(&n_upstream, EpicsValue::Long(upstream_count as i32)),
@@ -199,6 +227,16 @@ impl Stats {
             db.put_pv_and_post(&n_put, EpicsValue::Long(put_count as i32)),
             db.put_pv_and_post(&n_readonly, EpicsValue::Long(readonly as i32)),
             db.put_pv_and_post(&n_hosts, EpicsValue::Long(host_count as i32)),
+            db.put_pv_and_post(&n_vctotal, EpicsValue::Long(cache_size as i32)),
+            db.put_pv_and_post(&n_pvtotal, EpicsValue::Long(cache_size as i32)),
+            db.put_pv_and_post(&n_connected, EpicsValue::Long(connected)),
+            db.put_pv_and_post(&n_active_alias, EpicsValue::Long(active as i32)),
+            db.put_pv_and_post(&n_inactive_alias, EpicsValue::Long(inactive as i32)),
+            db.put_pv_and_post(&n_unconnected, EpicsValue::Long(unconnected)),
+            db.put_pv_and_post(&n_dead_alias, EpicsValue::Long(dead as i32)),
+            db.put_pv_and_post(&n_connecting_alias, EpicsValue::Long(connecting as i32)),
+            db.put_pv_and_post(&n_disconnected, EpicsValue::Long(dead as i32)),
+            db.put_pv_and_post(&n_client_event_rate, EpicsValue::Double(event_rate)),
         );
     }
 

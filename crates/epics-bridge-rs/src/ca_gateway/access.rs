@@ -76,17 +76,18 @@ impl AccessConfig {
 
     /// Whether reading the given (asg, asl, user, host) tuple is allowed.
     ///
-    /// `asl` (access security level) is currently unused; the underlying
-    /// EPICS ACF parser stores per-rule levels but `check_access` returns
-    /// a coarse `Read | ReadWrite | NoAccess` level. ASL filtering can be
-    /// added when finer-grained level checking is needed.
-    pub fn can_read(&self, asg: &str, _asl: i32, user: &str, host: &str) -> bool {
+    /// The ASL is now passed to the underlying ACF check (C-G6 fix);
+    /// rules with a level below `asl` are skipped, matching epics-base
+    /// `asLibRoutines.c::asCompute`. Negative or zero ASL is treated
+    /// as level 0 (most-restrictive).
+    pub fn can_read(&self, asg: &str, asl: i32, user: &str, host: &str) -> bool {
         if self.allow_all {
             return true;
         }
+        let asl = asl.max(0).min(u8::MAX as i32) as u8;
         match &self.config {
             Some(cfg) => matches!(
-                cfg.check_access(asg, host, user),
+                cfg.check_access_asl(asg, host, user, asl),
                 AccessLevel::Read | AccessLevel::ReadWrite
             ),
             None => true,
@@ -94,12 +95,16 @@ impl AccessConfig {
     }
 
     /// Whether writing the given tuple is allowed.
-    pub fn can_write(&self, asg: &str, _asl: i32, user: &str, host: &str) -> bool {
+    pub fn can_write(&self, asg: &str, asl: i32, user: &str, host: &str) -> bool {
         if self.allow_all {
             return true;
         }
+        let asl = asl.max(0).min(u8::MAX as i32) as u8;
         match &self.config {
-            Some(cfg) => matches!(cfg.check_access(asg, host, user), AccessLevel::ReadWrite),
+            Some(cfg) => matches!(
+                cfg.check_access_asl(asg, host, user, asl),
+                AccessLevel::ReadWrite
+            ),
             None => true,
         }
     }

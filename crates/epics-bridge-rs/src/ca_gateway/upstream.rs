@@ -95,6 +95,13 @@ struct WriteHookEnv {
     putlog: Option<Arc<PutLog>>,
     /// Stats counters.
     stats: Arc<Stats>,
+    /// Beacon-anomaly trigger handle. Fires from
+    /// `ensure_subscribed`'s first-Active transition (so other gateway-
+    /// aware downstream clients re-search and discover this gateway as
+    /// the server for the just-added PV) and from upstream-reconnect
+    /// transitions in the forwarding task. Mirrors C++ ca-gateway's
+    /// `gateServer::generateBeaconAnomaly` (B-G9).
+    beacon_anomaly: Arc<super::beacon::BeaconAnomaly>,
 }
 
 /// Configuration handed to [`UpstreamManager::new`]. Groups the
@@ -110,6 +117,7 @@ pub struct UpstreamManagerConfig {
     pub putlog: Option<Arc<PutLog>>,
     pub stats: Arc<Stats>,
     pub read_only: bool,
+    pub beacon_anomaly: Arc<super::beacon::BeaconAnomaly>,
 }
 
 /// Manages upstream CA client connections for the gateway.
@@ -152,6 +160,7 @@ impl UpstreamManager {
                 pvlist: cfg.pvlist,
                 putlog: cfg.putlog,
                 stats: cfg.stats,
+                beacon_anomaly: cfg.beacon_anomaly,
             },
             subs: HashMap::new(),
         })
@@ -276,6 +285,7 @@ impl UpstreamManager {
         let db_clone = self.shadow_db.clone();
         let channel_for_task = channel.clone();
         let stats_for_task = self.write_env.stats.clone();
+        let beacon_anomaly_for_task = self.write_env.beacon_anomaly.clone();
         let name = upstream_name.to_string();
         let task = tokio::spawn(async move {
             let mut backoff = Duration::from_millis(250);
@@ -299,8 +309,10 @@ impl UpstreamManager {
                     //     already-active PV every time the upstream
                     //     reconnects.
                     //   * Otherwise → `Inactive`.
+                    let mut transitioned_from_disconnect = false;
                     if let Some(entry_arc) = cache_clone.read().await.get(&name) {
                         let mut entry = entry_arc.write().await;
+                        let was_disconnect = matches!(entry.state, PvState::Disconnect);
                         if matches!(entry.state, PvState::Connecting | PvState::Disconnect) {
                             let next = if entry.subscriber_count() > 0 {
                                 PvState::Active
@@ -310,6 +322,16 @@ impl UpstreamManager {
                             entry.set_state(next);
                         }
                         entry.update(snapshot.clone());
+                        transitioned_from_disconnect = was_disconnect;
+                    }
+
+                    // B-G9: trigger a beacon anomaly when the upstream
+                    // reconnects so other gateway-aware clients
+                    // re-discover and the downstream side knows the
+                    // gateway is alive again. Mirrors C++ ca-gateway
+                    // gateServer::generateBeaconAnomaly on reconnect.
+                    if transitioned_from_disconnect {
+                        beacon_anomaly_for_task.request();
                     }
 
                     // Push to shadow PvDatabase to fan out to downstream clients
@@ -323,11 +345,21 @@ impl UpstreamManager {
 
                 // Monitor closed — upstream disconnected. Mark cache
                 // entry so any cached snapshot reads carry the right
-                // state (downstream subscriber bridges will keep
-                // receiving the *last known* value until cleanup).
+                // state, and surface an INVALID alarm on the shadow
+                // PV so downstream clients see the disconnect in
+                // their alarm severity rather than continuing to
+                // observe the last value at NoAlarm (B-G11). C++
+                // ca-gateway deletes the VC on Active→Disconnect
+                // which yields ECA_DISCONN; the alarm-post route is
+                // less disruptive and equivalent in operator visibility.
                 if let Some(entry_arc) = cache_clone.read().await.get(&name) {
                     entry_arc.write().await.set_state(PvState::Disconnect);
                 }
+                // 3 = AlarmSeverity::Invalid; status 0 = LINK alarm
+                // (downstream client cannot tell why upstream is gone,
+                // only that it is — INVALID severity is the closest
+                // EPICS alarm to "channel disconnected").
+                let _ = db_clone.post_alarm(&name, 3, 0).await;
 
                 // Try to re-subscribe with exponential backoff. The
                 // CaChannel itself drives reconnect under the hood;
@@ -622,6 +654,7 @@ mod tests {
             pvlist: Arc::new(ArcSwap::from_pointee(PvList::new())),
             putlog: None,
             stats: Arc::new(Stats::new("gw:".into())),
+            beacon_anomaly: Arc::new(crate::ca_gateway::beacon::BeaconAnomaly::new()),
         }
     }
 
@@ -638,6 +671,7 @@ mod tests {
             putlog: None,
             stats: env.stats.clone(),
             read_only: false,
+            beacon_anomaly: env.beacon_anomaly.clone(),
         })
         .await;
         assert!(mgr.is_ok());
