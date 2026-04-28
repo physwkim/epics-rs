@@ -728,28 +728,30 @@ pub fn decode_pv_field(
                 as usize;
             let mut out = Vec::with_capacity(n);
             for _ in 0..n {
-                // 0x01 = element present, 0x00 = null. Some pvxs builds emit
-                // the legacy "always present" form without the byte; we accept
-                // both by peeking.
+                // pvxs dataencode.cpp:359-361 — `to_wire(buf, uint8_t(0u))`
+                // for null, `uint8_t(1u)` for present. Anything else is a
+                // protocol violation.
                 let presence = cur.get_u8()?;
-                if presence == 0x00 || presence == 0xFF {
-                    out.push(PvStructure::new(struct_id));
-                    continue;
-                }
-                if presence != 0x01 {
-                    // Treat as already-consumed first byte of the element body.
-                    // Reset cursor back by 1 — only safe because the element
-                    // starts with a structure body. This branch should not
-                    // normally hit pvxs-generated wire.
-                    let pos = cur.position();
-                    cur.set_position(pos - 1);
-                }
-                let element_desc = FieldDesc::Structure {
-                    struct_id: struct_id.clone(),
-                    fields: fields.clone(),
-                };
-                if let PvField::Structure(s) = decode_pv_field(&element_desc, cur, order)? {
-                    out.push(s);
+                match presence {
+                    0x00 => {
+                        out.push(PvStructure::new(struct_id));
+                    }
+                    0x01 => {
+                        let element_desc = FieldDesc::Structure {
+                            struct_id: struct_id.clone(),
+                            fields: fields.clone(),
+                        };
+                        if let PvField::Structure(s) =
+                            decode_pv_field(&element_desc, cur, order)?
+                        {
+                            out.push(s);
+                        }
+                    }
+                    other => {
+                        return Err(DecodeError(format!(
+                            "structure array element presence byte 0x{other:02X} (expected 0x00 or 0x01)"
+                        )));
+                    }
                 }
             }
             PvField::StructureArray(out)

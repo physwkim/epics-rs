@@ -341,15 +341,18 @@ pub async fn op_rpc(
             init_resp.status
         )));
     }
-    // The server's INIT response carries the *response* introspection.
-    let response_intro = init_resp.introspection;
+    // RPC INIT response carries no introspection per pvxs (serverget.cpp:97 —
+    // `if (cmd != CMD_RPC) to_wire(R, type)`); the response type comes back
+    // with the DATA frame.
+    let _ = init_resp.introspection;
 
-    // DATA: send the request value with subcmd=0x00 + structure-tag prefix +
-    // value bytes (no bitset, since RPC arguments are always all-fields).
+    // DATA: send the request as `type(arg) + full_value(arg)`.
+    // pvxs clientget.cpp:307-311.
     let mut data_payload = Vec::new();
     data_payload.put_u32(channel.sid, order);
     data_payload.put_u32(ioid, order);
     data_payload.put_u8(0x00);
+    crate::pvdata::encode::encode_type_desc(request_desc, order, &mut data_payload);
     encode_pv_field(request_value, request_desc, order, &mut data_payload);
     let data_header =
         PvaHeader::application(false, order, Command::Rpc.code(), data_payload.len() as u32);
@@ -360,7 +363,7 @@ pub async fn op_rpc(
 
     // Response data frame
     let resp_frame = conn.read_app_frame().await?;
-    match decode_op_response(&resp_frame, Some(&response_intro))? {
+    match decode_op_response(&resp_frame, None)? {
         OpResponse::Data(d) => {
             if !d.status.is_success() {
                 return Err(PvaError::Protocol(format!("RPC failed: {:?}", d.status)));
@@ -368,7 +371,8 @@ pub async fn op_rpc(
             // Best-effort cleanup: send DESTROY_REQUEST.
             let destroy = codec.build_destroy_request(channel.sid, ioid);
             let _ = conn.send(&destroy).await;
-            Ok((response_intro, d.value))
+            let desc = d.response_desc.unwrap_or(FieldDesc::Variant);
+            Ok((desc, d.value))
         }
         OpResponse::Status(s) => {
             if !s.status.is_success() {

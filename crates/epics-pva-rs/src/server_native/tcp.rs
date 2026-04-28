@@ -210,10 +210,6 @@ async fn handle_connection_io(
     let mut handshake_complete = false;
     let _peer = peer;
 
-    // Per-connection type-cache for emit-side TypeStore. Repeat compound
-    // descriptors collapse to 3-byte 0xFE references — big win when many
-    // channels share the same NTScalar/NTTable shape on one client.
-
     loop {
         let frame = read_frame(&mut reader, &mut rx_buf, op_timeout).await?;
         last_rx.store(now_nanos(), Ordering::SeqCst);
@@ -772,7 +768,7 @@ async fn handle_op(
                                     }
                                 }
                                 Err(mpsc::error::TryRecvError::Empty) => break,
-                                Err(mpsc::error::TryRecvError::Disconnected) => return,
+                                Err(mpsc::error::TryRecvError::Disconnected) => break,
                             }
                         }
                         if squashing {
@@ -781,26 +777,38 @@ async fn handle_op(
                         }
                         let payload = build_monitor_payload(ioid, &intro_clone, &value, order);
                         if writer_clone.lock().await.write_all(&payload).await.is_err() {
-                            break;
+                            return;
                         }
                     }
+                    // Source closed — emit MONITOR FINISH (subcmd 0x10 + Status).
+                    // pvxs servermon.cpp:148-178 sends a final frame with
+                    // subcmd=0x10 to signal end-of-stream so the client can
+                    // tear down cleanly.
+                    let finish = build_monitor_finish(ioid, order);
+                    let _ = writer_clone.lock().await.write_all(&finish).await;
                 });
             }
         }
         OpKind::Rpc => {
-            // Decode request value using the introspection from INIT.
-            let value = match decode_pv_field(&intro, &mut cur, order) {
-                Ok(v) => v,
+            // RPC DATA request from client: `type(arg) + full_value(arg)`.
+            // pvxs clientget.cpp:307-311 — `to_wire(R, type); to_wire_full(R, arg)`.
+            // The introspection on the channel was negotiated for the
+            // *pvRequest* in INIT, not the actual call argument, so we must
+            // decode the argument's own type descriptor here.
+            let (req_desc, req_value) = match decode_type_desc(&mut cur, order) {
+                Ok(desc) => match decode_pv_field(&desc, &mut cur, order) {
+                    Ok(v) => (desc, v),
+                    Err(_) => (desc, PvField::Null),
+                },
                 Err(_) => {
-                    // Fall back to a null value if the body is empty (some
-                    // legacy clients don't send a value bodies for parameter-
-                    // less RPCs).
-                    PvField::Null
+                    // Empty body — some clients send parameterless RPCs with
+                    // no payload after subcmd.
+                    (FieldDesc::Variant, PvField::Null)
                 }
             };
             let pv_name = ch.name.clone();
-            let intro_clone = intro.clone();
-            let result = source.rpc(&pv_name, intro_clone, value).await;
+            let _ = intro; // INIT pvRequest descriptor — no longer used here.
+            let result = source.rpc(&pv_name, req_desc, req_value).await;
 
             let mut payload = Vec::new();
             payload.put_u32(ioid, order);
@@ -929,6 +937,21 @@ fn build_monitor_payload(
     encode_pv_field(value, intro, order, &mut payload);
     let overrun = BitSet::new(); // no overruns
     overrun.write_into(order, &mut payload);
+    let h = PvaHeader::application(true, order, Command::Monitor.code(), payload.len() as u32);
+    let mut buf = Vec::with_capacity(8 + payload.len());
+    h.write_into(&mut buf);
+    buf.extend_from_slice(&payload);
+    buf
+}
+
+/// Build a MONITOR FINISH frame (subcmd `0x10` + Status). Sent when the
+/// underlying source closes its broadcast channel, signalling end-of-stream
+/// to the subscribing client. Mirrors pvxs `servermon.cpp:148-178`.
+fn build_monitor_finish(ioid: u32, order: ByteOrder) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.put_u32(ioid, order);
+    payload.put_u8(0x10);
+    Status::ok().write_into(order, &mut payload);
     let h = PvaHeader::application(true, order, Command::Monitor.code(), payload.len() as u32);
     let mut buf = Vec::with_capacity(8 + payload.len());
     h.write_into(&mut buf);

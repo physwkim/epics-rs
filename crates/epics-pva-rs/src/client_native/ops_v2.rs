@@ -407,11 +407,13 @@ pub async fn op_rpc(
     }
     let response_intro = init_resp.introspection;
 
-    // DATA
+    // DATA — RPC argument: `type(arg) + full_value(arg)`.
+    // pvxs clientget.cpp:307-311 — `to_wire(R, type); to_wire_full(R, arg)`.
     let mut data = Vec::new();
     data.put_u32(sid, order);
     data.put_u32(ioid, order);
     data.put_u8(0x00);
+    crate::pvdata::encode::encode_type_desc(request_desc, order, &mut data);
     encode_pv_field(request_value, request_desc, order, &mut data);
     let data_h = PvaHeader::application(false, order, Command::Rpc.code(), data.len() as u32);
     let mut data_frame = Vec::with_capacity(8 + data.len());
@@ -420,14 +422,19 @@ pub async fn op_rpc(
     server.send(data_frame).await?;
 
     let resp_frame = await_frame(&mut stream, op_timeout).await?;
-    let result = match decode_op_response(&resp_frame, Some(&response_intro))? {
+    // RPC response carries its own type — `response_intro` from INIT is
+    // unused (RPC INIT has no introspection per pvxs).
+    let _ = response_intro;
+    let result = match decode_op_response(&resp_frame, None)? {
         OpResponse::Data(d) => {
             if d.status.is_success() {
-                Ok((response_intro, d.value))
+                let desc = d.response_desc.unwrap_or(FieldDesc::Variant);
+                Ok((desc, d.value))
             } else {
                 Err(PvaError::Protocol(format!("RPC: {:?}", d.status)))
             }
         }
+        OpResponse::Status(s) => Err(PvaError::Protocol(format!("RPC: {:?}", s.status))),
         other => Err(PvaError::Protocol(format!(
             "expected RPC data, got {other:?}"
         ))),

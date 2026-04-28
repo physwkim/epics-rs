@@ -237,6 +237,11 @@ pub struct OpDataResponse {
     pub status: Status,
     pub changed: BitSet,
     pub value: PvField,
+    /// Response type descriptor — only populated for RPC, where the wire
+    /// format carries its own type independent of any INIT-time
+    /// introspection. `None` for GET/MONITOR/PUT_GET (the caller already
+    /// has the type from INIT).
+    pub response_desc: Option<FieldDesc>,
 }
 
 /// Decoded "completion" response (PUT after sending data, or DESTROY ack).
@@ -294,6 +299,21 @@ pub fn decode_op_response_cached(
         .map_err(|e| PvaError::Decode(e.to_string()))?;
     let subcmd = cur.get_u8().map_err(|e| PvaError::Decode(e.to_string()))?;
 
+    // FINISH/DESTROY (subcmd & 0x10) — server signals end-of-stream
+    // (typically MONITOR after the source closes its broadcast channel).
+    // pvxs servermon.cpp:148 sets `subcmd = 0x10` and emits only a Status
+    // after ioid/subcmd. Surface this as `OpResponse::Status` so the
+    // caller can tear down cleanly.
+    if subcmd & 0x10 != 0 {
+        let status =
+            Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
+        return Ok(OpResponse::Status(OpStatusResponse {
+            ioid,
+            subcmd,
+            status,
+        }));
+    }
+
     if subcmd & 0x08 != 0 {
         // INIT phase
         let status =
@@ -307,12 +327,16 @@ pub fn decode_op_response_cached(
                 introspection: FieldDesc::Variant,
             }));
         }
-        // Introspection: a single type-desc byte followed by its body.
-        // pvxs and pvAccessJava emit `0x80 + structure-body` directly OR
-        // `0xFD + key + body` to populate the per-connection cache.
-        // `decode_type_desc_cached` handles both.
-        let intro = crate::pvdata::encode::decode_type_desc_cached(&mut cur, order, type_cache)
-            .map_err(|e| PvaError::Decode(e.to_string()))?;
+        // RPC INIT carries no type descriptor — pvxs clientget.cpp:410
+        // (`if (cmd != CMD_RPC && init && ok) from_wire_type(...)`).
+        // For GET/PUT/MONITOR the introspection follows: a single type-desc
+        // byte + body, optionally wrapped in a 0xFD/0xFE cache marker.
+        let intro = if matches!(cmd, Command::Rpc) {
+            FieldDesc::Variant
+        } else {
+            crate::pvdata::encode::decode_type_desc_cached(&mut cur, order, type_cache)
+                .map_err(|e| PvaError::Decode(e.to_string()))?
+        };
         return Ok(OpResponse::Init(OpInitResponse {
             ioid,
             subcmd,
@@ -322,8 +346,9 @@ pub fn decode_op_response_cached(
         }));
     }
 
-    // PUT done: ioid + subcmd + status only (no value).
-    if cmd == Command::Put {
+    // PUT data response without GetBack (subcmd & 0x40 == 0):
+    // `ioid + subcmd + status` only.
+    if cmd == Command::Put && subcmd & 0x40 == 0 {
         let status =
             Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
         return Ok(OpResponse::Status(OpStatusResponse {
@@ -333,12 +358,45 @@ pub fn decode_op_response_cached(
         }));
     }
 
+    // RPC data response: `ioid + subcmd + status + type + full_value`.
+    // pvxs clientget.cpp:415-421 — `from_wire_type(...) + from_wire_full(...)`.
+    // No bitset; the response carries its own type descriptor independent of
+    // any INIT-time introspection.
+    if cmd == Command::Rpc {
+        let status =
+            Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?;
+        if !status.is_success() {
+            return Ok(OpResponse::Status(OpStatusResponse {
+                ioid,
+                subcmd,
+                status,
+            }));
+        }
+        let resp_desc = crate::pvdata::encode::decode_type_desc_cached(
+            &mut cur, order, type_cache,
+        )
+        .map_err(|e| PvaError::Decode(e.to_string()))?;
+        let resp_value = crate::pvdata::encode::decode_pv_field(&resp_desc, &mut cur, order)
+            .map_err(|e| PvaError::Decode(e.to_string()))?;
+        let mut all = BitSet::new();
+        all.set(0);
+        return Ok(OpResponse::Data(OpDataResponse {
+            ioid,
+            subcmd,
+            status,
+            changed: all,
+            value: resp_value,
+            response_desc: Some(resp_desc),
+        }));
+    }
+
     let intro = introspection.ok_or_else(|| {
         PvaError::Protocol("data response without prior introspection".to_string())
     })?;
 
-    // GET data response begins with a Status; MONITOR data does not.
-    let status = if cmd == Command::Get {
+    // GET data response and PUT_GET (PUT with subcmd & 0x40) begin with a
+    // Status; MONITOR data does not.
+    let status = if cmd == Command::Get || cmd == Command::Put {
         Status::decode(&mut cur, order).map_err(|e| PvaError::Decode(e.to_string()))?
     } else {
         Status::ok()
@@ -358,6 +416,7 @@ pub fn decode_op_response_cached(
         status,
         changed,
         value,
+        response_desc: None,
     }))
 }
 
