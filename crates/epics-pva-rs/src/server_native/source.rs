@@ -3,10 +3,33 @@
 //! Replaces the spvirit `PvStore` trait. Uses our own [`crate::pvdata`]
 //! types, so no `spvirit_*` types appear in the public surface.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::pvdata::{FieldDesc, PvField};
+
+/// Per-operation context surfaced to [`ChannelSource`] implementors
+/// that need the downstream peer's identity (audit, ACL, gateway
+/// credential pass-through). Fields mirror what `CONNECTION_VALIDATION`
+/// established at handshake time, plus the peer's TCP socket address.
+///
+/// PG-G10: gateways use this to pick the correct upstream client
+/// when the gateway maintains a per-credential connection pool to
+/// the upstream IOC. Default trait methods that don't take a context
+/// remain available so existing implementations are unaffected.
+#[derive(Clone, Debug)]
+pub struct ChannelContext {
+    /// Downstream client TCP socket address.
+    pub peer: SocketAddr,
+    /// Account name from CONNECTION_VALIDATION (`anonymous` when the
+    /// client didn't authenticate).
+    pub account: String,
+    /// Auth method (`"anonymous"`, `"ca"`, `"x509"`).
+    pub method: String,
+    /// Reverse-resolved host name. Empty when DNS lookup failed.
+    pub host: String,
+}
 
 /// A backend that can answer pvAccess GET / PUT / MONITOR requests for a
 /// set of named PVs.
@@ -32,6 +55,22 @@ pub trait ChannelSource: Send + Sync + 'static {
         name: &str,
         value: PvField,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
+    /// Apply a PUT with the downstream peer's [`ChannelContext`].
+    /// Default impl forwards to [`Self::put_value`] (ignores ctx);
+    /// gateways override this to route the put through a
+    /// per-credential upstream client pool. Mirrors pvxs's
+    /// `Source::onCreate` plumbing of the connecting peer's
+    /// credentials.
+    fn put_value_ctx(
+        &self,
+        name: &str,
+        value: PvField,
+        ctx: ChannelContext,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let _ = ctx;
+        self.put_value(name, value)
+    }
 
     /// True iff PUT is allowed against this PV (for ACL gating).
     fn is_writable(&self, name: &str) -> impl std::future::Future<Output = bool> + Send;
@@ -102,6 +141,12 @@ pub trait ChannelSourceObj: Send + Sync {
         name: &'a str,
         value: PvField,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+    fn put_value_ctx<'a>(
+        &'a self,
+        name: &'a str,
+        value: PvField,
+        ctx: ChannelContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
     fn is_writable<'a>(
         &'a self,
         name: &'a str,
@@ -154,6 +199,14 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
         value: PvField,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(<Self as ChannelSource>::put_value(self, name, value))
+    }
+    fn put_value_ctx<'a>(
+        &'a self,
+        name: &'a str,
+        value: PvField,
+        ctx: ChannelContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(<Self as ChannelSource>::put_value_ctx(self, name, value, ctx))
     }
     fn is_writable<'a>(
         &'a self,

@@ -584,20 +584,41 @@ async fn run_engine(
 
             res = search_socket.recv_from(&mut search_buf) => {
                 if let Ok((n, _from)) = res {
-                    handle_search_response(
-                        &search_buf[..n], &mut pending, &mut by_name, &beacons, &ignore_guids,
-                    );
+                    // Multi-message drain (P-G10): pvxs packs many
+                    // SEARCH messages per UDP datagram. Without the
+                    // loop we'd parse only the first and silently
+                    // drop the rest.
+                    let mut pos = 0usize;
+                    while pos < n {
+                        let consumed = handle_search_response(
+                            &search_buf[pos..n],
+                            &mut pending, &mut by_name, &beacons, &ignore_guids,
+                        );
+                        if consumed == 0 {
+                            break;
+                        }
+                        pos = pos.saturating_add(consumed);
+                    }
                 }
             }
 
             res = beacon_recv => {
                 if let Ok((n, from)) = res {
                     let mut poke = false;
-                    handle_beacon(
-                        &beacon_buf[..n], &beacons, &mut pending,
-                        &mut subscribers, &mut announced, &mut poke,
-                        &ignore_guids, from,
-                    );
+                    // Multi-message drain (P-G10): same rationale as
+                    // search responses — beacons can be chained.
+                    let mut pos = 0usize;
+                    while pos < n {
+                        let consumed = handle_beacon(
+                            &beacon_buf[pos..n], &beacons, &mut pending,
+                            &mut subscribers, &mut announced, &mut poke,
+                            &ignore_guids, from,
+                        );
+                        if consumed == 0 {
+                            break;
+                        }
+                        pos = pos.saturating_add(consumed);
+                    }
                     if poke && fast_ticks_remaining == 0 {
                         tick = interval(Duration::from_millis(200));
                         tick.tick().await;
@@ -723,26 +744,28 @@ async fn broadcast(socket: &UdpSocket, packet: &[u8], extra_targets: &[SocketAdd
     }
 }
 
+/// Returns bytes consumed from `bytes` so the caller can advance to
+/// the next chained message in the same datagram (P-G10).
 fn handle_search_response(
     bytes: &[u8],
     pending: &mut HashMap<u32, Pending>,
     by_name: &mut HashMap<String, u32>,
     _beacons: &Arc<BeaconTracker>,
     ignore_guids: &std::collections::HashSet<[u8; 12]>,
-) {
-    let Ok(Some((frame, _))) = try_parse_frame(bytes) else {
-        return;
+) -> usize {
+    let Ok(Some((frame, consumed))) = try_parse_frame(bytes) else {
+        return 0;
     };
     let Ok(resp) = decode_search_response(&frame) else {
-        return;
+        return consumed;
     };
     if !resp.found {
-        return;
+        return consumed;
     }
     // pvxs procSearchReply (client.cpp:857-863) drops responses whose
     // server GUID is on the blocklist.
     if ignore_guids.contains(&resp.guid) {
-        return;
+        return consumed;
     }
     for cid in resp.cids {
         let server = rewrite_loopback(resp.server_addr);
@@ -766,8 +789,11 @@ fn handle_search_response(
             }
         }
     }
+    consumed
 }
 
+/// Returns bytes consumed from `bytes` so the caller can advance to
+/// the next chained beacon in the same datagram (P-G10).
 #[allow(clippy::too_many_arguments)]
 fn handle_beacon(
     bytes: &[u8],
@@ -778,35 +804,35 @@ fn handle_beacon(
     poke_request: &mut bool,
     ignore_guids: &std::collections::HashSet<[u8; 12]>,
     peer: SocketAddr,
-) {
-    let Ok(Some((frame, _))) = try_parse_frame(bytes) else {
-        return;
+) -> usize {
+    let Ok(Some((frame, consumed))) = try_parse_frame(bytes) else {
+        return 0;
     };
     if frame.header.command != Command::Beacon.code() {
-        return;
+        return consumed;
     }
     let order = frame.header.flags.byte_order();
     let mut cur = Cursor::new(frame.payload.as_slice());
     let Ok(guid) = cur.get_bytes(12) else {
-        return;
+        return consumed;
     };
     // pvxs udp_collector.cpp::CMD_BEACON skips 4 bytes here:
     // flags(u8) + seq(u8) + change(u16). server.cpp::doBeacons emits
     // exactly this layout.
     let Ok(_flags) = cur.get_u8() else {
-        return;
+        return consumed;
     };
     let Ok(_seq) = cur.get_u8() else {
-        return;
+        return consumed;
     };
     let Ok(_change) = cur.get_u16(order) else {
-        return;
+        return consumed;
     };
     let Ok(addr_bytes) = cur.get_bytes(16) else {
-        return;
+        return consumed;
     };
     let Ok(port) = cur.get_u16(order) else {
-        return;
+        return consumed;
     };
     let proto = decode_string(&mut cur, order)
         .ok()
@@ -819,7 +845,7 @@ fn handle_beacon(
     let mut addr_arr = [0u8; 16];
     addr_arr.copy_from_slice(&addr_bytes);
     let Some(ip) = ip_from_bytes(&addr_arr) else {
-        return;
+        return consumed;
     };
     // pvxs udp_collector.cpp:480: when the beacon's advertised server
     // address is 0.0.0.0 (server bound wildcard), substitute the UDP
@@ -830,7 +856,7 @@ fn handle_beacon(
     let server = SocketAddr::new(resolved_ip, port);
 
     if ignore_guids.contains(&guid_arr) {
-        return;
+        return consumed;
     }
     let allow_reconnect = beacons.observe(server, guid_arr);
     let first_announce = announced.insert((server, guid_arr));
@@ -856,6 +882,7 @@ fn handle_beacon(
         };
         subscribers.retain(|tx| tx.try_send(evt.clone()).is_ok());
     }
+    consumed
 }
 
 fn rewrite_loopback(addr: SocketAddr) -> SocketAddr {

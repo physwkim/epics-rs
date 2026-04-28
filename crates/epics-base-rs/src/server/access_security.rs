@@ -36,7 +36,31 @@ pub struct AccessSecurityConfig {
 
 impl AccessSecurityConfig {
     /// Check access for a given ASG, hostname, and username.
+    ///
+    /// Convenience that omits the ASL gate (treats every rule as
+    /// applicable). Equivalent to `check_access_asl(..., 0)` with
+    /// rules typically declared at level 0/1. New code should call
+    /// [`Self::check_access_asl`] so a per-record ASL can correctly
+    /// disable a rule whose level is below the record's ASL.
     pub fn check_access(&self, asg_name: &str, host: &str, user: &str) -> AccessLevel {
+        self.check_access_asl(asg_name, host, user, 0)
+    }
+
+    /// Check access taking the per-record ASL into account.
+    ///
+    /// Per epics-base `asLibRoutines.c::asCompute`: a rule with
+    /// `RULE(N, …)` only applies when the record's ASL ≤ N. The
+    /// canonical example is `RULE(0, READ) RULE(1, WRITE)` — every
+    /// record is readable, but only records with ASL ≥ 1 are
+    /// writable. Without this gate, a low-ASL record's protection
+    /// is silently equivalent to ASL 0 (closes C-G6).
+    pub fn check_access_asl(
+        &self,
+        asg_name: &str,
+        host: &str,
+        user: &str,
+        record_asl: u8,
+    ) -> AccessLevel {
         let asg = match self.asg.get(asg_name) {
             Some(a) => a,
             None => {
@@ -57,6 +81,13 @@ impl AccessSecurityConfig {
         let mut can_write = false;
 
         for rule in &asg.rules {
+            // ASL gate: a rule only applies when its level is at
+            // least the record's ASL. (epics-base treats the rule
+            // level as a *ceiling* on what it grants — record_asl
+            // greater than rule.level disables that rule.)
+            if record_asl > rule.level {
+                continue;
+            }
             let user_match = if rule.uag.is_empty() {
                 true // No UAG restriction = all users
             } else {

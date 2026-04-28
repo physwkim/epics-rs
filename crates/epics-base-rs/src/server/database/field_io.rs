@@ -142,6 +142,22 @@ impl PvDatabase {
         self.put_pv_and_post_with_origin(name, value, 0).await
     }
 
+    /// Push a monitor event holding the simple PV's *current* value
+    /// but with explicit alarm severity/status. Used by the gateway
+    /// to surface upstream-disconnect to downstream monitor
+    /// subscribers without dropping the shadow PV (which would force
+    /// downstream clients into ECA_DISCONN reconnect storms on every
+    /// transient hiccup). Returns `ChannelNotFound` for record-backed
+    /// PVs — those carry their own `common.sevr/stat` in record
+    /// processing.
+    pub async fn post_alarm(&self, name: &str, severity: u16, status: u16) -> CaResult<()> {
+        if let Some(pv) = self.inner.simple_pvs.read().await.get(name).cloned() {
+            pv.post_alarm(severity, status).await;
+            return Ok(());
+        }
+        Err(crate::error::CaError::ChannelNotFound(name.to_string()))
+    }
+
     /// Like `put_pv_and_post` but with explicit origin tag.
     pub async fn put_pv_and_post_with_origin(
         &self,
