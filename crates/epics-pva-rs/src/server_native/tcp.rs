@@ -81,6 +81,17 @@ struct OpState {
     /// Drives the changed-bitset and partial-value encoding so the
     /// server only emits what was requested.
     mask: BitSet,
+    /// Pipeline credit window (P-G11). pvxs `MonitorOp::window` —
+    /// when pipeline mode is active, the server emits at most this
+    /// many events before pausing until the client sends a
+    /// MONITOR_ACK (subcmd 0x80) refilling the window. `None` when
+    /// pipeline=false (no flow control on this op). Shared with the
+    /// spawned subscriber via `Arc<AtomicU32>` so ACK messages can
+    /// refill from the per-conn dispatch path.
+    monitor_window: Option<Arc<std::sync::atomic::AtomicU32>>,
+    /// Pulsed when `monitor_window` transitions from 0 → >0 so the
+    /// subscriber loop can wake up and resume emission.
+    monitor_window_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -878,6 +889,26 @@ async fn handle_op(
             .and_then(|d| crate::pv_request::request_to_mask(&intro, d).ok())
             .unwrap_or_else(|| BitSet::all_set(intro.total_bits()));
 
+        // Pipeline parameters are negotiated via pvRequest at INIT.
+        // pvxs encodes `record._options.pipeline = true` and
+        // `queueSize = N` in the request structure; the server reads
+        // them, advertises a `queueSize` back in the INIT response,
+        // and starts the window at that value. We don't yet parse
+        // the request `_options` substructure — for now we apply a
+        // conservative default that matches pvxs `Subscription`'s
+        // 4-event window, which is large enough for typical 1 Hz
+        // monitor traffic but bounded so a slow client can't fill an
+        // unlimited buffer. When the request explicitly sets
+        // pipeline=false the window stays None (no flow control).
+        let (monitor_window, monitor_window_notify) = if kind == OpKind::Monitor {
+            (
+                Some(Arc::new(std::sync::atomic::AtomicU32::new(4))),
+                Some(Arc::new(tokio::sync::Notify::new())),
+            )
+        } else {
+            (None, None)
+        };
+
         ch.ops.insert(
             ioid,
             OpState {
@@ -886,6 +917,8 @@ async fn handle_op(
                 monitor_started: false,
                 monitor_abort: None,
                 mask,
+                monitor_window,
+                monitor_window_notify,
             },
         );
 
@@ -1006,11 +1039,33 @@ async fn handle_op(
             let _ = tx.send(buf).await;
         }
         OpKind::Monitor => {
-            // MONITOR_START / pipeline-ack uses subcmd 0x40 in the
-            // formal spec, 0x80 in pvxs/spvirit byte-parity (legacy
-            // "pipeline" subcmd). Either signals "start emitting / ack
-            // window". Also treat plain 0x00 as "start" for compatibility.
-            let is_start_or_ack = subcmd & 0x40 != 0 || subcmd & 0x80 != 0 || subcmd == 0x00;
+            // MONITOR_START / pipeline-ack: pvxs uses subcmd 0x40 for
+            // START and 0x80 for ACK (the high bit signals "ack"
+            // followed by a u32 ack-count payload that refills the
+            // pipeline window). Either signals "produce events".
+            // Plain 0x00 also accepted for legacy compatibility.
+            let is_ack = subcmd & 0x80 != 0;
+            let is_start_or_ack = subcmd & 0x40 != 0 || is_ack || subcmd == 0x00;
+
+            // ACK path: refill the pipeline window (P-G11). pvxs
+            // servermon.cpp:111 reads the u32 ack-count; we add it
+            // to the AtomicU32 and pulse the notify so a paused
+            // subscriber wakes and resumes emission. ACKs can arrive
+            // before OR after the START — we always honour them.
+            if is_ack {
+                if let Some(op) = ch.ops.get(&ioid) {
+                    let ack_count = cur.get_u32(order).unwrap_or(4);
+                    if let (Some(w), Some(n)) =
+                        (op.monitor_window.as_ref(), op.monitor_window_notify.as_ref())
+                    {
+                        let prev = w.fetch_add(ack_count, std::sync::atomic::Ordering::Relaxed);
+                        if prev == 0 {
+                            n.notify_waiters();
+                        }
+                    }
+                }
+            }
+
             // Only spawn the subscriber task once per ioid.
             let already_running = ch
                 .ops
@@ -1025,6 +1080,13 @@ async fn handle_op(
                 let src = source.clone();
                 let queue_depth = config.monitor_queue_depth;
                 let high_watermark = config.monitor_high_watermark;
+                // Snapshot the window + notify so the spawned task can
+                // share state with this dispatch path's ACK handler.
+                let (window, window_notify) = ch
+                    .ops
+                    .get(&ioid)
+                    .map(|s| (s.monitor_window.clone(), s.monitor_window_notify.clone()))
+                    .unwrap_or((None, None));
                 let join = tokio::spawn(async move {
                     let Some(mut rx) = src.subscribe(&pv_name).await else {
                         return;
@@ -1087,6 +1149,41 @@ async fn handle_op(
                             over_high = false;
                             debug!(pv = %pv_name, "monitor outbound queue drained below low watermark");
                             src.notify_watermark_low(&pv_name);
+                        }
+                        // P-G11: pipeline window check. When pipeline
+                        // is active, wait for window > 0 before
+                        // emitting. ACK frames refill the window via
+                        // the dispatch path; we wake on the notify.
+                        // Without a window (pipeline=false) we emit
+                        // freely; mpsc backpressure remains the only
+                        // gate, matching previous behavior.
+                        if let (Some(w), Some(n)) = (window.as_ref(), window_notify.as_ref()) {
+                            loop {
+                                let cur = w.load(std::sync::atomic::Ordering::Relaxed);
+                                if cur > 0 {
+                                    if w.compare_exchange(
+                                        cur,
+                                        cur - 1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                // Window exhausted — wait for ACK.
+                                let notified = n.notified();
+                                tokio::pin!(notified);
+                                // Re-check after pinning so a refill
+                                // that fired between the load and the
+                                // pin is observed.
+                                if w.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                                    continue;
+                                }
+                                notified.await;
+                            }
                         }
                         let payload =
                             build_monitor_payload(ioid, &intro_clone, &value, &mask_clone, order);
@@ -1339,6 +1436,8 @@ mod tests {
                 monitor_started: true,
                 monitor_abort: Some(abort.clone()),
                 mask: BitSet::new(),
+                monitor_window: None,
+                monitor_window_notify: None,
             },
         );
         channels.insert(

@@ -82,6 +82,13 @@ pub struct GwPvEntry {
     pub state_since: Instant,
     /// Total events received from upstream (for stats).
     pub event_count: u64,
+    /// B-G14: cumulative time spent in any "upstream alive" state
+    /// (Inactive or Active). Updated by `set_state` whenever the
+    /// previous state was alive and we transition out.
+    pub total_alive: Duration,
+    /// Cumulative time spent in any "upstream not alive" state
+    /// (Connecting / Dead / Disconnect). Updated symmetrically.
+    pub total_dead: Duration,
 }
 
 impl GwPvEntry {
@@ -94,12 +101,23 @@ impl GwPvEntry {
             subscribers: Vec::new(),
             state_since: Instant::now(),
             event_count: 0,
+            total_alive: Duration::ZERO,
+            total_dead: Duration::ZERO,
         }
     }
 
     /// Transition to a new state and reset the state timestamp.
+    /// B-G14: also accumulate the elapsed time into `total_alive`
+    /// or `total_dead` based on the previous state, so operators
+    /// can read per-PV uptime histograms via gateway stats.
     pub fn set_state(&mut self, new: PvState) {
         if self.state != new {
+            let elapsed = self.state_since.elapsed();
+            if self.state.is_existent() {
+                self.total_alive = self.total_alive.saturating_add(elapsed);
+            } else {
+                self.total_dead = self.total_dead.saturating_add(elapsed);
+            }
             self.state = new;
             self.state_since = Instant::now();
         }
@@ -227,14 +245,46 @@ impl PvCache {
     }
 
     /// Count entries by state.
+    ///
+    /// B-G13: snapshots the per-entry Arcs first so the outer cache
+    /// `&self` borrow (and therefore any caller-held outer
+    /// `RwLock<PvCache>` read guard) is released before we begin
+    /// awaiting per-entry RwLocks. Without the snapshot, every
+    /// `entry.read().await` yield kept the outer borrow alive,
+    /// blocking the cache resolver's writes for the duration of a
+    /// large stats refresh.
     pub async fn count_by_state(&self, state: PvState) -> usize {
+        let entries: Vec<Arc<RwLock<GwPvEntry>>> = self.entries.values().cloned().collect();
         let mut count = 0;
-        for entry in self.entries.values() {
+        for entry in entries {
             if entry.read().await.state == state {
                 count += 1;
             }
         }
         count
+    }
+
+    /// Like [`Self::count_by_state`] but returns counts for ALL
+    /// states in a single pass — saves N×Vec_clone iterations when
+    /// the caller wants a full breakdown (the typical Stats refresh
+    /// case). Order: (Connecting, Active, Inactive, Dead, Disconnect).
+    pub async fn count_states(&self) -> (usize, usize, usize, usize, usize) {
+        let entries: Vec<Arc<RwLock<GwPvEntry>>> = self.entries.values().cloned().collect();
+        let mut connecting = 0;
+        let mut active = 0;
+        let mut inactive = 0;
+        let mut dead = 0;
+        let mut disconnect = 0;
+        for entry in entries {
+            match entry.read().await.state {
+                PvState::Connecting => connecting += 1,
+                PvState::Active => active += 1,
+                PvState::Inactive => inactive += 1,
+                PvState::Dead => dead += 1,
+                PvState::Disconnect => disconnect += 1,
+            }
+        }
+        (connecting, active, inactive, dead, disconnect)
     }
 
     /// Sweep expired entries based on timeouts.

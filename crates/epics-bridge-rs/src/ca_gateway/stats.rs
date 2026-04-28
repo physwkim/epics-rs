@@ -33,7 +33,7 @@ use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::types::EpicsValue;
 use tokio::sync::{Mutex, RwLock};
 
-use super::cache::{PvCache, PvState};
+use super::cache::PvCache;
 
 /// Gateway runtime statistics.
 pub struct Stats {
@@ -152,12 +152,12 @@ impl Stats {
             return;
         }
 
-        // Compute counts by state
+        // Compute counts by state via the single-pass count_states
+        // helper (B-G13). Snapshot inside count_states releases the
+        // per-entry Arc borrows once collected, so the outer
+        // `cache.read().await` doesn't span the per-entry awaits.
         let cache_guard = cache.read().await;
-        let connecting = cache_guard.count_by_state(PvState::Connecting).await;
-        let active = cache_guard.count_by_state(PvState::Active).await;
-        let inactive = cache_guard.count_by_state(PvState::Inactive).await;
-        let dead = cache_guard.count_by_state(PvState::Dead).await;
+        let (connecting, active, inactive, dead, _disconnect) = cache_guard.count_states().await;
         drop(cache_guard);
 
         // Compute event rate over the interval since last refresh

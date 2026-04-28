@@ -207,6 +207,15 @@ impl SearchEngine {
             .await;
     }
 
+    /// Most recent GUID this engine's BeaconTracker has observed for
+    /// `addr`. Used by Channel::ensure_active to detect server
+    /// replacement at the same address (P-G12). None when the
+    /// address has never produced a beacon (or we have no beacon
+    /// listener for it).
+    pub fn beacon_guid_for(&self, addr: SocketAddr) -> Option<[u8; 12]> {
+        self.beacons.guid_for(addr)
+    }
+
     /// Force the engine into fast-tick mode (200 ms × 30 ticks ≈ 6 s)
     /// and reset every pending search's retry deadline. Equivalent to
     /// pvxs `Context::hurryUp`: lets an application kick all pending

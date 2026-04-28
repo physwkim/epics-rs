@@ -561,8 +561,25 @@ impl GatewayServer {
             None
         };
 
-        // Run downstream CaServer (blocks)
-        let downstream_result = downstream.run().await;
+        // Run downstream CaServer until either the server returns
+        // (fatal I/O) or SIGINT/SIGTERM arrives (B-G15: graceful
+        // shutdown). On signal we tear down upstream subscriptions
+        // first so the upstream IOC sees a clean disconnect, then
+        // abort the auxiliary tasks.
+        let downstream_result = {
+            let downstream_run = downstream.run();
+            tokio::pin!(downstream_run);
+            let ctrl_c = tokio::signal::ctrl_c();
+            tokio::pin!(ctrl_c);
+            tokio::select! {
+                r = &mut downstream_run => r,
+                _ = &mut ctrl_c => {
+                    tracing::info!("ca-gateway-rs: SIGINT received — shutting down");
+                    self.upstream.write().await.shutdown().await;
+                    Ok(())
+                }
+            }
+        };
 
         // Cleanup
         cleanup_handle.abort();
@@ -590,6 +607,7 @@ impl GatewayServer {
         let cache = self.cache.clone();
         let pvlist = self.pvlist.clone();
         let access = self.access.clone();
+        let upstream = self.upstream.clone();
 
         Some(tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
@@ -600,8 +618,8 @@ impl GatewayServer {
                     return;
                 }
             };
-            let handler =
-                CommandHandler::new(cache, pvlist, access, pvlist_path, access_path);
+            let handler = CommandHandler::new(cache, pvlist, access, pvlist_path, access_path)
+                .with_upstream(upstream);
             tracing::info!(
                 command_file = %cmd_path.display(),
                 "ca-gateway-rs: SIGUSR1 handler armed"

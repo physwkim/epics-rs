@@ -23,6 +23,7 @@ use crate::error::BridgeResult;
 use super::access::AccessConfig;
 use super::cache::PvCache;
 use super::pvlist::{PvList, parse_pvlist_file};
+use super::upstream::UpstreamManager;
 
 /// Commands that can be issued to a running gateway at runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +71,11 @@ pub struct CommandHandler {
     /// re-reads the file and `store`s the new `Arc<AccessConfig>` so
     /// every per-PV WriteHook picks up the new rules without restart.
     access: Arc<ArcSwap<AccessConfig>>,
+    /// Upstream subscription manager. ReloadPvList walks this on a
+    /// pvlist edit and unsubscribes any PVs that no longer match —
+    /// without the unsubscribe step, removed entries leak shadow
+    /// PVs and upstream channels until restart (B-G12).
+    upstream: Option<Arc<RwLock<UpstreamManager>>>,
     pvlist_path: Option<PathBuf>,
     access_path: Option<PathBuf>,
 }
@@ -86,9 +92,18 @@ impl CommandHandler {
             cache,
             pvlist,
             access,
+            upstream: None,
             pvlist_path,
             access_path,
         }
+    }
+
+    /// Attach the upstream manager so ReloadPvList can prune
+    /// subscriptions for removed PVs (B-G12). Must be called before
+    /// the handler is used; cache-stat commands work without it.
+    pub fn with_upstream(mut self, upstream: Arc<RwLock<UpstreamManager>>) -> Self {
+        self.upstream = Some(upstream);
+        self
     }
 
     /// Dispatch a command, returning the formatted output to print.
@@ -132,8 +147,29 @@ impl CommandHandler {
                 };
                 let new = parse_pvlist_file(path)?;
                 let count = new.entries.len();
-                self.pvlist.store(Arc::new(new));
-                Ok(format!("Reloaded pvlist: {count} rules\n"))
+                let new_arc = Arc::new(new);
+                self.pvlist.store(new_arc.clone());
+
+                // B-G12: prune subscriptions for PVs that the new
+                // pvlist no longer admits. Without this, removed
+                // entries leak shadow PVs and upstream channels
+                // until process restart. Match against the new
+                // pvlist via the same `match_name` the resolver
+                // uses so alias rewrites are honored.
+                let mut pruned: usize = 0;
+                if let Some(upstream) = &self.upstream {
+                    let cached_names: Vec<String> = self.cache.read().await.names();
+                    for name in cached_names {
+                        if new_arc.match_name(&name).is_none() {
+                            upstream.write().await.unsubscribe(&name).await;
+                            self.cache.write().await.remove(&name);
+                            pruned += 1;
+                        }
+                    }
+                }
+                Ok(format!(
+                    "Reloaded pvlist: {count} rules ({pruned} PVs pruned)\n"
+                ))
             }
             GatewayCommand::ReloadAccess => {
                 let path = match &self.access_path {
