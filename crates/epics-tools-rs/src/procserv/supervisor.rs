@@ -343,7 +343,35 @@ impl SupervisorState {
 
     /// Spawn the configured child and store the handle. Updates
     /// info-file + `PROCSERV_INFO` env var.
+    ///
+    /// Ordering note: `PROCSERV_INFO` is set BEFORE `ChildHandle::spawn`
+    /// so the child inherits it via `execvp`. The pre-spawn render
+    /// uses `child_pid: None`; the post-spawn info-file write uses the
+    /// real pid. C procServ does the same — the env-var carries
+    /// supervisor identity at exec time, the info file (separate
+    /// channel) carries the live child pid for `manage-procs`.
     async fn respawn_child(&mut self) -> ProcServResult<()> {
+        // 1. Render the env-var info BEFORE fork. child_pid is unknown
+        //    at this point (we haven't forked yet); leave it None.
+        let pre_spawn_info = InfoSnapshot {
+            procserv_pid: std::process::id() as i32,
+            child_pid: None,
+            child_exe: self.config.child.program.clone(),
+            child_args: self.config.child.args.clone(),
+        };
+        // SAFETY: PROCSERV_INFO is process-wide. Setting env in a
+        // running multi-threaded program is racy on POSIX; we accept
+        // that risk because (a) only this supervisor task touches it,
+        // (b) the child gets a fresh copy via execvp at fork time, so
+        // a torn read in another supervisor thread is harmless.
+        unsafe {
+            std::env::set_var(
+                "PROCSERV_INFO",
+                render_procserv_info(&pre_spawn_info),
+            )
+        };
+
+        // 2. Spawn — child inherits the env var.
         let spec = ChildSpec {
             program: self.config.child.program.clone(),
             args: self.config.child.args.clone(),
@@ -352,20 +380,15 @@ impl SupervisorState {
         };
         let (handle, rx) = ChildHandle::spawn(&spec)?;
 
-        let info = InfoSnapshot {
-            procserv_pid: std::process::id() as i32,
+        // 3. Write info file with the real child_pid for manage-procs.
+        let post_spawn_info = InfoSnapshot {
+            procserv_pid: pre_spawn_info.procserv_pid,
             child_pid: Some(handle.pid()),
-            child_exe: self.config.child.program.clone(),
-            child_args: self.config.child.args.clone(),
+            child_exe: pre_spawn_info.child_exe.clone(),
+            child_args: pre_spawn_info.child_args.clone(),
         };
-        // SAFETY: PROCSERV_INFO is process-wide. Setting env in a
-        // running multi-threaded program is racy on POSIX; we accept
-        // that risk because (a) only this supervisor task touches it,
-        // (b) a torn read of this var is harmless (the child gets a
-        // fresh copy via execvp). Mirrors C `setEnvVar` behaviour.
-        unsafe { std::env::set_var("PROCSERV_INFO", render_procserv_info(&info)) };
         if let Some(p) = &self.config.logging.info_path {
-            let _ = write_info_file(p, &info);
+            let _ = write_info_file(p, &post_spawn_info);
         }
 
         self.has_run_once = true;
