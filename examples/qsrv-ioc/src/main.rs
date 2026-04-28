@@ -69,7 +69,7 @@ async fn main() -> CaResult<()> {
     };
 
     // ── QSRV provider (group PVs, PVA-only) ──
-    let mut provider = BridgeProvider::new(db.clone());
+    let provider = BridgeProvider::new(db.clone());
     if let Some(ref path) = group_file {
         provider
             .load_group_file(path)

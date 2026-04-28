@@ -87,7 +87,7 @@ async fn run(args: Args) -> Result<(), String> {
     let server = builder.build().await.map_err(|e| e.to_string())?;
     let db = server.database().clone();
 
-    let mut provider = BridgeProvider::new(db);
+    let provider = BridgeProvider::new(db);
     if let Some(path) = args.group_file.as_ref() {
         provider
             .load_group_file(path.to_string_lossy().as_ref())

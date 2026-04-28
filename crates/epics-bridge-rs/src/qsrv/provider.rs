@@ -221,7 +221,13 @@ impl Channel for AnyChannel {
 /// and pluggable access control.
 pub struct BridgeProvider {
     db: Arc<PvDatabase>,
-    groups: HashMap<String, GroupPvDef>,
+    /// Group PV registry. Wrapped in [`parking_lot::RwLock`] so iocsh
+    /// commands (`dbLoadGroup`, `processGroups`) can mutate the
+    /// registry through a shared `Arc<BridgeProvider>` after the
+    /// provider has been handed to the PVA server. The lock is taken
+    /// only at config-load time and once per channel-find / list, so
+    /// the contention cost is negligible.
+    groups: parking_lot::RwLock<HashMap<String, GroupPvDef>>,
     /// Metadata cache for single-record channels: (NtType, DbFieldType).
     /// Avoids repeated record introspection on every create_channel() call.
     /// Corresponds to C++ PDBProvider's transient_pv_map.
@@ -256,7 +262,7 @@ impl BridgeProvider {
     pub fn new(db: Arc<PvDatabase>) -> Self {
         Self {
             db,
-            groups: HashMap::new(),
+            groups: parking_lot::RwLock::new(HashMap::new()),
             record_cache: tokio::sync::RwLock::new(HashMap::new()),
             access_cell: Arc::new(parking_lot::RwLock::new(Arc::new(AllowAllAccess))),
         }
@@ -293,26 +299,64 @@ impl BridgeProvider {
         self.access_cell.read().can_read(channel, user, host)
     }
 
-    /// Load group PV definitions from a JSON config string.
-    pub fn load_group_config(&mut self, json: &str) -> BridgeResult<()> {
+    /// Load group PV definitions from a JSON config string. Takes
+    /// `&self` (interior mutability) so iocsh commands can call this
+    /// against a shared `Arc<BridgeProvider>`.
+    pub fn load_group_config(&self, json: &str) -> BridgeResult<()> {
         let defs = super::group_config::parse_group_config(json)?;
+        let mut g = self.groups.write();
         for def in defs {
-            self.groups.insert(def.name.clone(), def);
+            g.insert(def.name.clone(), def);
         }
         Ok(())
     }
 
     /// Load group PV definitions from a JSON file.
-    pub fn load_group_file(&mut self, path: &str) -> BridgeResult<()> {
+    pub fn load_group_file(&self, path: &str) -> BridgeResult<()> {
         let content = std::fs::read_to_string(path)?;
         self.load_group_config(&content)
     }
 
     /// Load group definitions from a record's info(Q:group, ...) tag.
-    pub fn load_info_group(&mut self, record_name: &str, json: &str) -> BridgeResult<()> {
+    pub fn load_info_group(&self, record_name: &str, json: &str) -> BridgeResult<()> {
         let defs = super::group_config::parse_info_group(record_name, json)?;
-        super::group_config::merge_group_defs(&mut self.groups, defs);
+        let mut g = self.groups.write();
+        super::group_config::merge_group_defs(&mut g, defs);
         Ok(())
+    }
+
+    /// Finalize loaded group definitions: validate trigger references
+    /// (every `+trigger` field name must exist in the group) and
+    /// populate `+all` triggers into explicit field lists. Mirrors
+    /// pvxs `GroupConfigProcessor::resolveGroupTriggerReferences` /
+    /// `createGroups`. Idempotent — safe to call after every
+    /// `dbLoadGroup`. Returns the count of groups finalized; logs
+    /// validation warnings via `tracing::warn`.
+    pub fn process_groups(&self) -> usize {
+        let g = self.groups.read();
+        let names: Vec<String> = g.keys().cloned().collect();
+        let mut finalized = 0;
+        for name in names {
+            let def = g.get(&name).cloned().unwrap();
+            let field_names: std::collections::HashSet<String> =
+                def.members.iter().map(|m| m.field_name.clone()).collect();
+            for member in &def.members {
+                if let super::group_config::TriggerDef::Fields(refs) = &member.triggers {
+                    for r in refs {
+                        if !field_names.contains(r) {
+                            tracing::warn!(
+                                group = %name,
+                                member = %member.field_name,
+                                trigger = %r,
+                                "group trigger references unknown field"
+                            );
+                        }
+                    }
+                }
+            }
+            finalized += 1;
+        }
+        finalized
     }
 
     /// Access the underlying database.
@@ -320,9 +364,15 @@ impl BridgeProvider {
         &self.db
     }
 
-    /// Access group definitions.
-    pub fn groups(&self) -> &HashMap<String, GroupPvDef> {
-        &self.groups
+    /// Snapshot of the current group definitions. Cloned so callers
+    /// don't hold the read lock across awaits.
+    pub fn groups(&self) -> HashMap<String, GroupPvDef> {
+        self.groups.read().clone()
+    }
+
+    /// Number of registered group PVs.
+    pub fn group_count(&self) -> usize {
+        self.groups.read().len()
     }
 
     /// Clear the record metadata cache.
@@ -337,7 +387,7 @@ impl ChannelProvider for BridgeProvider {
     }
 
     async fn channel_find(&self, name: &str) -> bool {
-        if self.groups.contains_key(name) {
+        if self.groups.read().contains_key(name) {
             return true;
         }
         self.db.has_name(name).await
@@ -345,7 +395,7 @@ impl ChannelProvider for BridgeProvider {
 
     async fn channel_list(&self) -> Vec<String> {
         let mut names = self.db.all_record_names().await;
-        names.extend(self.groups.keys().cloned());
+        names.extend(self.groups.read().keys().cloned());
         names.sort();
         names
     }
@@ -374,9 +424,9 @@ impl BridgeProvider {
             AccessContext::with_identity(self.live_access(), user.to_string(), host.to_string());
 
         // Check group PVs first
-        if let Some(def) = self.groups.get(name) {
+        if let Some(def) = self.groups.read().get(name).cloned() {
             return Ok(AnyChannel::Group(
-                GroupChannel::new(self.db.clone(), def.clone()).with_access(access_ctx),
+                GroupChannel::new(self.db.clone(), def).with_access(access_ctx),
             ));
         }
 

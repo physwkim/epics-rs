@@ -28,6 +28,7 @@ pub mod channel;
 pub mod convert;
 pub mod group;
 pub mod group_config;
+pub mod iocsh;
 pub mod monitor;
 pub mod provider;
 #[cfg(feature = "qsrv")]
