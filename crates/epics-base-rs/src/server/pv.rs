@@ -19,6 +19,17 @@ fn per_channel_event_depth() -> usize {
         .max(4)
 }
 
+/// Per-PV subscriber cap (P-G14). Default 1024 — comfortably above
+/// any realistic dashboard fan-out, small enough to bound the
+/// per-PV `Vec<Subscriber>` under abuse. Override via
+/// `EPICS_CAS_MAX_SUBSCRIBERS_PER_PV`.
+fn max_subscribers_per_pv() -> usize {
+    crate::runtime::env::get("EPICS_CAS_MAX_SUBSCRIBERS_PER_PV")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1024)
+        .max(8)
+}
+
 /// Process-global counter of monitor events dropped because the
 /// per-channel mpsc was full AND the coalesce slot was already
 /// occupied by an even-newer overflow value. Exposed for the
@@ -268,7 +279,14 @@ impl ProcessVariable {
         }
     }
 
-    /// Add a subscriber. Returns the receiver for monitor events.
+    /// Add a subscriber. Returns the receiver for monitor events,
+    /// or `None` when the per-PV subscriber cap has been reached
+    /// (P-G14: defends against a misbehaving client opening many
+    /// MONITOR ops against one shared PV; per-channel cap limits
+    /// channels but not subscriber rows on a single PV). Operators
+    /// override the cap via `EPICS_CAS_MAX_SUBSCRIBERS_PER_PV`
+    /// (default 1024 — large enough for any realistic dashboard
+    /// fan-out, small enough to bound memory under abuse).
     ///
     /// Channel depth defaults to 64 events; the operator can lift the
     /// cap via `EPICS_CAS_MAX_EVENTS_PER_CHAN` for sites that need
@@ -280,7 +298,8 @@ impl ProcessVariable {
         sid: u32,
         data_type: DbFieldType,
         mask: u16,
-    ) -> mpsc::Receiver<MonitorEvent> {
+    ) -> Option<mpsc::Receiver<MonitorEvent>> {
+        let cap = max_subscribers_per_pv();
         let (tx, rx) = mpsc::channel(per_channel_event_depth());
         let sub = Subscriber {
             sid,
@@ -289,8 +308,18 @@ impl ProcessVariable {
             tx,
             coalesced: Arc::new(StdMutex::new(None)),
         };
-        self.subscribers.lock().await.push(sub);
-        rx
+        let mut subs = self.subscribers.lock().await;
+        if subs.len() >= cap {
+            tracing::warn!(
+                pv = %self.name,
+                live = subs.len(),
+                cap,
+                "PV subscriber cap reached, refusing add_subscriber"
+            );
+            return None;
+        }
+        subs.push(sub);
+        Some(rx)
     }
 
     /// Remove a subscriber by subscription ID.

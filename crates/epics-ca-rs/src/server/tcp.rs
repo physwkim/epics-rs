@@ -310,10 +310,23 @@ pub async fn run_tcp_listener(
     >,
     #[cfg(feature = "cap-tokens")] cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
 ) -> CaResult<()> {
-    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+    // C-G11: honor EPICS_CAS_INTF_ADDR_LIST for the TCP listener
+    // (was previously ignored — only the UDP responder respected
+    // it). Bind to the first configured interface; if the list is
+    // empty (the common case) fall back to 0.0.0.0. Multi-interface
+    // multi-listener support is left for a future round — operators
+    // who need it currently bind 0.0.0.0 and apply firewall rules.
+    let bind_ip: std::net::IpAddr = {
+        let cfg = super::addr_list::from_env();
+        cfg.intf_addrs
+            .first()
+            .map(|a| std::net::IpAddr::V4(*a))
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+    };
+    let listener = match TcpListener::bind((bind_ip, port)).await {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            TcpListener::bind(("0.0.0.0", 0)).await?
+            TcpListener::bind((bind_ip, 0)).await?
         }
         Err(e) => return Err(e.into()),
     };
@@ -1375,7 +1388,20 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
             {
                 match &entry.target {
                     ChannelTarget::SimplePv(pv) => {
-                        let rx = pv.add_subscriber(sub_id, native_type, mask).await;
+                        let rx_opt = pv.add_subscriber(sub_id, native_type, mask).await;
+                        let Some(rx) = rx_opt else {
+                            // P-G14: per-PV subscriber cap reached.
+                            // Skip the registration silently — the
+                            // warn log inside add_subscriber surfaces
+                            // it for operators. Client's outstanding
+                            // EVENT_ADD will eventually time out.
+                            tracing::warn!(
+                                pv = %pv.name,
+                                sub_id,
+                                "EVENT_ADD refused: PV subscriber cap reached"
+                            );
+                            return Ok(());
+                        };
 
                         // Send initial value
                         let snap = pv.snapshot().await;
