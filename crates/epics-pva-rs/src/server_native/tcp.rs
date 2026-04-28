@@ -163,10 +163,13 @@ type SrvWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 /// monitor subscribers) push fully-framed PVA messages into the
 /// channel; a single dedicated writer task drains it in arrival order.
 /// Replaces `Arc<Mutex<SrvWrite>>` so a slow client cannot block other
-/// producers waiting for the lock. Errors on the write side simply
-/// drop the receiver, after which sends become no-ops; the read loop
-/// will independently observe the dead socket and tear down.
-type SrvTx = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
+/// producers waiting for the lock. The channel is *bounded* —
+/// `await`-style sends propagate backpressure all the way back to the
+/// monitor subscribers / read loop, so memory cannot grow unbounded
+/// when the client is slow. Errors on the write side drop the
+/// receiver; subsequent sends fail and the read loop independently
+/// observes the dead socket and tears down.
+type SrvTx = tokio::sync::mpsc::Sender<Vec<u8>>;
 
 async fn handle_connection_io(
     source: DynSource,
@@ -183,10 +186,12 @@ async fn handle_connection_io(
     // it exits, closing the receiver. Subsequent `tx.send(...)` calls
     // succeed silently (we don't bubble) — the read loop independently
     // notices the dead socket via EOF or its idle timeout.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(config.write_queue_depth);
+    let writer_peer = peer;
     let _writer_task = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
-            if writer_raw.write_all(&frame).await.is_err() {
+            if let Err(e) = writer_raw.write_all(&frame).await {
+                debug!(peer = ?writer_peer, error = %e, "writer task: TCP write failed, dropping connection");
                 break;
             }
         }
@@ -215,7 +220,7 @@ async fn handle_connection_io(
             let h = PvaHeader::control(true, order_hb, ControlCommand::EchoRequest.code(), 0);
             let mut buf = Vec::with_capacity(8);
             h.write_into(&mut buf);
-            if tx_hb.send(buf).is_err() {
+            if tx_hb.send(buf).await.is_err() {
                 break;
             }
         }
@@ -231,11 +236,11 @@ async fn handle_connection_io(
         h.write_into(&mut buf);
         buf
     };
-    let _ = tx.send(set_bo);
+    let _ = tx.send(set_bo).await;
 
     // Step 2: send CONNECTION_VALIDATION request (server → client).
     let val_req = build_server_connection_validation(order, 87_040, 32_767, &["ca", "anonymous"]);
-    let _ = tx.send(val_req);
+    let _ = tx.send(val_req).await;
 
     // Step 3+: drive the read loop.
     let mut rx_buf: Vec<u8> = Vec::with_capacity(8192);
@@ -260,7 +265,7 @@ async fn handle_connection_io(
                     frame.header.payload_length,
                 );
                 h.write_into(&mut buf);
-                let _ = tx.send(buf);
+                let _ = tx.send(buf).await;
             }
             continue;
         }
@@ -281,7 +286,7 @@ async fn handle_connection_io(
                 let mut buf = Vec::new();
                 h.write_into(&mut buf);
                 buf.extend_from_slice(&payload);
-                let _ = tx.send(buf);
+                let _ = tx.send(buf).await;
                 handshake_complete = true;
                 continue;
             } else {
@@ -314,7 +319,7 @@ async fn handle_connection_io(
                     let mut buf = Vec::new();
                     h.write_into(&mut buf);
                     buf.extend_from_slice(&payload);
-                    let _ = tx.send(buf);
+                    let _ = tx.send(buf).await;
                     continue;
                 }
                 handle_create_channel(&source, &frame, &tx, &mut channels, order).await?;
@@ -397,7 +402,7 @@ async fn handle_connection_io(
                 );
                 h.write_into(&mut buf);
                 buf.extend_from_slice(&frame.payload);
-                let _ = tx.send(buf);
+                let _ = tx.send(buf).await;
             }
             _ => {
                 // Unhandled — keep going.
@@ -496,7 +501,7 @@ async fn handle_create_channel(
         let mut buf = Vec::new();
         h.write_into(&mut buf);
         buf.extend_from_slice(&payload);
-        let _ = tx.send(buf);
+        let _ = tx.send(buf).await;
         return Ok(());
     }
 
@@ -528,7 +533,7 @@ async fn handle_create_channel(
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    let _ = tx.send(buf);
+    let _ = tx.send(buf).await;
     Ok(())
 }
 
@@ -562,7 +567,7 @@ async fn handle_destroy_channel(
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    let _ = tx.send(buf);
+    let _ = tx.send(buf).await;
     Ok(())
 }
 
@@ -705,7 +710,7 @@ async fn handle_op(
         let mut buf = Vec::new();
         h.write_into(&mut buf);
         buf.extend_from_slice(&payload);
-        let _ = tx.send(buf);
+        let _ = tx.send(buf).await;
         return Ok(());
     }
 
@@ -741,7 +746,7 @@ async fn handle_op(
             let mut buf = Vec::new();
             h.write_into(&mut buf);
             buf.extend_from_slice(&payload);
-            let _ = tx.send(buf);
+            let _ = tx.send(buf).await;
         }
         OpKind::Put => {
             // Read bitset (which fields client is putting) + value.
@@ -776,7 +781,7 @@ async fn handle_op(
             let mut buf = Vec::new();
             h.write_into(&mut buf);
             buf.extend_from_slice(&payload);
-            let _ = tx.send(buf);
+            let _ = tx.send(buf).await;
         }
         OpKind::Monitor => {
             // MONITOR_START / pipeline-ack uses subcmd 0x40 in the
@@ -806,7 +811,7 @@ async fn handle_op(
                         let payload = build_monitor_payload(
                             ioid, &intro_clone, &initial, &mask_clone, order,
                         );
-                        if tx_clone.send(payload).is_err() {
+                        if tx_clone.send(payload).await.is_err() {
                             return;
                         }
                     }
@@ -837,7 +842,7 @@ async fn handle_op(
                         let payload = build_monitor_payload(
                             ioid, &intro_clone, &value, &mask_clone, order,
                         );
-                        if tx_clone.send(payload).is_err() {
+                        if tx_clone.send(payload).await.is_err() {
                             return;
                         }
                     }
@@ -846,7 +851,7 @@ async fn handle_op(
                     // subcmd=0x10 to signal end-of-stream so the client can
                     // tear down cleanly.
                     let finish = build_monitor_finish(ioid, order);
-                    let _ = tx_clone.send(finish);
+                    let _ = tx_clone.send(finish).await;
                 });
                 if let Some(s) = ch.ops.get_mut(&ioid) {
                     s.monitor_started = true;
@@ -896,7 +901,7 @@ async fn handle_op(
             let mut buf = Vec::new();
             h.write_into(&mut buf);
             buf.extend_from_slice(&payload);
-            let _ = tx.send(buf);
+            let _ = tx.send(buf).await;
         }
     }
     Ok(())
@@ -943,7 +948,7 @@ async fn handle_get_field(
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    let _ = tx.send(buf);
+    let _ = tx.send(buf).await;
     Ok(())
 }
 
@@ -968,7 +973,7 @@ async fn send_op_error(
     let mut buf = Vec::new();
     h.write_into(&mut buf);
     buf.extend_from_slice(&payload);
-    let _ = tx.send(buf);
+    let _ = tx.send(buf).await;
     Ok(())
 }
 
@@ -1030,6 +1035,106 @@ mod tests {
     use super::*;
     use crate::client_native::decode::{OpResponse, decode_op_response, try_parse_frame};
     use crate::pvdata::{PvStructure, ScalarType, ScalarValue};
+
+    fn synth_frame(command: Command, order: ByteOrder, payload: Vec<u8>) -> Frame {
+        let header = PvaHeader::application(false, order, command.code(), payload.len() as u32);
+        Frame { header, payload }
+    }
+
+    #[test]
+    fn handle_message_does_not_panic_on_well_formed_input() {
+        // Wire layout: ioid (u32) + messageType (u8) + message (string).
+        // We can't easily inspect tracing output here, so the assertion is
+        // simply that the handler tolerates each severity level without
+        // panicking and consumes the cursor cleanly.
+        let order = ByteOrder::Little;
+        let peer = "127.0.0.1:5075".parse::<SocketAddr>().unwrap();
+        for mtype in [0u8, 1, 2, 3, 9] {
+            let mut payload = Vec::new();
+            payload.put_u32(0xDEADBEEF, order); // ioid
+            payload.put_u8(mtype);
+            crate::proto::encode_string_into("hello from client", order, &mut payload);
+            let frame = synth_frame(Command::Message, order, payload);
+            handle_message(&frame, order, &peer); // must not panic
+        }
+
+        // Truncated payloads must also not panic — handler should bail
+        // silently after the first read failure.
+        let frame_short = synth_frame(Command::Message, order, vec![0x01, 0x02]);
+        handle_message(&frame_short, order, &peer);
+    }
+
+    #[tokio::test]
+    async fn cancel_request_aborts_monitor_and_clears_started_flag() {
+        let order = ByteOrder::Little;
+        let sid: u32 = 7;
+        let ioid: u32 = 99;
+
+        // Stand up a fake OpState whose `monitor_abort` points at a real
+        // task we can observe being cancelled.
+        let task = tokio::spawn(async move {
+            // Loop until aborted by the Drop guard. If the test ever
+            // returns without the abort firing, the JoinHandle will see
+            // this future complete normally — the assertion below catches
+            // that.
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+        let abort = Arc::new(AbortOnDrop(task.abort_handle()));
+
+        let mut channels: HashMap<u32, ChannelState> = HashMap::new();
+        let mut ops = HashMap::new();
+        ops.insert(
+            ioid,
+            OpState {
+                intro: FieldDesc::Variant,
+                kind: OpKind::Monitor,
+                monitor_started: true,
+                monitor_abort: Some(abort.clone()),
+                mask: BitSet::new(),
+            },
+        );
+        channels.insert(
+            sid,
+            ChannelState {
+                name: "dut".into(),
+                cid: 1,
+                sid,
+                introspection: None,
+                ops,
+            },
+        );
+
+        // Build the CancelRequest payload: sid + ioid.
+        let mut payload = Vec::new();
+        payload.put_u32(sid, order);
+        payload.put_u32(ioid, order);
+        let frame = synth_frame(Command::CancelRequest, order, payload);
+        handle_cancel_request(&frame, &mut channels, order);
+
+        // Op must still be in the map (cancel is non-destructive), but
+        // `monitor_started` must reset and the abort guard must be cleared.
+        let op = channels
+            .get(&sid)
+            .and_then(|c| c.ops.get(&ioid))
+            .expect("op preserved across cancel");
+        assert!(!op.monitor_started, "monitor_started should reset");
+        assert!(op.monitor_abort.is_none(), "abort guard should be dropped");
+
+        // Drop the only remaining strong ref — this fires the abort
+        // (already triggered above when the OpState's clone dropped).
+        drop(abort);
+
+        // The task must terminate (with `cancelled` == true) within a
+        // reasonable window, otherwise the cancel was a no-op.
+        let join = tokio::time::timeout(Duration::from_millis(500), task).await;
+        let outcome = join.expect("aborted task should finish quickly");
+        assert!(
+            outcome.unwrap_err().is_cancelled(),
+            "task should have been aborted by the Drop guard"
+        );
+    }
 
     #[test]
     fn monitor_payload_orders_overrun_after_value() {

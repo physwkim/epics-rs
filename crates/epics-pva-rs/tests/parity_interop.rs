@@ -40,5 +40,9 @@ mod testudp_port;
 mod testxcode_port;
 #[path = "parity/tls_interop.rs"]
 mod tls_interop;
+#[path = "parity/test_monitor_finish.rs"]
+mod test_monitor_finish;
+#[path = "parity/test_pvrequest_filter.rs"]
+mod test_pvrequest_filter;
 #[path = "parity/wire_dump.rs"]
 mod wire_dump;

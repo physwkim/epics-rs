@@ -61,6 +61,12 @@ pub struct PvaServerConfig {
     /// `pvmonitor` / `pvget` is required. Default: `false` for maximum
     /// compatibility.
     pub emit_type_cache: bool,
+    /// Outbound queue depth (number of pending PVA frames) per
+    /// connection. The dedicated writer task drains this; producers
+    /// `await` when the queue is full, propagating backpressure to the
+    /// monitor subscribers / read loop instead of letting memory grow
+    /// unbounded for slow clients. Default: 1024.
+    pub write_queue_depth: usize,
 }
 
 impl Default for PvaServerConfig {
@@ -81,6 +87,7 @@ impl Default for PvaServerConfig {
             auto_beacon: true,
             interfaces: Vec::new(),
             emit_type_cache: false,
+            write_queue_depth: 1024,
         }
     }
 }
