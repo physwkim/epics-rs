@@ -409,4 +409,158 @@ mod tests {
         };
         assert_eq!(u.field_count(), 2);
     }
+
+    // ── TypeDef builder — pvxs test/testtype.cpp::testTypeDef parity ──
+
+    #[test]
+    fn typedef_structure_with_scalar_member() {
+        let td = TypeDef::structure("epics:nt/NTScalar:1.0")
+            .scalar("value", ScalarType::Double)
+            .build();
+        match td {
+            FieldDesc::Structure { struct_id, fields } => {
+                assert_eq!(struct_id, "epics:nt/NTScalar:1.0");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "value");
+                assert!(matches!(fields[0].1, FieldDesc::Scalar(ScalarType::Double)));
+            }
+            other => panic!("expected Structure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typedef_structure_with_scalar_array_member() {
+        let td = TypeDef::structure("test:array")
+            .scalar_array("vals", ScalarType::Int)
+            .build();
+        match td {
+            FieldDesc::Structure { fields, .. } => {
+                assert!(matches!(
+                    fields[0].1,
+                    FieldDesc::ScalarArray(ScalarType::Int)
+                ));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn typedef_nested_structure_via_member() {
+        let alarm = TypeDef::structure("alarm_t")
+            .scalar("severity", ScalarType::Int)
+            .scalar("status", ScalarType::Int)
+            .scalar("message", ScalarType::String)
+            .build();
+        let nt = TypeDef::structure("epics:nt/NTScalar:1.0")
+            .scalar("value", ScalarType::Double)
+            .member(Member::new("alarm", alarm))
+            .build();
+        match nt {
+            FieldDesc::Structure { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[1].0, "alarm");
+                match &fields[1].1 {
+                    FieldDesc::Structure { struct_id, fields } => {
+                        assert_eq!(struct_id, "alarm_t");
+                        assert_eq!(fields.len(), 3);
+                        assert_eq!(fields[2].0, "message");
+                    }
+                    _ => panic!("inner must be Structure"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn typedef_structure_array() {
+        let td = TypeDef::structure_array("rows")
+            .scalar("a", ScalarType::Int)
+            .build();
+        assert!(matches!(td, FieldDesc::StructureArray { .. }));
+    }
+
+    #[test]
+    fn typedef_union_holds_variants_under_variants_field() {
+        let td = TypeDef::union("any")
+            .scalar("d", ScalarType::Double)
+            .scalar("i", ScalarType::Int)
+            .build();
+        match td {
+            FieldDesc::Union {
+                struct_id,
+                variants,
+            } => {
+                assert_eq!(struct_id, "any");
+                assert_eq!(variants.len(), 2);
+            }
+            _ => panic!("expected Union"),
+        }
+    }
+
+    #[test]
+    fn typedef_union_array() {
+        let td = TypeDef::union_array("cells")
+            .scalar("v", ScalarType::Float)
+            .build();
+        assert!(matches!(td, FieldDesc::UnionArray { .. }));
+    }
+
+    #[test]
+    fn typedef_empty_struct_id_allowed() {
+        let td = TypeDef::structure("").scalar("x", ScalarType::Int).build();
+        match td {
+            FieldDesc::Structure { struct_id, .. } => assert!(struct_id.is_empty()),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn typedef_total_bits_round_trips_through_field_desc() {
+        // TypeDef-built tree should produce the same total_bits as the
+        // hand-rolled equivalent — guards against silent drift between
+        // the builder and FieldDesc::total_bits.
+        let built = TypeDef::structure("epics:nt/NTScalar:1.0")
+            .scalar("value", ScalarType::Double)
+            .member(Member::new(
+                "alarm",
+                TypeDef::structure("alarm_t")
+                    .scalar("severity", ScalarType::Int)
+                    .scalar("status", ScalarType::Int)
+                    .scalar("message", ScalarType::String)
+                    .build(),
+            ))
+            .build();
+        let hand = FieldDesc::Structure {
+            struct_id: "epics:nt/NTScalar:1.0".into(),
+            fields: vec![
+                ("value".into(), FieldDesc::Scalar(ScalarType::Double)),
+                (
+                    "alarm".into(),
+                    FieldDesc::Structure {
+                        struct_id: "alarm_t".into(),
+                        fields: vec![
+                            ("severity".into(), FieldDesc::Scalar(ScalarType::Int)),
+                            ("status".into(), FieldDesc::Scalar(ScalarType::Int)),
+                            ("message".into(), FieldDesc::Scalar(ScalarType::String)),
+                        ],
+                    },
+                ),
+            ],
+        };
+        assert_eq!(built.total_bits(), hand.total_bits());
+    }
+
+    #[test]
+    fn typedef_member_scalar_helper() {
+        let m = Member::scalar("x", ScalarType::Boolean);
+        assert_eq!(m.name, "x");
+        assert!(matches!(m.desc, FieldDesc::Scalar(ScalarType::Boolean)));
+    }
+
+    #[test]
+    fn typedef_member_scalar_array_helper() {
+        let m = Member::scalar_array("xs", ScalarType::String);
+        assert!(matches!(m.desc, FieldDesc::ScalarArray(ScalarType::String)));
+    }
 }

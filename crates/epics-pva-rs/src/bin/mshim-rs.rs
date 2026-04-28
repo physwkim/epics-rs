@@ -135,6 +135,8 @@ async fn main() {
     };
 
     // Single send socket — the kernel routes per-destination IP.
+    // Tokio requires nonblocking sockets when adopting via
+    // `from_std`, otherwise the runtime registration panics.
     let send_sock_std = match StdUdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(e) => {
@@ -142,6 +144,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(e) = send_sock_std.set_nonblocking(true) {
+        eprintln!("mshim-rs: send_sock set_nonblocking: {e}");
+        std::process::exit(1);
+    }
     if let Err(e) = send_sock_std.set_broadcast(true) {
         eprintln!("mshim-rs: set_broadcast: {e}");
     }
@@ -238,5 +244,59 @@ async fn main() {
 async fn futures_join_all(handles: Vec<tokio::task::JoinHandle<()>>) {
     for h in handles {
         let _ = h.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_endpoint_ipv4_with_port() {
+        let ep = parse_endpoint("127.0.0.1:5076", 9999).unwrap();
+        assert_eq!(ep.ip.to_string(), "127.0.0.1");
+        assert_eq!(ep.port, 5076);
+        assert!(ep.extra.is_none());
+    }
+
+    #[test]
+    fn parse_endpoint_default_port_when_omitted() {
+        let ep = parse_endpoint("224.1.1.1", 5076).unwrap();
+        assert_eq!(ep.ip.to_string(), "224.1.1.1");
+        assert_eq!(ep.port, 5076);
+    }
+
+    #[test]
+    fn parse_endpoint_ttl_modifier_kept_as_extra() {
+        let ep = parse_endpoint("224.1.1.1,255", 5076).unwrap();
+        assert_eq!(ep.ip.to_string(), "224.1.1.1");
+        assert_eq!(ep.port, 5076);
+        assert_eq!(ep.extra.as_deref(), Some(",255"));
+    }
+
+    #[test]
+    fn parse_endpoint_iface_modifier_kept_as_extra() {
+        let ep = parse_endpoint("224.1.1.1@eth0", 5076).unwrap();
+        assert_eq!(ep.ip.to_string(), "224.1.1.1");
+        assert_eq!(ep.extra.as_deref(), Some("@eth0"));
+    }
+
+    #[test]
+    fn parse_endpoint_ipv4_port_with_iface() {
+        // pvxs syntax: "224.1.1.1:5076@eth0"
+        let ep = parse_endpoint("224.1.1.1:5076@eth0", 9999).unwrap();
+        assert_eq!(ep.ip.to_string(), "224.1.1.1");
+        assert_eq!(ep.port, 5076);
+        assert_eq!(ep.extra.as_deref(), Some("@eth0"));
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_bad_ip() {
+        assert!(parse_endpoint("not-an-ip", 5076).is_err());
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_bad_port() {
+        assert!(parse_endpoint("127.0.0.1:notaport", 5076).is_err());
     }
 }
