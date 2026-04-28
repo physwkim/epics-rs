@@ -50,6 +50,17 @@ struct ChannelState {
     ops: HashMap<u32, OpState>,
 }
 
+/// Shared abort guard: when the last clone is dropped (HashMap removal,
+/// connection end, ...), the spawned task is aborted automatically.
+#[derive(Debug)]
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct OpState {
@@ -58,6 +69,11 @@ struct OpState {
     /// For MONITOR ops: true once the subscriber task has been spawned.
     /// Subsequent START/pipeline-ack messages are no-ops.
     monitor_started: bool,
+    /// Abort guard for the spawned MONITOR subscriber. Drop semantics
+    /// (via `AbortOnDrop`) ensure the task is cancelled when the op is
+    /// removed from the channel map (DestroyRequest), when the channel
+    /// itself is removed (DestroyChannel), or when the connection ends.
+    monitor_abort: Option<Arc<AbortOnDrop>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -529,6 +545,10 @@ async fn handle_destroy_channel(
     let cid = cur
         .get_u32(order)
         .map_err(|e| PvaError::Decode(e.to_string()))?;
+    // Removing the channel drops every OpState in `ops`, which drops
+    // each `monitor_abort: Option<Arc<AbortOnDrop>>` and cancels the
+    // associated subscriber task — preventing orphaned spawns from
+    // holding the source's broadcast subscription.
     channels.remove(&sid);
     let mut payload = Vec::new();
     payload.put_u32(sid, order);
@@ -560,6 +580,8 @@ fn handle_destroy_request(
     let Ok(sid) = cur.get_u32(order) else { return };
     let Ok(ioid) = cur.get_u32(order) else { return };
     if let Some(ch) = channels.get_mut(&sid) {
+        // Removing the op drops `monitor_abort: Option<Arc<AbortOnDrop>>`.
+        // Once the last clone is dropped, the subscriber task aborts.
         ch.ops.remove(&ioid);
     }
 }
@@ -606,6 +628,7 @@ async fn handle_op(
                 intro: intro.clone(),
                 kind,
                 monitor_started: false,
+                monitor_abort: None,
             },
         );
 
@@ -732,15 +755,12 @@ async fn handle_op(
                 .map(|s| s.monitor_started)
                 .unwrap_or(false);
             if is_start_or_ack && !already_running {
-                if let Some(s) = ch.ops.get_mut(&ioid) {
-                    s.monitor_started = true;
-                }
                 let pv_name = ch.name.clone();
                 let intro_clone = intro.clone();
                 let writer_clone = writer.clone();
                 let src = source.clone();
                 let queue_depth = config.monitor_queue_depth;
-                tokio::spawn(async move {
+                let join = tokio::spawn(async move {
                     let Some(mut rx) = src.subscribe(&pv_name).await else {
                         return;
                     };
@@ -787,6 +807,10 @@ async fn handle_op(
                     let finish = build_monitor_finish(ioid, order);
                     let _ = writer_clone.lock().await.write_all(&finish).await;
                 });
+                if let Some(s) = ch.ops.get_mut(&ioid) {
+                    s.monitor_started = true;
+                    s.monitor_abort = Some(Arc::new(AbortOnDrop(join.abort_handle())));
+                }
             }
         }
         OpKind::Rpc => {

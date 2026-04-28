@@ -757,29 +757,30 @@ pub fn decode_pv_field(
             PvField::StructureArray(out)
         }
         FieldDesc::Union { variants, .. } => {
-            let selector_byte = cur.get_u8()?;
-            if selector_byte == 0xFF {
-                PvField::Union {
+            // Selector wire format = Size with 0xFF == null. pvxs
+            // pvaproto.h:340-358 (`from_wire(buf, Selector&)`) routes
+            // through the same Size codec. `decode_size` already returns
+            // `None` for 0xFF, so no peek-and-pushback is needed.
+            match decode_size(cur, order)? {
+                None => PvField::Union {
                     selector: -1,
                     variant_name: String::new(),
                     value: Box::new(PvField::Null),
-                }
-            } else {
-                // Push back, then decode as size.
-                let pos = cur.position();
-                cur.set_position(pos - 1);
-                let sel = decode_size(cur, order)?
-                    .ok_or_else(|| DecodeError("union selector".into()))?
-                    as i32;
-                let (variant_name, vdesc) = variants
-                    .get(sel as usize)
-                    .ok_or_else(|| DecodeError(format!("union selector {sel} out of range")))?
-                    .clone();
-                let value = decode_pv_field(&vdesc, cur, order)?;
-                PvField::Union {
-                    selector: sel,
-                    variant_name,
-                    value: Box::new(value),
+                },
+                Some(sel_u32) => {
+                    let sel = sel_u32 as i32;
+                    let (variant_name, vdesc) = variants
+                        .get(sel as usize)
+                        .ok_or_else(|| {
+                            DecodeError(format!("union selector {sel} out of range"))
+                        })?
+                        .clone();
+                    let value = decode_pv_field(&vdesc, cur, order)?;
+                    PvField::Union {
+                        selector: sel,
+                        variant_name,
+                        value: Box::new(value),
+                    }
                 }
             }
         }
@@ -789,30 +790,32 @@ pub fn decode_pv_field(
                 as usize;
             let mut items = Vec::with_capacity(n);
             for _ in 0..n {
-                let sel_byte = cur.get_u8()?;
-                if sel_byte == 0xFF {
-                    items.push(UnionItem {
+                // Per-element selector encoding matches the scalar Union
+                // case: Size with 0xFF as the null sentinel.
+                match decode_size(cur, order)? {
+                    None => items.push(UnionItem {
                         selector: -1,
                         variant_name: String::new(),
                         value: PvField::Null,
-                    });
-                    continue;
+                    }),
+                    Some(sel_u32) => {
+                        let sel = sel_u32 as i32;
+                        let (variant_name, vdesc) = variants
+                            .get(sel as usize)
+                            .ok_or_else(|| {
+                                DecodeError(format!(
+                                    "union array selector {sel} out of range"
+                                ))
+                            })?
+                            .clone();
+                        let value = decode_pv_field(&vdesc, cur, order)?;
+                        items.push(UnionItem {
+                            selector: sel,
+                            variant_name,
+                            value,
+                        });
+                    }
                 }
-                let pos = cur.position();
-                cur.set_position(pos - 1);
-                let sel = decode_size(cur, order)?
-                    .ok_or_else(|| DecodeError("union array selector".into()))?
-                    as i32;
-                let (variant_name, vdesc) = variants
-                    .get(sel as usize)
-                    .ok_or_else(|| DecodeError(format!("union array selector {sel} out of range")))?
-                    .clone();
-                let value = decode_pv_field(&vdesc, cur, order)?;
-                items.push(UnionItem {
-                    selector: sel,
-                    variant_name,
-                    value,
-                });
             }
             PvField::UnionArray(items)
         }
