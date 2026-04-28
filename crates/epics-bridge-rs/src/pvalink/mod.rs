@@ -18,9 +18,13 @@
 //! ```
 
 mod config;
+mod integration;
+mod iocsh;
 mod link;
 mod registry;
 
 pub use config::{LinkDirection, PvaLinkConfig, PvaLinkParseError};
+pub use integration::{PvaLinkResolver, install_pvalink_resolver};
+pub use iocsh::{db_pvxr_command, pvxrefdiff_command, register_pvalink_commands};
 pub use link::{PvaLink, PvaLinkError};
 pub use registry::PvaLinkRegistry;
