@@ -163,6 +163,34 @@ pub fn server_intf_addr_list() -> Vec<IpAddr> {
     list_intf_addresses()
 }
 
+/// Parse `EPICS_PVAS_IGNORE_ADDR_LIST` — server-side blocklist. Each
+/// entry pairs an IP with an optional port (`port == 0` matches any
+/// port from that IP). Connections (TCP) and search packets (UDP)
+/// from a matching peer are silently dropped. Mirrors pvxs
+/// `Config::ignoreAddrs`. Default port for plain-IP entries is
+/// `EPICS_PVAS_BROADCAST_PORT`, but the dropped-port match is
+/// usually wildcard-by-zero anyway.
+pub fn server_ignore_addr_list() -> Vec<(IpAddr, u16)> {
+    let Ok(raw) = std::env::var("EPICS_PVAS_IGNORE_ADDR_LIST") else {
+        return Vec::new();
+    };
+    raw.split(|c: char| c == ',' || c.is_whitespace())
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            if let Ok(sa) = s.parse::<SocketAddr>() {
+                return Some((sa.ip(), sa.port()));
+            }
+            if let Ok(ip) = s.parse::<IpAddr>() {
+                return Some((ip, 0));
+            }
+            None
+        })
+        .collect()
+}
+
 /// Parse `EPICS_PVAS_BEACON_ADDR_LIST` — explicit beacon destinations
 /// (default port = `EPICS_PVAS_BROADCAST_PORT`). Falls back to empty
 /// when unset (caller should auto-discover NIC broadcasts).
