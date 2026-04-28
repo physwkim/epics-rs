@@ -37,8 +37,10 @@ pub fn parse_socket_addr(s: &str) -> Result<SocketAddr, std::net::AddrParseError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(epics_env)]
     fn test_default_ca_server_port() {
         // Remove env var to ensure default
         unsafe { std::env::remove_var("EPICS_CA_SERVER_PORT") };
@@ -46,24 +48,28 @@ mod tests {
     }
 
     #[test]
+    #[serial(epics_env)]
     fn test_default_ca_repeater_port() {
         unsafe { std::env::remove_var("EPICS_CA_REPEATER_PORT") };
         assert_eq!(ca_repeater_port(), 5065);
     }
 
     #[test]
+    #[serial(epics_env)]
     fn test_default_pva_broadcast_port() {
         unsafe { std::env::remove_var("EPICS_PVA_BROADCAST_PORT") };
         assert_eq!(pva_broadcast_port(), 5076);
     }
 
     #[test]
+    #[serial(epics_env)]
     fn test_default_pva_server_port() {
         unsafe { std::env::remove_var("EPICS_PVA_SERVER_PORT") };
         assert_eq!(pva_server_port(), 5075);
     }
 
     #[test]
+    #[serial(epics_env)]
     fn test_ca_server_port_env_override() {
         unsafe { std::env::set_var("EPICS_CA_SERVER_PORT", "9064") };
         assert_eq!(ca_server_port(), 9064);
