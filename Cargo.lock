@@ -822,6 +822,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -944,8 +945,11 @@ version = "0.10.5"
 dependencies = [
  "chrono",
  "clap",
+ "epics-base-rs",
+ "libc",
  "nix 0.29.0",
  "parking_lot",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

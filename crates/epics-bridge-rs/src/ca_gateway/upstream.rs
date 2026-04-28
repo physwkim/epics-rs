@@ -574,8 +574,8 @@ fn build_write_hook(
 /// so a disk-full putlog doesn't silently disappear the audit
 /// trail.
 async fn log_denial(env: &WriteHookEnv, ctx: &WriteContext, pv: &str, value: &str) {
-    if let Some(pl) = &env.putlog {
-        if let Err(e) = pl
+    if let Some(pl) = &env.putlog
+        && let Err(e) = pl
             .log(&ctx.user, &ctx.host, pv, value, PutOutcome::Denied)
             .await
         {
@@ -585,7 +585,6 @@ async fn log_denial(env: &WriteHookEnv, ctx: &WriteContext, pv: &str, value: &st
                 "ca-gateway-rs: putlog write failed"
             );
         }
-    }
 }
 
 /// Render an `EpicsValue` for the put-audit log, truncating to at

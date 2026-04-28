@@ -1,0 +1,282 @@
+//! End-to-end tests for the procserv supervisor.
+//!
+//! Spins up an in-process [`ProcServ`] wrapping a real child program
+//! (`/bin/cat`, `/bin/echo`) and connects to it via a real TCP
+//! socket. Exercises the same code paths the daemon binary uses,
+//! minus the daemonize step.
+//!
+//! These tests are gated to `cfg(unix)` (forkpty) and depend on
+//! `/bin/cat` / `/bin/echo` being present.
+
+#![cfg(unix)]
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use epics_tools_rs::procserv::{
+    ProcServ, ProcServConfig,
+    config::{ChildConfig, KeyBindings, ListenConfig, LoggingConfig},
+    restart::{RestartMode, RestartPolicy},
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::time::{Instant, sleep, timeout};
+
+/// Build a config wrapping `/bin/cat` on a random localhost port.
+fn cat_config(port: u16) -> ProcServConfig {
+    ProcServConfig {
+        foreground: true,
+        listen: ListenConfig {
+            tcp_port: Some(port),
+            tcp_bind: Some(SocketAddr::from(([127, 0, 0, 1], port))),
+            unix_path: None,
+        },
+        keys: KeyBindings {
+            kill: Some(0x18),
+            toggle_restart: Some(0x14),
+            restart: Some(0x12),
+            quit: None,
+            logout: Some(0x1d),
+        },
+        child: ChildConfig {
+            name: "cat".into(),
+            program: PathBuf::from("/bin/cat"),
+            args: vec![],
+            cwd: None,
+            kill_signal: 9,
+            ignore_chars: Vec::new(),
+        },
+        logging: LoggingConfig {
+            log_path: None,
+            pid_path: None,
+            info_path: None,
+            time_format: "%Y-%m-%dT%H:%M:%S".into(),
+        },
+        restart: RestartPolicy::default(),
+        restart_mode: RestartMode::Disabled, // don't auto-restart in tests
+        holdoff: Duration::from_millis(50),
+        wait_for_manual_start: false,
+    }
+}
+
+/// Allocate an OS-assigned localhost port: bind to :0, query, drop.
+async fn pick_port() -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+/// Read up to `deadline` and return everything that arrived.
+async fn read_for(stream: &mut TcpStream, dur: Duration) -> Vec<u8> {
+    let deadline = Instant::now() + dur;
+    let mut buf = Vec::new();
+    let mut tmp = vec![0u8; 1024];
+    while Instant::now() < deadline {
+        match timeout(Duration::from_millis(100), stream.read(&mut tmp)).await {
+            Ok(Ok(0)) => break, // EOF
+            Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+            Ok(Err(_)) => break,
+            Err(_) => continue, // timeout — keep waiting
+        }
+    }
+    buf
+}
+
+/// Strip telnet IAC sequences from a stream of bytes (just enough to
+/// make the test assertions readable). Mirrors the parser in
+/// procserv::telnet but without the supervisor overhead.
+fn strip_iac(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if b != 0xFF {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        // IAC ...
+        if i + 1 >= input.len() {
+            break;
+        }
+        let cmd = input[i + 1];
+        match cmd {
+            0xFF => {
+                out.push(0xFF);
+                i += 2;
+            }
+            0xFB..=0xFE => {
+                // WILL/WONT/DO/DONT — 3-byte
+                i += 3;
+            }
+            0xFA => {
+                // SB ... SE
+                i += 2;
+                while i + 1 < input.len() && !(input[i] == 0xFF && input[i + 1] == 0xF0) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            _ => {
+                i += 2;
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn cat_round_trip_via_tcp_console() {
+    let port = pick_port().await;
+    let cfg = cat_config(port);
+    let server = ProcServ::new(cfg).expect("build");
+
+    // Run server in a background task; we'll abort it at the end.
+    let server_task = tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    // Connect to the supervisor's TCP console.
+    let mut conn = {
+        // Listener is set up async; retry briefly.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(s) => break s,
+                Err(_) if Instant::now() < deadline => {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("could not connect: {e}"),
+            }
+        }
+    };
+
+    // Drain initial banner (PTY may not have output yet, but the
+    // welcome banner from the supervisor is sent on connect).
+    let initial = read_for(&mut conn, Duration::from_millis(500)).await;
+    let cleaned = String::from_utf8_lossy(&strip_iac(&initial)).to_string();
+    assert!(
+        cleaned.contains("Welcome to procserv-rs"),
+        "missing welcome banner; got: {cleaned:?}"
+    );
+
+    // Type a line — `cat` will echo it back. Through the party-line:
+    // our typed bytes go to the supervisor → forwarded to PTY stdin
+    // (writes via processClass equivalent) AND echoed to other
+    // clients (none here besides us, but the echo to ourselves is
+    // suppressed because we're the sender).
+    conn.write_all(b"hello world\n").await.unwrap();
+
+    // The PTY (cat) will echo "hello world" back; that arrives via
+    // the SendToAll fanout (PTY is the sender, we're the recipient).
+    // Allow up to 1s; 50ms is usually enough on macOS.
+    let out = read_for(&mut conn, Duration::from_secs(2)).await;
+    let cleaned_out = String::from_utf8_lossy(&strip_iac(&out)).to_string();
+    assert!(
+        cleaned_out.contains("hello world"),
+        "expected echo of 'hello world', got: {cleaned_out:?} (raw {out:?})"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn kill_keystroke_signals_child() {
+    let port = pick_port().await;
+    let cfg = cat_config(port);
+    let server = ProcServ::new(cfg).expect("build");
+
+    let server_task = tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    let mut conn = {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(s) => break s,
+                Err(_) if Instant::now() < deadline => {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("could not connect: {e}"),
+            }
+        }
+    };
+
+    // Drain banner.
+    let _ = read_for(&mut conn, Duration::from_millis(300)).await;
+
+    // Send Ctrl-X (0x18) — kills the child.
+    conn.write_all(&[0x18]).await.unwrap();
+
+    // Within 2s we should see the "@@@ Child exited" banner from
+    // the supervisor. With `RestartMode::Disabled` configured, no
+    // respawn follows.
+    let out = read_for(&mut conn, Duration::from_secs(3)).await;
+    let cleaned = String::from_utf8_lossy(&strip_iac(&out)).to_string();
+    assert!(
+        cleaned.contains("Child exited"),
+        "expected 'Child exited' banner, got: {cleaned:?}"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn two_clients_share_same_party_line() {
+    let port = pick_port().await;
+    let cfg = cat_config(port);
+    let server = ProcServ::new(cfg).expect("build");
+
+    let server_task = tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    // Connect client A.
+    let mut a = {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(s) => break s,
+                Err(_) if Instant::now() < deadline => {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("connect A: {e}"),
+            }
+        }
+    };
+    let _ = read_for(&mut a, Duration::from_millis(300)).await;
+
+    // Connect client B.
+    let mut b = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let _ = read_for(&mut b, Duration::from_millis(300)).await;
+
+    // A types — both A and B see PTY output. Plus B sees A's bytes
+    // forwarded (echo to other clients).
+    a.write_all(b"shared input\n").await.unwrap();
+
+    let a_out = read_for(&mut a, Duration::from_secs(2)).await;
+    let b_out = read_for(&mut b, Duration::from_secs(2)).await;
+
+    let a_clean = String::from_utf8_lossy(&strip_iac(&a_out)).to_string();
+    let b_clean = String::from_utf8_lossy(&strip_iac(&b_out)).to_string();
+
+    // A should see the PTY echo (from cat), but NOT its own typed
+    // bytes echoed back through SendToAll (sender is excluded).
+    assert!(
+        a_clean.contains("shared input"),
+        "A should see PTY echo: {a_clean:?}"
+    );
+
+    // B should see both the PTY echo AND the bytes forwarded from A.
+    // In practice both contain "shared input" so we just check
+    // presence.
+    assert!(
+        b_clean.contains("shared input"),
+        "B should see A's input + PTY echo: {b_clean:?}"
+    );
+
+    server_task.abort();
+}

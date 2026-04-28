@@ -21,6 +21,7 @@ mod app {
     use epics_tools_rs::procserv::{
         ProcServ, ProcServConfig,
         config::{ChildConfig, KeyBindings, ListenConfig, LoggingConfig},
+        daemon::{fork_and_go, install_signal_handlers},
         restart::{RestartMode, RestartPolicy},
     };
 
@@ -80,6 +81,26 @@ mod app {
         #[arg(long)]
         name: Option<String>,
 
+        /// Restart-policy max attempts inside `--restart-window`.
+        #[arg(long, default_value_t = 10)]
+        max_restarts: u32,
+
+        /// Restart-policy sliding window in seconds.
+        #[arg(long, default_value_t = 600)]
+        restart_window: u64,
+
+        /// Kill character (Ctrl-X = 24). Use 0 to disable.
+        #[arg(long, default_value_t = 24)]
+        kill_char: u8,
+
+        /// Toggle restart-mode character (Ctrl-T = 20). 0 to disable.
+        #[arg(long, default_value_t = 20)]
+        toggle_restart_char: u8,
+
+        /// Logout character (Ctrl-] = 29). 0 to disable.
+        #[arg(long, default_value_t = 29)]
+        logout_char: u8,
+
         /// Program to launch + its arguments. Everything after `--`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         cmd: Vec<String>,
@@ -92,9 +113,11 @@ mod app {
         let mut iter = args.cmd.into_iter();
         let program = PathBuf::from(iter.next().unwrap());
         let argv: Vec<String> = iter.collect();
-        let display_name = args
-            .name
-            .unwrap_or_else(|| program.file_name().map_or("child".into(), |s| s.to_string_lossy().into()));
+        let display_name = args.name.unwrap_or_else(|| {
+            program
+                .file_name()
+                .map_or("child".into(), |s| s.to_string_lossy().into())
+        });
 
         let listen = ListenConfig {
             tcp_port: args.port,
@@ -124,21 +147,32 @@ mod app {
             time_format: "%Y-%m-%d %H:%M:%S".into(),
         };
 
+        let nz = |c: u8| if c == 0 { None } else { Some(c) };
+
         Ok(ProcServConfig {
             foreground: args.foreground,
             listen,
-            keys: KeyBindings::default(),
+            keys: KeyBindings {
+                kill: nz(args.kill_char),
+                toggle_restart: nz(args.toggle_restart_char),
+                restart: Some(0x12), // Ctrl-R when child dead
+                quit: None,
+                logout: nz(args.logout_char),
+            },
             child,
             logging,
-            restart: RestartPolicy::default(),
+            restart: RestartPolicy {
+                max_restarts: args.max_restarts,
+                window: Duration::from_secs(args.restart_window),
+                delay: Duration::from_secs(1),
+            },
             restart_mode: RestartMode::OnExit,
             holdoff: Duration::from_secs(args.holdoff),
             wait_for_manual_start: args.wait,
         })
     }
 
-    pub async fn entry() -> ExitCode {
-        // Initialize tracing — RUST_LOG controls verbosity.
+    pub fn entry() -> ExitCode {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -147,6 +181,7 @@ mod app {
             .try_init();
 
         let args = Args::parse();
+        let foreground = args.foreground;
         let cfg = match build_config(args) {
             Ok(c) => c,
             Err(e) => {
@@ -155,26 +190,65 @@ mod app {
             }
         };
 
-        let server = match ProcServ::new(cfg) {
-            Ok(s) => s,
+        // Daemonize BEFORE starting the tokio runtime — the runtime's
+        // worker threads don't survive fork(). After fork_and_go
+        // returns we're in the grandchild (or directly in foreground
+        // mode) and safe to start tokio.
+        if !foreground
+            && let Err(e) = fork_and_go() {
+                eprintln!("procserv-rs: daemonize failed: {e}");
+                return ExitCode::FAILURE;
+            }
+
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
             Err(e) => {
-                tracing::error!(error = %e, "procserv-rs: build failed");
+                tracing::error!(error = %e, "procserv-rs: tokio runtime build failed");
                 return ExitCode::FAILURE;
             }
         };
 
-        match server.run().await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                tracing::error!(error = %e, "procserv-rs: runtime error");
-                ExitCode::FAILURE
+        runtime.block_on(async move {
+            let server = match ProcServ::new(cfg) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "procserv-rs: build failed");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let shutdown = match install_signal_handlers().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "procserv-rs: signal handler install failed");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            // Race the supervisor against the shutdown signal. The
+            // supervisor's own `quit` keystroke also returns Ok(())
+            // from .run(), so either branch ends the process cleanly.
+            tokio::select! {
+                res = server.run() => match res {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        tracing::error!(error = %e, "procserv-rs: runtime error");
+                        ExitCode::FAILURE
+                    }
+                },
+                reason = shutdown.wait() => {
+                    tracing::info!(reason = ?reason.ok(), "procserv-rs: shutdown signal");
+                    ExitCode::SUCCESS
+                }
             }
-        }
+        })
     }
 }
 
 #[cfg(unix)]
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> std::process::ExitCode {
-    app::entry().await
+fn main() -> std::process::ExitCode {
+    app::entry()
 }
