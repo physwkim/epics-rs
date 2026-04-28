@@ -4,6 +4,7 @@
 //! A group PV combines fields from multiple EPICS database records
 //! into a single PvStructure.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use epics_base_rs::server::database::PvDatabase;
@@ -61,9 +62,15 @@ fn parse_field_path(path: &str) -> Vec<FieldNameComponent> {
 // ---------------------------------------------------------------------------
 
 /// Navigate a field path (e.g., `"a.b[0].c"`) within a PvStructure,
-/// returning the leaf PvField. Supports array indexing via `[N]`.
+/// returning the leaf [`PvField`]. Supports array indexing via `[N]`.
+///
+/// Plain (non-indexed) paths borrow into the input — no allocation. Indexed
+/// terminals (`field[N]` where `field` is a `ScalarArray`) clone the
+/// element into a fresh `PvField::Scalar` and return `Cow::Owned`, so
+/// callers see a single PV scalar value rather than the whole array.
+///
 /// Corresponds to C++ QSRV `FieldName` + `Field::findIn`.
-pub fn get_nested_field<'a>(pv: &'a PvStructure, path: &str) -> Option<&'a PvField> {
+pub fn get_nested_field<'a>(pv: &'a PvStructure, path: &str) -> Option<Cow<'a, PvField>> {
     let components = parse_field_path(path);
     if components.is_empty() {
         return None;
@@ -72,24 +79,39 @@ pub fn get_nested_field<'a>(pv: &'a PvStructure, path: &str) -> Option<&'a PvFie
     let mut current_struct = pv;
     for (i, comp) in components.iter().enumerate() {
         let field = current_struct.get_field(&comp.name)?;
+        let is_last = i == components.len() - 1;
 
-        // Handle array index: field must be a ScalarArray, index into it
         if let Some(idx) = comp.index {
-            if let PvField::ScalarArray(arr) = field
-                && i == components.len() - 1
-            {
-                return arr.get(idx as usize).map(|_sv| {
-                    // Array indexing into ScalarArray can't return &PvField
-                    // without an owned wrapper — return the whole array.
-                    field
-                });
+            // Indexed terminal `field[N]`: extract element N as a fresh
+            // PvField. ScalarArray → PvField::Scalar, StructureArray →
+            // PvField::Structure. Anything else fails.
+            if !is_last {
+                // Mid-path index (`field[N].child`) requires a
+                // StructureArray. Index into the Vec<PvStructure> and
+                // continue navigating.
+                if let PvField::StructureArray(items) = field {
+                    let element = items.get(idx as usize)?;
+                    current_struct = element;
+                    continue;
+                }
+                return None;
             }
-            // For Structure arrays (future): would index into a Vec<PvStructure>
-            return None;
+            // Terminal index.
+            return match field {
+                PvField::ScalarArray(arr) => {
+                    let sv = arr.get(idx as usize)?.clone();
+                    Some(Cow::Owned(PvField::Scalar(sv)))
+                }
+                PvField::StructureArray(items) => {
+                    let element = items.get(idx as usize)?.clone();
+                    Some(Cow::Owned(PvField::Structure(element)))
+                }
+                _ => None,
+            };
         }
 
-        if i == components.len() - 1 {
-            return Some(field);
+        if is_last {
+            return Some(Cow::Borrowed(field));
         }
         match field {
             PvField::Structure(s) => current_struct = s,
@@ -575,7 +597,7 @@ impl super::provider::Channel for GroupChannel {
                 // path uses set_nested_field — put must use the same
                 // path semantics.
                 let epics_val = match get_nested_field(value, &member.field_name) {
-                    Some(pv_field) => self.convert_member_value(member, pv_field).await,
+                    Some(pv_field) => self.convert_member_value(member, &pv_field).await,
                     None => None,
                 };
                 writes.push((member, epics_val));
@@ -634,7 +656,7 @@ impl super::provider::Channel for GroupChannel {
                     None => continue,
                 };
 
-                let epics_val = match self.convert_member_value(member, pv_field).await {
+                let epics_val = match self.convert_member_value(member, &pv_field).await {
                     Some(v) => v,
                     None => continue,
                 };
@@ -1294,7 +1316,7 @@ mod tests {
         // Verify get_nested_field returns the same value
         let field = get_nested_field(&pv, "a.b");
         assert!(field.is_some());
-        if let Some(PvField::Scalar(ScalarValue::Int(v))) = field {
+        if let Some(PvField::Scalar(ScalarValue::Int(v))) = field.as_deref() {
             assert_eq!(*v, 99);
         } else {
             panic!("expected Int(99)");
@@ -1309,7 +1331,8 @@ mod tests {
         set_nested_field(&mut pv, "x.y", PvField::Scalar(ScalarValue::Int(1)));
         set_nested_field(&mut pv, "x.y", PvField::Scalar(ScalarValue::Int(2)));
 
-        if let Some(PvField::Scalar(ScalarValue::Int(v))) = get_nested_field(&pv, "x.y") {
+        if let Some(PvField::Scalar(ScalarValue::Int(v))) = get_nested_field(&pv, "x.y").as_deref()
+        {
             assert_eq!(*v, 2);
         } else {
             panic!("expected Int(2)");
@@ -1326,6 +1349,62 @@ mod tests {
 
         assert!(get_nested_field(&pv, "a.x").is_some());
         assert!(get_nested_field(&pv, "a.y").is_some());
+    }
+
+    /// `field[N]` on a ScalarArray must return the indexed scalar
+    /// element wrapped as a fresh PvField::Scalar — NOT the whole
+    /// array. Regression test: prior implementation returned the
+    /// array unchanged, silently breaking NTTable column[N] paths.
+    #[test]
+    fn nested_field_scalar_array_index() {
+        use epics_pva_rs::pvdata::ScalarValue;
+
+        let mut pv = PvStructure::new("test");
+        pv.fields.push((
+            "samples".into(),
+            PvField::ScalarArray(vec![
+                ScalarValue::Double(1.5),
+                ScalarValue::Double(2.5),
+                ScalarValue::Double(3.5),
+            ]),
+        ));
+
+        match get_nested_field(&pv, "samples[1]").as_deref() {
+            Some(PvField::Scalar(ScalarValue::Double(v))) => assert_eq!(*v, 2.5),
+            other => panic!("expected Scalar(Double(2.5)), got {other:?}"),
+        }
+
+        // Out-of-bounds index → None.
+        assert!(get_nested_field(&pv, "samples[99]").is_none());
+    }
+
+    /// Mid-path index `field[N].child` must descend into a
+    /// StructureArray element and continue navigating.
+    #[test]
+    fn nested_field_structure_array_index() {
+        use epics_pva_rs::pvdata::ScalarValue;
+
+        let mut elem0 = PvStructure::new("entry");
+        elem0.fields.push((
+            "name".into(),
+            PvField::Scalar(ScalarValue::String("a".into())),
+        ));
+        let mut elem1 = PvStructure::new("entry");
+        elem1.fields.push((
+            "name".into(),
+            PvField::Scalar(ScalarValue::String("b".into())),
+        ));
+
+        let mut pv = PvStructure::new("test");
+        pv.fields.push((
+            "entries".into(),
+            PvField::StructureArray(vec![elem0, elem1]),
+        ));
+
+        match get_nested_field(&pv, "entries[1].name").as_deref() {
+            Some(PvField::Scalar(ScalarValue::String(s))) => assert_eq!(s, "b"),
+            other => panic!("expected Scalar(String(\"b\")), got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------

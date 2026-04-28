@@ -16,8 +16,8 @@
 //! Multiple ops can ride on the same channel concurrently: each gets a
 //! fresh `ioid` and registers with the underlying [`ServerConn`] router.
 //! Reconnect is **automatic** and transparent to monitor consumers — see
-//! [`crate::client_native::ops::op_monitor`] for the loop that re-issues
-//! INIT/START on each new server conn.
+//! [`crate::client_native::ops_v2::op_monitor_handle`] for the loop that
+//! re-issues INIT/START on each new server conn.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

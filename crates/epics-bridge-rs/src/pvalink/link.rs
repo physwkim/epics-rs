@@ -98,6 +98,23 @@ impl PvaLink {
         Ok(extract_field(&result.value, &self.config.field))
     }
 
+    /// Synchronous fast-path read: return the cached field if the
+    /// monitor has delivered at least one event, without ever
+    /// awaiting. Returns `None` for OUT links, non-monitor INPs,
+    /// or pre-first-event INPs.
+    ///
+    /// Lets the record-link resolver path skip `block_on` on every
+    /// process — the typical hot case where a monitor has already
+    /// populated the cache. Mirrors pvxs `pvalink_lset.cpp::pvaLoadValue`
+    /// (sync read of cached `current` slot).
+    pub fn try_read_cached(&self) -> Option<PvField> {
+        if matches!(self.config.direction, LinkDirection::Out) || !self.config.monitor {
+            return None;
+        }
+        let v = self.latest.lock().clone()?;
+        Some(extract_field(&v, &self.config.field))
+    }
+
     /// Convenience: read the value as f64.
     pub async fn read_scalar_f64(&self) -> PvaLinkResult<f64> {
         let pv = self.read().await?;

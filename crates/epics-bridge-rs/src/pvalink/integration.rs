@@ -128,7 +128,9 @@ impl PvaLinkResolver {
     /// expects. The closure is sync; it uses
     /// `Handle::block_on(future)` for the rare uncached path.
     /// Pre-warm INP links via [`Self::open`] to keep the steady-state
-    /// path lock-free.
+    /// path lock-free. The returned closure has a sync fast path
+    /// (cache hit on a pre-warmed monitor) and only falls through
+    /// to `block_on` on the first call for a given PV.
     pub fn build_resolver(self) -> ExternalPvResolver {
         let resolver = self;
         Arc::new(move |name: &str| -> Option<EpicsValue> {
@@ -137,11 +139,30 @@ impl PvaLinkResolver {
             }
             // Strip optional pva:// prefix — the resolver receives the
             // bare PV name in some link forms but the prefixed form in
-            // others.
-            let name = name
-                .strip_prefix("pva://")
-                .or_else(|| name.strip_prefix("ca://"))
-                .unwrap_or(name);
+            // others. `ca://` is handled by libca, not pvalink — reject.
+            let name = match name.strip_prefix("pva://") {
+                Some(stripped) => stripped,
+                None => {
+                    if name.starts_with("ca://") {
+                        return None;
+                    }
+                    name
+                }
+            };
+
+            // Fast path: a previously-opened link with a cached
+            // monitor value. No `block_on`, no async runtime touch.
+            if let Some(link) = resolver.registry.try_get(name, LinkDirection::Inp)
+                && let Some(value) = link.try_read_cached()
+            {
+                resolver
+                    .reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return pvfield_to_epics_value(&value);
+            }
+
+            // Slow path: link not yet open or first-event not arrived.
+            // Open the link (idempotent) then issue an async read.
             let cfg = PvaLinkConfig {
                 pv_name: name.to_string(),
                 field: "value".into(),
@@ -151,9 +172,6 @@ impl PvaLinkResolver {
                 scan_on_update: false,
                 direction: LinkDirection::Inp,
             };
-            // Open-or-fetch then read. open() is idempotent via the
-            // registry; first call spawns the monitor task, subsequent
-            // calls return the cached link.
             let link = resolver
                 .handle
                 .block_on(async { resolver.registry.get_or_open(cfg).await })
@@ -188,31 +206,16 @@ pub async fn install_pvalink_resolver(
 
 impl LinkSet for PvaLinkResolver {
     fn is_connected(&self, name: &str) -> bool {
-        // Cached snapshot only — sync trait can't await on a fresh
-        // open. If the link wasn't pre-warmed via `pvxr`, this
-        // returns false, which is the right answer for "are we
-        // currently in receipt of an upstream value?".
+        // Sync-only check: trait can't await. If the link hasn't
+        // been pre-opened we report "not connected" — the resolver
+        // hot path or `pvxr` will open it lazily; any caller that
+        // wants a fresh open should call `Self::open(name).await`
+        // first.
         let name = strip_scheme(name);
-        let cfg = PvaLinkConfig {
-            pv_name: name.to_string(),
-            field: "value".into(),
-            monitor: true,
-            process: false,
-            notify: false,
-            scan_on_update: false,
-            direction: LinkDirection::Inp,
-        };
-        // Use try-path through the registry: if the link doesn't
-        // exist yet we skip the monitor spawn (which would require
-        // an async block). For LinkSet purposes "not yet open" ==
-        // "not connected".
-        self.handle.block_on(async {
-            if let Ok(link) = self.registry.get_or_open(cfg).await {
-                link.is_connected()
-            } else {
-                false
-            }
-        })
+        match self.registry.try_get(name, LinkDirection::Inp) {
+            Some(link) => link.is_connected(),
+            None => false,
+        }
     }
 
     fn get_value(&self, name: &str) -> Option<EpicsValue> {
@@ -220,6 +223,17 @@ impl LinkSet for PvaLinkResolver {
             return None;
         }
         let name = strip_scheme(name);
+
+        // Fast path: cached monitor value, no async runtime touch.
+        if let Some(link) = self.registry.try_get(name, LinkDirection::Inp)
+            && let Some(value) = link.try_read_cached()
+        {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return pvfield_to_epics_value(&value);
+        }
+
+        // Slow path: open the link / fall back to a fresh GET.
         let cfg = PvaLinkConfig {
             pv_name: name.to_string(),
             field: "value".into(),
@@ -290,10 +304,12 @@ impl LinkSet for PvaLinkResolver {
     }
 }
 
+/// Strip the `pva://` scheme prefix the bridge sometimes prepends.
+/// Pvalink only handles PVA — `ca://` is the libca scheme and is
+/// dispatched by the CA-link path elsewhere, so we deliberately do
+/// not accept it here.
 fn strip_scheme(name: &str) -> &str {
-    name.strip_prefix("pva://")
-        .or_else(|| name.strip_prefix("ca://"))
-        .unwrap_or(name)
+    name.strip_prefix("pva://").unwrap_or(name)
 }
 
 fn default_inp_cfg(pv_name: &str) -> PvaLinkConfig {

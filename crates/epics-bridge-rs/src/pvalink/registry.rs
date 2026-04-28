@@ -22,6 +22,17 @@ impl PvaLinkRegistry {
         Self::default()
     }
 
+    /// Synchronous lookup of an already-open link. Returns `None`
+    /// if no link with the given `(pv_name, direction)` has been
+    /// opened yet. Used by the record-link hot path to skip the
+    /// async runtime when the link is already cached.
+    pub fn try_get(&self, pv_name: &str, direction: LinkDirection) -> Option<Arc<PvaLink>> {
+        self.map
+            .read()
+            .get(&(pv_name.to_string(), direction))
+            .cloned()
+    }
+
     /// Get an existing link or open a new one.
     pub async fn get_or_open(&self, config: PvaLinkConfig) -> PvaLinkResult<Arc<PvaLink>> {
         let key = (config.pv_name.clone(), config.direction);

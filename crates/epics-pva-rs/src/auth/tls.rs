@@ -14,7 +14,7 @@
 //! This module produces ready-to-use `rustls::ClientConfig` / `ServerConfig`
 //! values; the client/server runtime layers wrap them in `TlsConnector`/
 //! `TlsAcceptor` on demand. We deliberately *don't* spin up a TLS connection
-//! here — that work belongs in `client_native::conn` / `server_native::tcp`,
+//! here — that work belongs in `client_native::server_conn` / `server_native::tcp`,
 //! which can decide per-target whether to upgrade the socket.
 
 use std::fs::File;

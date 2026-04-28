@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::types::EpicsValue;
-use epics_ca_rs::client::CaClient;
+use epics_ca_rs::client::{CaChannel, CaClient};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -38,17 +38,30 @@ use crate::error::{BridgeError, BridgeResult};
 
 use super::cache::{PvCache, PvState};
 
+/// One upstream subscription: the long-lived [`CaChannel`] is shared
+/// between the monitor-forwarding task and any direct
+/// [`UpstreamManager::put`] / [`UpstreamManager::get`] calls so we
+/// don't pay a fresh CREATE_CHAN round-trip per write. Mirrors C
+/// CA-gateway behaviour (cas/io/casChannel.cc) where the upstream
+/// channel is reused across the gateway's lifetime.
+struct UpstreamSubscription {
+    channel: Arc<CaChannel>,
+    task: JoinHandle<()>,
+}
+
 /// Manages upstream CA client connections for the gateway.
 ///
-/// Holds a single shared `CaClient` and tracks per-PV monitor tasks.
-/// Each subscribed PV has a background task that forwards upstream
-/// events to the cache + shadow database.
+/// Holds a single shared `CaClient` and tracks per-PV channel +
+/// monitor task pairs. The channel is reused for PUT / GET so the
+/// gateway does not re-do CA handshake on every write.
 pub struct UpstreamManager {
     client: Arc<CaClient>,
     cache: Arc<RwLock<PvCache>>,
     shadow_db: Arc<PvDatabase>,
-    /// Active monitor tasks (one per upstream PV).
-    tasks: HashMap<String, JoinHandle<()>>,
+    /// Active upstream subscriptions, keyed by PV name. Holding the
+    /// channel here keeps it alive for the gateway's lifetime so
+    /// every PUT / GET reuses one circuit.
+    subs: HashMap<String, UpstreamSubscription>,
 }
 
 impl UpstreamManager {
@@ -67,18 +80,18 @@ impl UpstreamManager {
             client: Arc::new(client),
             cache,
             shadow_db,
-            tasks: HashMap::new(),
+            subs: HashMap::new(),
         })
     }
 
     /// Number of active upstream subscriptions.
     pub fn subscription_count(&self) -> usize {
-        self.tasks.len()
+        self.subs.len()
     }
 
     /// Whether a given upstream name is currently subscribed.
     pub fn is_subscribed(&self, name: &str) -> bool {
-        self.tasks.contains_key(name)
+        self.subs.contains_key(name)
     }
 
     /// Ensure an upstream subscription exists for `upstream_name`.
@@ -92,7 +105,7 @@ impl UpstreamManager {
     /// The cache entry transitions to `Inactive` once the first event
     /// arrives, then `Active` when a downstream subscriber attaches.
     pub async fn ensure_subscribed(&mut self, upstream_name: &str) -> BridgeResult<()> {
-        if self.tasks.contains_key(upstream_name) {
+        if self.subs.contains_key(upstream_name) {
             return Ok(());
         }
 
@@ -109,16 +122,20 @@ impl UpstreamManager {
             .add_pv(upstream_name, EpicsValue::Double(0.0))
             .await;
 
-        // Create CA channel
-        let channel = self.client.create_channel(upstream_name);
+        // Create one CA channel and reuse it for both monitor and
+        // direct PUT/GET. Stored as Arc so the lifecycle guard fires
+        // exactly once when the subscription is dropped.
+        let channel = Arc::new(self.client.create_channel(upstream_name));
 
-        // Subscribe
+        // Subscribe (monitor receiver is independent of the channel handle).
         let mut monitor = channel
             .subscribe()
             .await
             .map_err(|e| BridgeError::PutRejected(format!("subscribe failed: {e}")))?;
 
-        // Spawn forwarding task
+        // Spawn forwarding task — does NOT borrow the channel, so the
+        // direct put()/get() path can use the same channel without
+        // contention.
         let cache_clone = self.cache.clone();
         let db_clone = self.shadow_db.clone();
         let name = upstream_name.to_string();
@@ -150,19 +167,34 @@ impl UpstreamManager {
             }
         });
 
-        self.tasks.insert(upstream_name.to_string(), task);
+        self.subs.insert(
+            upstream_name.to_string(),
+            UpstreamSubscription { channel, task },
+        );
         Ok(())
     }
 
-    /// Remove an upstream subscription and abort its task.
+    /// Remove an upstream subscription and abort its task. Drops
+    /// the cached channel — the next `ensure_subscribed` will open
+    /// a fresh one.
     pub async fn unsubscribe(&mut self, upstream_name: &str) {
-        if let Some(task) = self.tasks.remove(upstream_name) {
-            task.abort();
+        if let Some(sub) = self.subs.remove(upstream_name) {
+            sub.task.abort();
         }
     }
 
-    /// Forward a put operation to the upstream IOC.
+    /// Forward a put operation to the upstream IOC. Reuses the
+    /// existing subscribed channel when available, avoiding a
+    /// fresh CREATE_CHAN round-trip per write. Falls back to a
+    /// transient channel only when the PV has no subscription.
     pub async fn put(&self, upstream_name: &str, value: &EpicsValue) -> BridgeResult<()> {
+        if let Some(sub) = self.subs.get(upstream_name) {
+            return sub
+                .channel
+                .put(value)
+                .await
+                .map_err(|e| BridgeError::PutRejected(format!("upstream put: {e}")));
+        }
         let channel = self.client.create_channel(upstream_name);
         channel
             .put(value)
@@ -170,8 +202,17 @@ impl UpstreamManager {
             .map_err(|e| BridgeError::PutRejected(format!("upstream put: {e}")))
     }
 
-    /// Get the current value from upstream (one-shot, bypasses cache).
+    /// Get the current value from upstream. Reuses the subscribed
+    /// channel when available; otherwise opens a transient one.
     pub async fn get(&self, upstream_name: &str) -> BridgeResult<EpicsValue> {
+        if let Some(sub) = self.subs.get(upstream_name) {
+            let (_dbf, value) = sub
+                .channel
+                .get()
+                .await
+                .map_err(|e| BridgeError::PutRejected(format!("upstream get: {e}")))?;
+            return Ok(value);
+        }
         let channel = self.client.create_channel(upstream_name);
         let (_dbf, value) = channel
             .get()
@@ -185,7 +226,7 @@ impl UpstreamManager {
     pub async fn sweep_orphaned(&mut self) {
         let cache = self.cache.read().await;
         let live_names: Vec<String> = self
-            .tasks
+            .subs
             .keys()
             .filter(|name| cache.get(name).is_none())
             .cloned()
@@ -199,8 +240,8 @@ impl UpstreamManager {
 
     /// Abort all active subscriptions and shut down.
     pub async fn shutdown(&mut self) {
-        for (_name, task) in self.tasks.drain() {
-            task.abort();
+        for (_name, sub) in self.subs.drain() {
+            sub.task.abort();
         }
         self.client.shutdown().await;
     }

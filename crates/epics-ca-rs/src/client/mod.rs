@@ -535,12 +535,17 @@ impl CaClient {
             initial_lane: 0,
         });
 
+        let lifecycle = Arc::new(ChannelLifecycle {
+            cid,
+            coord_tx: self.coord_tx.clone(),
+        });
         CaChannel {
             cid,
             pv_name,
             coord_tx: self.coord_tx.clone(),
             transport_tx: self.transport_tx.clone(),
             conn_tx,
+            _lifecycle: lifecycle,
         }
     }
 
@@ -673,6 +678,23 @@ impl CaClient {
 }
 
 /// A persistent CA channel with auto-reconnection.
+/// Per-channel lifecycle guard. Holds the coordinator sender so a
+/// `DropChannel` request fires exactly once — when the last
+/// [`CaChannel`] clone is dropped. Pulled into its own type so that
+/// `CaChannel: Clone` does NOT trigger a tear-down on every clone.
+struct ChannelLifecycle {
+    cid: u32,
+    coord_tx: mpsc::UnboundedSender<CoordRequest>,
+}
+
+impl Drop for ChannelLifecycle {
+    fn drop(&mut self) {
+        let _ = self
+            .coord_tx
+            .send(CoordRequest::DropChannel { cid: self.cid });
+    }
+}
+
 #[derive(Clone)]
 pub struct CaChannel {
     cid: u32,
@@ -680,6 +702,8 @@ pub struct CaChannel {
     coord_tx: mpsc::UnboundedSender<CoordRequest>,
     transport_tx: mpsc::UnboundedSender<TransportCommand>,
     conn_tx: broadcast::Sender<ConnectionEvent>,
+    /// Refcounted lifecycle guard — see [`ChannelLifecycle`].
+    _lifecycle: Arc<ChannelLifecycle>,
 }
 
 impl CaChannel {
@@ -1062,14 +1086,6 @@ impl CaChannel {
             Ok(Some(d)) => d,
             _ => Duration::ZERO,
         }
-    }
-}
-
-impl Drop for CaChannel {
-    fn drop(&mut self) {
-        let _ = self
-            .coord_tx
-            .send(CoordRequest::DropChannel { cid: self.cid });
     }
 }
 
@@ -1951,6 +1967,7 @@ fn parse_addr_list() -> CaResult<Vec<SocketAddr>> {
 
 #[cfg(test)]
 mod tls_sni_config_tests {
+    #[cfg(feature = "experimental-rust-tls")]
     use super::*;
 
     /// `tls_server_name` defaults to `None` and accepts `Some(...)` so
