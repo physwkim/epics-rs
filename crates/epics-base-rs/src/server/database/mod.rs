@@ -1,8 +1,11 @@
 pub mod db_access;
 mod field_io;
+mod link_set;
 mod links;
 mod processing;
 mod scan_index;
+
+pub use link_set::{DynLinkSet, LinkSet, LinkSetRegistry};
 
 use crate::runtime::sync::RwLock;
 use std::collections::{BTreeSet, HashMap};
@@ -89,6 +92,11 @@ struct PvDatabaseInner {
     external_resolver: RwLock<Option<ExternalPvResolver>>,
     /// Optional async resolver invoked on `has_name` misses (e.g. CA gateway).
     search_resolver: RwLock<Option<SearchResolver>>,
+    /// Per-scheme link sets — pluggable backends for `pva://` /
+    /// `ca://` link resolution. Consulted before the legacy
+    /// [`ExternalPvResolver`] in [`Self::resolve_external_pv`].
+    /// Mirrors the C-EPICS lset abstraction.
+    link_sets: RwLock<link_set::LinkSetRegistry>,
     /// True once the ScanScheduler has been started for this DB.
     /// Prevents duplicate scan tasks when multiple protocol servers (CA + PVA)
     /// both try to start scanning on the same DB.
@@ -132,6 +140,7 @@ impl PvDatabase {
                 simple_pvs: RwLock::new(HashMap::new()),
                 external_resolver: RwLock::new(None),
                 search_resolver: RwLock::new(None),
+                link_sets: RwLock::new(link_set::LinkSetRegistry::new()),
                 records: RwLock::new(HashMap::new()),
                 scan_index: RwLock::new(HashMap::new()),
                 cp_links: RwLock::new(HashMap::new()),
@@ -209,8 +218,102 @@ impl PvDatabase {
         *self.inner.external_resolver.write().await = Some(resolver);
     }
 
-    /// Resolve an external PV name via the registered resolver.
+    /// Register a [`LinkSet`] under `scheme` (e.g. `"pva"` /
+    /// `"ca"`). The lset is consulted for `ParsedLink::Pva` /
+    /// `ParsedLink::Ca` link reads/writes before falling back to
+    /// the legacy [`ExternalPvResolver`]. Subsequent calls for the
+    /// same scheme replace the previous binding.
+    pub async fn register_link_set(&self, scheme: &str, lset: link_set::DynLinkSet) {
+        self.inner.link_sets.write().await.register(scheme, lset);
+    }
+
+    /// Look up the lset for `scheme`, if any.
+    pub async fn link_set(&self, scheme: &str) -> Option<link_set::DynLinkSet> {
+        self.inner.link_sets.read().await.get(scheme)
+    }
+
+    /// Snapshot of every registered scheme name. Stable order for
+    /// `dbpvxr` dumps.
+    pub async fn registered_link_schemes(&self) -> Vec<String> {
+        let mut s = self.inner.link_sets.read().await.schemes();
+        s.sort();
+        s
+    }
+
+    /// Enumerate every link-shaped field on `record_name`. Returns
+    /// `(field_name, link_string, parsed)` tuples for fields whose
+    /// raw value parses as a non-trivial link via
+    /// [`crate::server::record::parse_link_v2`]. Used by `dbpvxr` to
+    /// dump per-record link state without hardcoding the field-name
+    /// list — works across record types as long as they expose link
+    /// strings via [`Record::get_field`].
+    ///
+    /// Returns an empty Vec when the record doesn't exist.
+    pub async fn record_link_fields(
+        &self,
+        record_name: &str,
+    ) -> Vec<(String, String, crate::server::record::ParsedLink)> {
+        let rec = match self.get_record(record_name).await {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let inst = rec.read().await;
+        let mut out = Vec::new();
+        for fd in inst.record.field_list() {
+            if !matches!(fd.dbf_type, crate::types::DbFieldType::String) {
+                continue;
+            }
+            let raw = match inst.record.get_field(fd.name) {
+                Some(EpicsValue::String(s)) => s,
+                _ => continue,
+            };
+            if raw.is_empty() {
+                continue;
+            }
+            let parsed = crate::server::record::parse_link_v2(&raw);
+            if !matches!(parsed, crate::server::record::ParsedLink::None) {
+                out.push((fd.name.to_string(), raw, parsed));
+            }
+        }
+        out
+    }
+
+    /// Resolve an external PV name. Dispatches through the
+    /// `(scheme, name)` lset if one is registered; otherwise falls
+    /// back to the legacy [`ExternalPvResolver`] closure. `name`
+    /// may be the bare PV name (in which case `pva://` is assumed
+    /// when an lset is registered for that scheme) or a fully
+    /// scheme-prefixed string.
     pub(crate) async fn resolve_external_pv(&self, name: &str) -> Option<EpicsValue> {
+        // Try lsets first. We accept both "scheme://body" and the
+        // bare body (stored in ParsedLink::Pva/Ca after the
+        // dispatch in record/link.rs).
+        let (scheme, body) = if let Some(rest) = name.strip_prefix("pva://") {
+            ("pva", rest)
+        } else if let Some(rest) = name.strip_prefix("ca://") {
+            ("ca", rest)
+        } else {
+            // No prefix — try every registered lset in turn. The
+            // first one with a value for `name` wins. Schemes are
+            // single-digit so this is cheap.
+            let registry = self.inner.link_sets.read().await;
+            for s in registry.schemes() {
+                if let Some(lset) = registry.get(&s) {
+                    if let Some(v) = lset.get_value(name) {
+                        return Some(v);
+                    }
+                }
+            }
+            drop(registry);
+            // Fall through to legacy resolver.
+            let resolver = self.inner.external_resolver.read().await;
+            return resolver.as_ref().and_then(|r| r(name));
+        };
+        if let Some(lset) = self.inner.link_sets.read().await.get(scheme) {
+            if let Some(v) = lset.get_value(body) {
+                return Some(v);
+            }
+        }
         let resolver = self.inner.external_resolver.read().await;
         resolver.as_ref().and_then(|r| r(name))
     }

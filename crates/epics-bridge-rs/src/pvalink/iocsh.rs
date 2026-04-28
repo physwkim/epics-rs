@@ -5,6 +5,7 @@
 //! synchronous record-link resolver can read cached monitor values
 //! without `block_on(GET)`.
 
+use epics_base_rs::server::database::LinkSet;
 use epics_base_rs::server::iocsh::registry::{
     ArgDesc, ArgType, ArgValue, CommandContext, CommandDef, CommandOutcome,
 };
@@ -70,9 +71,12 @@ pub fn pvxrefdiff_command(resolver: PvaLinkResolver) -> CommandDef {
 }
 
 /// `dbpvxr <recordName>` — print pvalink debug info for the named
-/// record. Mirrors pvxs `dbpvxr` (pvalink.cpp:185). Currently shows
-/// resolver-level stats only; per-record link state would require
-/// record-instance access we don't yet thread through here.
+/// record. Mirrors pvxs `dbpvxr` (pvalink.cpp:185). With no
+/// argument prints resolver-level stats; with a record name walks
+/// every link-shaped String field on that record (INP/OUT/DOL/...)
+/// and dumps connection / value / alarm / time state for each
+/// `pva://...` or `ca://...` link via the registered
+/// [`epics_base_rs::server::database::LinkSet`].
 pub fn dbpvxr_command(resolver: PvaLinkResolver) -> CommandDef {
     CommandDef::new(
         "dbpvxr",
@@ -88,14 +92,67 @@ pub fn dbpvxr_command(resolver: PvaLinkResolver) -> CommandDef {
                 _ => None,
             };
             ctx.println(&format!(
-                "dbpvxr: {} cached link(s), {} total reads",
+                "dbpvxr: {} cached link(s), {} total reads, enabled={}",
                 resolver.link_count(),
-                resolver.read_count()
+                resolver.read_count(),
+                resolver.is_enabled()
             ));
             if let Some(rec) = target {
-                ctx.println(&format!(
-                    "  (per-record dump for '{rec}' not yet implemented; see pvxs `dbpvxr` for the full output)"
-                ));
+                let db = ctx.db().clone();
+                let handle = ctx.runtime_handle().clone();
+                let rec_clone = rec.clone();
+                let links = std::thread::spawn(move || {
+                    handle.block_on(async move { db.record_link_fields(&rec_clone).await })
+                })
+                .join()
+                .unwrap_or_default();
+                if links.is_empty() {
+                    ctx.println(&format!(
+                        "  '{rec}': no link fields found (or record missing)"
+                    ));
+                } else {
+                    ctx.println(&format!("  '{rec}': {} link field(s)", links.len()));
+                    for (field, raw, parsed) in links {
+                        match parsed {
+                            epics_base_rs::server::record::ParsedLink::Pva(name) => {
+                                let connected =
+                                    <PvaLinkResolver as LinkSet>::is_connected(&resolver, &name);
+                                let value =
+                                    <PvaLinkResolver as LinkSet>::get_value(&resolver, &name);
+                                let alarm =
+                                    <PvaLinkResolver as LinkSet>::alarm_message(&resolver, &name);
+                                let ts = <PvaLinkResolver as LinkSet>::time_stamp(&resolver, &name);
+                                ctx.println(&format!(
+                                    "    {field}={raw:?}  pva://{name}  connected={connected}"
+                                ));
+                                if let Some(v) = value {
+                                    ctx.println(&format!("        value={v}"));
+                                }
+                                if let Some(a) = alarm {
+                                    ctx.println(&format!("        alarm={a:?}"));
+                                }
+                                if let Some((s, n)) = ts {
+                                    ctx.println(&format!("        timeStamp={s}.{n:09}"));
+                                }
+                            }
+                            epics_base_rs::server::record::ParsedLink::Ca(name) => {
+                                ctx.println(&format!(
+                                    "    {field}={raw:?}  ca://{name}  (CA link — see camonitor)"
+                                ));
+                            }
+                            epics_base_rs::server::record::ParsedLink::Db(db) => {
+                                ctx.println(&format!(
+                                    "    {field}={raw:?}  db link → {}.{}",
+                                    db.record, db.field
+                                ));
+                            }
+                            epics_base_rs::server::record::ParsedLink::Constant(c) => {
+                                ctx.println(&format!("    {field}={raw:?}  constant {c:?}"));
+                            }
+                            epics_base_rs::server::record::ParsedLink::None => {}
+                        }
+                    }
+                }
             }
             Ok(CommandOutcome::Continue)
         },

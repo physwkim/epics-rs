@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use epics_base_rs::server::database::{ExternalPvResolver, PvDatabase};
+use epics_base_rs::server::database::{ExternalPvResolver, LinkSet, PvDatabase};
 use epics_base_rs::types::EpicsValue;
 use epics_pva_rs::pvdata::{PvField, ScalarValue};
 
@@ -170,6 +170,10 @@ impl PvaLinkResolver {
 /// Install a [`PvaLinkResolver`] on `db`. Returns the resolver so the
 /// caller can pre-open links and query stats (`db_pvxr` / `pvxrefdiff`
 /// iocsh commands lean on this).
+///
+/// Registers the resolver under the `"pva"` lset scheme *and*
+/// installs the legacy [`ExternalPvResolver`] closure so callers
+/// using either dispatch path work transparently.
 pub async fn install_pvalink_resolver(
     db: &Arc<PvDatabase>,
     handle: tokio::runtime::Handle,
@@ -177,7 +181,131 @@ pub async fn install_pvalink_resolver(
     let resolver = PvaLinkResolver::new(handle);
     db.set_external_resolver(resolver.clone().build_resolver())
         .await;
+    db.register_link_set("pva", Arc::new(resolver.clone()))
+        .await;
     resolver
+}
+
+impl LinkSet for PvaLinkResolver {
+    fn is_connected(&self, name: &str) -> bool {
+        // Cached snapshot only — sync trait can't await on a fresh
+        // open. If the link wasn't pre-warmed via `pvxr`, this
+        // returns false, which is the right answer for "are we
+        // currently in receipt of an upstream value?".
+        let name = strip_scheme(name);
+        let cfg = PvaLinkConfig {
+            pv_name: name.to_string(),
+            field: "value".into(),
+            monitor: true,
+            process: false,
+            notify: false,
+            scan_on_update: false,
+            direction: LinkDirection::Inp,
+        };
+        // Use try-path through the registry: if the link doesn't
+        // exist yet we skip the monitor spawn (which would require
+        // an async block). For LinkSet purposes "not yet open" ==
+        // "not connected".
+        self.handle.block_on(async {
+            if let Ok(link) = self.registry.get_or_open(cfg).await {
+                link.is_connected()
+            } else {
+                false
+            }
+        })
+    }
+
+    fn get_value(&self, name: &str) -> Option<EpicsValue> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let name = strip_scheme(name);
+        let cfg = PvaLinkConfig {
+            pv_name: name.to_string(),
+            field: "value".into(),
+            monitor: true,
+            process: false,
+            notify: false,
+            scan_on_update: false,
+            direction: LinkDirection::Inp,
+        };
+        let value = self.handle.block_on(async {
+            let link = self.registry.get_or_open(cfg).await.ok()?;
+            link.read().await.ok()
+        })?;
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        pvfield_to_epics_value(&value)
+    }
+
+    fn put_value(&self, name: &str, value: EpicsValue) -> Result<(), String> {
+        if !self.is_enabled() {
+            return Err("pvalink disabled".into());
+        }
+        let name = strip_scheme(name);
+        let cfg = PvaLinkConfig {
+            pv_name: name.to_string(),
+            field: "value".into(),
+            monitor: false,
+            process: true,
+            notify: false,
+            scan_on_update: false,
+            direction: LinkDirection::Out,
+        };
+        // Format the EpicsValue as a string using its Display impl
+        // — pvput accepts the string form and the server coerces.
+        let value_str = value.to_string();
+        self.handle.block_on(async {
+            let link = self
+                .registry
+                .get_or_open(cfg)
+                .await
+                .map_err(|e| e.to_string())?;
+            link.write(&value_str).await.map_err(|e| e.to_string())
+        })
+    }
+
+    fn alarm_message(&self, name: &str) -> Option<String> {
+        let name = strip_scheme(name);
+        let link = self
+            .handle
+            .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })?;
+        link.alarm_message()
+    }
+
+    fn time_stamp(&self, name: &str) -> Option<(i64, i32)> {
+        let name = strip_scheme(name);
+        let link = self
+            .handle
+            .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })?;
+        link.time_stamp()
+    }
+
+    fn link_names(&self) -> Vec<String> {
+        // The registry is keyed on (pv_name, direction). We don't
+        // currently expose iteration; skip for now and rely on
+        // resolver-level stats (read_count / link_count) for
+        // dbpvxr summaries.
+        Vec::new()
+    }
+}
+
+fn strip_scheme(name: &str) -> &str {
+    name.strip_prefix("pva://")
+        .or_else(|| name.strip_prefix("ca://"))
+        .unwrap_or(name)
+}
+
+fn default_inp_cfg(pv_name: &str) -> PvaLinkConfig {
+    PvaLinkConfig {
+        pv_name: pv_name.to_string(),
+        field: "value".into(),
+        monitor: true,
+        process: false,
+        notify: false,
+        scan_on_update: false,
+        direction: LinkDirection::Inp,
+    }
 }
 
 /// Best-effort conversion. We coerce scalar values and 1-D scalar arrays;
