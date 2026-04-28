@@ -65,6 +65,16 @@ pub struct Channel {
     /// first server, it pops the next alternative before falling back to
     /// a fresh UDP search.
     alternatives: parking_lot::Mutex<Vec<std::net::SocketAddr>>,
+    /// Earliest instant at which `ensure_active` is allowed to attempt a
+    /// fresh connect. Set after a connect/CreateChannel failure to throttle
+    /// reconnect storms — pvxs Channel::disconnect (client.cpp:155-163)
+    /// pushes Connecting-stage failures 10 buckets (≈10 s) into the
+    /// future. We accumulate exponentially per consecutive failure with a
+    /// hard cap so a flapping server can't make every monitor caller spin.
+    holdoff_until: parking_lot::Mutex<Option<std::time::Instant>>,
+    /// Consecutive connect failures since the last successful Active
+    /// transition. Used to scale `holdoff_until`.
+    connect_fail_count: std::sync::atomic::AtomicU32,
 }
 
 /// How a channel resolves its PV name to a server address.
@@ -166,6 +176,8 @@ impl Channel {
             pool,
             resolver: Resolver::Search(search),
             alternatives: parking_lot::Mutex::new(Vec::new()),
+            holdoff_until: parking_lot::Mutex::new(None),
+            connect_fail_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -190,6 +202,8 @@ impl Channel {
             pool,
             resolver: Resolver::Direct(addr),
             alternatives: parking_lot::Mutex::new(Vec::new()),
+            holdoff_until: parking_lot::Mutex::new(None),
+            connect_fail_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -226,6 +240,29 @@ impl Channel {
 
         // Serialize transitions across concurrent callers.
         let _guard = self.transition_lock.lock().await;
+
+        // Connect-fail holdoff. After a recent connect/CreateChannel
+        // failure we sleep for the remainder of the holdoff window
+        // before re-issuing the search. pvxs Channel::disconnect
+        // (client.cpp:155-163) implements the same idea with a
+        // 10-bucket future-push on the search ring; here we
+        // accumulate `2^min(fails-1, 4)` seconds (cap 16s) per
+        // consecutive failure. Reset to zero on the next successful
+        // Active transition.
+        let now = std::time::Instant::now();
+        let wait = {
+            let mut h = self.holdoff_until.lock();
+            match *h {
+                Some(t) if t > now => Some(t - now),
+                _ => {
+                    *h = None;
+                    None
+                }
+            }
+        };
+        if let Some(d) = wait {
+            tokio::time::sleep(d).await;
+        }
 
         // Re-check after acquiring the lock.
         {
@@ -291,6 +328,13 @@ impl Channel {
                             server: server.clone(),
                             sid,
                         });
+                        // Successful Active — clear holdoff state so the
+                        // next eventual disconnect starts the backoff
+                        // ladder from scratch instead of inheriting an
+                        // old failure count.
+                        self.connect_fail_count
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                        *self.holdoff_until.lock() = None;
                         return Ok((server, sid));
                     }
                     Err(e) => {
@@ -300,6 +344,16 @@ impl Channel {
                 },
             }
         }
+        // Every candidate failed (search returned but TCP setup or
+        // CREATE_CHANNEL bounced). Bump the consecutive-failure counter
+        // and arm the holdoff window for the next call.
+        let fails = self
+            .connect_fail_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let secs = 1u64 << fails.saturating_sub(1).min(4); // 1, 2, 4, 8, 16
+        *self.holdoff_until.lock() =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(secs));
         Err(last_err.unwrap_or_else(|| PvaError::Protocol("connect failed".into())))
     }
 

@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.10.3 — 2026-04-28 — pva-rs reconnect machinery brought up to pvxs parity
+
+A focused pass on `epics-pva-rs` client-side reconnect: the v0.10.2
+review identified the gaps relative to pvxs (`pva-rs reconnect gaps vs
+pvxs` in kodex). All five items closed in this release. The protocol
+behaviour now mirrors pvxs `client.cpp` and `clientconn.cpp` — same
+constants, same trigger conditions — without the libca-only extras
+(penalty box, circuit breaker, multi-lane retry).
+
+### Cooperative search-bucket ring
+
+- Replaces the per-channel `BACKOFF_SECS` exponential schedule with a
+  30-bucket ring rotated at 1 s. Each tick processes exactly one
+  bucket so steady-state UDP search load is `O(pending / 30)` packets
+  per second instead of `O(pending)`. Mirrors pvxs `client.cpp`
+  `searchBuckets[nBuckets=30]`.
+- New searches land in `(current + 1) % 30`; first retry rotates
+  back to the same slot 30 ticks later; subsequent retries shift by
+  an extra `RETRY_HOLDOFF_BUCKETS = 10` (matches pvxs
+  `Channel::disconnect` holdoff at client.cpp:155-163).
+
+### `poke()` — fast-tick mode on fresh server identity
+
+- When a beacon delivers a new (server, GUID) pair (server restart or
+  brand-new server), the search engine flips its tick interval to
+  200 ms for one full revolution (≈ 6 s) so every pending search
+  retries quickly. Reverts to 1 s afterwards. Mirrors pvxs
+  `ContextImpl::poke()` (client.cpp:713) with the 30 s pokeHoldoff
+  enforced by the same `first_announce` gate that drives the
+  `Discovered` events.
+- Periodic same-GUID beacons no longer pull pending searches'
+  `last_attempt` forward (closes a regression: every 15 s beacon
+  effectively reset every backoff regardless of whether anything
+  changed).
+
+### Beacon-timeout pruning + `Discovered::Timeout`
+
+- `BeaconTracker::prune_stale(max_age)` walks the throttle map and
+  evicts entries whose `last_seen` is older than `max_age`,
+  returning the (server, guid) tuples that were dropped.
+- The search engine now runs a `BEACON_CLEAN_INTERVAL = 180 s` tick
+  that calls `prune_stale(BEACON_TIMEOUT = 360 s)` and emits
+  `Discovered::Timeout` for each pruned server. Application
+  observers subscribed via `SearchEngine::discover()` see online /
+  timeout transitions both ways. Mirrors pvxs `tickBeaconClean`
+  (client.cpp:1254).
+- New `Discovered::Timeout { server, guid }` variant on the public
+  enum.
+
+### Connect-fail holdoff per channel
+
+- `Channel` gained `holdoff_until: Option<Instant>` and
+  `connect_fail_count: AtomicU32`. `ensure_active` now sleeps until
+  `holdoff_until` before issuing a fresh search; on every full
+  candidate-list failure the counter increments and the holdoff is
+  set to `2^min(fails-1, 4)` seconds (1 s → 16 s cap). On the next
+  successful Active transition both fields reset. Mirrors pvxs
+  `Channel::disconnect` 10-bucket future-push, generalised so
+  callers that retry tightly (e.g. monitor reconnect loops) don't
+  spin against a dead server.
+
+### Tests
+
+- `beacon_throttle::tests::prune_stale_returns_aged_out_entries`
+  covers the new prune API.
+- All existing 128 lib tests + 118 parity tests + 4 stability tests
+  pass against the new tick / bucket logic.
+
+### What was deliberately NOT added
+
+Per the v0.10.2 kodex `tech_debt` entry: pvxs deliberately omits the
+libca penalty box, circuit breaker, and multi-lane retry buckets. We
+match that decision — those features remain CA-only (in `epics-ca-rs`)
+and would re-introduce complexity that pvxs ships without for a
+reason. If a real flapping-server incident in production calls for
+them later, the data point goes through CA-rs first.
+
 ## v0.10.2 — 2026-04-28 — kodex-driven cross-crate review pass
 
 A self-review using the kodex knowledge graph as a baseline (so we

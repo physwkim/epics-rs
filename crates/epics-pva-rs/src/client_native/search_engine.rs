@@ -77,9 +77,20 @@ pub enum Discovered {
     /// A beacon arrived for a (server, guid) pair we hadn't seen before,
     /// or a known server reported a different GUID (i.e. restarted).
     Online { server: SocketAddr, guid: [u8; 12] },
-    // Reserved for future expansion: pvxs has Discovered::Timeout when
-    // a server stops emitting beacons. We don't track that yet.
+    /// A server we were tracking has stopped sending beacons for at
+    /// least `BEACON_TIMEOUT`. Mirrors pvxs `Discovered::Timeout`
+    /// (client.cpp:1272) — operators / dashboards use this to mark
+    /// servers as unreachable without waiting for a TCP error.
+    Timeout { server: SocketAddr, guid: [u8; 12] },
 }
+
+/// Maximum age of a beacon before the server is treated as offline.
+/// pvxs uses 2× the beacon-clean interval (default 360s); we match.
+pub const BEACON_TIMEOUT: Duration = Duration::from_secs(360);
+
+/// Period of the beacon-cleanup tick. pvxs runs `tickBeaconClean` every
+/// 180s; we match.
+pub const BEACON_CLEAN_INTERVAL: Duration = Duration::from_secs(180);
 
 /// How long the engine collects extra SEARCH_RESPONSE entries after the
 /// first one for a given pv name (used by [`SearchCommand::FindAll`]).
@@ -230,7 +241,20 @@ struct Pending {
     last_attempt: Instant,
     attempt: usize,
     search_id: u32,
+    /// Which search bucket this pending occupies. Set on first insert
+    /// and rotated forward by `nBuckets` after each retry.
+    bucket: usize,
 }
+
+/// pvxs `client.cpp::nBuckets`. 30 buckets at 1 s normal interval gives
+/// each pending search a 30-second slot rotation — cooperative tick
+/// caps UDP search traffic at roughly `pending.len() / 30` packets per
+/// second instead of letting every channel fire on its own backoff.
+const N_SEARCH_BUCKETS: usize = 30;
+/// Bucket distance to push a re-search after the first retry. Mirrors
+/// pvxs `Channel::disconnect` holdoff = 10 buckets to keep failed
+/// connect attempts from looping faster than the 30s schedule.
+const RETRY_HOLDOFF_BUCKETS: usize = 10;
 
 async fn run_engine(
     mut cmd_rx: mpsc::Receiver<SearchCommand>,
@@ -247,6 +271,18 @@ async fn run_engine(
     let mut pending: HashMap<u32, Pending> = HashMap::new(); // by search_id
     let mut by_name: HashMap<String, u32> = HashMap::new(); // pv_name → search_id
     let mut subscribers: Vec<mpsc::Sender<Discovered>> = Vec::new();
+    // Search bucket ring (pvxs client.cpp searchBuckets[30]). Each
+    // bucket holds the search_ids whose retry slot is "this bucket"
+    // on the rotating cursor. Tick advances the cursor and processes
+    // exactly one bucket — so steady-state UDP search load = O(1) per
+    // tick regardless of how many channels are pending.
+    let mut search_buckets: Vec<Vec<u32>> = vec![Vec::new(); N_SEARCH_BUCKETS];
+    let mut current_bucket: usize = 0;
+    // After a `poke()` (fresh server identity discovered) we run one
+    // 30-bucket revolution at fast 200 ms cadence so all pending
+    // searches retry within 6 s instead of up to 30 s. Counter
+    // decrements per fast tick; reaches 0 → revert to 1 s cadence.
+    let mut fast_ticks_remaining: u32 = 0;
     // (server, guid) pairs already announced via discover(). pvxs's
     // discover() fires Online once per new server identity; tracker
     // uses different (reconnect-throttle) semantics so we de-dup here.
@@ -254,6 +290,12 @@ async fn run_engine(
         std::collections::HashSet::new();
 
     let mut tick = interval(Duration::from_secs(1));
+    // Periodic beacon-tracker cleanup: every BEACON_CLEAN_INTERVAL we
+    // walk the map and forget servers whose beacons have been silent
+    // longer than BEACON_TIMEOUT. Each pruned entry fires a
+    // `Discovered::Timeout`. Mirrors pvxs tickBeaconClean.
+    let mut beacon_clean_tick = interval(BEACON_CLEAN_INTERVAL);
+    beacon_clean_tick.tick().await; // skip immediate fire
     let mut search_buf = vec![0u8; 4096];
     let mut beacon_buf = vec![0u8; 4096];
 
@@ -271,12 +313,18 @@ async fn run_engine(
             cmd = cmd_rx.recv() => match cmd {
                 Some(SearchCommand::Find { pv_name, responder }) => {
                     let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
+                    // Place new searches one bucket ahead of the cursor
+                    // so they don't fire in the same tick they were
+                    // submitted (pvxs initialSearchDelay).
+                    let bucket = (current_bucket + 1) % N_SEARCH_BUCKETS;
+                    search_buckets[bucket].push(sid);
                     let p = Pending {
                         pv_name: pv_name.clone(),
                         responder: Responder::Single(responder),
                         last_attempt: Instant::now(),
                         attempt: 0,
                         search_id: sid,
+                        bucket,
                     };
                     by_name.insert(pv_name, sid);
                     pending.insert(sid, p);
@@ -287,6 +335,8 @@ async fn run_engine(
                 }
                 Some(SearchCommand::FindAll { pv_name, responder }) => {
                     let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
+                    let bucket = (current_bucket + 1) % N_SEARCH_BUCKETS;
+                    search_buckets[bucket].push(sid);
                     let p = Pending {
                         pv_name: pv_name.clone(),
                         responder: Responder::Multi {
@@ -297,6 +347,7 @@ async fn run_engine(
                         last_attempt: Instant::now(),
                         attempt: 0,
                         search_id: sid,
+                        bucket,
                     };
                     by_name.insert(pv_name, sid);
                     pending.insert(sid, p);
@@ -307,7 +358,9 @@ async fn run_engine(
                 }
                 Some(SearchCommand::Cancel { pv_name }) => {
                     if let Some(sid) = by_name.remove(&pv_name) {
-                        pending.remove(&sid);
+                        if let Some(p) = pending.remove(&sid) {
+                            search_buckets[p.bucket].retain(|x| *x != sid);
+                        }
                     }
                 }
                 Some(SearchCommand::BeaconObserved { server, guid }) => {
@@ -315,9 +368,28 @@ async fn run_engine(
                     // discover() de-dup: announce each (server, guid) pair
                     // exactly once until forgotten.
                     let first_announce = announced.insert((server, guid));
-                    if allow_reconnect {
+                    // pvxs `poke()` semantics: only kick pending searches
+                    // when the server identity is FRESH — either a
+                    // brand-new (server, guid) pair, or the same server
+                    // returning with a new GUID after the anomaly window.
+                    // Without the `first_announce` gate every periodic
+                    // beacon would needlessly bring forward every pending
+                    // search's retry deadline.
+                    if allow_reconnect && first_announce {
+                        // pvxs `poke()` (client.cpp:713). Switch the tick
+                        // ring to 200 ms cadence for one full revolution
+                        // (30 ticks ≈ 6 s) so every pending search retries
+                        // quickly without permanently spamming the net.
+                        if fast_ticks_remaining == 0 {
+                            tick = interval(Duration::from_millis(200));
+                            tick.tick().await; // skip immediate fire
+                        }
+                        fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
                         for p in pending.values_mut() {
                             p.last_attempt = Instant::now() - Duration::from_secs(60);
+                            // Reset attempt so the kicked retry doesn't
+                            // inherit the holdoff from past failures.
+                            p.attempt = 0;
                         }
                     }
                     if first_announce {
@@ -341,7 +413,27 @@ async fn run_engine(
 
             res = beacon_recv => {
                 if let Ok((n, _from)) = res {
-                    handle_beacon(&beacon_buf[..n], &beacons, &mut pending, &mut subscribers, &mut announced);
+                    let mut poke = false;
+                    handle_beacon(
+                        &beacon_buf[..n], &beacons, &mut pending,
+                        &mut subscribers, &mut announced, &mut poke,
+                    );
+                    if poke && fast_ticks_remaining == 0 {
+                        tick = interval(Duration::from_millis(200));
+                        tick.tick().await;
+                        fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
+                    } else if poke {
+                        // Already in fast mode: extend the revolution.
+                        fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
+                    }
+                }
+            }
+
+            _ = beacon_clean_tick.tick() => {
+                for (server, guid) in beacons.prune_stale(BEACON_TIMEOUT) {
+                    announced.remove(&(server, guid));
+                    let evt = Discovered::Timeout { server, guid };
+                    subscribers.retain(|tx| tx.try_send(evt.clone()).is_ok());
                 }
             }
 
@@ -361,20 +453,55 @@ async fn run_engine(
                 for sid in to_flush {
                     if let Some(p) = pending.remove(&sid) {
                         by_name.remove(&p.pv_name);
+                        search_buckets[p.bucket].retain(|x| *x != sid);
                         if let Responder::Multi { responder, accumulated, .. } = p.responder {
                             let _ = responder.send(accumulated);
                         }
                     }
                 }
 
-                // 2. Retry pending searches whose backoff has elapsed.
-                for p in pending.values_mut() {
-                    let backoff = BACKOFF_SECS[p.attempt.min(BACKOFF_SECS.len()-1)];
-                    if now.duration_since(p.last_attempt) >= Duration::from_secs(backoff) {
+                // 2. Process exactly one search bucket per tick. Pending
+                //    searches in this bucket get one UDP retransmit; the
+                //    bucket is then drained and each pending re-armed
+                //    into a future bucket — `current + nBuckets` (i.e.
+                //    same slot, 30 ticks later) for the steady-state
+                //    case, plus an extra `RETRY_HOLDOFF_BUCKETS` shift
+                //    when the search has already failed once or more
+                //    (matches pvxs Channel::disconnect holdoff).
+                let bucket_ids = std::mem::take(&mut search_buckets[current_bucket]);
+                for sid in bucket_ids {
+                    let pkt_opt = pending.get_mut(&sid).map(|p| {
                         p.last_attempt = now;
-                        p.attempt = (p.attempt + 1).min(BACKOFF_SECS.len() - 1);
-                        let pkt = codec.build_search(0, p.search_id, &p.pv_name, [0,0,0,0], response_port, false);
+                        p.attempt = p.attempt.saturating_add(1);
+                        let next_bucket = if p.attempt > 1 {
+                            (current_bucket + N_SEARCH_BUCKETS + RETRY_HOLDOFF_BUCKETS)
+                                % N_SEARCH_BUCKETS
+                        } else {
+                            current_bucket // 30 ticks later (same slot)
+                        };
+                        p.bucket = next_bucket;
+                        codec.build_search(
+                            0, sid, &p.pv_name, [0,0,0,0], response_port, false,
+                        )
+                    });
+                    if let Some(pkt) = pkt_opt {
                         broadcast(&search_socket, &pkt, &extra_targets).await;
+                        if let Some(p) = pending.get(&sid) {
+                            search_buckets[p.bucket].push(sid);
+                        }
+                    }
+                }
+                current_bucket = (current_bucket + 1) % N_SEARCH_BUCKETS;
+
+                // 3. Drop fast-tick mode after one full revolution so we
+                //    don't permanently spam the network at 200 ms.
+                if fast_ticks_remaining > 0 {
+                    fast_ticks_remaining -= 1;
+                    if fast_ticks_remaining == 0 {
+                        tick = interval(Duration::from_secs(1));
+                        // Skip the immediate fire so the new cadence
+                        // doesn't double-tick in the same instant.
+                        tick.tick().await;
                     }
                 }
             }
@@ -461,6 +588,7 @@ fn handle_beacon(
     pending: &mut HashMap<u32, Pending>,
     subscribers: &mut Vec<mpsc::Sender<Discovered>>,
     announced: &mut std::collections::HashSet<(SocketAddr, [u8; 12])>,
+    poke_request: &mut bool,
 ) {
     let Ok(Some((frame, _))) = try_parse_frame(bytes) else {
         return;
@@ -505,9 +633,17 @@ fn handle_beacon(
 
     let allow_reconnect = beacons.observe(server, guid_arr);
     let first_announce = announced.insert((server, guid_arr));
-    if allow_reconnect {
+    // pvxs poke() — only kick on FRESH server identity (mirror of the
+    // SearchCommand::BeaconObserved path). A long-running server's
+    // periodic beacons should not constantly bring pending searches'
+    // retry deadlines forward. Set the poke_request flag so the main
+    // loop can also flip the tick cadence to fast (200 ms × 30) for
+    // one revolution.
+    if allow_reconnect && first_announce {
+        *poke_request = true;
         for p in pending.values_mut() {
             p.last_attempt = Instant::now() - Duration::from_secs(60);
+            p.attempt = 0;
         }
     }
     if first_announce {

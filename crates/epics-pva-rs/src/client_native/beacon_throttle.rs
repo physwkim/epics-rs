@@ -101,6 +101,26 @@ impl BeaconTracker {
     pub fn forget(&self, server: SocketAddr) {
         self.inner.write().remove(&server);
     }
+
+    /// Drop entries whose last beacon is older than `max_age`. Returns the
+    /// list of (server, guid) tuples that were pruned so the caller can
+    /// raise a `Discovered::Timeout` for each. Mirrors pvxs
+    /// `tickBeaconClean` (client.cpp:1254) which prunes after 2× the
+    /// beacon-clean interval (default 360s).
+    pub fn prune_stale(&self, max_age: Duration) -> Vec<(SocketAddr, [u8; 12])> {
+        let now = Instant::now();
+        let mut map = self.inner.write();
+        let mut pruned = Vec::new();
+        map.retain(|server, entry| {
+            if now.duration_since(entry.last_seen) > max_age {
+                pruned.push((*server, entry.guid));
+                false
+            } else {
+                true
+            }
+        });
+        pruned
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +160,24 @@ mod tests {
         t.observe(addr(), [1u8; 12]);
         t.forget(addr());
         assert!(!t.is_throttled(addr()));
+    }
+
+    /// Stale entries — last_seen older than `max_age` — are pruned and
+    /// returned so the caller can fire `Discovered::Timeout`. Mirrors
+    /// pvxs `tickBeaconClean` (client.cpp:1254).
+    #[test]
+    fn prune_stale_returns_aged_out_entries() {
+        let t = BeaconTracker::new();
+        t.observe(addr(), [9u8; 12]);
+        // Immediate prune with a far-future age cutoff drops nothing.
+        let pruned = t.prune_stale(Duration::from_secs(3600));
+        assert!(pruned.is_empty());
+        // Negative-ish (zero) cutoff drops everything currently tracked.
+        let pruned = t.prune_stale(Duration::from_secs(0));
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].0, addr());
+        assert_eq!(pruned[0].1, [9u8; 12]);
+        // Idempotent: a second call with no entries left returns empty.
+        assert!(t.prune_stale(Duration::from_secs(0)).is_empty());
     }
 }
