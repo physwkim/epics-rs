@@ -147,6 +147,29 @@ impl SearchEngine {
         let search_socket = bind_ephemeral_udp()?;
         let beacon_socket = bind_beacon_udp(); // Optional — may be None.
 
+        // pvxs 8db40be (2025-10): warn loudly when a Context is built
+        // with no search destinations and AUTO_ADDR_LIST disabled.
+        // The user otherwise sees nothing but timeouts.
+        let auto_addr =
+            std::env::var("EPICS_PVA_AUTO_ADDR_LIST").unwrap_or_else(|_| "YES".into());
+        let auto_on = matches!(
+            auto_addr.trim().to_ascii_uppercase().as_str(),
+            "YES" | "Y" | "1" | "TRUE"
+        );
+        let env_addrs = std::env::var("EPICS_PVA_ADDR_LIST").ok();
+        let env_has_dest = env_addrs
+            .as_deref()
+            .map(|s| s.split(|c: char| c == ',' || c.is_whitespace()).any(|t| !t.trim().is_empty()))
+            .unwrap_or(false);
+        if extra_targets.is_empty() && !env_has_dest && !auto_on {
+            tracing::warn!(
+                target: "epics_pva_rs::client",
+                "PVA client context created with no search destinations \
+                 (EPICS_PVA_ADDR_LIST empty, EPICS_PVA_AUTO_ADDR_LIST=NO, \
+                 no programmatic addr_list). All searches will time out."
+            );
+        }
+
         let beacons_clone = beacons.clone();
         tokio::spawn(run_engine(
             cmd_rx,

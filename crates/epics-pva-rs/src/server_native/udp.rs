@@ -203,13 +203,31 @@ pub async fn run_udp_responder_with_config(
     // amortized across the listener's lifetime.
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let (n, peer) = match socket.recv_from(&mut buf).await {
-            Ok(t) => t,
+        // pvxs 57f9468 (2025-11): receive metadata tells us which NIC
+        // the SEARCH arrived on, so the corresponding SEARCH_RESPONSE
+        // can be sent from a socket bound to that same NIC. Without
+        // this, replies to multicast/broadcast SEARCHes go via the OS
+        // default route — wrong NIC on multi-homed hosts.
+        let meta = match socket.recv_with_meta(&mut buf).await {
+            Ok(m) => m,
             Err(e) => {
                 debug!("udp recv error: {e}");
                 continue;
             }
         };
+        let n = meta.n;
+        let peer = meta.src;
+        let reply_iface_ip = meta.iface_ip;
+        // pvxs `udp_collector.cpp::handle_one`: silently drop UDP
+        // datagrams whose source IP is itself a multicast group. Such
+        // packets are necessarily forged (mcast is dest-only) and
+        // replying to one would amplify a DDoS.
+        if let std::net::IpAddr::V4(v4) = peer.ip() {
+            if v4.is_multicast() {
+                debug!("ignoring UDP with mcast source {peer}");
+                continue;
+            }
+        }
         // ignore_addrs: drop search packets from blocklisted peers
         // *before* we spend time decoding. Mirrors pvxs serverconn.cpp
         // ignoreAddrs check on inbound search.
@@ -254,8 +272,23 @@ pub async fn run_udp_responder_with_config(
                             req.byte_order,
                             protocol,
                         );
-                        if let Err(e) = socket.send_to(&resp, peer).await {
-                            debug!("udp send to {peer}: {e}");
+                        // pvxs 57f9468: send the reply from the socket
+                        // bound to the NIC the request arrived on, so
+                        // the source IP on the wire matches the
+                        // interface that received the multicast /
+                        // broadcast SEARCH. Falls back to plain
+                        // routing-decided send if that NIC is no
+                        // longer in the bundle (rare).
+                        let send = socket.send_via(&resp, peer, reply_iface_ip).await;
+                        let send = match send {
+                            Ok(n) => Ok(n),
+                            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                                socket.send_to(&resp, peer).await
+                            }
+                            Err(e) => Err(e),
+                        };
+                        if let Err(e) = send {
+                            debug!("udp send to {peer} via {reply_iface_ip}: {e}");
                         }
                     }
                     consumed

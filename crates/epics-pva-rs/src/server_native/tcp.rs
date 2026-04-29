@@ -1568,8 +1568,20 @@ async fn handle_op(
                     let mut over_high = false;
                     // Emit initial snapshot.
                     if let Some(initial) = src.get_value(&pv_name).await {
+                        // pvxs e9ab67a (2025-10): the first update is
+                        // mask-bypassed so the client receives a
+                        // *complete* prototype regardless of its
+                        // pvRequest field selection. Subsequent
+                        // updates honour `mask_clone`. Without this,
+                        // a `record[]` request with no fields marked
+                        // would silently filter out the seeding
+                        // update and `fill_unmarked_from_prior` on
+                        // the client would have no real prior to
+                        // merge against — the user would see leaves
+                        // default-filled forever.
+                        let full_mask = BitSet::all_set(intro_clone.total_bits());
                         let payload =
-                            build_monitor_payload(ioid, &intro_clone, &initial, &mask_clone, order);
+                            build_monitor_payload(ioid, &intro_clone, &initial, &full_mask, order);
                         if tx_clone.send(payload).await.is_err() {
                             return;
                         }

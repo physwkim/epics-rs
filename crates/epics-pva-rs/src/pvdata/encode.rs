@@ -1054,6 +1054,82 @@ pub fn decode_pv_field_with_bitset(
     }
 }
 
+/// pvxs cc5d382 (2022-11) "monitor yield 'complete' updates":
+/// merge a freshly-decoded sparse `decoded` value with a previously
+/// captured `prior` "complete" snapshot, so the result has every leaf
+/// either freshly updated (bit set in `bitset`) OR carried over from
+/// `prior` (bit not set). Used by client-side monitor delivery to
+/// hand the user a complete value instead of a delta with default-
+/// filled holes.
+///
+/// `bit_offset` matches `decode_pv_field_with_bitset`'s numbering
+/// scheme — depth-first per pvData spec §5.4.
+pub fn fill_unmarked_from_prior(
+    desc: &FieldDesc,
+    bitset: &crate::proto::BitSet,
+    bit_offset: usize,
+    decoded: PvField,
+    prior: &PvField,
+) -> PvField {
+    match desc {
+        FieldDesc::Scalar(_)
+        | FieldDesc::ScalarArray(_)
+        | FieldDesc::Variant
+        | FieldDesc::VariantArray
+        | FieldDesc::BoundedString(_)
+        | FieldDesc::Union { .. }
+        | FieldDesc::UnionArray { .. }
+        | FieldDesc::StructureArray { .. } => {
+            if bitset.get(bit_offset) {
+                // Marked leaf: keep the freshly-decoded value.
+                decoded
+            } else {
+                // Unmarked leaf: carry over from prior.
+                prior.clone()
+            }
+        }
+        FieldDesc::Structure { struct_id, fields } => {
+            // Walk each child; recurse to honour per-field marking.
+            // Pull the child PvField slots out of `decoded`'s structure
+            // so we can move (not clone) them into the merged output.
+            let mut decoded_children: Vec<(String, PvField)> = match decoded {
+                PvField::Structure(s) => s.fields,
+                _ => Vec::new(),
+            };
+            let prior_struct = match prior {
+                PvField::Structure(s) => Some(s),
+                _ => None,
+            };
+            let mut out = PvStructure::new(struct_id);
+            let mut child_bit = bit_offset + 1;
+            for (name, child_desc) in fields {
+                // Take this child's decoded value out of the moved
+                // vec; default-fill if it's missing (defensive — the
+                // decoder always emits every field).
+                let decoded_child = decoded_children
+                    .iter()
+                    .position(|(n, _)| n == name)
+                    .map(|idx| decoded_children.swap_remove(idx).1)
+                    .unwrap_or_else(|| default_value_for(child_desc));
+                let prior_child = prior_struct
+                    .and_then(|s| s.get_field(name))
+                    .cloned()
+                    .unwrap_or_else(|| default_value_for(child_desc));
+                let merged = fill_unmarked_from_prior(
+                    child_desc,
+                    bitset,
+                    child_bit,
+                    decoded_child,
+                    &prior_child,
+                );
+                out.fields.push((name.clone(), merged));
+                child_bit += child_desc.total_bits();
+            }
+            PvField::Structure(out)
+        }
+    }
+}
+
 /// Decode a `PvField` matching `desc` — assumes every field is present
 /// on the wire (i.e. bitset is "all bits set"). Used for cases like
 /// CONNECTION_VALIDATION authnz where there's no bitset.
@@ -1617,5 +1693,86 @@ mod tests {
         );
         assert_eq!(buf, vec![ScalarType::Double.type_code()]);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn fill_unmarked_carries_prior_for_unmarked_leaves() {
+        // Two-leaf NTScalar-like struct: { value: Double, alarm: Int }.
+        // Bit layout (depth-first): root=0, value=1, alarm=2.
+        let desc = FieldDesc::Structure {
+            struct_id: "test:S:1.0".into(),
+            fields: vec![
+                ("value".into(), FieldDesc::Scalar(ScalarType::Double)),
+                ("alarm".into(), FieldDesc::Scalar(ScalarType::Int)),
+            ],
+        };
+
+        let mut prior_struct = PvStructure::new("test:S:1.0");
+        prior_struct
+            .fields
+            .push(("value".into(), PvField::Scalar(ScalarValue::Double(1.0))));
+        prior_struct
+            .fields
+            .push(("alarm".into(), PvField::Scalar(ScalarValue::Int(7))));
+        let prior = PvField::Structure(prior_struct);
+
+        // "Decoded" delta: value=42.0 marked, alarm absent (default 0).
+        let mut decoded_struct = PvStructure::new("test:S:1.0");
+        decoded_struct
+            .fields
+            .push(("value".into(), PvField::Scalar(ScalarValue::Double(42.0))));
+        decoded_struct
+            .fields
+            .push(("alarm".into(), PvField::Scalar(ScalarValue::Int(0))));
+        let decoded = PvField::Structure(decoded_struct);
+
+        let mut bs = crate::proto::BitSet::new();
+        bs.set(1); // value bit only
+
+        let merged = fill_unmarked_from_prior(&desc, &bs, 0, decoded, &prior);
+
+        if let PvField::Structure(s) = merged {
+            // value: from decoded (marked → fresh)
+            assert!(matches!(
+                s.get_field("value"),
+                Some(PvField::Scalar(ScalarValue::Double(v))) if (*v - 42.0).abs() < 1e-9
+            ));
+            // alarm: carried over from prior (unmarked → prior wins)
+            assert!(matches!(
+                s.get_field("alarm"),
+                Some(PvField::Scalar(ScalarValue::Int(7)))
+            ));
+        } else {
+            panic!("merged must be Structure");
+        }
+    }
+
+    #[test]
+    fn fill_unmarked_keeps_decoded_when_marked() {
+        let desc = FieldDesc::Scalar(ScalarType::Int);
+        let prior = PvField::Scalar(ScalarValue::Int(99));
+        let decoded = PvField::Scalar(ScalarValue::Int(42));
+        let mut bs = crate::proto::BitSet::new();
+        bs.set(0); // leaf bit set
+
+        let merged = fill_unmarked_from_prior(&desc, &bs, 0, decoded, &prior);
+        assert!(matches!(
+            merged,
+            PvField::Scalar(ScalarValue::Int(42))
+        ));
+    }
+
+    #[test]
+    fn fill_unmarked_carries_prior_when_leaf_unmarked() {
+        let desc = FieldDesc::Scalar(ScalarType::Int);
+        let prior = PvField::Scalar(ScalarValue::Int(99));
+        let decoded = PvField::Scalar(ScalarValue::Int(0));
+        let bs = crate::proto::BitSet::new(); // no bits set
+
+        let merged = fill_unmarked_from_prior(&desc, &bs, 0, decoded, &prior);
+        assert!(matches!(
+            merged,
+            PvField::Scalar(ScalarValue::Int(99))
+        ));
     }
 }

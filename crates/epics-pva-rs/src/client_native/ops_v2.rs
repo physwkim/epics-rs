@@ -1446,6 +1446,13 @@ where
     }
 
     let mut events_since_ack: u32 = 0;
+    // pvxs cc5d382: track the most-recently-delivered "complete"
+    // value so partial updates (bitset with only some fields marked)
+    // can be merged with prior state before the user callback runs.
+    // Without this, unmarked leaves would land at the consumer as
+    // zero-filled defaults — sparse delta semantics — which loses
+    // the cumulative state pvxs guarantees.
+    let mut prior: Option<PvField> = None;
     loop {
         if let Some(s) = &state {
             if s.stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1465,7 +1472,15 @@ where
         };
         match decode_op_response(&frame, Some(&intro)) {
             Ok(OpResponse::Data(d)) => {
-                callback(&intro, &d.value);
+                let value = if let Some(prev) = prior.as_ref() {
+                    crate::pvdata::encode::fill_unmarked_from_prior(
+                        &intro, &d.changed, 0, d.value, prev,
+                    )
+                } else {
+                    d.value
+                };
+                prior = Some(value.clone());
+                callback(&intro, &value);
                 events_since_ack += 1;
                 if let Some(s) = &state {
                     let mut st = s.stats.lock();
@@ -1474,7 +1489,7 @@ where
                         st.max_queue = events_since_ack;
                     }
                 }
-                let _ = &d; // silence unused-on-some-cfg warning
+                // (d was destructured above when computing `value`.)
                 if pipeline_size > 0 && events_since_ack >= pipeline_size {
                     let ack = codec.build_monitor_ack(sid, ioid, events_since_ack);
                     if server.send(ack).await.is_err() {

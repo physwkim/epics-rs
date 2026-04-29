@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 
-use crate::error::PvaResult;
+use crate::error::{PvaError, PvaResult};
 use crate::pvdata::{FieldDesc, PvField};
 
 use super::channel::{Channel, ConnectionPool};
@@ -281,6 +281,12 @@ impl PvaClient {
         pv_name: &str,
         forced: Option<SocketAddr>,
     ) -> PvaResult<Arc<Channel>> {
+        // pvxs adab53e (2025-10): reject empty PV names at the
+        // builder boundary instead of letting them flow through
+        // SEARCH and surface as a confusing late-stage timeout.
+        if pv_name.is_empty() {
+            return Err(PvaError::InvalidValue("empty channel name".into()));
+        }
         // Forced-server channels skip the cache entirely — pinning is a
         // per-call request, not a global property of the PV name.
         if forced.is_none() {
