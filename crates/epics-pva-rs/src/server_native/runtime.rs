@@ -76,6 +76,16 @@ pub struct PvaServerConfig {
     /// so subsequent producers fail fast. Default: 5 s, override
     /// via `EPICS_PVAS_SEND_TMO`.
     pub send_timeout: Duration,
+    /// Cap on the TLS handshake duration. Without this the
+    /// `TlsAcceptor::accept` future is awaited bare, so a peer that
+    /// completes the TCP handshake but never delivers (or only partially
+    /// delivers) a `ClientHello` keeps a slot in `max_connections` until
+    /// the OS-level keepalive (15s/5s probes) drops the half-open TCP.
+    /// A coordinated burst of such peers can exhaust the connection
+    /// limit (slowloris-style). pvxs avoids the equivalent issue via
+    /// libevent `bufferevent_set_timeouts`; we do it explicitly here.
+    /// Default: 10 s, override via `EPICS_PVAS_TLS_HANDSHAKE_TMO`.
+    pub tls_handshake_timeout: Duration,
     /// Hard cap on a single inbound message's payload length.
     /// `read_frame` rejects (and drops the connection) any header
     /// claiming more than this. Without a cap a malicious peer
@@ -156,6 +166,7 @@ impl Default for PvaServerConfig {
             monitor_low_watermark: 0,
             auth_complete: None,
             send_timeout: Duration::from_secs(5),
+            tls_handshake_timeout: Duration::from_secs(10),
             max_message_size: 64 * 1024 * 1024,
         }
     }
@@ -190,6 +201,8 @@ impl PvaServerConfig {
         self.auto_beacon = env::auto_beacon_addr_list_enabled();
         self.interfaces = env::server_intf_addr_list();
         self.send_timeout = Duration::from_secs_f64(env::send_timeout_secs());
+        self.tls_handshake_timeout =
+            Duration::from_secs_f64(env::tls_handshake_timeout_secs());
         // Effective inactivity timeout = configured CONN_TMO × 4/3.
         // pvxs config.cpp:187 applies the same scaling so a client
         // sending ECHO every CONN_TMO/2 (the protocol convention)

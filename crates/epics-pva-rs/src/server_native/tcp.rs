@@ -160,14 +160,31 @@ pub async fn run_tcp_server(
                         let _ = sock.set_tcp_keepalive(&keepalive);
                     }
                     let result = match acceptor {
-                        Some(a) => match a.accept(stream).await {
-                            Ok(tls_stream) => {
+                        // Round 8 P-G15: cap the TLS handshake — a peer
+                        // that completes TCP but stalls during ClientHello
+                        // would otherwise hold a `max_connections` slot
+                        // until OS keepalive reaps it (~30s).
+                        Some(a) => match tokio::time::timeout(
+                            cfg.tls_handshake_timeout,
+                            a.accept(stream),
+                        )
+                        .await
+                        {
+                            Ok(Ok(tls_stream)) => {
                                 let (r, w) = tokio::io::split(tls_stream);
                                 handle_connection_io(src, Box::new(r), Box::new(w), peer, cfg).await
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 debug!(?peer, "TLS handshake failed: {e}");
                                 Err(PvaError::Io(e))
+                            }
+                            Err(_) => {
+                                debug!(
+                                    ?peer,
+                                    timeout = ?cfg.tls_handshake_timeout,
+                                    "TLS handshake timed out"
+                                );
+                                Err(PvaError::Protocol("TLS handshake timeout".into()))
                             }
                         },
                         None => {

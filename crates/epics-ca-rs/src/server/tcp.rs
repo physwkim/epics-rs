@@ -77,6 +77,20 @@ fn send_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(5))
 }
 
+/// Cap on `TlsAcceptor::accept` duration. Round 8 C-G12: without this
+/// a peer that completes TCP but stalls during ClientHello holds a
+/// connection slot until OS-level keepalive (15s/5s probes) reaps it
+/// (~30s); coordinated peers can exhaust the listener under
+/// `EPICS_CAS_MAX_CONNECTIONS`. Default 10 s, override via
+/// `EPICS_CAS_TLS_HANDSHAKE_TMO`. Floored at 1s.
+#[cfg(feature = "experimental-rust-tls")]
+fn tls_handshake_timeout() -> Duration {
+    epics_base_rs::runtime::env::get("EPICS_CAS_TLS_HANDSHAKE_TMO")
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|v| Duration::from_secs_f64(v.max(1.0)))
+        .unwrap_or(Duration::from_secs(10))
+}
+
 /// Connection lifecycle event broadcast by the TCP listener.
 ///
 /// Marked `#[non_exhaustive]` so subsequent variants (e.g. per-monitor
@@ -404,8 +418,25 @@ pub async fn run_tcp_listener(
                 #[cfg(feature = "experimental-rust-tls")]
                 {
                     if let Some(acceptor) = tls_acceptor {
-                        match acceptor.accept(stream).await {
-                            Ok(tls_stream) => {
+                        // C-G12: cap the TLS handshake. A peer that
+                        // completes TCP but stalls during ClientHello
+                        // would otherwise hold a connection slot until
+                        // OS keepalive reaps it (~30s).
+                        let hs = tokio::time::timeout(
+                            tls_handshake_timeout(),
+                            acceptor.accept(stream),
+                        )
+                        .await;
+                        match hs {
+                            Err(_) => {
+                                tracing::warn!(peer = %peer,
+                                    timeout = ?tls_handshake_timeout(),
+                                    "TLS handshake timed out");
+                                Err(epics_base_rs::error::CaError::Protocol(
+                                    "TLS handshake timeout".into(),
+                                ))
+                            }
+                            Ok(Ok(tls_stream)) => {
                                 // Extract verified peer identity from the
                                 // client certificate, if presented.
                                 let identity = tls_stream
@@ -433,7 +464,7 @@ pub async fn run_tcp_listener(
                                 )
                                 .await
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 tracing::warn!(peer = %peer, error = %e,
                                     "TLS handshake failed");
                                 Err(epics_base_rs::error::CaError::Io(e))
