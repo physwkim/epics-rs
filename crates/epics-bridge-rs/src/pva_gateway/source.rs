@@ -248,18 +248,20 @@ impl ChannelSource for GatewayChannelSource {
         // the encoded body to N receivers — N atomic refcount bumps,
         // not N encodes.
         //
-        // Opt-in via `EPICS_PVA_GW_RAW_FRAMES=YES` while the timing
-        // races between the upstream broadcast and per-subscriber
-        // mpsc bridge are still being shaken out — when disabled
-        // (default) the server falls through to `subscribe()` for the
-        // typed-PvField path which has full test coverage.
-        match epics_base_rs::runtime::env::get("EPICS_PVA_GW_RAW_FRAMES")
-            .as_deref()
+        // F-G12 default ON — raw forwarding is the production
+        // gateway path. Operators can opt out via
+        // `EPICS_PVA_GW_RAW_FRAMES=NO` if they hit a regression and
+        // want the legacy decode-then-encode path while issues are
+        // diagnosed.
+        if let Some(v) =
+            epics_base_rs::runtime::env::get("EPICS_PVA_GW_RAW_FRAMES")
         {
-            Some(v) if v.eq_ignore_ascii_case("YES")
-                || v.eq_ignore_ascii_case("TRUE")
-                || v == "1" => {}
-            _ => return None,
+            if v.eq_ignore_ascii_case("NO")
+                || v.eq_ignore_ascii_case("FALSE")
+                || v == "0"
+            {
+                return None;
+            }
         }
         let entry = self.cache.lookup(name, self.connect_timeout).await.ok()?;
         let mut bcast = entry.subscribe_raw();

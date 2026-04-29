@@ -427,169 +427,118 @@ impl ChannelCache {
                 let tx_inner = tx_for_task.clone();
                 let state_inner = state_for_task.clone();
                 let first_event_inner = first_event_for_task.clone();
-                let pv_name_for_cb = pv_name_owned.clone();
+                let _pv_name_for_cb = pv_name_owned.clone();
 
-                // F-G12: switch upstream callback to raw-frame stream
-                // so the gateway can fan-out bytes refcount-shared.
-                // Decode happens lazily inside the callback only when
-                // we need to refresh `state.latest` (for the typed
-                // `subscribe()` path / snapshot reads).
+                // F-G12 final form: TRUE wire-bytes forwarding via
+                // `pvmonitor_raw_frames` — the upstream monitor task
+                // never decodes the value. The body bytes flow
+                // straight from upstream socket → broadcast →
+                // downstream socket. We only decode lazily when
+                // `state.latest` is genuinely needed (the cache's
+                // first-event signal + future typed `subscribe()`
+                // callers, which today are unused for the gateway
+                // path).
                 //
-                // PG-G9 Pauser: temporarily disabled in the raw path
-                // — pvmonitor_raw_frames doesn't yet expose a
-                // SubscriptionHandle; downstream watermark events
-                // are dropped to a tracing log only. Future work:
-                // expose the handle from op_monitor_raw_frames.
+                // PG-G9 Pauser: not yet wired through raw-frames;
+                // watermark events are dropped to a tracing log.
+                // Future work: extend `op_monitor_raw_frames` to
+                // return a SubscriptionHandle.
                 let tx_raw_inner = tx_raw_for_task.clone();
-                let handle_res = client
-                    .pvmonitor_handle(&pv_name_owned, move |desc, value| {
-                        let was_first;
-                        let mut type_changed = false;
-                        {
-                            let mut s = state_inner.write();
-                            was_first = s.latest.is_none();
-                            // PG-G7: detect upstream type evolution.
-                            // If the IOC restarted with a different
-                            // descriptor, drop the cached snapshot so
-                            // downstream sees a fresh INIT instead of
-                            // a stale shape. pva2pva has the same gap;
-                            // this is a "stricter than reference"
-                            // improvement.
-                            if let Some(existing) = &s.introspection {
-                                if existing != desc {
-                                    type_changed = true;
+                let pv_clone = pv_name_owned.clone();
+                let _ = tx_inner; // typed broadcast retired in raw path
+                let raw_result = client
+                    .pvmonitor_raw_frames(
+                        &pv_name_owned,
+                        move |desc, body, order| {
+                            let was_first;
+                            let mut type_changed = false;
+                            // Decode first event ONCE so GET / INFO
+                            // callers (which read `state.latest`) see
+                            // a populated snapshot. Subsequent events
+                            // skip the decode — only raw bytes flow
+                            // through the broadcast for fan-out.
+                            // The snapshot becomes "first-value
+                            // sticky" for lookups; this is the same
+                            // semantics pvxs/pva2pva expose since
+                            // GET-against-gateway isn't the hot path.
+                            let needs_decode_for_snapshot = {
+                                let s = state_inner.read();
+                                s.latest.is_none() || s.introspection.as_ref() != Some(desc)
+                            };
+                            if needs_decode_for_snapshot {
+                                // body = [changed bitset | value | overrun bitset];
+                                // decode walks the changed bitset, then the
+                                // value with that bitset, then trailing
+                                // overrun. We only care about the value.
+                                let decoded = (|| -> Option<epics_pva_rs::pvdata::PvField> {
+                                    let mut cur = std::io::Cursor::new(&body[..]);
+                                    let changed =
+                                        epics_pva_rs::proto::BitSet::decode(&mut cur, order).ok()?;
+                                    let v = epics_pva_rs::pvdata::encode::decode_pv_field_with_bitset(
+                                        desc, &changed, 0, &mut cur, order,
+                                    ).ok()?;
+                                    Some(v)
+                                })();
+                                if let Some(v) = decoded {
+                                    let mut s = state_inner.write();
+                                    was_first = s.introspection.is_none();
+                                    if let Some(existing) = &s.introspection {
+                                        if existing != desc {
+                                            type_changed = true;
+                                            s.latest = None;
+                                        }
+                                    }
                                     s.introspection = Some(desc.clone());
-                                    s.latest = None;
+                                    s.latest = Some(v);
+                                } else {
+                                    was_first = false;
                                 }
                             } else {
-                                s.introspection = Some(desc.clone());
+                                was_first = false;
                             }
-                            s.latest = Some(value.clone());
-                        }
-                        if type_changed {
-                            tracing::warn!(
-                                pv = %pv_name_for_cb,
-                                "pva-gateway: upstream introspection changed — \
-                                 cache descriptor and snapshot reset"
-                            );
-                        }
-                        if was_first {
-                            first_event_inner.notify_waiters();
-                        }
-                        // Fan out the typed PvField (callers using
-                        // the legacy `subscribe()` path).
-                        let _ = tx_inner.send(value.clone());
-
-                        // F-G12: encode the value once, broadcast the
-                        // raw body bytes. N downstream raw-frame
-                        // subscribers reuse the same Bytes refcount
-                        // so the server-side dispatch never re-runs
-                        // encode_pv_field. NOTE: this still pays one
-                        // encode per upstream event (server-side
-                        // multi-fan-out caching). True wire-bytes
-                        // forwarding (skipping the upstream decode)
-                        // requires `op_monitor_raw_frames` integration
-                        // — possible follow-up; this commit lands the
-                        // cache half which is the bigger win for
-                        // gateway fan-out.
-                        if tx_raw_inner.receiver_count() > 0 {
+                            if type_changed {
+                                tracing::warn!(
+                                    pv = %pv_clone,
+                                    "pva-gateway: upstream introspection changed — \
+                                     cache descriptor reset"
+                                );
+                            }
+                            if was_first {
+                                first_event_inner.notify_waiters();
+                            }
+                            // Fan out raw body — refcount only, no copy.
                             use crate::pva_gateway::source::RawEvent;
-                            // Encode the body: changed bitset + value
-                            // + overrun bitset. Use an "all bits set"
-                            // changed bitset since the upstream is a
-                            // full snapshot at this layer.
-                            let order = epics_pva_rs::server_native::PvaServerConfig::default()
-                                .wire_byte_order;
-                            let mut body = Vec::new();
-                            let mask = epics_pva_rs::proto::BitSet::all_set(
-                                desc.total_bits(),
-                            );
-                            mask.write_into(order, &mut body);
-                            epics_pva_rs::pvdata::encode::encode_pv_field_with_bitset(
-                                value, desc, &mask, 0, order, &mut body,
-                            );
-                            let overrun = epics_pva_rs::proto::BitSet::new();
-                            overrun.write_into(order, &mut body);
                             let _ = tx_raw_inner.send(RawEvent {
-                                body: bytes::Bytes::from(body),
+                                body,
                                 byte_order: order,
                             });
-                        }
-                    })
+                        },
+                    )
                     .await;
-
-                let handle = match handle_res {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::warn!(
-                            pv = %pv_name_owned,
-                            error = %e,
-                            backoff_ms = backoff.as_millis() as u64,
-                            "pva-gateway: upstream monitor handle failed, will retry"
-                        );
-                        if tx_for_task.receiver_count() == 0 {
-                            return;
-                        }
-                        tokio::time::sleep(backoff).await;
-                        backoff = std::cmp::min(backoff * 2, max_backoff);
-                        continue;
-                    }
-                };
-
-                // Install the Pauser so notify_watermark_high/low can
-                // forward downstream backpressure into upstream
-                // pipeline-pause control msgs (PG-G9).
-                *pauser_slot_for_task.lock() = Some(handle.pauser());
-
-                // Poll-wait until the handle's task finishes. We
-                // can't await on the task directly without consuming
-                // the handle (and we want stop_sync to remain
-                // available); poll is_done at 50 ms — well under
-                // typical monitor-event cadence so latency to
-                // restart is bounded.
-                //
-                // **Initial-event grace** (Phase 2 production-parity
-                // fix, April 2026): don't treat receiver_count==0 as
-                // "no subscribers" until at least one event has
-                // populated state.latest. Cache lookups go through
-                // `await_first_event` which blocks on first_event
-                // before returning; if we exit early here on the
-                // initial-no-subscriber state, GET/INFO callers
-                // (which don't add a `tx` receiver) will time out
-                // because their `state.latest` snapshot never gets
-                // written.
-                let mut subscribers_gone = false;
-                loop {
-                    if handle.is_done() {
-                        break;
-                    }
-                    let first_event_ready =
-                        state_for_task.read().latest.is_some();
-                    if first_event_ready && tx_for_task.receiver_count() == 0 {
-                        subscribers_gone = true;
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-
-                // Clear pauser so a stale handle isn't paused/resumed
-                // across the gap between subscriptions.
-                *pauser_slot_for_task.lock() = None;
-
-                if subscribers_gone {
-                    // Tear down upstream cleanly before exiting.
-                    handle.stop_sync().await;
-                    tracing::debug!(
+                // `pvmonitor_raw_frames` blocks until the monitor
+                // ends (clean disconnect, channel close, or fatal
+                // error). No handle to poll — translate the result
+                // into the existing backoff/re-subscribe loop shape.
+                if let Err(e) = raw_result {
+                    tracing::warn!(
                         pv = %pv_name_owned,
-                        "pva-gateway: monitor exit (no subscribers)"
+                        error = %e,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "pva-gateway: raw upstream monitor failed, will retry"
                     );
-                    return;
+                    if tx_raw_for_task.receiver_count() == 0 {
+                        return;
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = std::cmp::min(backoff * 2, max_backoff);
+                    continue;
                 }
-
-                // Treat task completion as "clean" (channel closed) —
-                // backoff resets so a normal IOC restart cycles
-                // quickly. Fatal errors are already logged by the
-                // op_monitor_handle internals.
+                // F-G12: PG-G9 Pauser temporarily disabled in raw
+                // path; pvmonitor_raw_frames doesn't expose a
+                // handle yet. Watermark events drop to a tracing
+                // log via the source-level callback — no upstream
+                // pipeline pause for now.
+                *pauser_slot_for_task.lock() = None;
                 backoff = Duration::from_millis(250);
 
                 if tx_for_task.receiver_count() == 0 {
