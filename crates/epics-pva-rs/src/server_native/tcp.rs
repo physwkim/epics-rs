@@ -1472,8 +1472,7 @@ async fn handle_op(
                     // forward. Falls back to the decoded path on
                     // byte-order mismatch or when the source returns
                     // None.
-                    if raw_path_eligible
-                        && let Some(mut rx_raw) = src.subscribe_raw(&pv_name).await
+                    if raw_path_eligible && let Some(mut rx_raw) = src.subscribe_raw(&pv_name).await
                     {
                         // Emit initial snapshot via the regular
                         // encode path (no raw bytes for the

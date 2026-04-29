@@ -164,7 +164,7 @@ impl Drop for AbortOnDrop {
 pub struct ChannelCache {
     client: Arc<PvaClient>,
     /// Map of PV name → entry.
-    entries: Mutex<HashMap<String, Arc<UpstreamEntry>>>,
+    entries: Arc<Mutex<HashMap<String, Arc<UpstreamEntry>>>>,
     /// Cleanup-tick handle. Aborted on `ChannelCache` drop.
     cleanup_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Hard cap on `entries.len()` — defends against probe-storm DoS
@@ -199,7 +199,7 @@ impl ChannelCache {
     ) -> Arc<Self> {
         let cache = Arc::new(Self {
             client,
-            entries: Mutex::new(HashMap::new()),
+            entries: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task: parking_lot::Mutex::new(None),
             max_entries,
             negative_cache: parking_lot::Mutex::new(VecDeque::with_capacity(NEG_CACHE_MAX)),
@@ -348,14 +348,23 @@ impl ChannelCache {
         }
         impl<'a> Drop for CleanupGuard<'a> {
             fn drop(&mut self) {
-                if self.armed {
-                    // Best-effort: if the lock is contended at drop
-                    // time we'd block, so we use try_lock and fall
-                    // back to letting the next cleanup tick mop up.
-                    if let Ok(mut map) = self.cache.entries.try_lock() {
-                        map.remove(self.pv_name);
-                    }
+                if !self.armed {
+                    return;
                 }
+                if let Ok(mut map) = self.cache.entries.try_lock() {
+                    map.remove(self.pv_name);
+                    return;
+                }
+                // Lock contended — spawn a tiny task that takes the
+                // async lock and removes the orphan. Without this,
+                // the orphan survives a full cleanup TTL because
+                // cleanup_tick treats drop_poke=true (initial state)
+                // as "recently used, keep".
+                let entries = self.cache.entries.clone();
+                let pv_name = self.pv_name.to_string();
+                tokio::spawn(async move {
+                    entries.lock().await.remove(&pv_name);
+                });
             }
         }
 
@@ -553,9 +562,7 @@ impl ChannelCache {
                 // empty. Only exit when BOTH have no live receivers,
                 // otherwise upstream IOC restart silently kills every
                 // raw-path downstream monitor.
-                if tx_for_task.receiver_count() == 0
-                    && tx_raw_for_task.receiver_count() == 0
-                {
+                if tx_for_task.receiver_count() == 0 && tx_raw_for_task.receiver_count() == 0 {
                     tracing::debug!(
                         pv = %pv_name_owned,
                         "pva-gateway: monitor exit (no subscribers)"

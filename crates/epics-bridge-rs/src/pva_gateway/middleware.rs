@@ -437,6 +437,12 @@ pub struct AuditLayer<A: AuditSink> {
 
 impl<A: AuditSink> AuditLayer<A> {
     /// New layer that audits PUT only (high-signal events).
+    ///
+    /// **Note**: `sink.record()` runs synchronously inside the PUT
+    /// path. If your sink does blocking I/O (file write, syslog,
+    /// HTTP), wrap it with [`MpscAuditSink::wrap`] first or use the
+    /// [`AuditLayer::with_blocking_sink`] convenience constructor —
+    /// otherwise gateway worker threads stall under sustained load.
     pub fn new(sink: A) -> Self {
         Self {
             sink: Arc::new(sink),
@@ -445,7 +451,26 @@ impl<A: AuditSink> AuditLayer<A> {
             audit_rpc: false,
         }
     }
+}
 
+impl AuditLayer<MpscAuditSink> {
+    /// Construct an audit layer where the user-supplied sink may
+    /// block (file write, syslog, etc.). Wraps `inner` in an
+    /// [`MpscAuditSink`] of `capacity`; the layer's `record()`
+    /// becomes a non-blocking try_send and a background drainer task
+    /// services the blocking I/O. Audit events past `capacity` are
+    /// dropped (counted via [`MpscAuditSink::drops`]).
+    pub fn with_blocking_sink<I: AuditSink>(capacity: usize, inner: I) -> Self {
+        Self {
+            sink: Arc::new(MpscAuditSink::wrap(capacity, inner)),
+            audit_get: false,
+            audit_subscribe: false,
+            audit_rpc: false,
+        }
+    }
+}
+
+impl<A: AuditSink> AuditLayer<A> {
     /// Also emit an audit event on every GET. Off by default
     /// because GET frequency dominates real workloads (a Phoebus
     /// dashboard polls dozens per second).

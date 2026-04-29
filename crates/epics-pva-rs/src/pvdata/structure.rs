@@ -183,7 +183,11 @@ impl PvField {
                     .unwrap_or_default();
                 FieldDesc::StructureArray { struct_id, fields }
             }
-            Self::Union { variant_name, value, .. } => FieldDesc::Union {
+            Self::Union {
+                variant_name,
+                value,
+                ..
+            } => FieldDesc::Union {
                 struct_id: String::new(),
                 variants: vec![(variant_name.clone(), value.descriptor())],
             },

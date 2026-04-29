@@ -162,12 +162,19 @@ impl ChannelSource for ControlSource {
         Err("control PVs are read-only".to_string())
     }
 
-    async fn subscribe(&self, _name: &str) -> Option<mpsc::Receiver<PvField>> {
-        // No live monitor: control PVs are diagnostic snapshots.
-        // Downstream MONITOR INIT against one of these still
-        // succeeds (the server sends one Data frame from
-        // `get_value` and then the channel idles); only the
-        // open-ended "value-change" path returns None here.
-        None
+    async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
+        // Control PVs are snapshots: no live event source. The PVA
+        // server's MONITOR INIT path bails when both subscribe_raw
+        // and subscribe return None — the initial-snapshot emit
+        // doesn't run, so a returning-None subscribe makes
+        // `pvmonitor <prefix>:cacheSize` silently produce zero
+        // frames. Return an empty channel: the server then falls
+        // through to the get_value initial-snapshot path and emits
+        // the current reading once before the channel idles.
+        if !self.matches(name) {
+            return None;
+        }
+        let (_tx, rx) = mpsc::channel::<PvField>(1);
+        Some(rx)
     }
 }

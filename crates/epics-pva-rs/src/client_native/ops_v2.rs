@@ -981,6 +981,20 @@ where
             // here since we drive ACKs ourselves below.
             if subcmd & 0x10 != 0 {
                 server.unregister_ioid(ioid);
+                // FINISH carries a Status after subcmd; a non-success
+                // status means the server is reporting an error
+                // (out-of-memory, oversubscription, etc.) rather than
+                // clean end-of-stream. Surface as Fatal so the bridge
+                // gateway sees the failure and can rebind / log.
+                let order_le = order;
+                let mut cur = std::io::Cursor::new(&frame.payload[5..]);
+                if let Ok(st) = crate::proto::Status::decode(&mut cur, order_le)
+                    && !st.is_success()
+                {
+                    return Err(MonitorEnd::Fatal(PvaError::Protocol(format!(
+                        "MONITOR FINISH with non-success status: {st:?}"
+                    ))));
+                }
                 return Ok(());
             }
             continue;

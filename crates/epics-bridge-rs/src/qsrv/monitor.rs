@@ -92,14 +92,13 @@ impl PvaMonitor for BridgeMonitor {
             .await
             .ok_or_else(|| BridgeError::RecordNotFound(self.record_name.clone()))?;
 
-        // Read initial complete snapshot from the record (like C++ BaseMonitor::connect)
-        let (record_name, _) = epics_base_rs::server::database::parse_pv_name(&self.record_name);
-        if let Some(rec) = self.db.get_record(record_name).await {
-            let instance = rec.read().await;
-            if let Some(snapshot) = instance.snapshot_for_field("VAL") {
-                self.initial_snapshot = Some(snapshot_to_pv_structure(&snapshot, self.nt_type));
-            }
-        }
+        // The native PVA server emits the initial snapshot via
+        // ChannelSource::get_value() at MONITOR INIT time (server_native/
+        // tcp.rs build_monitor_payload). Caching another initial snapshot
+        // here would deliver it twice — visible to clients tracking
+        // event counts (archiver appliance) and surfaced in `pvmonitor`
+        // as a duplicate timestamp on the first event. Leave
+        // initial_snapshot None.
 
         self.subscription = Some(sub);
         self.running = true;
@@ -133,9 +132,14 @@ mod tests {
     use std::time::Duration;
 
     /// Lifecycle invariants:
-    /// - `start()` opens a subscription (poll yields the initial snapshot).
-    /// - `stop()` drops the subscription so the underlying DbSubscription
-    ///   is released (poll returns None — the broadcast sender was dropped).
+    /// - `start()` opens a subscription. The native PVA server emits
+    ///   the initial snapshot via ChannelSource::get_value() at
+    ///   MONITOR INIT — BridgeMonitor::poll() only surfaces fresh
+    ///   record updates so the client doesn't see a duplicate
+    ///   initial event.
+    /// - `stop()` drops the subscription so the underlying
+    ///   DbSubscription is released (poll returns None — the
+    ///   broadcast sender was dropped).
     /// - Stopping is idempotent and leaves no spawned task lingering.
     #[tokio::test]
     async fn monitor_stop_releases_subscription() {
@@ -147,11 +151,13 @@ mod tests {
         mon.start().await.expect("start ok");
         assert!(mon.running);
 
-        // First poll yields the recorded initial snapshot.
-        let initial = tokio::time::timeout(Duration::from_secs(1), mon.poll())
-            .await
-            .expect("initial poll did not time out");
-        assert!(initial.is_some(), "initial snapshot should be present");
+        // No cached initial snapshot — the PVA server provides it via
+        // get_value(). poll() blocks waiting for a fresh update.
+        let polled = tokio::time::timeout(Duration::from_millis(100), mon.poll()).await;
+        assert!(
+            polled.is_err(),
+            "poll() should time out without a fresh update"
+        );
 
         // Drop the underlying record's only owner of the broadcast
         // sender. After `stop()` the subscription is None, so subsequent

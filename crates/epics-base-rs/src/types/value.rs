@@ -61,6 +61,38 @@ impl fmt::Display for EpicsValue {
 }
 
 impl EpicsValue {
+    /// Render for audit / log paths with array truncation. The full
+    /// `Display` impl allocates `Vec<String>` of length N and joins —
+    /// for a peer-controlled `LongArray` of millions of elements that
+    /// is tens of MB of churn before any post-truncation. This helper
+    /// caps array element count to `max_elems`, appending `, …+K
+    /// more` on overflow.
+    pub fn display_truncated(&self, max_elems: usize) -> String {
+        fn render<T: fmt::Display>(arr: &[T], max: usize) -> String {
+            if arr.len() <= max {
+                let parts: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
+                format!("[{}]", parts.join(", "))
+            } else {
+                let parts: Vec<String> = arr[..max].iter().map(|v| v.to_string()).collect();
+                format!("[{}, …+{} more]", parts.join(", "), arr.len() - max)
+            }
+        }
+        match self {
+            Self::ShortArray(arr) => render(arr, max_elems),
+            Self::FloatArray(arr) => render(arr, max_elems),
+            Self::EnumArray(arr) => render(arr, max_elems),
+            Self::DoubleArray(arr) => render(arr, max_elems),
+            Self::LongArray(arr) => render(arr, max_elems),
+            Self::CharArray(arr) if arr.len() > max_elems * 4 => {
+                // 4× because chars are bytes; let scalar+small-array
+                // CharArray fall through to Display.
+                format!("<binary {} bytes>", arr.len())
+            }
+            // Scalars + short CharArray: full Display is bounded.
+            other => format!("{other}"),
+        }
+    }
+
     /// Deserialize a value from raw bytes based on DBR type
     pub fn from_bytes(dbr_type: DbFieldType, data: &[u8]) -> CaResult<Self> {
         match dbr_type {

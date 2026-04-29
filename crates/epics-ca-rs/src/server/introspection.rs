@@ -151,22 +151,47 @@ pub async fn run_introspection(
 }
 
 async fn handle_request(stream: TcpStream, state: Arc<IntrospectionState>) -> std::io::Result<()> {
+    // Slowloris guard: a peer that completes TCP and never sends bytes
+    // (or trickles them one byte at a time) would otherwise pin a
+    // tokio task forever. 5 s is generous for a local-admin HTTP
+    // request; reject silently on timeout.
+    const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const MAX_HEADERS: usize = 32;
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).await? == 0 {
+    let read_request_line =
+        tokio::time::timeout(HEADER_READ_TIMEOUT, reader.read_line(&mut request_line))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "request line timeout")
+            })??;
+    if read_request_line == 0 {
         return Ok(());
     }
     // Drain remaining headers — we don't need them, but RFC 7230
     // requires reading until the empty line so the client doesn't see
     // a half-read connection.
+    let mut header_count = 0usize;
     loop {
+        if header_count >= MAX_HEADERS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "too many headers",
+            ));
+        }
         let mut header = String::new();
-        if reader.read_line(&mut header).await? == 0 {
+        let read_n = tokio::time::timeout(HEADER_READ_TIMEOUT, reader.read_line(&mut header))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "header read timeout")
+            })??;
+        if read_n == 0 {
             break;
         }
         if header == "\r\n" || header == "\n" {
             break;
         }
+        header_count += 1;
     }
 
     let (method, path) = parse_request_line(&request_line);

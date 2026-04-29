@@ -657,6 +657,12 @@ impl PvaClient {
     /// `record[process=true]` to request a synchronous PROC after the
     /// PUT — RPC-like semantics for IOCs that have side effects on
     /// process. pvxs `Context::put(name).pvRequest(...)` parity.
+    ///
+    /// **Endian caveat**: the pvRequest is encoded once against the
+    /// current server's byte order. PUT is a one-shot op so reconnect
+    /// to a different-endian server isn't possible mid-call, but the
+    /// monitor variant inherits this constraint — see
+    /// [`Self::pvmonitor_with_request`].
     pub async fn pvput_with_request(
         &self,
         pv_name: &str,

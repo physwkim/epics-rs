@@ -1291,9 +1291,11 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
             };
 
             // Stringify the value once for the audit log; skipped when
-            // audit is off.
+            // audit is off. Use the truncated renderer so a malicious
+            // peer can't pin the dispatch task on `format!`-ing a
+            // peer-controlled array of millions of elements.
             let audit_value = if state.audit.is_some() {
-                format!("{new_value}")
+                new_value.display_truncated(64)
             } else {
                 String::new()
             };

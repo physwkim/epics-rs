@@ -391,10 +391,33 @@ async fn run_nameserver_connection(
                     Ok(n) => n,
                 };
                 accumulated.extend_from_slice(&buf[..n]);
-                // Forward the whole buffer; the engine parses VERSION +
-                // SEARCH/NOT_FOUND chains the same way it does for UDP.
-                let _ = resp_tx.send((accumulated.clone(), addr));
-                accumulated.clear();
+                // Forward only the prefix that contains complete CA
+                // messages. Without this framing, kernel splitting a
+                // server response across read syscalls causes the
+                // dispatcher to miss leading frames (when the partial
+                // buffer is < 16 bytes) and misalign subsequent
+                // parses. Each CA message is 16-byte header +
+                // align8(postsize) — no extended-postsize support
+                // here because the dispatcher itself ignores it.
+                let mut consumed = 0usize;
+                loop {
+                    if accumulated.len() - consumed < CaHeader::SIZE {
+                        break;
+                    }
+                    let Ok(hdr) = CaHeader::from_bytes(&accumulated[consumed..]) else {
+                        break;
+                    };
+                    let msg_size = CaHeader::SIZE + align8(hdr.postsize as usize);
+                    if accumulated.len() - consumed < msg_size {
+                        break;
+                    }
+                    consumed += msg_size;
+                }
+                if consumed > 0 {
+                    let frame_bytes = accumulated[..consumed].to_vec();
+                    let _ = resp_tx.send((frame_bytes, addr));
+                    accumulated.drain(..consumed);
+                }
             }
         });
 
