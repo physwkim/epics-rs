@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.11.1 — 2026-04-29
+
+Patch release. v0.11.0 shipped a regression in which default
+`pvmonitor` callers stalled after ~5 events; this release fixes that
+and supersedes v0.11.0 (which has been yanked from crates.io).
+
+### epics-pva-rs
+- **fix**: server-side pipeline credit window (P-G11, originally added
+  in v0.10.5 → 0.11.0 round-6) was applied unconditionally to every
+  Monitor op. pvxs only enables flow control when the client's
+  pvRequest sets `record._options.pipeline=true`; without that opt-in,
+  default `pvmonitor` callers stalled after the initial snapshot + 4
+  updates. The window is now gated on the actual pvRequest option.
+
 ## v0.11.0 — 2026-04-29
 
 Highlights since v0.10.5:
