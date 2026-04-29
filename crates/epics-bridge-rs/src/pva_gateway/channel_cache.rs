@@ -351,6 +351,12 @@ impl ChannelCache {
                 if !self.armed {
                     return;
                 }
+                // F-G1/F-G6: also record a negative-cache hit so a
+                // cancellation race (caller's outer timeout / abort
+                // dropping the future before await_first_event
+                // returns Err) doesn't leave the next lookup
+                // re-spawning the same upstream search immediately.
+                self.cache.record_failure(self.pv_name);
                 if let Ok(mut map) = self.cache.entries.try_lock() {
                     map.remove(self.pv_name);
                     return;

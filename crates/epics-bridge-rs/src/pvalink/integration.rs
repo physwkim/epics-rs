@@ -249,7 +249,9 @@ impl LinkSet for PvaLinkResolver {
         // hot path or `pvxr` will open it lazily; any caller that
         // wants a fresh open should call `Self::open(name).await`
         // first.
-        let name = strip_scheme(name);
+        let Some(name) = strip_scheme(name) else {
+            return false;
+        };
         match self.registry.try_get(name, LinkDirection::Inp) {
             Some(link) => link.is_connected(),
             None => false,
@@ -260,7 +262,7 @@ impl LinkSet for PvaLinkResolver {
         if !self.is_enabled() {
             return None;
         }
-        let name = strip_scheme(name);
+        let name = strip_scheme(name)?;
 
         // Fast path: cached monitor value, no async runtime touch.
         if let Some(link) = self.registry.try_get(name, LinkDirection::Inp)
@@ -296,7 +298,9 @@ impl LinkSet for PvaLinkResolver {
         if !self.is_enabled() {
             return Err("pvalink disabled".into());
         }
-        let name = strip_scheme(name);
+        let name = strip_scheme(name).ok_or_else(|| {
+            format!("pvalink rejects ca:// scheme: {name} (use the CA-link path instead)")
+        })?;
         let cfg = PvaLinkConfig {
             pv_name: name.to_string(),
             field: "value".into(),
@@ -322,7 +326,7 @@ impl LinkSet for PvaLinkResolver {
     }
 
     fn alarm_message(&self, name: &str) -> Option<String> {
-        let name = strip_scheme(name);
+        let name = strip_scheme(name)?;
         let link = block_in_place_or_warn(|| {
             self.handle
                 .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })
@@ -331,7 +335,7 @@ impl LinkSet for PvaLinkResolver {
     }
 
     fn time_stamp(&self, name: &str) -> Option<(i64, i32)> {
-        let name = strip_scheme(name);
+        let name = strip_scheme(name)?;
         let link = block_in_place_or_warn(|| {
             self.handle
                 .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })
@@ -350,10 +354,17 @@ impl LinkSet for PvaLinkResolver {
 
 /// Strip the `pva://` scheme prefix the bridge sometimes prepends.
 /// Pvalink only handles PVA — `ca://` is the libca scheme and is
-/// dispatched by the CA-link path elsewhere, so we deliberately do
-/// not accept it here.
-fn strip_scheme(name: &str) -> &str {
-    name.strip_prefix("pva://").unwrap_or(name)
+/// dispatched by the CA-link path elsewhere, so an explicit `ca://`
+/// here returns `None` so the caller can short-circuit. Names with
+/// no scheme are passed through.
+fn strip_scheme(name: &str) -> Option<&str> {
+    if let Some(stripped) = name.strip_prefix("pva://") {
+        return Some(stripped);
+    }
+    if name.starts_with("ca://") {
+        return None;
+    }
+    Some(name)
 }
 
 fn default_inp_cfg(pv_name: &str) -> PvaLinkConfig {

@@ -31,14 +31,18 @@ impl RepeaterClient {
     }
 
     fn send_message(&self, data: &[u8]) -> bool {
+        // R4-2: distinguish error kinds. The previous version
+        // returned `false` for everything (including transient
+        // WouldBlock on a saturated kernel UDP buffer), causing the
+        // outer loop to drop the client. Now: keep alive on
+        // transient/unknown errors; only treat ECONNREFUSED /
+        // EHOSTUNREACH as "client gone".
         match self.sock.send(data) {
             Ok(_) => true,
-            Err(e) => {
-                // ECONNREFUSED means client is gone
-                matches!(e.kind(), io::ErrorKind::ConnectionRefused)
-                    .then_some(false)
-                    .unwrap_or(false)
-            }
+            Err(e) => !matches!(
+                e.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::HostUnreachable
+            ),
         }
     }
 

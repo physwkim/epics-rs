@@ -484,7 +484,22 @@ impl SharedSource {
     }
 
     pub fn add(&self, name: impl Into<String>, pv: SharedPV) {
-        self.pvs.lock().insert(name.into(), pv);
+        let key = name.into();
+        // R-6: warn on silent overwrite. A second registration with
+        // the same name swaps in the new SharedPV — but in-flight
+        // clones held by ongoing RPCs still reference the previous
+        // SharedPV, so live operations don't migrate. Surfacing
+        // this nudges callers toward `remove` then `add` for
+        // intentional swaps.
+        if self.pvs.lock().insert(key.clone(), pv).is_some() {
+            tracing::warn!(
+                pv = %key,
+                "SharedSource::add overwriting an existing PV — \
+                 in-flight operations on the old SharedPV continue \
+                 with stale state. Call SharedSource::remove first \
+                 for intentional swaps."
+            );
+        }
     }
 
     /// Remove a previously-added PV by name. Returns the removed
