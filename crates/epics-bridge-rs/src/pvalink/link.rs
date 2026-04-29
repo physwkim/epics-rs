@@ -149,6 +149,20 @@ impl PvaLink {
         Ok(())
     }
 
+    /// Write a typed `PvField` directly (no string round-trip). For
+    /// large arrays this avoids the O(N) `Display` allocation +
+    /// O(N) pvput parse-back that `write(value_str)` triggers.
+    /// Used by the pvalink OUT path on EpicsValue array variants.
+    pub async fn write_pv_field(&self, value: &PvField) -> PvaLinkResult<()> {
+        if matches!(self.config.direction, LinkDirection::Inp) {
+            return Err(PvaLinkError::NotWritable);
+        }
+        self.client
+            .pvput_pv_field(&self.config.pv_name, value)
+            .await?;
+        Ok(())
+    }
+
     /// True when the link's monitor has received at least one update
     /// (i.e., the upstream PV is reachable and has emitted a value).
     /// Mirrors pvxs `pvaIsConnected` (pvalink_lset.cpp:186).

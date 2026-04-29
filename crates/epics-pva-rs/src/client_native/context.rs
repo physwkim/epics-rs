@@ -416,6 +416,21 @@ impl PvaClient {
         crate::client_native::ops_v2::op_put_value(&ch, &pv_field, self.inner.timeout).await
     }
 
+    /// Like [`Self::pvput`] but takes a pre-built [`PvField`]. Skips
+    /// the string-form round-trip — the value travels as-is on the
+    /// wire, so a 1 M-element `ScalarArray<Double>` is one 8 MB
+    /// memcpy rather than ~25 MB of `Display` allocations + 25 MB of
+    /// pvput's parse-back. Used by pvalink OUT links where the
+    /// EpicsValue → PvField shape is already known.
+    pub async fn pvput_pv_field(
+        &self,
+        pv_name: &str,
+        value: &crate::pvdata::PvField,
+    ) -> PvaResult<()> {
+        let ch = self.channel(pv_name).await?;
+        crate::client_native::ops_v2::op_put_value(&ch, value, self.inner.timeout).await
+    }
+
     /// Typed `pvmonitor` — every wire event is decoded into `T`
     /// before the callback fires. Decode failures surface as
     /// [`crate::error::PvaError::InvalidValue`] and end the monitor.

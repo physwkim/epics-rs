@@ -360,7 +360,10 @@ impl BridgeProvider {
     /// Replace the current access-control policy. All AccessContexts
     /// vended from this provider — including those already attached to
     /// existing channels — observe the swap on their next access check.
-    pub fn set_access_control(&mut self, access: Arc<dyn AccessControl>) {
+    pub fn set_access_control(&self, access: Arc<dyn AccessControl>) {
+        // Storage is `Arc<RwLock<Arc<dyn AccessControl>>>` so an
+        // immutable receiver is correct — `&mut self` blocked
+        // hot-reload through `Arc<BridgeProvider>` (P-G17).
         *self.access_cell.write() = access;
     }
 
@@ -694,7 +697,7 @@ mod tests {
     #[test]
     fn provider_set_access_control() {
         let db = Arc::new(PvDatabase::new());
-        let mut provider = BridgeProvider::new(db);
+        let provider = BridgeProvider::new(db);
         // Default policy
         assert!(provider.can_read("X", "u", "h"));
         assert!(provider.can_write("X", "u", "h"));
@@ -814,7 +817,7 @@ mod tests {
     #[test]
     fn live_access_proxy_observes_policy_swap() {
         let db = Arc::new(PvDatabase::new());
-        let mut provider = BridgeProvider::new(db);
+        let provider = BridgeProvider::new(db);
 
         // Hand out an AccessContext bound to the LIVE proxy. Default is
         // AllowAllAccess.

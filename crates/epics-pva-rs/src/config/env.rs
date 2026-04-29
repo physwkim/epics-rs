@@ -166,6 +166,7 @@ pub fn send_timeout_secs() -> f64 {
     std::env::var("EPICS_PVAS_SEND_TMO")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
         .map(|v| v.max(0.1))
         .unwrap_or(5.0)
 }
@@ -180,6 +181,7 @@ pub fn tls_handshake_timeout_secs() -> f64 {
     std::env::var("EPICS_PVAS_TLS_HANDSHAKE_TMO")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
         .map(|v| v.max(1.0))
         .unwrap_or(10.0)
 }

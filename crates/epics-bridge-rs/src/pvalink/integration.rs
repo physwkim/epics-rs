@@ -310,9 +310,13 @@ impl LinkSet for PvaLinkResolver {
             scan_on_update: false,
             direction: LinkDirection::Out,
         };
-        // Format the EpicsValue as a string using its Display impl
-        // — pvput accepts the string form and the server coerces.
-        let value_str = value.to_string();
+        // P-G16: route through the typed PvField path so a large
+        // array (e.g., waveform OUT=@pva://NAME with 1M doubles)
+        // doesn't round-trip through Display + parse — that
+        // allocates ~50 MB per record process. epics_to_pv_field
+        // already maps every EpicsValue variant including
+        // StringArray.
+        let pv_field = crate::qsrv::convert::epics_to_pv_field(&value);
         block_in_place_or_warn(|| {
             self.handle.block_on(async {
                 let link = self
@@ -320,7 +324,9 @@ impl LinkSet for PvaLinkResolver {
                     .get_or_open(cfg)
                     .await
                     .map_err(|e| e.to_string())?;
-                link.write(&value_str).await.map_err(|e| e.to_string())
+                link.write_pv_field(&pv_field)
+                    .await
+                    .map_err(|e| e.to_string())
             })
         })
     }

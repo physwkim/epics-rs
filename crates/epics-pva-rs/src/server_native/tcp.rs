@@ -147,6 +147,13 @@ struct OpState {
     /// Pulsed when `monitor_window` transitions from 0 → >0 so the
     /// subscriber loop can wake up and resume emission.
     monitor_window_notify: Option<Arc<tokio::sync::Notify>>,
+    /// MONITOR pause flag (P-G28). pvxs subcmd `0x04` (without the
+    /// `0x40` start bit) signals "stop emitting events but keep the
+    /// op alive"; pvxs `Subscription::pause(true)` uses this. The
+    /// subscriber task checks before emit and skips when `true`.
+    /// Pulsed via the same notify as the credit window so the loop
+    /// wakes on resume.
+    monitor_paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1284,6 +1291,7 @@ async fn handle_op(
                 mask,
                 monitor_window,
                 monitor_window_notify,
+                monitor_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
 
@@ -1411,6 +1419,29 @@ async fn handle_op(
             // Plain 0x00 also accepted for legacy compatibility.
             let is_ack = subcmd & 0x80 != 0;
             let is_start_or_ack = subcmd & 0x40 != 0 || is_ack || subcmd == 0x00;
+            // P-G28: subcmd 0x04 alone is PAUSE (pvxs Subscription::
+            // pause(true)). subcmd 0x44 (start | process bit) is
+            // RESUME — clears the paused flag in addition to its
+            // existing start handling. We honour PAUSE by setting
+            // the paused atomic; the subscriber loop checks before
+            // emit. The flag also clears on RESUME and on START.
+            let is_pause = subcmd == 0x04;
+            let is_resume = subcmd & 0x40 != 0;
+            if let Some(op) = ch.ops.get(&ioid) {
+                if is_pause {
+                    op.monitor_paused
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                } else if is_resume {
+                    let prev = op
+                        .monitor_paused
+                        .swap(false, std::sync::atomic::Ordering::Relaxed);
+                    if prev {
+                        if let Some(n) = op.monitor_window_notify.as_ref() {
+                            n.notify_waiters();
+                        }
+                    }
+                }
+            }
 
             // ACK path: refill the pipeline window (P-G11). pvxs
             // servermon.cpp:111 reads the u32 ack-count; we add it
@@ -1448,11 +1479,23 @@ async fn handle_op(
                 let high_watermark = config.monitor_high_watermark;
                 // Snapshot the window + notify so the spawned task can
                 // share state with this dispatch path's ACK handler.
-                let (window, window_notify) = ch
+                let (window, window_notify, paused_flag) = ch
                     .ops
                     .get(&ioid)
-                    .map(|s| (s.monitor_window.clone(), s.monitor_window_notify.clone()))
-                    .unwrap_or((None, None));
+                    .map(|s| {
+                        (
+                            s.monitor_window.clone(),
+                            s.monitor_window_notify.clone(),
+                            s.monitor_paused.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            None,
+                            None,
+                            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        )
+                    });
                 let total_bits = intro_clone.total_bits();
                 // Raw fast path is correct only when the downstream's
                 // pvRequest matches the upstream's bytes 1:1 — i.e. no
@@ -1621,6 +1664,13 @@ async fn handle_op(
                                 }
                                 notified.await;
                             }
+                        }
+                        // P-G28: pause drops events on the floor.
+                        // Resume cleanly re-emits whatever the source
+                        // sends next; clients that need state recovery
+                        // re-issue their pvRequest after resume.
+                        if paused_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            continue;
                         }
                         let payload =
                             build_monitor_payload(ioid, &intro_clone, &value, &mask_clone, order);
@@ -1901,6 +1951,7 @@ mod tests {
                 mask: BitSet::new(),
                 monitor_window: None,
                 monitor_window_notify: None,
+                monitor_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         channels.insert(

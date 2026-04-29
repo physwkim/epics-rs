@@ -326,6 +326,36 @@ impl DbSubscription {
     }
 }
 
+impl Drop for DbSubscription {
+    /// Remove this subscription's `Subscriber` slot from the record's
+    /// per-field subscriber Vec. Without this, an in-process consumer
+    /// that drops a `DbSubscription` (pvalink, qsrv, gateway, etc.)
+    /// leaves a dead `(sid, tx, coalesced)` entry in
+    /// `RecordInstance.subscribers`. Every subsequent
+    /// `notify_field_with_origin` then runs `tx.try_send(event.clone())`
+    /// against a closed mpsc — wasted clones, wasted contention on
+    /// the record lock, and over time an O(N_dropped_subs) tax on
+    /// every record process cycle.
+    ///
+    /// CA TCP server-side cleanup at `server/tcp.rs:1649` already
+    /// calls `remove_subscriber` on disconnect; this Drop closes the
+    /// gap for the in-process API.
+    fn drop(&mut self) {
+        let record = self.record.clone();
+        let sid = self.sid;
+        // Drop runs in sync context but we need an async write lock.
+        // Spawn a fire-and-forget cleanup task. If no tokio runtime is
+        // current (e.g., subscription created in a sync test that
+        // never started a runtime), `tokio::spawn` will panic — but
+        // that scenario can't have an active subscription anyway.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                record.write().await.remove_subscriber(sid);
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DbMultiMonitor — select! over multiple subscriptions
 // ---------------------------------------------------------------------------

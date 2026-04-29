@@ -446,6 +446,16 @@ async fn run_engine(
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
                 Some(SearchCommand::Find { pv_name, responder }) => {
+                    // P-G27: drop any prior pending search for the
+                    // same name so a tight retry loop doesn't grow
+                    // pending / search_buckets without bound. The
+                    // old responder gets dropped (oneshot Sender drops
+                    // → caller's find() future returns Cancelled).
+                    if let Some(old_sid) = by_name.remove(&pv_name) {
+                        if let Some(old) = pending.remove(&old_sid) {
+                            search_buckets[old.bucket].retain(|x| *x != old_sid);
+                        }
+                    }
                     let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
                     // Place new searches one bucket ahead of the cursor
                     // so they don't fire in the same tick they were
@@ -468,6 +478,13 @@ async fn run_engine(
                     }
                 }
                 Some(SearchCommand::FindAll { pv_name, responder }) => {
+                    // P-G27: same dedup as Find — drop any prior
+                    // pending search for the same name.
+                    if let Some(old_sid) = by_name.remove(&pv_name) {
+                        if let Some(old) = pending.remove(&old_sid) {
+                            search_buckets[old.bucket].retain(|x| *x != old_sid);
+                        }
+                    }
                     let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
                     let bucket = (current_bucket + 1) % N_SEARCH_BUCKETS;
                     search_buckets[bucket].push(sid);
@@ -524,9 +541,13 @@ async fn run_engine(
                         fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
                         for p in pending.values_mut() {
                             p.last_attempt = Instant::now() - Duration::from_secs(60);
-                            // Reset attempt so the kicked retry doesn't
-                            // inherit the holdoff from past failures.
+                            // Reset attempt AND holdoff_cycles so the
+                            // kicked retry doesn't inherit the holdoff
+                            // from past failures (P-G26: failed-once
+                            // searches otherwise still wait their
+                            // remaining 10-cycle holdoff during fast-tick).
                             p.attempt = 0;
+                            p.holdoff_cycles = 0;
                         }
                     }
                     if first_announce {
@@ -564,6 +585,7 @@ async fn run_engine(
                     for p in pending.values_mut() {
                         p.last_attempt = now - Duration::from_secs(60);
                         p.attempt = 0;
+                        p.holdoff_cycles = 0;
                     }
                 }
                 Some(SearchCommand::CacheClear { pv_name }) => {
@@ -941,6 +963,7 @@ fn handle_beacon(
         for p in pending.values_mut() {
             p.last_attempt = Instant::now() - Duration::from_secs(60);
             p.attempt = 0;
+            p.holdoff_cycles = 0;
         }
     }
     if first_announce {
