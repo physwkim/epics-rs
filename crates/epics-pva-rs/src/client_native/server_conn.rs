@@ -235,6 +235,20 @@ impl ServerConn {
         tokio::spawn(async move {
             let mut buf = rx_buf;
             let mut chunk = vec![0u8; 4096];
+            // P-G21: client-side segmented-message reassembly. Mirror
+            // of the server-side state machine added in P-G20. pvxs
+            // sends large monitor events (NTNDArray frames, multi-MiB
+            // arrays, big NTTable INIT descriptors) as
+            // SegFirst..SegMiddle*..SegLast sequences; without
+            // reassembly the client decodes each segment as if it
+            // were a fresh complete frame, the IOID-routed receiver
+            // gets garbage, and the application surfaces a Decode
+            // error (or worse — wrong shape silently parsed).
+            let mut seg_buf: Vec<u8> = Vec::new();
+            let mut seg_cmd: u8 = 0;
+            let mut seg_flags: crate::proto::HeaderFlags =
+                crate::proto::HeaderFlags(0);
+            let mut expect_seg = false;
             loop {
                 tokio::select! {
                     _ = cancel_reader.cancelled() => break,
@@ -273,7 +287,68 @@ impl ServerConn {
                                     handle_control_frame(&frame, &writer_tx_reader, order_reader).await;
                                     continue;
                                 }
-                                route_frame(frame, &router_reader);
+                                // P-G21: segmentation gate (mirrors
+                                // server-side P-G20 / pvxs conn.cpp:
+                                // 228-244). Validate continuation
+                                // invariants; accumulate until
+                                // SegLast (or unsegmented), then
+                                // dispatch the synthetic Frame.
+                                let raw_seg = frame.header.flags.0
+                                    & crate::proto::HeaderFlags::SEGMENT_MASK;
+                                let continuation = raw_seg
+                                    & crate::proto::HeaderFlags::SEGMENT_LAST
+                                    != 0;
+                                if continuation ^ expect_seg
+                                    || (continuation
+                                        && frame.header.command != seg_cmd)
+                                {
+                                    warn!(
+                                        expect_seg,
+                                        continuation,
+                                        cmd = frame.header.command,
+                                        saved = seg_cmd,
+                                        "PVA segmentation violation from server, closing"
+                                    );
+                                    cancel_reader.cancel();
+                                    return;
+                                }
+                                if raw_seg == 0
+                                    || raw_seg
+                                        == crate::proto::HeaderFlags::SEGMENT_FIRST
+                                {
+                                    expect_seg = true;
+                                    seg_cmd = frame.header.command;
+                                    seg_flags = frame.header.flags;
+                                    seg_buf.clear();
+                                }
+                                seg_buf.extend_from_slice(&frame.payload);
+                                if raw_seg != 0
+                                    && raw_seg
+                                        != crate::proto::HeaderFlags::SEGMENT_LAST
+                                {
+                                    continue;
+                                }
+                                expect_seg = false;
+                                let dispatch_frame = if raw_seg == 0 {
+                                    frame
+                                } else {
+                                    Frame {
+                                        header: crate::proto::PvaHeader {
+                                            version: frame.header.version,
+                                            // Strip the segment bits — the
+                                            // dispatch path expects an
+                                            // unsegmented application frame.
+                                            flags: crate::proto::HeaderFlags(
+                                                seg_flags.0
+                                                    & !crate::proto::HeaderFlags::SEGMENT_MASK,
+                                            ),
+                                            command: seg_cmd,
+                                            payload_length: seg_buf.len() as u32,
+                                        },
+                                        payload: std::mem::take(&mut seg_buf),
+                                    }
+                                };
+                                route_frame(dispatch_frame, &router_reader);
                             }
                         }
                         Err(_) => break,
