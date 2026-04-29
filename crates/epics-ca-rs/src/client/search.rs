@@ -1,12 +1,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
 
+use epics_base_rs::net::AsyncUdpV4;
 use epics_base_rs::runtime::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 
 use crate::protocol::*;
 
@@ -17,6 +16,41 @@ use super::types::{SearchReason, SearchRequest, SearchResponse};
 /// arrived from. Used to feed nameserver TCP responses through the same
 /// `handle_udp_response` parser as plain UDP search replies.
 type ParsedDatagram = (Vec<u8>, SocketAddr);
+
+/// Send `buf` toward `addr`, expanding to a per-NIC fanout when the
+/// destination is the limited broadcast `255.255.255.255` or an IPv4
+/// multicast group (`224.0.0.0/4`). Per-subnet broadcasts and
+/// unicast destinations route via the NIC chosen by [`AsyncUdpV4`].
+async fn send_with_fanout(
+    socket: &AsyncUdpV4,
+    buf: &[u8],
+    addr: SocketAddr,
+    site: &'static str,
+) {
+    let needs_fanout = match addr {
+        SocketAddr::V4(v4) => v4.ip().is_broadcast() || v4.ip().is_multicast(),
+        SocketAddr::V6(_) => false,
+    };
+    let result = if needs_fanout {
+        socket.fanout_to(buf, addr).await.map(|_| ())
+    } else {
+        socket.send_to(buf, addr).await.map(|_| ())
+    };
+    if let Err(e) = result {
+        // P-7: surface routing/permission failures at debug level
+        // rather than swallowing them silently. libca cae597d21 added
+        // similar visibility for udpiiu — EHOSTUNREACH / EPERM
+        // (firewall) etc. otherwise turn into "no responses, retried
+        // forever".
+        tracing::debug!(
+            target: "epics_ca_rs::search",
+            %addr,
+            site,
+            error = %e,
+            "send_to failed"
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Configuration constants
@@ -249,24 +283,16 @@ pub(crate) async fn run_search_engine(
     mut request_rx: mpsc::UnboundedReceiver<SearchRequest>,
     response_tx: mpsc::UnboundedSender<SearchResponse>,
 ) {
-    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+    // libca-style multi-NIC: one bound socket per IPv4 interface so
+    // `255.255.255.255` and per-subnet broadcasts each leave via the
+    // matching NIC. SO_REUSEADDR + (Linux) IP_MULTICAST_ALL=0 are
+    // applied to every per-NIC socket inside `AsyncUdpV4::bind`.
+    let socket = match AsyncUdpV4::bind(0, true) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let _ = socket.set_broadcast(true);
-
-    // Increase OS socket receive buffer for search response bursts.
-    #[cfg(unix)]
-    {
-        use std::os::fd::BorrowedFd;
-        // SAFETY: socket.as_raw_fd() returns a valid OS-owned fd that
-        // outlives the BorrowedFd we construct here (`socket` is on the
-        // stack and not closed until end of scope). socket2::SockRef
-        // does not take ownership; it only reads/writes socket options.
-        let fd = unsafe { BorrowedFd::borrow_raw(socket.as_raw_fd()) };
-        let sock_ref = socket2::SockRef::from(&fd);
-        let _ = sock_ref.set_recv_buffer_size(256 * 1024);
-    }
+    // Larger receive buffer absorbs multi-PV SEARCH response bursts.
+    let _ = socket.set_recv_buffer_size(256 * 1024);
 
     // Spawn a connection task per EPICS_CA_NAME_SERVERS entry.
     // Each task auto-reconnects with exponential backoff and forwards
@@ -713,7 +739,7 @@ fn handle_udp_response(
 async fn send_due_searches(
     state: &mut SearchEngineState,
     addr_list: &[SocketAddr],
-    socket: &UdpSocket,
+    socket: &AsyncUdpV4,
     nameserver_txs: &[mpsc::UnboundedSender<Vec<u8>>],
 ) {
     let now = Instant::now();
@@ -771,7 +797,7 @@ async fn send_due_searches(
         {
             if frames_sent < frames_per_try {
                 for addr in addr_list {
-                    let _ = socket.send_to(&current_frame, addr).await;
+                    send_with_fanout(socket, &current_frame, *addr, "broadcast burst").await;
                 }
                 for ns_tx in nameserver_txs {
                     let _ = ns_tx.send(current_frame.clone());
@@ -794,7 +820,7 @@ async fn send_due_searches(
             solo.extend_from_slice(&version_hdr);
             solo.extend_from_slice(payload);
             for addr in addr_list {
-                let _ = socket.send_to(&solo, addr).await;
+                send_with_fanout(socket, &solo, *addr, "solo").await;
             }
             for ns_tx in nameserver_txs {
                 let _ = ns_tx.send(solo.clone());
@@ -811,7 +837,7 @@ async fn send_due_searches(
     // Flush remaining frame.
     if current_frame.len() > CaHeader::SIZE && frames_sent < frames_per_try {
         for addr in addr_list {
-            let _ = socket.send_to(&current_frame, addr).await;
+            send_with_fanout(socket, &current_frame, *addr, "flush").await;
         }
         for ns_tx in nameserver_txs {
             let _ = ns_tx.send(current_frame.clone());

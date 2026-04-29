@@ -30,6 +30,8 @@ use crate::error::BridgeResult;
 use super::access::AccessConfig;
 use super::beacon::BeaconAnomaly;
 use super::cache::{CacheTimeouts, PvCache};
+// Used only inside the cfg(unix) signal handler below.
+#[cfg(unix)]
 use super::command::CommandHandler;
 use super::downstream::DownstreamServer;
 use super::putlog::PutLog;

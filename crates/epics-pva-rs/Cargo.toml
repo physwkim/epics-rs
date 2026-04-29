@@ -27,16 +27,16 @@ bytes = "1"
 parking_lot = "0.12"
 if-addrs = "0.13"
 
-# POSIX getgrouplist / getpwuid / getgrgid for posix_groups() — pvxs
-# osdGetRoles parity. Stays a regular dep; on non-Unix targets the
-# auth::plain::posix_groups() path is cfg-gated to return [].
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 # TLS for `pvas://` (opt-in via `EPICS_PVAS_TLS_KEYCHAIN`).
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+# POSIX getgrouplist / getpwuid / getgrgid for posix_groups() — pvxs
+# osdGetRoles parity. The auth::plain::posix_groups() path is
+# cfg-gated to return [] on non-Unix targets.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 rcgen = "0.13"

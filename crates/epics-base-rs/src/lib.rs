@@ -24,6 +24,7 @@
 
 pub mod calc;
 pub mod error;
+pub mod net;
 pub mod runtime;
 pub mod server;
 pub mod types;

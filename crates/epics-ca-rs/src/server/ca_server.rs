@@ -375,6 +375,10 @@ pub struct CaServer {
     introspection_addr: Option<std::net::SocketAddr>,
     /// Grace period in seconds applied when drain is requested.
     /// Default 30 s; configurable via EPICS_CAS_DRAIN_GRACE_SECS.
+    /// Only consumed by the Unix SIGTERM handler — kept on the
+    /// struct for both cfgs so the constructor signature stays
+    /// stable across platforms.
+    #[cfg_attr(not(unix), allow(dead_code))]
     drain_grace_secs: u64,
     /// Optional capability-token verifier; threaded into per-client
     /// state at accept time so CLIENT_NAME `cap:<token>` payloads

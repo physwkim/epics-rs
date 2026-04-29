@@ -18,13 +18,12 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
+use epics_base_rs::net::AsyncUdpV4;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 use tracing::debug;
@@ -276,49 +275,40 @@ impl SearchEngine {
 
 // ── UDP socket helpers ──────────────────────────────────────────────────
 
-fn bind_ephemeral_udp() -> PvaResult<UdpSocket> {
-    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    sock.set_reuse_address(true)?;
-    sock.set_broadcast(true)?;
-    sock.set_nonblocking(true)?;
-    sock.bind(&"0.0.0.0:0".parse::<SocketAddr>().unwrap().into())?;
-    let std_sock: StdUdpSocket = sock.into();
-    UdpSocket::from_std(std_sock).map_err(PvaError::Io)
+fn bind_ephemeral_udp() -> PvaResult<AsyncUdpV4> {
+    // SEARCH packets embed a `response_port` that IOCs reply unicast
+    // to. With per-NIC sockets we want every NIC's reply port to be
+    // identical so the IOC's response lands on the right
+    // logical socket regardless of which NIC delivered it back.
+    AsyncUdpV4::bind_ephemeral_same_port(true).map_err(PvaError::Io)
 }
 
-fn bind_beacon_udp() -> Option<UdpSocket> {
+fn bind_beacon_udp() -> Option<AsyncUdpV4> {
     let port = std::env::var("EPICS_PVA_BROADCAST_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_BROADCAST_PORT);
-    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).ok()?;
-    sock.set_reuse_address(true).ok()?;
-    #[cfg(unix)]
-    {
-        let _ = sock.set_reuse_port(true);
-    }
-    sock.set_broadcast(true).ok()?;
-    sock.set_nonblocking(true).ok()?;
-    let bind: SocketAddr = format!("0.0.0.0:{port}").parse().ok()?;
-    if sock.bind(&bind.into()).is_err() {
-        debug!("beacon socket bind to {port} failed (likely in-use); fast-reconnect disabled");
-        return None;
-    }
+    let sock = match AsyncUdpV4::bind(port, true) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("beacon socket bind to {port} failed: {e}; fast-reconnect disabled");
+            return None;
+        }
+    };
     // pvxs udp_collector.cpp:140 binds wildcard so we also receive
     // multicast packets — but only for groups we've explicitly joined.
     // Join any multicast groups present in EPICS_PVA_ADDR_LIST (and the
     // standard PVA `224.0.2.3` group is left to user opt-in to avoid
     // surprising multicast traffic from a default config).
     join_addr_list_multicast(&sock);
-    let std_sock: StdUdpSocket = sock.into();
-    UdpSocket::from_std(std_sock).ok()
+    Some(sock)
 }
 
 /// Walk `EPICS_PVA_ADDR_LIST` and join every IPv4 multicast group on
-/// `sock` (interface = 0.0.0.0 / ANY, kernel routes by group). Errors
-/// are logged but not propagated — a single failed join shouldn't
-/// disable the rest of the discovery path.
-pub(crate) fn join_addr_list_multicast(sock: &Socket) {
+/// every up, non-loopback NIC of `sock`. Errors are logged but not
+/// propagated — a single failed join shouldn't disable the rest of
+/// the discovery path.
+pub(crate) fn join_addr_list_multicast(sock: &AsyncUdpV4) {
     let Ok(env) = std::env::var("EPICS_PVA_ADDR_LIST") else {
         return;
     };
@@ -332,7 +322,7 @@ pub(crate) fn join_addr_list_multicast(sock: &Socket) {
             continue;
         };
         if ip.is_multicast() {
-            if let Err(e) = sock.join_multicast_v4(&ip, &Ipv4Addr::UNSPECIFIED) {
+            if let Err(e) = sock.join_multicast_v4(ip) {
                 debug!("join_multicast_v4 for {ip} failed: {e}");
             } else {
                 debug!("joined multicast group {ip}");
@@ -383,15 +373,21 @@ const RETRY_HOLDOFF_BUCKETS: usize = 10;
 
 async fn run_engine(
     mut cmd_rx: mpsc::Receiver<SearchCommand>,
-    search_socket: UdpSocket,
-    beacon_socket: Option<UdpSocket>,
+    search_socket: AsyncUdpV4,
+    beacon_socket: Option<AsyncUdpV4>,
     extra_targets: Vec<SocketAddr>,
     beacons: Arc<BeaconTracker>,
 ) {
     static NEXT_SEARCH_ID: AtomicU32 = AtomicU32::new(1);
 
     let codec = PvaCodec { big_endian: false };
-    let response_port = search_socket.local_addr().map(|a| a.port()).unwrap_or(0);
+    // All NICs share one ephemeral port (bind_ephemeral_same_port), so
+    // any per-NIC socket gives the same answer.
+    let response_port = search_socket
+        .local_addrs()
+        .first()
+        .map(|a| a.port())
+        .unwrap_or(0);
 
     let mut pending: HashMap<u32, Pending> = HashMap::new(); // by search_id
     let mut by_name: HashMap<String, u32> = HashMap::new(); // pv_name → search_id
@@ -802,7 +798,7 @@ async fn run_engine(
     }
 }
 
-async fn broadcast(socket: &UdpSocket, packet: &[u8], extra_targets: &[SocketAddr]) {
+async fn broadcast(socket: &AsyncUdpV4, packet: &[u8], extra_targets: &[SocketAddr]) {
     let mut targets: Vec<SocketAddr> = Vec::with_capacity(8);
 
     // Limited broadcast to default UDP port.
@@ -830,7 +826,20 @@ async fn broadcast(socket: &UdpSocket, packet: &[u8], extra_targets: &[SocketAdd
     }
 
     for t in targets {
-        if let Err(e) = socket.send_to(packet, t).await {
+        // Limited broadcast (255.255.255.255) and multicast (224/4)
+        // need explicit per-NIC fanout — OS routing alone would only
+        // pick the default-route NIC. Per-subnet broadcast and
+        // unicast destinations route via the NIC chosen by AsyncUdpV4.
+        let needs_fanout = match t {
+            SocketAddr::V4(v4) => v4.ip().is_broadcast() || v4.ip().is_multicast(),
+            SocketAddr::V6(_) => false,
+        };
+        let result = if needs_fanout {
+            socket.fanout_to(packet, t).await.map(|_| ())
+        } else {
+            socket.send_to(packet, t).await.map(|_| ())
+        };
+        if let Err(e) = result {
             debug!("search broadcast to {t} failed: {e}");
         }
     }

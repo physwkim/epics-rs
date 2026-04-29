@@ -5,12 +5,11 @@
 //! periodically to advertise our presence.
 
 use std::io::Cursor;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
+use epics_base_rs::net::AsyncUdpV4;
 use tracing::debug;
 
 use crate::error::{PvaError, PvaResult};
@@ -34,21 +33,15 @@ pub fn random_guid() -> [u8; 12] {
     buf
 }
 
-fn bind_udp(port: u16) -> PvaResult<UdpSocket> {
-    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    sock.set_reuse_address(true)?;
-    sock.set_broadcast(true)?;
-    sock.set_nonblocking(true)?;
-    let bind: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-    sock.bind(&bind.into())?;
+fn bind_udp(port: u16) -> PvaResult<AsyncUdpV4> {
+    let sock = AsyncUdpV4::bind(port, true).map_err(PvaError::Io)?;
     // pvxs server.cpp joins multicast groups listed in
     // EPICS_PVAS_INTF_ADDR_LIST / EPICS_PVA_ADDR_LIST so SEARCH packets
     // sent to those groups reach the responder. We do the same here —
     // the call is idempotent on each restart and silently skips
     // non-multicast entries.
     crate::client_native::search_engine::join_addr_list_multicast(&sock);
-    let std_sock: StdUdpSocket = sock.into();
-    UdpSocket::from_std(std_sock).map_err(PvaError::Io)
+    Ok(sock)
 }
 
 /// Run the UDP search responder + beacon emitter until the runtime is dropped.
@@ -182,7 +175,18 @@ pub async fn run_udp_responder_with_config(
                 change_count,
             );
             for dest in &beacon_destinations {
-                let _ = beacon_socket.send_to(&beacon, dest).await;
+                // Limited broadcast / multicast destinations need
+                // explicit per-NIC fanout. Per-subnet broadcast and
+                // unicast route via AsyncUdpV4::send_to's NIC pick.
+                let needs_fanout = match dest {
+                    SocketAddr::V4(v4) => v4.ip().is_broadcast() || v4.ip().is_multicast(),
+                    SocketAddr::V6(_) => false,
+                };
+                let _ = if needs_fanout {
+                    beacon_socket.fanout_to(&beacon, *dest).await.map(|_| ())
+                } else {
+                    beacon_socket.send_to(&beacon, *dest).await.map(|_| ())
+                };
             }
             beacon_seq = beacon_seq.wrapping_add(1);
             emitted = emitted.saturating_add(1);

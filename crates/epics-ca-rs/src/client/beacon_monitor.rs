@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
+use epics_base_rs::net::AsyncUdpV4;
 use epics_base_rs::runtime::sync::mpsc;
-use tokio::net::UdpSocket;
 
 use crate::protocol::*;
 
@@ -61,8 +61,12 @@ async fn run_beacon_monitor_inner(
         std::sync::Arc<crate::server::signed_beacon::SignedBeaconVerifier>,
     >,
 ) {
-    // Bind a dedicated UDP socket for beacon reception.
-    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+    // The CA repeater forwards every accepted beacon to its
+    // registered clients over loopback only — there's no multi-NIC
+    // routing here. Bind exclusively on `127.0.0.1` so we get the
+    // SO_REUSEADDR-friendly per-NIC machinery for free without
+    // wasting per-NIC sockets that would never see traffic.
+    let socket = match AsyncUdpV4::bind_single(Ipv4Addr::LOCALHOST, 0, false) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -302,16 +306,23 @@ fn handle_beacon(
 // ---------------------------------------------------------------------------
 
 /// Register our socket with the CA repeater at localhost:5065.
-async fn register_with_repeater(socket: &UdpSocket) -> Result<(), ()> {
-    let local_ip = match socket.local_addr().ok() {
-        Some(SocketAddr::V4(v4)) => *v4.ip(),
-        _ => Ipv4Addr::LOCALHOST,
-    };
+async fn register_with_repeater(socket: &AsyncUdpV4) -> Result<(), ()> {
+    // We bound to a single loopback NIC, so `local_addrs()` gives the
+    // one ephemeral port we want to announce.
+    let local_ip = socket
+        .local_addrs()
+        .into_iter()
+        .find_map(|sa| match sa {
+            SocketAddr::V4(v4) => Some(*v4.ip()),
+            _ => None,
+        })
+        .unwrap_or(Ipv4Addr::LOCALHOST);
 
     let mut hdr = CaHeader::new(CA_PROTO_REPEATER_REGISTER);
     hdr.available = u32::from_be_bytes(local_ip.octets());
 
-    let repeater_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, CA_REPEATER_PORT);
+    let repeater_addr =
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, CA_REPEATER_PORT));
     socket
         .send_to(&hdr.to_bytes(), repeater_addr)
         .await

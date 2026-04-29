@@ -12,11 +12,10 @@
 //!   Used as the response port.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
+use epics_base_rs::net::AsyncUdpV4;
 use tokio::time::timeout;
 use tracing::debug;
 
@@ -103,15 +102,11 @@ pub fn build_search_targets(extra: &[SocketAddr]) -> Vec<SocketAddr> {
     targets
 }
 
-/// Bind a UDP socket suitable for SEARCH: SO_BROADCAST, SO_REUSEADDR.
-fn bind_broadcast_socket() -> PvaResult<UdpSocket> {
-    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    sock.set_reuse_address(true)?;
-    sock.set_broadcast(true)?;
-    sock.set_nonblocking(true)?;
-    sock.bind(&"0.0.0.0:0".parse::<SocketAddr>().unwrap().into())?;
-    let std_sock: StdUdpSocket = sock.into();
-    UdpSocket::from_std(std_sock).map_err(PvaError::Io)
+/// Bind a per-NIC UDP socket bundle suitable for SEARCH: every NIC
+/// shares one ephemeral port so embedded `response_port` works
+/// regardless of which NIC delivers the IOC's reply.
+fn bind_broadcast_socket() -> PvaResult<AsyncUdpV4> {
+    AsyncUdpV4::bind_ephemeral_same_port(true).map_err(PvaError::Io)
 }
 
 /// Send a SEARCH for `pv_name` and wait for a SEARCH_RESPONSE.
@@ -120,8 +115,11 @@ fn bind_broadcast_socket() -> PvaResult<UdpSocket> {
 /// received before the deadline, returns the discovered server address.
 pub async fn search(pv_name: &str, total_timeout: Duration) -> PvaResult<SocketAddr> {
     let socket = bind_broadcast_socket()?;
-    let local = socket.local_addr()?;
-    let response_port = local.port();
+    let response_port = socket
+        .local_addrs()
+        .first()
+        .map(|a| a.port())
+        .unwrap_or(0);
 
     let codec = PvaCodec { big_endian: false };
     let targets = build_search_targets(&[]);
@@ -151,8 +149,20 @@ pub async fn search(pv_name: &str, total_timeout: Duration) -> PvaResult<SocketA
             false,
         );
         for &target in &targets {
+            // Limited broadcast / multicast destinations need explicit
+            // per-NIC fanout. Per-subnet broadcast and unicast targets
+            // ride AsyncUdpV4's automatic NIC selection.
+            let needs_fanout = match target {
+                SocketAddr::V4(v4) => v4.ip().is_broadcast() || v4.ip().is_multicast(),
+                SocketAddr::V6(_) => false,
+            };
+            let result = if needs_fanout {
+                socket.fanout_to(&pkt, target).await.map(|_| ())
+            } else {
+                socket.send_to(&pkt, target).await.map(|_| ())
+            };
             // Non-fatal: a single bad NIC shouldn't kill the whole search.
-            if let Err(e) = socket.send_to(&pkt, target).await {
+            if let Err(e) = result {
                 debug!("search send to {target} failed: {e}");
             }
         }

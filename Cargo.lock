@@ -815,6 +815,7 @@ dependencies = [
  "epics-ca-rs",
  "epics-macros-rs",
  "hostname",
+ "if-addrs",
  "parking_lot",
  "rustyline",
  "serial_test",
