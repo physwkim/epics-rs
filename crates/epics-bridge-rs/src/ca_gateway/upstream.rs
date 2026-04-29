@@ -628,7 +628,45 @@ async fn log_denial(env: &WriteHookEnv, ctx: &WriteContext, pv: &str, value: &st
 /// in operator-facing audits; full-fidelity tracing belongs
 /// elsewhere.
 fn format_value_for_audit(v: &EpicsValue, max_len: usize) -> String {
-    let s = format!("{v}");
+    // B-G16: bound the formatted-string allocation BEFORE running
+    // Display::fmt over the whole value. The previous
+    // `format!("{v}")` ran the full Display implementation first
+    // (every element of a million-element waveform) then truncated
+    // — a 25 MB String per put on a 1 M-element double array, with
+    // no caller bound. For arrays, slice to a small head before
+    // formatting so the heaviest path stays O(max_len) rather than
+    // O(array_len). For scalars / strings the overhead is at most
+    // one short String.
+    const HEAD_PEEK_ELEMS: usize = 32;
+    let truncated;
+    let v_for_format: &EpicsValue = match v {
+        EpicsValue::ShortArray(arr) if arr.len() > HEAD_PEEK_ELEMS => {
+            truncated = EpicsValue::ShortArray(arr[..HEAD_PEEK_ELEMS].to_vec());
+            &truncated
+        }
+        EpicsValue::FloatArray(arr) if arr.len() > HEAD_PEEK_ELEMS => {
+            truncated = EpicsValue::FloatArray(arr[..HEAD_PEEK_ELEMS].to_vec());
+            &truncated
+        }
+        EpicsValue::EnumArray(arr) if arr.len() > HEAD_PEEK_ELEMS => {
+            truncated = EpicsValue::EnumArray(arr[..HEAD_PEEK_ELEMS].to_vec());
+            &truncated
+        }
+        EpicsValue::DoubleArray(arr) if arr.len() > HEAD_PEEK_ELEMS => {
+            truncated = EpicsValue::DoubleArray(arr[..HEAD_PEEK_ELEMS].to_vec());
+            &truncated
+        }
+        EpicsValue::LongArray(arr) if arr.len() > HEAD_PEEK_ELEMS => {
+            truncated = EpicsValue::LongArray(arr[..HEAD_PEEK_ELEMS].to_vec());
+            &truncated
+        }
+        EpicsValue::CharArray(arr) if arr.len() > max_len => {
+            truncated = EpicsValue::CharArray(arr[..max_len].to_vec());
+            &truncated
+        }
+        _ => v,
+    };
+    let s = format!("{v_for_format}");
     if s.len() <= max_len {
         s
     } else {
