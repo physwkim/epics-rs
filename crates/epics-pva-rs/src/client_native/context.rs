@@ -357,6 +357,39 @@ impl PvaClient {
         Ok(v)
     }
 
+    /// `pvget` with a custom pvRequest (field selection + record
+    /// options). Mirrors pvxs `Context::get(name).pvRequest(expr)`:
+    ///
+    /// ```ignore
+    /// use epics_pva_rs::pv_request::PvRequestBuilder;
+    ///
+    /// let req = PvRequestBuilder::new()
+    ///     .field("value")
+    ///     .field("alarm.severity")
+    ///     .record("queueSize", "8")
+    ///     .build();
+    /// let v = client.pvget_with_request("MY:PV", &req).await?;
+    /// ```
+    pub async fn pvget_with_request(
+        &self,
+        pv_name: &str,
+        request: &crate::pv_request::PvRequestExpr,
+    ) -> PvaResult<PvField> {
+        let ch = self.channel(pv_name).await?;
+        let big_endian = matches!(
+            ch.ensure_active().await?.0.byte_order,
+            crate::proto::ByteOrder::Big
+        );
+        let bytes = request.encode(big_endian);
+        let (_, v) = crate::client_native::ops_v2::op_get_raw(
+            &ch,
+            &bytes,
+            self.inner.timeout,
+        )
+        .await?;
+        Ok(v)
+    }
+
     /// Force the search engine into fast-tick mode for one revolution
     /// and reset every pending search's retry deadline. Mirrors pvxs
     /// `Context::hurryUp` (client.cpp:430). Useful when the application
@@ -402,6 +435,23 @@ impl PvaClient {
         if let Ok(engine) = self.search_engine().await {
             engine.ignore_server_guids(guids).await;
         }
+    }
+
+    /// Subscribe to server-discovery events: every beacon (or active
+    /// DISCOVER reply) for a previously-unknown server / restarted
+    /// GUID surfaces as a [`crate::client_native::search_engine::Discovered`]
+    /// on the returned receiver. Combine with [`Self::ping_all`] to
+    /// drive an active scan instead of waiting for the next beacon
+    /// cycle. Mirrors pvxs `Context::discover(fn).exec()` minus the
+    /// pingAll flag — call ping_all() yourself when you want both.
+    /// Multiple concurrent subscribers are supported (each gets its
+    /// own receiver). Drop the receiver to unsubscribe.
+    pub async fn discover(
+        &self,
+    ) -> PvaResult<tokio::sync::mpsc::Receiver<
+        crate::client_native::search_engine::Discovered,
+    >> {
+        self.search_engine().await?.discover().await
     }
 
     /// Graceful shutdown: drop the channel cache, close pooled
