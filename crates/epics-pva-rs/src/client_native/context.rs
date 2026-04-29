@@ -639,15 +639,25 @@ impl PvaClient {
         op_monitor_events(&ch, &[], self.inner.pipeline_size, mask, callback).await
     }
 
+    /// Fetch the channel's introspection (FieldDesc) using PVA's
+    /// dedicated GET_FIELD message — cheaper than [`Self::pvget`]
+    /// because no value bytes are transferred. F-G4 (April 2026):
+    /// previously implemented as a full GET that discarded the value;
+    /// now uses the proper introspection-only path matching pvxs
+    /// `Context::info(name).exec()`. Critical for large NTNDArray /
+    /// NTTable PVs where pvinfo() was paying a multi-MiB transfer
+    /// cost just to discover the shape.
     pub async fn pvinfo(&self, pv_name: &str) -> PvaResult<FieldDesc> {
         let ch = self.channel(pv_name).await?;
-        let (intro, _value) = op_get(&ch, &[], self.inner.timeout).await?;
-        Ok(intro)
+        crate::client_native::ops_v2::op_get_field(&ch, "", self.inner.timeout).await
     }
 
+    /// Like [`Self::pvinfo`] but also reports which server replied —
+    /// useful for diagnostics on multi-source / failover deployments.
     pub async fn pvinfo_full(&self, pv_name: &str) -> PvaResult<(FieldDesc, SocketAddr)> {
         let ch = self.channel(pv_name).await?;
-        let (intro, _value) = op_get(&ch, &[], self.inner.timeout).await?;
+        let intro =
+            crate::client_native::ops_v2::op_get_field(&ch, "", self.inner.timeout).await?;
         let server_addr = match ch.current_state() {
             super::channel::ChannelState::Active { server, .. } => server.addr,
             _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
