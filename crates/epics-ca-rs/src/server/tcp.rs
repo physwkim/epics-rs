@@ -860,8 +860,13 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
             // usernames pass through unchanged for backwards compat.
             #[cfg(feature = "cap-tokens")]
             {
-                state.username = match (&state.cap_token_verifier, raw.strip_prefix("cap:")) {
-                    (Some(v), Some(token)) => match v.verify(token) {
+                // M1: TokenVerifier::verify expects the full `cap:`-
+                // prefixed form (it strips the prefix internally).
+                // The previous double-strip yielded MissingPrefix on
+                // every well-formed token; cap-tokens was non-
+                // functional whenever a verifier was configured.
+                state.username = match (&state.cap_token_verifier, raw.starts_with("cap:")) {
+                    (Some(v), true) => match v.verify(&raw) {
                         Ok(claims) => {
                             tracing::debug!(peer = %state.peer, sub = %claims.sub,
                                 "cap-token verified");
