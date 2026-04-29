@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use common::{require_tool, spawn_softioc};
 use epics_base_rs::types::EpicsValue;
-use serial_test::serial;
+use serial_test::file_serial;
 
 const TEST_DB: &str = "
 record(ai, \"TEST:AI\") {
@@ -41,7 +41,7 @@ fn set_client_env(addr_list: &str, port: u16) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
+#[file_serial(ca_softioc)]
 async fn rust_client_can_caget_from_softioc() {
     if !require_tool("softIoc") {
         return;
@@ -68,7 +68,7 @@ async fn rust_client_can_caget_from_softioc() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
+#[file_serial(ca_softioc)]
 async fn rust_client_can_caput_to_softioc() {
     if !require_tool("softIoc") {
         return;
@@ -99,7 +99,7 @@ async fn rust_client_can_caput_to_softioc() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
+#[file_serial(ca_softioc)]
 async fn rust_client_monitors_softioc_changes() {
     if !require_tool("softIoc") {
         return;
@@ -149,7 +149,7 @@ async fn rust_client_monitors_softioc_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[serial]
+#[file_serial(ca_softioc)]
 async fn rust_client_handles_softioc_restart() {
     if !require_tool("softIoc") {
         return;

@@ -130,6 +130,23 @@ pub async fn run_tcp_server_with_peers(
     peers: Arc<crate::server_native::peers::PeerRegistry>,
 ) -> PvaResult<()> {
     let listener = TcpListener::bind(bind_addr).await.map_err(PvaError::Io)?;
+    run_tcp_server_on_listener(source, listener, config, peers).await
+}
+
+/// Variant that takes a pre-bound [`TcpListener`]. Lets
+/// [`crate::server_native::PvaServer::start`] perform the bind
+/// synchronously (so the bound port is observable to callers) and
+/// then hand the listener to the spawned accept task. Eliminates
+/// the bind-race window that existed when the spawn-and-bind happened
+/// inside the spawned task — concurrent isolated tests can no longer
+/// have their picked-then-dropped ephemeral ports stolen by a peer.
+pub async fn run_tcp_server_on_listener(
+    source: DynSource,
+    listener: TcpListener,
+    config: PvaServerConfig,
+    peers: Arc<crate::server_native::peers::PeerRegistry>,
+) -> PvaResult<()> {
+    let bind_addr = listener.local_addr().map_err(PvaError::Io)?;
     debug!(?bind_addr, "TCP listener up");
     let active = Arc::new(AtomicUsize::new(0));
 

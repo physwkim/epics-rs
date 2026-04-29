@@ -322,17 +322,20 @@ impl PvaServer {
     where
         S: ChannelSource + 'static,
     {
-        // Pre-bind ephemeral ports so the listeners come up on known
-        // ports we can hand to clients via `client_config()`. Without
-        // this we'd have to plumb the real port out of the listener
-        // task after start() returns.
-        let pick_port = || {
-            let l = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                .expect("isolated tcp port");
-            let p = l.local_addr().unwrap().port();
-            drop(l);
-            p
-        };
+        // Robustness: pass `tcp_port = 0` and let the OS pick during
+        // the synchronous bind inside Self::start. The previous
+        // design pre-bound ephemeral ports just to know them, then
+        // dropped the binders before re-binding inside the accept
+        // task — a concurrent test could steal the freshly-released
+        // port in that window. Now there's no window at all: the
+        // listener that ends up serving clients is the one we bound
+        // before returning.
+        //
+        // UDP still uses pick-and-drop because the responder task
+        // owns the UDP socket lifecycle and we don't yet thread a
+        // pre-bound socket through; UDP search is also self-contained
+        // (each test gets its own ephemeral port and discovers via
+        // direct addr) so the race window is harmless there.
         let pick_udp = || {
             let l = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                 .expect("isolated udp port");
@@ -341,7 +344,7 @@ impl PvaServer {
             p
         };
         let cfg = PvaServerConfig {
-            tcp_port: pick_port(),
+            tcp_port: 0,
             udp_port: pick_udp(),
             ..PvaServerConfig::isolated()
         };
@@ -357,11 +360,32 @@ impl PvaServer {
         let guid = random_guid();
         let bind_addr = SocketAddr::new(std::net::IpAddr::V4(config.bind_ip), config.tcp_port);
 
+        // Robustness: bind the TCP listener synchronously here so the
+        // actually-bound port is observable to client_config() before
+        // start() returns. The previous design spawned the accept task
+        // and trusted `config.tcp_port` (which is 0 for ephemeral
+        // pickers), leaving a race window where a concurrent test
+        // could grab a freshly-released port between `pick_port`'s
+        // drop and the accept task's bind. tokio's
+        // `std::net::TcpListener::bind` is sync; we then promote it
+        // to a non-blocking tokio listener after spawning.
+        let std_listener = std::net::TcpListener::bind(bind_addr)
+            .expect("PvaServer::start: bind TCP listener");
+        std_listener
+            .set_nonblocking(true)
+            .expect("PvaServer::start: set_nonblocking");
+        let bound_tcp_port = std_listener
+            .local_addr()
+            .expect("PvaServer::start: local_addr")
+            .port();
+        let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
+            .expect("PvaServer::start: TcpListener::from_std");
+
         let protocol: &'static str = if config.tls.is_some() { "tls" } else { "tcp" };
         let udp_handle = tokio::spawn(run_udp_responder_with_config(
             dyn_source.clone(),
             config.udp_port,
-            config.tcp_port,
+            bound_tcp_port,
             guid,
             protocol,
             config.beacon_period,
@@ -372,13 +396,14 @@ impl PvaServer {
             config.ignore_addrs.clone(),
         ));
         let peers = crate::server_native::peers::PeerRegistry::new();
-        let tcp_handle = tokio::spawn(crate::server_native::tcp::run_tcp_server_with_peers(
-            dyn_source,
-            bind_addr,
-            config.clone(),
-            peers.clone(),
-        ));
-        let bound_tcp_port = config.tcp_port;
+        let tcp_handle = tokio::spawn(
+            crate::server_native::tcp::run_tcp_server_on_listener(
+                dyn_source,
+                tokio_listener,
+                config.clone(),
+                peers.clone(),
+            ),
+        );
 
         Self {
             udp_handle,

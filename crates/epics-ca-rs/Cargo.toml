@@ -110,7 +110,7 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tempfile = "3"
 proptest = "1"
 rcgen = "0.13"
-serial_test = "3"
+serial_test = { version = "3", features = ["file_locks"] }
 
 [[bench]]
 name = "protocol_bench"

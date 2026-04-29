@@ -11,7 +11,7 @@ use epics_pva_rs::nt::{Alarm, TimeStamp, TypedNT};
 use epics_pva_rs::nt::typed::EnumValue;
 use epics_pva_rs::pvdata::{FieldDesc, ScalarType};
 use epics_pva_rs::server_native::{PvaServer, SharedPV, SharedSource};
-use serial_test::serial;
+use serial_test::file_serial;
 
 #[derive(Debug, Clone, NTScalar, PartialEq)]
 struct MotorPos {
@@ -60,7 +60,7 @@ fn typed_nt_round_trip_local() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
+#[file_serial(pva_listener)]
 async fn pvget_typed_against_local_server() {
     // Build a SharedPV holding a 3-field NTScalar (value + alarm +
     // timestamp). The descriptor we open with must match the
@@ -164,7 +164,7 @@ fn typed_nt_enum_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
+#[file_serial(pva_listener)]
 async fn pvget_typed_primitive_f64() {
     // Bare f64 against a plain NTScalar<double> source.
     let pv = SharedPV::new();

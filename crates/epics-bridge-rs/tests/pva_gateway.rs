@@ -29,7 +29,7 @@ use epics_bridge_rs::pva_gateway::{
 use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{PvaServer, PvaServerConfig, SharedPV, SharedSource};
-use serial_test::serial;
+use serial_test::file_serial;
 
 /// Build a 1-PV upstream PvaServer on a random loopback port and
 /// return (server, addr, shared_pv).
@@ -68,7 +68,7 @@ fn spawn_upstream(pv_name: &str, initial: f64) -> (PvaServer, SocketAddr, Shared
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
+#[file_serial(pva_listener)]
 async fn gateway_get_forwards_upstream_value() {
     let (_us_server, us_addr, us_pv) = spawn_upstream("GW:GET:PV", 42.5);
     // Upstream client pinned at the test server.
@@ -124,7 +124,7 @@ async fn gateway_get_forwards_upstream_value() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
+#[file_serial(pva_listener)]
 async fn gateway_monitor_fans_out_to_two_clients() {
     let (_us_server, us_addr, us_pv) = spawn_upstream("GW:MON:PV", 0.0);
     let upstream_client = Arc::new(
@@ -265,7 +265,7 @@ async fn drain_to_latest(
 /// able to `pvget <prefix>:cacheSize` and read the live cache entry
 /// count without that name being forwarded upstream.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
+#[file_serial(pva_listener)]
 async fn gateway_control_prefix_cache_size() {
     let (_us_server, us_addr, _us_pv) = spawn_upstream("GW:CTRL:PV", 1.0);
     let upstream_client = Arc::new(
@@ -335,7 +335,7 @@ async fn gateway_control_prefix_cache_size() {
 /// "B:VAL" only on B, and a single downstream client reaches both
 /// through the gateway.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
+#[file_serial(pva_listener)]
 async fn multi_tenant_gateway_routes_to_correct_upstream() {
     let (_us_a, addr_a, _pv_a) = spawn_upstream("A:VAL", 1.0);
     let (_us_b, addr_b, _pv_b) = spawn_upstream("B:VAL", 2.0);
