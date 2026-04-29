@@ -258,7 +258,7 @@ impl DbSubscription {
         let sid = next_sid();
         let rx = {
             let mut instance = rec.write().await;
-            instance.add_subscriber(&field, sid, DbFieldType::Double, mask)
+            instance.add_subscriber(&field, sid, DbFieldType::Double, mask)?
         };
         Some(Self {
             rx,

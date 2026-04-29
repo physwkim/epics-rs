@@ -1455,27 +1455,41 @@ impl RecordInstance {
         }
     }
 
-    /// Add a subscriber for a specific field.
+    /// Add a subscriber for a specific field. Returns `None` when the
+    /// per-field subscriber cap (`EPICS_CAS_MAX_SUBSCRIBERS_PER_PV`)
+    /// is reached. C-G15: the parallel cap on `ProcessVariable`
+    /// (P-G14) defends against a misbehaving client opening many
+    /// MONITOR ops against one shared PV; the same defence is needed
+    /// for record fields, which the CA server's
+    /// `ChannelTarget::RecordField` path lands on.
     pub fn add_subscriber(
         &mut self,
         field: &str,
         sid: u32,
         data_type: DbFieldType,
         mask: u16,
-    ) -> mpsc::Receiver<MonitorEvent> {
+    ) -> Option<mpsc::Receiver<MonitorEvent>> {
+        let cap = crate::server::pv::max_subscribers_per_pv();
+        let field_str = field.to_string();
+        let bucket = self.subscribers.entry(field_str.clone()).or_default();
+        if bucket.len() >= cap {
+            tracing::warn!(
+                record = %self.name,
+                field = %field_str,
+                live = bucket.len(),
+                cap,
+                "record field subscriber cap reached, refusing add_subscriber"
+            );
+            return None;
+        }
         let (tx, rx) = mpsc::channel(64);
-        let sub = Subscriber {
+        bucket.push(Subscriber {
             sid,
             data_type,
             mask,
             tx,
             coalesced: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        };
-        let field_str = field.to_string();
-        self.subscribers
-            .entry(field_str.clone())
-            .or_default()
-            .push(sub);
+        });
         // Initialize last_posted with current value so the first process cycle
         // doesn't treat it as "changed" (the initial value is already sent
         // to the client as part of EVENT_ADD response).
@@ -1484,7 +1498,7 @@ impl RecordInstance {
                 self.last_posted.insert(field_str, val);
             }
         }
-        rx
+        Some(rx)
     }
 
     /// Remove a subscriber by subscription ID from all fields.
