@@ -440,18 +440,38 @@ fn test_encode_gr_long_with_metadata() {
 
 #[test]
 fn test_encode_gr_char_with_metadata() {
+    // DBF_CHAR limits are epicsInt8 (-128..127) per libca 7cb80d5a1.
+    // Pre-fix: f64 → u8 saturated negatives to 0 and large positives
+    // round-tripped fine but unsignedly. Post-fix: f64 → i8 → u8
+    // bit-pattern preserves signed semantics. 100.0 stays 100;
+    // -10.0 round-trips as 0xF6.
     let mut snap = Snapshot::new(EpicsValue::Char(42), 0, 0, SystemTime::UNIX_EPOCH);
     snap.display = Some(DisplayInfo {
         units: "raw".to_string(),
-        upper_disp_limit: 255.0,
-        lower_disp_limit: 0.0,
+        upper_disp_limit: 100.0,
+        lower_disp_limit: -10.0,
         ..Default::default()
     });
     let data = encode_dbr(25, &snap).unwrap();
     assert_eq!(data.len(), 20);
-    assert_eq!(data[12], 255);
-    assert_eq!(data[13], 0);
+    assert_eq!(data[12], 100u8); // 100 fits i8 → 100u8.
+    assert_eq!(data[13], 0xF6u8); // -10i8 bit-pattern.
     assert_eq!(data[19], 42);
+}
+
+#[test]
+fn test_encode_gr_char_saturates_out_of_range() {
+    // 255.0 is out of i8 range — saturates to i8::MAX (127).
+    // Before P-8 fix this passed unchecked as u8(255).
+    let mut snap = Snapshot::new(EpicsValue::Char(0), 0, 0, SystemTime::UNIX_EPOCH);
+    snap.display = Some(DisplayInfo {
+        upper_disp_limit: 255.0,
+        lower_disp_limit: -200.0,
+        ..Default::default()
+    });
+    let data = encode_dbr(25, &snap).unwrap();
+    assert_eq!(data[12], 127u8); // saturated i8::MAX
+    assert_eq!(data[13], 0x80u8); // saturated i8::MIN bit-pattern
 }
 
 #[test]
@@ -803,4 +823,61 @@ fn test_dbr_type_helpers() {
     assert_eq!(DbFieldType::Long.ctrl_dbr_type(), 33);
     assert_eq!(DbFieldType::String.time_dbr_type(), 14);
     assert_eq!(DbFieldType::Char.ctrl_dbr_type(), 32);
+}
+
+// ── P-1 (BUG_ARCHAEOLOGY libca 8cc20393f / a7bf59079): empty-array
+// COUNT=0 round-trip. Pre-fix the `count <= 1` short-circuit raised
+// CaError::Protocol("...too small") on GET and silently degraded
+// array WRITE to a scalar PUT.
+
+#[test]
+fn p1_empty_array_double_decodes_as_empty_doublearray() {
+    let v = EpicsValue::from_bytes_array(DbFieldType::Double, &[], 0).unwrap();
+    assert_eq!(v, EpicsValue::DoubleArray(vec![]));
+    assert_eq!(v.count(), 0);
+}
+
+#[test]
+fn p1_count_one_double_falls_through_to_scalar() {
+    // count == 1 still routes through the scalar decoder (the
+    // legitimate "scalar shaped as array of one" CA case).
+    let bytes = 7.5_f64.to_be_bytes();
+    let v = EpicsValue::from_bytes_array(DbFieldType::Double, &bytes, 1).unwrap();
+    assert_eq!(v, EpicsValue::Double(7.5));
+}
+
+#[test]
+fn p1_empty_array_string_decodes_as_empty_stringarray() {
+    // DBR_STRING uses 40-byte fixed-width slots — count=0 means no
+    // bytes consumed; the decoder must produce StringArray(vec![])
+    // not error on zero-length input.
+    let v = EpicsValue::from_bytes_array(DbFieldType::String, &[], 0).unwrap();
+    assert_eq!(v, EpicsValue::StringArray(vec![]));
+    assert_eq!(v.count(), 0);
+}
+
+#[test]
+fn p1_empty_array_all_dbr_types_round_trip() {
+    // Every DBR type's count=0 path must produce its typed empty
+    // variant. Catches future variants added without an arm in
+    // from_bytes_array's count=0 dispatch.
+    let cases: &[(DbFieldType, EpicsValue)] = &[
+        (DbFieldType::Short, EpicsValue::ShortArray(vec![])),
+        (DbFieldType::Float, EpicsValue::FloatArray(vec![])),
+        (DbFieldType::Enum, EpicsValue::EnumArray(vec![])),
+        (DbFieldType::Char, EpicsValue::CharArray(vec![])),
+        (DbFieldType::Long, EpicsValue::LongArray(vec![])),
+        (DbFieldType::Double, EpicsValue::DoubleArray(vec![])),
+        (DbFieldType::String, EpicsValue::StringArray(vec![])),
+    ];
+    for (t, expected) in cases {
+        let v = EpicsValue::from_bytes_array(*t, &[], 0).unwrap();
+        assert_eq!(&v, expected, "DBF type {t:?}");
+        // to_bytes round-trip: empty array encodes to empty payload,
+        // which decodes back to the same empty array variant.
+        let bytes = v.to_bytes();
+        assert_eq!(bytes.len(), 0, "encoded length for empty {t:?}");
+        let back = EpicsValue::from_bytes_array(*t, &bytes, 0).unwrap();
+        assert_eq!(back, *expected, "round-trip {t:?}");
+    }
 }

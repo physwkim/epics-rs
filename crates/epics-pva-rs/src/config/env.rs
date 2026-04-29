@@ -10,23 +10,50 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Parse a `EPICS_PVA_ADDR_LIST`-style string (comma/whitespace
-/// separated) into a list of `SocketAddr`. Plain IP entries get
-/// `default_port` appended; `host:port` entries keep their explicit
-/// port. Unparsable entries are silently dropped.
+/// separated) into a list of `SocketAddr`. Accepts plain IPs (gets
+/// `default_port` appended), `ip:port`, DNS hostnames (resolves via
+/// `ToSocketAddrs`), and `hostname:port`. Unresolvable entries are
+/// dropped with a debug log so operators can spot the silent miss.
+///
+/// P-6 (BUG_ARCHAEOLOGY libca a8e8d22c3): the previous parser only
+/// accepted literal IPs, silently dropping every DNS hostname. C
+/// libca had a 32-byte buffer truncation bug; we had a stricter
+/// "drop the whole token" bug — same operator-visible symptom of
+/// "Empty PV search address list" with no actionable error.
 pub fn parse_addr_list_with_port(env: &str, default_port: u16) -> Vec<SocketAddr> {
+    use std::net::ToSocketAddrs;
     env.split(|c: char| c == ',' || c.is_whitespace())
         .filter_map(|s| {
             let s = s.trim();
             if s.is_empty() {
                 return None;
             }
+            // 1. Bracketed IPv6 with port: `[::1]:5064`.
             if let Ok(sa) = s.parse::<SocketAddr>() {
                 return Some(sa);
             }
+            // 2. Bare IP (v4 or v6) — append default port.
             if let Ok(ip) = s.parse::<IpAddr>() {
                 return Some(SocketAddr::new(ip, default_port));
             }
-            None
+            // 3. `host:port` or bare hostname — synchronous DNS
+            //    resolve via ToSocketAddrs. Take the first address;
+            //    callers iterate and dedup.
+            let with_port = if s.contains(':') {
+                s.to_string()
+            } else {
+                format!("{s}:{default_port}")
+            };
+            match with_port.to_socket_addrs() {
+                Ok(mut iter) => iter.next().or_else(|| {
+                    tracing::debug!(token = %s, "EPICS_PVA addr-list: empty resolution");
+                    None
+                }),
+                Err(e) => {
+                    tracing::debug!(token = %s, error = %e, "EPICS_PVA addr-list: resolve failed");
+                    None
+                }
+            }
         })
         .collect()
 }

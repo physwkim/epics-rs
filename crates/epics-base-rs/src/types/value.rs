@@ -254,7 +254,28 @@ impl EpicsValue {
     /// can short-circuit. Cap the allocation at `data.len() / size`
     /// so the capacity tracks the bytes that actually arrived.
     pub fn from_bytes_array(dbr_type: DbFieldType, data: &[u8], count: usize) -> CaResult<Self> {
-        if count <= 1 {
+        // P-1 (BUG_ARCHAEOLOGY libca 8cc20393f / a7bf59079): count=0
+        // is a legitimate empty-array round-trip and must NOT collapse
+        // to scalar decoding. The previous `count <= 1` short-circuit
+        // (a) read garbage scalar from an empty payload on GET (raised
+        // CaError::Protocol "char data empty" / "...too small") and
+        // (b) accepted scalar bytes for an array WRITE with count=0
+        // when the server should reject. Treat count=0 as the typed
+        // empty-array variant; count=1 still falls through to the
+        // scalar decoder (the legitimate "scalar shaped as array of
+        // one" case in CA).
+        if count == 0 {
+            return Ok(match dbr_type {
+                DbFieldType::String => Self::StringArray(Vec::new()),
+                DbFieldType::Short => Self::ShortArray(Vec::new()),
+                DbFieldType::Float => Self::FloatArray(Vec::new()),
+                DbFieldType::Enum => Self::EnumArray(Vec::new()),
+                DbFieldType::Char => Self::CharArray(Vec::new()),
+                DbFieldType::Long => Self::LongArray(Vec::new()),
+                DbFieldType::Double => Self::DoubleArray(Vec::new()),
+            });
+        }
+        if count == 1 {
             return Self::from_bytes(dbr_type, data);
         }
         let cap_for = |elem_size: usize| count.min(data.len() / elem_size.max(1));

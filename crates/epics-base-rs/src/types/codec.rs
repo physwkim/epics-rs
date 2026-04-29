@@ -380,7 +380,12 @@ fn encode_units_limits_i32(
     }
 }
 
-/// units(8) + n limits as u8
+/// units(8) + n limits as u8 (DBF_CHAR limits, transmitted as
+/// SIGNED `epicsInt8` per the libca spec — `7cb80d5a1`). Encoding
+/// path: `f64 limit → i8 (saturating) → u8 bit-pattern → wire byte`.
+/// Without the i8 intermediate `(-10.0_f64) as u8` saturates to 0
+/// in Rust, silently destroying negative DRVL/LOPR/HOPR/HIHI on
+/// DBF_CHAR records. P-8 finding (BUG_ARCHAEOLOGY).
 fn encode_units_limits_u8(
     buf: &mut Vec<u8>,
     snapshot: &crate::server::snapshot::Snapshot,
@@ -389,7 +394,9 @@ fn encode_units_limits_u8(
     encode_units(buf, snapshot);
     let limits = get_limits(snapshot, n_limits);
     for l in &limits[..n_limits] {
-        buf.push(*l as u8);
+        // Saturating cast f64 → i8 → wire byte. `as i8` on f64 in
+        // Rust ≥1.45 saturates to [i8::MIN, i8::MAX] (no UB).
+        buf.push((*l as i8) as u8);
     }
 }
 
@@ -688,7 +695,12 @@ fn decode_gr_ctrl(
             let mut limits = [0.0f64; 8];
             for i in 0..n_limits {
                 if off < data.len() {
-                    limits[i] = data[off] as f64;
+                    // Decode as SIGNED i8 → f64 (DBF_CHAR is
+                    // epicsInt8 per libca 7cb80d5a1). The previous
+                    // `data[off] as f64` route read 0xF6 as 246.0
+                    // instead of -10.0, silently flipping signs on
+                    // CTRL_CHAR / GR_CHAR negative DRVL/LOPR limits.
+                    limits[i] = (data[off] as i8) as f64;
                 }
                 off += 1;
             }
