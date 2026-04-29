@@ -142,8 +142,42 @@ async fn run_beacon_monitor_inner(
             if hdr.cmmd == crate::server::signed_beacon::CA_PROTO_RSRV_BEACON_SIG {
                 if let Some(ref v) = verifier {
                     let frame = &buf[frame_start..frame_start + frame_len];
+                    // G3: bind the signed payload's announced server_ip
+                    // to the UDP source IP. A recorded valid companion
+                    // can otherwise be replayed from anywhere; combined
+                    // with the unbounded verified_tuples map below this
+                    // is a poison amplifier.
+                    let src_ip = match _src.ip() {
+                        std::net::IpAddr::V4(v) => v,
+                        std::net::IpAddr::V6(_) => {
+                            metrics::counter!("ca_client_signed_beacon_failures_total")
+                                .increment(1);
+                            continue;
+                        }
+                    };
                     match v.verify(frame) {
+                        Ok((ip, port, beacon_id)) if Ipv4Addr::from(ip) != src_ip => {
+                            tracing::debug!(
+                                announced = %Ipv4Addr::from(ip),
+                                actual = %src_ip,
+                                port, beacon_id,
+                                "signed beacon source-IP mismatch (G3)"
+                            );
+                            metrics::counter!("ca_client_signed_beacon_source_ip_mismatch_total")
+                                .increment(1);
+                        }
                         Ok((ip, port, beacon_id)) => {
+                            // G2: cap verified_tuples on the companion-
+                            // only path. The unsigned-beacon path GC's
+                            // it via retain() at line 181, but a peer
+                            // sending only signed companions would
+                            // otherwise grow it linearly.
+                            const MAX_VERIFIED_TUPLES: usize = 8192;
+                            if verified_tuples.len() >= MAX_VERIFIED_TUPLES {
+                                let max_age = std::time::Duration::from_secs(v.max_age_secs.max(1));
+                                let now = std::time::Instant::now();
+                                verified_tuples.retain(|_, t| now.duration_since(*t) <= max_age);
+                            }
                             verified_tuples
                                 .insert((ip, port, beacon_id), std::time::Instant::now());
                             metrics::counter!("ca_client_signed_beacon_verified_total")
@@ -213,7 +247,16 @@ fn handle_beacon(
     let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
     let now = Instant::now();
 
+    // G1: cap the per-server BeaconState map. With
+    // EPICS_CA_BEACON_REQUIRE_SIGNED=NO an attacker can spoof
+    // beacons with arbitrary `available`/`count` to grow the map.
+    // Reap entries idle for ≥5× period_estimate when the cap is hit.
+    const MAX_BEACON_SERVERS: usize = 4096;
     let first_sighting = !servers.contains_key(&server_addr);
+    if first_sighting && servers.len() >= MAX_BEACON_SERVERS {
+        let cutoff_threshold = Duration::from_secs(15 * 5);
+        servers.retain(|_, s| now.duration_since(s.last_seen) < cutoff_threshold);
+    }
     let entry = servers.entry(server_addr).or_insert_with(|| BeaconState {
         last_id: beacon_id.wrapping_sub(1),
         last_seen: now,

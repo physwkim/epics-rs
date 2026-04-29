@@ -784,6 +784,17 @@ struct FieldPrimingState {
 /// Uses a fan-in channel pattern: each member subscription spawns a task
 /// that forwards events to a single receiver, enabling concurrent wait
 /// across all members.
+///
+/// Drop-guarded per-member task handle. Aborts the spawned forwarder
+/// when the GroupMonitor drops so a quiet PV doesn't leak the task.
+pub struct MemberTaskGuard(tokio::task::AbortHandle);
+
+impl Drop for MemberTaskGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub struct GroupMonitor {
     db: Arc<PvDatabase>,
     def: GroupPvDef,
@@ -797,8 +808,13 @@ pub struct GroupMonitor {
     initial_snapshot: Option<PvStructure>,
     /// Fan-in receiver for member events
     event_rx: Option<tokio::sync::mpsc::Receiver<MemberEvent>>,
-    /// Handles for spawned per-member tasks
-    _tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Handles for spawned per-member tasks. Wrapped in AbortOnDrop
+    /// so a quiet PV (no events between subscribe-then-drop cycles)
+    /// doesn't leak member-subscription tasks. Each task drives a
+    /// DbSubscription and forwards into the fan-in mpsc; without
+    /// the abort guard those tasks survive group-monitor teardown
+    /// until the parent record's broadcast disconnects.
+    _tasks: Vec<MemberTaskGuard>,
     /// Access control context propagated from the parent GroupChannel.
     access: super::provider::AccessContext,
     /// Per-member priming state. Once all fields are primed, the first
@@ -921,7 +937,7 @@ impl super::provider::PvaMonitor for GroupMonitor {
                         }
                     }
                 });
-                self._tasks.push(handle);
+                self._tasks.push(MemberTaskGuard(handle.abort_handle()));
             } else {
                 // Record not found or subscribe failed — auto-prime this
                 // member so the priming phase doesn't stall forever.
@@ -952,7 +968,7 @@ impl super::provider::PvaMonitor for GroupMonitor {
                             }
                         }
                     });
-                    self._tasks.push(handle);
+                    self._tasks.push(MemberTaskGuard(handle.abort_handle()));
                 } else {
                     // Property subscribe failed — auto-prime.
                     if let Some(state) = self.priming.get_mut(idx) {
@@ -1056,10 +1072,8 @@ impl super::provider::PvaMonitor for GroupMonitor {
         // Drop the receiver first to signal tasks to stop
         self.event_rx = None;
 
-        // Abort spawned tasks
-        for handle in self._tasks.drain(..) {
-            handle.abort();
-        }
+        // Abort spawned tasks. Drop fires the AbortOnDrop guard.
+        self._tasks.clear();
 
         self.running = false;
         self.group_channel = None;

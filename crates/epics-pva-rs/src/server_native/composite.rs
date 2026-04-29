@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::pvdata::{FieldDesc, PvField};
 
-use super::source::{ChannelSource, DynSource};
+use super::source::{ChannelContext, ChannelSource, DynSource, RawMonitorEvent};
 
 /// One entry in the registry.
 #[derive(Clone)]
@@ -216,6 +216,61 @@ impl ChannelSource for CompositeSource {
                 }
             }
             Err(format!("no source serves '{name}'"))
+        }
+    }
+
+    // F-G6-1: explicitly forward the trait methods that have default
+    // impls so the composite doesn't shadow per-source overrides.
+    // Round-2 caught the same pattern in the middleware Layer wrappers
+    // (subscribe_raw / put_value_ctx / notify_watermark_*) — without
+    // these, F-G12 raw-frame forwarding and PG-G10 per-credential
+    // routing silently revert to the default no-op for any source
+    // routed through the composite.
+    fn put_value_ctx(
+        &self,
+        name: &str,
+        value: PvField,
+        ctx: ChannelContext,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let name = name.to_string();
+        let this = self.snapshot();
+        async move {
+            for src in this {
+                if src.has_pv(&name).await {
+                    return src.put_value_ctx(&name, value, ctx).await;
+                }
+            }
+            Err(format!("no source serves '{name}'"))
+        }
+    }
+
+    fn subscribe_raw(
+        &self,
+        name: &str,
+    ) -> impl std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>> + Send {
+        let name = name.to_string();
+        let this = self.snapshot();
+        async move {
+            for src in this {
+                if src.has_pv(&name).await {
+                    return src.subscribe_raw(&name).await;
+                }
+            }
+            None
+        }
+    }
+
+    fn notify_watermark_high(&self, name: &str) {
+        for src in self.snapshot() {
+            // No has_pv check — fire on every source that registered.
+            // The per-source override decides whether the name matches.
+            src.notify_watermark_high(name);
+        }
+    }
+
+    fn notify_watermark_low(&self, name: &str) {
+        for src in self.snapshot() {
+            src.notify_watermark_low(name);
         }
     }
 }

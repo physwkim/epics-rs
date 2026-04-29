@@ -310,13 +310,25 @@ impl LinkSet for PvaLinkResolver {
             scan_on_update: false,
             direction: LinkDirection::Out,
         };
-        // P-G16: route through the typed PvField path so a large
-        // array (e.g., waveform OUT=@pva://NAME with 1M doubles)
-        // doesn't round-trip through Display + parse — that
-        // allocates ~50 MB per record process. epics_to_pv_field
-        // already maps every EpicsValue variant including
-        // StringArray.
-        let pv_field = crate::qsrv::convert::epics_to_pv_field(&value);
+        // P-G16: bypass the Display→string→parse round-trip for
+        // ARRAYS (where Display alloc is O(N_elements * digits) and
+        // pvput re-parses 25 MB strings on a 1 M-element waveform).
+        // SCALARS keep the string path because the typed
+        // PvField::Scalar doesn't carry the upstream NT-structure
+        // wrapper; encode_pv_field on a (Structure intro, Scalar
+        // value) mismatch hits the fall-through arm and emits zero
+        // bytes — a Round-6 regression caught immediately on
+        // verification of the original P-G16 fix.
+        let array_path = matches!(
+            value,
+            EpicsValue::ShortArray(_)
+                | EpicsValue::FloatArray(_)
+                | EpicsValue::EnumArray(_)
+                | EpicsValue::DoubleArray(_)
+                | EpicsValue::LongArray(_)
+                | EpicsValue::CharArray(_)
+                | EpicsValue::StringArray(_)
+        );
         block_in_place_or_warn(|| {
             self.handle.block_on(async {
                 let link = self
@@ -324,9 +336,15 @@ impl LinkSet for PvaLinkResolver {
                     .get_or_open(cfg)
                     .await
                     .map_err(|e| e.to_string())?;
-                link.write_pv_field(&pv_field)
-                    .await
-                    .map_err(|e| e.to_string())
+                if array_path {
+                    let pv_field = crate::qsrv::convert::epics_to_pv_field(&value);
+                    link.write_pv_field(&pv_field)
+                        .await
+                        .map_err(|e| e.to_string())
+                } else {
+                    let value_str = value.to_string();
+                    link.write(&value_str).await.map_err(|e| e.to_string())
+                }
             })
         })
     }

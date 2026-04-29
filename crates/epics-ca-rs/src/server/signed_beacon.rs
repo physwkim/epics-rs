@@ -49,16 +49,20 @@ const COMPANION_SIZE: usize = HEADER_SIZE + PAYLOAD_SIZE;
 pub type KeyId = [u8; 8];
 
 pub fn key_id(vk: &VerifyingKey) -> KeyId {
-    let bytes = vk.to_bytes();
-    // SplitMix64-style fold of the 32-byte VK so we don't pull in a
-    // hash crate just for this. Stable, collision-resistant enough for
-    // our purposes (8 bytes ≈ 18 quintillion ids; we're identifying a
-    // handful of issuers).
-    let mut acc: u64 = 0xCBF2_9CE4_8422_2325;
-    for b in bytes.iter() {
-        acc = acc.wrapping_mul(0x100000001B3).wrapping_add(*b as u64);
-    }
-    acc.to_be_bytes()
+    // G6: first 8 bytes of SHA256(vk_bytes). The previous FNV-1a
+    // fold (despite a "SplitMix64-style" comment, the magic numbers
+    // 0xCBF29CE484222325 / 0x100000001B3 are FNV's) is not collision-
+    // resistant — preimages for an 8-byte target can be ground in
+    // seconds. Doc comment at line 48 already promised SHA256[..8],
+    // implementation now matches. sha2 is already a transitive dep
+    // via ed25519_dalek so no new crate.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(vk.to_bytes());
+    let digest = hasher.finalize();
+    let mut id = [0u8; 8];
+    id.copy_from_slice(&digest[..8]);
+    id
 }
 
 /// Builds and emits signed companion datagrams. Holds the signing key

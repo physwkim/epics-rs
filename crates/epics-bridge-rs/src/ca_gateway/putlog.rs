@@ -126,20 +126,22 @@ impl PutLog {
         *counter = counter.saturating_add(line.len() as u64);
 
         if *counter >= self.max_bytes {
-            // Drop current handle, rename, re-open lazily on next log().
-            *guard = None;
+            // NEW-3: hold `guard` across the rename so a concurrent
+            // `log()` call cannot acquire `self.file.lock()` between
+            // the take-and-drop and the rename. The previous order
+            // (drop guard, then rename) admitted a race where the
+            // racing log() reopened `<path>` (creating a fresh file)
+            // before our rename moved that fresh file aside, putting
+            // the audit lines into `<path>.1` while `<path>` stayed
+            // empty.
             *counter = 0;
-            drop(guard);
-            drop(counter);
+            *guard = None;
             let backup = self.path.with_extension(
                 self.path
                     .extension()
                     .map(|e| format!("{}.1", e.to_string_lossy()))
                     .unwrap_or_else(|| "1".to_string()),
             );
-            // Best-effort rename; failure (e.g. backup path on a
-            // different fs) just means the next write keeps appending
-            // to the original file. Operators get a warning to fix.
             if let Err(e) = tokio::fs::rename(&self.path, &backup).await {
                 tracing::warn!(
                     error = %e,
@@ -148,6 +150,9 @@ impl PutLog {
                     "putlog rotation rename failed; continuing without rotation"
                 );
             }
+            // Guards drop here at end of scope, after the rename.
+            drop(guard);
+            drop(counter);
         }
 
         Ok(())

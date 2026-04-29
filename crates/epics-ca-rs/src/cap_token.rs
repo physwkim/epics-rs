@@ -183,6 +183,16 @@ impl TokenVerifier {
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_b64)
             .map_err(|e| TokenError::Base64(e.to_string()))?;
+        // G5: bound the JSON parse before verification. JSON parse
+        // runs against attacker-controlled bytes; while we still
+        // need claims.iss to look up the verification key (so we
+        // can't fully verify-first), capping the payload length
+        // prevents pathological deeply-nested JSON from burning CPU.
+        // Real CA cap-tokens are <1 KiB; 4 KiB gives generous headroom.
+        const MAX_PAYLOAD_BYTES: usize = 4096;
+        if payload_bytes.len() > MAX_PAYLOAD_BYTES {
+            return Err(TokenError::Malformed);
+        }
         let claims: TokenClaims =
             serde_json::from_slice(&payload_bytes).map_err(|e| TokenError::Json(e.to_string()))?;
         let key = self

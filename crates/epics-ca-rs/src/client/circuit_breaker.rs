@@ -198,6 +198,13 @@ impl CircuitBreakerRegistry {
     /// Notify that a recent attempt against `server` failed. May trip
     /// the breaker into OPEN.
     pub fn record_failure(&mut self, server: SocketAddr) {
+        // G4: mirror the cap-then-evict in `allow()` so a flapping
+        // workload that hits record_failure on many transient
+        // addresses (without ever calling allow on those addrs)
+        // can't grow the map past MAX_BREAKERS.
+        if self.breakers.len() >= Self::MAX_BREAKERS && !self.breakers.contains_key(&server) {
+            self.evict_idle_closed();
+        }
         let now = Instant::now();
         let breaker = self
             .breakers
