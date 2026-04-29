@@ -201,6 +201,100 @@ pub async fn op_put_raw(
     op_put_inner(channel, value_str, Some(pv_req), op_timeout).await
 }
 
+/// PUT a single dotted-path field of the channel's structure (e.g.
+/// `"alarm.severity"`, `"value"`, `"display.units"`). pvxs
+/// `PutBuilder::set("path", val)` parity. Server receives a value
+/// where only `field_path` carries the parsed string and every other
+/// field is a default; the changed bitset has only the path's bit
+/// set so the server applies just that one field.
+///
+/// pvRequest is forced to `field(<path>)` so the server INIT
+/// negotiation matches the field layout we'll send.
+pub async fn op_put_field(
+    channel: &Arc<Channel>,
+    field_path: &str,
+    value_str: &str,
+    op_timeout: Duration,
+) -> PvaResult<()> {
+    let (server, sid) = channel.ensure_active().await?;
+    let order = server.byte_order;
+    let big_endian = matches!(order, ByteOrder::Big);
+    let codec = PvaCodec { big_endian };
+    let ioid = alloc_ioid();
+
+    // pvRequest selects exactly the target field so server-side bitset
+    // bookkeeping aligns with the descriptor we'll get back.
+    let pv_req = if field_path.is_empty() {
+        sentinel_all_fields()
+    } else {
+        build_pv_request_fields(&[field_path], big_endian)
+    };
+    let mut stream = server.register_ioid_stream(ioid);
+    let cache = server.type_cache();
+
+    let init_req = codec.build_put_init(sid, ioid, &pv_req);
+    server.send(init_req).await?;
+    let init_frame = await_frame(&mut stream, op_timeout).await?;
+    let init = match decode_op_response_cached(&init_frame, None, &mut cache.lock())? {
+        OpResponse::Init(i) => i,
+        other => {
+            server.unregister_ioid(ioid);
+            return Err(PvaError::Protocol(format!(
+                "expected PUT INIT, got {other:?}"
+            )));
+        }
+    };
+    if !init.status.is_success() {
+        server.unregister_ioid(ioid);
+        return Err(PvaError::Protocol(format!(
+            "PUT INIT failed: {:?}",
+            init.status
+        )));
+    }
+    let intro = init.introspection;
+
+    let parts: Vec<&str> = field_path.split('.').filter(|s| !s.is_empty()).collect();
+    let value = build_put_value_for_path(&intro, &parts, value_str)?;
+    let bit = intro.bit_for_path(field_path).ok_or_else(|| {
+        PvaError::InvalidValue(format!(
+            "field path '{field_path}' not present in introspection"
+        ))
+    })?;
+
+    let mut payload = Vec::new();
+    payload.put_u32(sid, order);
+    payload.put_u32(ioid, order);
+    payload.put_u8(0x00);
+    let mut changed = BitSet::new();
+    changed.set(bit);
+    changed.write_into(order, &mut payload);
+    encode_pv_field(&value, &intro, order, &mut payload);
+    let header = PvaHeader::application(false, order, Command::Put.code(), payload.len() as u32);
+    let mut frame = Vec::new();
+    header.write_into(&mut frame);
+    frame.extend_from_slice(&payload);
+    server.send(frame).await?;
+
+    let done_frame = await_frame(&mut stream, op_timeout).await?;
+    let result = match decode_op_response(&done_frame, Some(&intro))? {
+        OpResponse::Status(s) => {
+            if s.status.is_success() {
+                Ok(())
+            } else {
+                Err(PvaError::Protocol(format!("PUT failed: {:?}", s.status)))
+            }
+        }
+        other => Err(PvaError::Protocol(format!(
+            "expected PUT done, got {other:?}"
+        ))),
+    };
+
+    let destroy = codec.build_destroy_request(sid, ioid);
+    let _ = server.send(destroy).await;
+    server.unregister_ioid(ioid);
+    result
+}
+
 async fn op_put_inner(
     channel: &Arc<Channel>,
     value_str: &str,
@@ -1016,6 +1110,66 @@ async fn await_frame(
 
 fn sentinel_all_fields() -> Vec<u8> {
     vec![0xFD, 0x02, 0x00, 0x80, 0x00, 0x00]
+}
+
+/// Build a PUT value where only `field_path` (e.g. `"alarm.severity"`)
+/// carries the parsed value; every other field gets a default. Mirrors
+/// pvxs `PutBuilder::set("alarm.severity", val)` semantics — the
+/// matching changed-bitset must be built separately via
+/// [`crate::pvdata::FieldDesc::bit_for_path`]. F-G5.
+fn build_put_value_for_path(
+    desc: &FieldDesc,
+    field_path: &[&str],
+    value_str: &str,
+) -> PvaResult<PvField> {
+    if field_path.is_empty() {
+        // Targeting the root: parse value directly into the descriptor
+        // shape (recurses into the "value" subfield convention used by
+        // build_put_value for compatibility).
+        return build_put_value(desc, value_str);
+    }
+    match desc {
+        FieldDesc::Structure { fields, struct_id } => {
+            let head = field_path[0];
+            let tail = &field_path[1..];
+            let mut s = PvStructure::new(struct_id);
+            for (name, child) in fields {
+                if name == head {
+                    s.fields
+                        .push((name.clone(), build_put_value_for_path(child, tail, value_str)?));
+                } else {
+                    s.fields.push((
+                        name.clone(),
+                        crate::pvdata::encode::default_value_for(child),
+                    ));
+                }
+            }
+            // Path didn't match any field → clear failure.
+            if !fields.iter().any(|(n, _)| n == head) {
+                return Err(PvaError::InvalidValue(format!(
+                    "field '{head}' not present in target structure"
+                )));
+            }
+            Ok(PvField::Structure(s))
+        }
+        FieldDesc::Scalar(st) if field_path.is_empty() => ScalarValue::parse(*st, value_str)
+            .map(PvField::Scalar)
+            .map_err(PvaError::InvalidValue),
+        FieldDesc::ScalarArray(st) if field_path.is_empty() => {
+            let mut items = Vec::new();
+            for tok in value_str
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                items.push(ScalarValue::parse(*st, tok).map_err(PvaError::InvalidValue)?);
+            }
+            Ok(PvField::ScalarArray(items))
+        }
+        _ => Err(PvaError::InvalidValue(format!(
+            "cannot navigate path through {desc} (remaining: {field_path:?})"
+        ))),
+    }
 }
 
 fn build_put_value(desc: &FieldDesc, value_str: &str) -> PvaResult<PvField> {

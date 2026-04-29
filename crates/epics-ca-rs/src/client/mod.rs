@@ -405,19 +405,29 @@ impl CaClient {
         }
 
         let nameserver_entries = parse_nameserver_list();
-        // Build the per-address SNI map: when EPICS_CA_NAME_SERVERS lists
-        // an IOC by hostname, every TCP connection to that resolved IP
-        // uses the operator-supplied hostname as the TLS SNI / cert
-        // verification name. Multi-IOC TLS deployments with
-        // hostname-bound certs no longer need a single global override.
-        // EPICS_CA_TLS_SERVER_NAME (config.tls_server_name) remains as
-        // the catch-all fallback for addresses not in the map.
+        // Build the per-address SNI map. Two sources:
+        // 1. EPICS_CA_NAME_SERVERS hostnames (added in F-G0).
+        // 2. EPICS_CA_TLS_SNI_MAP for IPs reached via UDP search
+        //    (F-G6). The CA SEARCH wire protocol carries no
+        //    hostname, so a UDP-discovered TLS IOC otherwise has to
+        //    fall back to the IP literal. Operators populate this map
+        //    with `EPICS_CA_TLS_SNI_MAP="10.0.0.1=ioc1.lab.example.com 10.0.0.2:5064=ioc2.lab.example.com"`
+        //    — the addr token may include or omit `:port`; the
+        //    matching `connect_server(addr)` looks up the addr first,
+        //    then the addr-with-port-zero (wildcard port) form.
+        // Per-address overrides win over the global
+        // EPICS_CA_TLS_SERVER_NAME (config.tls_server_name).
         #[cfg(feature = "experimental-rust-tls")]
-        let sni_overrides: std::collections::HashMap<SocketAddr, String> =
-            nameserver_entries
+        let sni_overrides: std::collections::HashMap<SocketAddr, String> = {
+            let mut map: std::collections::HashMap<SocketAddr, String> = nameserver_entries
                 .iter()
                 .filter_map(|(addr, host)| host.clone().map(|h| (*addr, h)))
                 .collect();
+            for (addr, host) in parse_tls_sni_map() {
+                map.insert(addr, host);
+            }
+            map
+        };
         let nameserver_addrs: Vec<SocketAddr> =
             nameserver_entries.iter().map(|(a, _)| *a).collect();
 
@@ -1900,6 +1910,70 @@ fn expand_shell_vars(s: &str) -> String {
         }
         out.push(s.as_bytes()[i] as char);
         i += 1;
+    }
+    out
+}
+
+/// Parse `EPICS_CA_TLS_SNI_MAP` — whitespace-separated `IP[:port]=hostname`
+/// entries. Returns a vec of `(SocketAddr, hostname)` pairs ready to
+/// merge into the per-server SNI override map.
+///
+/// The CA SEARCH wire protocol carries no hostname information, so a
+/// UDP-discovered TLS IOC at e.g. `10.0.0.1:5064` cannot be reached
+/// with a hostname-bound cert unless operators provide an explicit
+/// IP→hostname mapping. F-G6 (April 2026): adds this env so multi-IOC
+/// TLS deployments work for both EPICS_CA_NAME_SERVERS-listed IOCs
+/// and UDP-broadcast-discovered IOCs.
+///
+/// Entry syntax:
+///
+///   `10.0.0.1=ioc1.lab.example.com`               (any port)
+///   `10.0.0.1:5064=ioc1.lab.example.com`          (specific port)
+///   `192.168.1.10:5064=ioc.example.com 10.0.0.2=other.example.com`
+///
+/// Bad entries (missing `=`, unparseable IP) are silently skipped
+/// with a tracing warn — start-time misconfiguration shouldn't kill
+/// the client.
+#[cfg(feature = "experimental-rust-tls")]
+fn parse_tls_sni_map() -> Vec<(SocketAddr, String)> {
+    let Some(list) = epics_base_rs::runtime::env::get("EPICS_CA_TLS_SNI_MAP") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in list.split_whitespace() {
+        let Some((addr_part, host)) = entry.split_once('=') else {
+            tracing::warn!(entry = %entry,
+                "EPICS_CA_TLS_SNI_MAP entry missing '=', skipping");
+            continue;
+        };
+        if host.is_empty() {
+            tracing::warn!(entry = %entry,
+                "EPICS_CA_TLS_SNI_MAP entry has empty hostname, skipping");
+            continue;
+        }
+        let addr = if addr_part.contains(':') {
+            match addr_part.parse::<SocketAddr>() {
+                Ok(a) => a,
+                Err(_) => {
+                    tracing::warn!(entry = %entry,
+                        "EPICS_CA_TLS_SNI_MAP entry has unparseable IP:port, skipping");
+                    continue;
+                }
+            }
+        } else {
+            // Bare IP — match any port via the wildcard port=0 form.
+            // The transport manager's pick_sni() falls back to port-0
+            // lookup when the exact (ip, port) isn't found.
+            match addr_part.parse::<std::net::IpAddr>() {
+                Ok(ip) => SocketAddr::new(ip, 0),
+                Err(_) => {
+                    tracing::warn!(entry = %entry,
+                        "EPICS_CA_TLS_SNI_MAP entry has unparseable IP, skipping");
+                    continue;
+                }
+            }
+        };
+        out.push((addr, host.to_string()));
     }
     out
 }

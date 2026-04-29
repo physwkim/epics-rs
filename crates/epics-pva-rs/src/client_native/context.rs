@@ -357,6 +357,54 @@ impl PvaClient {
         Ok(v)
     }
 
+    /// Start a GET and return a [`PvaOperation`] handle the caller can
+    /// `wait()`, `cancel()`, or `interrupt()` from any task. F-G8 —
+    /// pvxs `Operation` parity for callers that need to start now and
+    /// wait later from a different context, or be able to cancel from
+    /// outside the awaiting task.
+    ///
+    /// Drop semantics: dropping the handle aborts the spawned op.
+    /// Wrap in `Arc<Mutex<>>` (or share via a channel) if you need to
+    /// keep the op alive past the handle's local scope.
+    pub fn start_get(
+        &self,
+        pv_name: &str,
+    ) -> crate::client_native::operation::PvaOperation<PvField> {
+        let client = self.clone();
+        let name = pv_name.to_string();
+        crate::client_native::operation::PvaOperation::spawn(async move {
+            client.pvget(&name).await
+        })
+    }
+
+    /// Start a PUT and return a [`PvaOperation`] handle. F-G8.
+    pub fn start_put(
+        &self,
+        pv_name: &str,
+        value_str: &str,
+    ) -> crate::client_native::operation::PvaOperation<()> {
+        let client = self.clone();
+        let name = pv_name.to_string();
+        let val = value_str.to_string();
+        crate::client_native::operation::PvaOperation::spawn(async move {
+            client.pvput(&name, &val).await
+        })
+    }
+
+    /// Start an RPC and return a [`PvaOperation`] handle. F-G8.
+    pub fn start_rpc(
+        &self,
+        pv_name: &str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> crate::client_native::operation::PvaOperation<(FieldDesc, PvField)> {
+        let client = self.clone();
+        let name = pv_name.to_string();
+        crate::client_native::operation::PvaOperation::spawn(async move {
+            client.pvrpc(&name, &request_desc, &request_value).await
+        })
+    }
+
     /// `pvget` with a custom pvRequest (field selection + record
     /// options). Mirrors pvxs `Context::get(name).pvRequest(expr)`:
     ///
@@ -502,6 +550,36 @@ impl PvaClient {
     pub async fn pvput(&self, pv_name: &str, value_str: &str) -> PvaResult<()> {
         let ch = self.channel(pv_name).await?;
         op_put(&ch, value_str, self.inner.timeout).await
+    }
+
+    /// PUT a single dotted-path field of the channel's structure.
+    /// pvxs `Context::put(name).set(field_path, value).exec()`
+    /// parity. Examples:
+    ///
+    /// ```ignore
+    /// client.pvput_field("MY:PV", "value", "42").await?;
+    /// client.pvput_field("MY:PV", "alarm.severity", "2").await?;
+    /// client.pvput_field("MY:PV", "display.units", "ms").await?;
+    /// ```
+    ///
+    /// The server receives a value where only the named field carries
+    /// the parsed string and the changed bitset has only that field's
+    /// bit set; every other field is left untouched. Use
+    /// [`Self::pvput`] for the common "PUT to .value" shortcut.
+    pub async fn pvput_field(
+        &self,
+        pv_name: &str,
+        field_path: &str,
+        value_str: &str,
+    ) -> PvaResult<()> {
+        let ch = self.channel(pv_name).await?;
+        crate::client_native::ops_v2::op_put_field(
+            &ch,
+            field_path,
+            value_str,
+            self.inner.timeout,
+        )
+        .await
     }
 
     /// `pvput` with a custom pvRequest. The most common use is

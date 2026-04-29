@@ -102,11 +102,32 @@ enum OpKind {
     Rpc,
 }
 
-/// Run the TCP listener forever.
+/// Run the TCP listener forever. Backwards-compat wrapper that
+/// drops per-peer stats — equivalent to calling
+/// [`run_tcp_server_with_peers`] with an empty registry the caller
+/// can never read.
 pub async fn run_tcp_server(
     source: DynSource,
     bind_addr: SocketAddr,
     config: PvaServerConfig,
+) -> PvaResult<()> {
+    run_tcp_server_with_peers(
+        source,
+        bind_addr,
+        config,
+        crate::server_native::peers::PeerRegistry::new(),
+    )
+    .await
+}
+
+/// Run the TCP listener with an externally-shared
+/// [`PeerRegistry`]. F-G7: lets [`crate::server_native::PvaServer::report`]
+/// observe per-connection stats.
+pub async fn run_tcp_server_with_peers(
+    source: DynSource,
+    bind_addr: SocketAddr,
+    config: PvaServerConfig,
+    peers: Arc<crate::server_native::peers::PeerRegistry>,
 ) -> PvaResult<()> {
     let listener = TcpListener::bind(bind_addr).await.map_err(PvaError::Io)?;
     debug!(?bind_addr, "TCP listener up");
@@ -139,6 +160,14 @@ pub async fn run_tcp_server(
                 let cfg = config.clone();
                 let active_dec = active.clone();
                 let acceptor = tls_acceptor.clone();
+                // F-G7: register this connection in the peer registry
+                // so PvaServer::report() can surface it. Removed when
+                // the connection task ends.
+                let tls_in_use = acceptor.is_some();
+                let peer_entry =
+                    crate::server_native::peers::PeerEntry::new(tls_in_use);
+                peers.insert(peer, peer_entry.clone());
+                let peers_for_task = peers.clone();
                 tokio::spawn(async move {
                     stream.set_nodelay(true).ok();
                     // Enable OS-level TCP keepalive so half-open connections
@@ -172,7 +201,15 @@ pub async fn run_tcp_server(
                         {
                             Ok(Ok(tls_stream)) => {
                                 let (r, w) = tokio::io::split(tls_stream);
-                                handle_connection_io(src, Box::new(r), Box::new(w), peer, cfg).await
+                                handle_connection_io(
+                                    src,
+                                    Box::new(r),
+                                    Box::new(w),
+                                    peer,
+                                    cfg,
+                                    peer_entry.clone(),
+                                )
+                                .await
                             }
                             Ok(Err(e)) => {
                                 debug!(?peer, "TLS handshake failed: {e}");
@@ -189,13 +226,24 @@ pub async fn run_tcp_server(
                         },
                         None => {
                             let (r, w) = stream.into_split();
-                            handle_connection_io(src, Box::new(r), Box::new(w), peer, cfg).await
+                            handle_connection_io(
+                                src,
+                                Box::new(r),
+                                Box::new(w),
+                                peer,
+                                cfg,
+                                peer_entry.clone(),
+                            )
+                            .await
                         }
                     };
                     if let Err(e) = result {
                         debug!(?peer, "connection ended: {e}");
                     }
                     active_dec.fetch_sub(1, Ordering::SeqCst);
+                    // F-G7: drop the per-peer entry whether the
+                    // connection ended cleanly or via I/O error.
+                    peers_for_task.remove(peer);
                 });
             }
             Err(e) => {
@@ -338,6 +386,7 @@ async fn handle_connection_io(
     mut writer_raw: SrvWrite,
     peer: SocketAddr,
     config: PvaServerConfig,
+    peer_entry: Arc<crate::server_native::peers::PeerEntry>,
 ) -> PvaResult<()> {
     let op_timeout = config.op_timeout;
     let idle_timeout = config.idle_timeout;
@@ -360,10 +409,14 @@ async fn handle_connection_io(
     let send_tmo = config.send_timeout;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(config.write_queue_depth);
     let writer_peer = peer;
+    let peer_entry_writer = peer_entry.clone();
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
             match tokio::time::timeout(send_tmo, writer_raw.write_all(&frame)).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    // F-G7: bytes_out counter for PvaServer::report().
+                    peer_entry_writer.touch_tx(frame.len());
+                }
                 Ok(Err(e)) => {
                     debug!(peer = ?writer_peer, error = %e, "writer task: TCP write failed, dropping connection");
                     break;
@@ -462,6 +515,9 @@ async fn handle_connection_io(
     let mut expect_seg = false;
     loop {
         let frame = read_frame(&mut reader, &mut rx_buf, op_timeout, max_msg_size).await?;
+        // F-G7: bytes_in counter (header + payload). Drives
+        // PvaServer::report() throughput diagnostics.
+        peer_entry.touch_rx(PvaHeader::SIZE + frame.payload.len());
         last_rx.store(now_nanos(), Ordering::SeqCst);
         if frame.header.flags.is_control() {
             // Handle echo etc., otherwise ignore.
@@ -600,12 +656,25 @@ async fn handle_connection_io(
                     let _ = tx.send(buf).await;
                     continue;
                 }
+                let before = channels.len();
                 handle_create_channel(&source, &frame, &tx, &mut channels, order).await?;
+                // F-G7: track channel-add success via the HashMap
+                // delta. Avoids threading peer_entry into every
+                // handler; the size check is O(1) and the rare
+                // duplicate-cid path naturally evaluates to no-op.
+                if channels.len() > before {
+                    peer_entry.channel_added();
+                }
             }
             Some(Command::DestroyChannel) => {
+                let before = channels.len();
                 handle_destroy_channel(&frame, &tx, &mut channels, order).await?;
+                if channels.len() < before {
+                    peer_entry.channel_removed();
+                }
             }
             Some(Command::Get) => {
+                peer_entry.op_init();
                 handle_op(
                     &source,
                     &frame,
@@ -621,6 +690,7 @@ async fn handle_connection_io(
                 .await?;
             }
             Some(Command::Put) => {
+                peer_entry.op_init();
                 handle_op(
                     &source,
                     &frame,
@@ -636,6 +706,7 @@ async fn handle_connection_io(
                 .await?;
             }
             Some(Command::Monitor) => {
+                peer_entry.op_init();
                 handle_op(
                     &source,
                     &frame,
@@ -651,6 +722,7 @@ async fn handle_connection_io(
                 .await?;
             }
             Some(Command::Rpc) => {
+                peer_entry.op_init();
                 handle_op(
                     &source,
                     &frame,
