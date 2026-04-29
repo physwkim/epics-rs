@@ -49,16 +49,40 @@ pub async fn op_get(
     fields: &[&str],
     op_timeout: Duration,
 ) -> PvaResult<(FieldDesc, PvField)> {
+    op_get_inner(channel, fields, None, op_timeout).await
+}
+
+/// `op_get` variant accepting a pre-built pvRequest blob (bytes
+/// produced by [`crate::pv_request::PvRequestExpr::encode`] or one of
+/// the `build_pv_request_*` helpers). Lets callers feed
+/// `record[pipeline=true,queueSize=N]` etc. through the convenience
+/// surface — pvxs `Context::get(name).pvRequest(...)` parity. The raw
+/// bytes win over the `fields` path when supplied; pass `None` to
+/// fall back to the field-list builder.
+pub async fn op_get_raw(
+    channel: &Arc<Channel>,
+    pv_req: &[u8],
+    op_timeout: Duration,
+) -> PvaResult<(FieldDesc, PvField)> {
+    op_get_inner(channel, &[], Some(pv_req), op_timeout).await
+}
+
+async fn op_get_inner(
+    channel: &Arc<Channel>,
+    fields: &[&str],
+    raw_pv_req: Option<&[u8]>,
+    op_timeout: Duration,
+) -> PvaResult<(FieldDesc, PvField)> {
     let (server, sid) = channel.ensure_active().await?;
     let order = server.byte_order;
     let big_endian = matches!(order, ByteOrder::Big);
     let codec = PvaCodec { big_endian };
     let ioid = alloc_ioid();
 
-    let pv_req = if fields.is_empty() {
-        sentinel_all_fields()
-    } else {
-        build_pv_request_fields(fields, big_endian)
+    let pv_req = match raw_pv_req {
+        Some(b) => b.to_vec(),
+        None if fields.is_empty() => sentinel_all_fields(),
+        None => build_pv_request_fields(fields, big_endian),
     };
 
     let mut stream = server.register_ioid_stream(ioid);
