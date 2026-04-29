@@ -1292,20 +1292,24 @@ async fn handle_get_field(
     let _sub = crate::proto::decode_string(&mut cur, order)
         .map_err(|e| PvaError::Decode(e.to_string()))?;
 
-    let intro = match channels.get(&sid).and_then(|c| c.introspection.clone()) {
-        Some(d) => d,
+    // P-G19: pvxs serverintrospect.cpp:159 silently returns on
+    // unknown SID; without this we'd reply with a fabricated
+    // Variant descriptor + status=OK, which is worse than a noop —
+    // a stale client would build its decode tree against a wrong
+    // shape and surface garbage on the next GET. Match pvxs.
+    let chan = match channels.get(&sid) {
+        Some(c) => c,
         None => {
-            // Try to resolve by name lookup
-            let name_opt = channels.get(&sid).map(|c| c.name.clone());
-            if let Some(name) = name_opt {
-                source
-                    .get_introspection(&name)
-                    .await
-                    .unwrap_or(FieldDesc::Variant)
-            } else {
-                FieldDesc::Variant
-            }
+            debug!(sid, ioid, "GET_FIELD on unknown SID: dropping");
+            return Ok(());
         }
+    };
+    let intro = match chan.introspection.clone() {
+        Some(d) => d,
+        None => source
+            .get_introspection(&chan.name)
+            .await
+            .unwrap_or(FieldDesc::Variant),
     };
 
     let mut payload = Vec::new();
