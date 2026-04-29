@@ -40,9 +40,29 @@ pub struct PvaServerConfig {
     /// message. Clients adopt whatever the server picks. pvxs's
     /// `Config::overrideSendBE` exposes the same knob; defaults to LE.
     pub wire_byte_order: crate::proto::ByteOrder,
-    /// Beacon emit period in seconds. pvxs default 15s. Override via
-    /// `EPICS_PVAS_BEACON_PERIOD`.
+    /// Beacon emit period in seconds during the initial burst (default
+    /// 15s). pvxs `server.cpp::beaconIntervalShort` parity. Override via
+    /// `EPICS_PVAS_BEACON_PERIOD` — note this controls the *short*
+    /// burst interval; the long steady-state interval is derived from
+    /// [`Self::beacon_period_long`]. After
+    /// [`Self::beacon_burst_count`] bursts the cadence drops to the
+    /// long interval until a topology change (change_count tick) is
+    /// emitted.
     pub beacon_period: Duration,
+    /// Long-interval beacon period after the initial burst (pvxs
+    /// `beaconIntervalLong` = 180s). Defaults to `12 × beacon_period`
+    /// to preserve the pvxs 15s/180s ratio for the default config but
+    /// scale automatically when operators tune the burst rate. Operators
+    /// at sites with strict UDP bandwidth budgets can lower this; the
+    /// only correctness constraint is `> beacon_period`.
+    pub beacon_period_long: Duration,
+    /// Number of short-interval beacons emitted before the cadence
+    /// drops to `beacon_period_long`. Default 10 (pvxs
+    /// `server.cpp:829` hardcodes the same value). After this many
+    /// bursts every receiver in earshot has had multiple chances to
+    /// notice the new server; further short-interval beacons just
+    /// burn UDP bandwidth without informational gain.
+    pub beacon_burst_count: u8,
     /// Explicit beacon destinations. When empty (and `auto_beacon` is
     /// true), emit per-NIC limited broadcast. From
     /// `EPICS_PVAS_BEACON_ADDR_LIST`.
@@ -156,6 +176,8 @@ impl Default for PvaServerConfig {
             tls: None,
             wire_byte_order: crate::proto::ByteOrder::Little,
             beacon_period: Duration::from_secs(15),
+            beacon_period_long: Duration::from_secs(180),
+            beacon_burst_count: 10,
             beacon_destinations: Vec::new(),
             auto_beacon: true,
             interfaces: Vec::new(),
@@ -197,6 +219,15 @@ impl PvaServerConfig {
         self.tcp_port = env::server_port();
         self.udp_port = env::server_broadcast_port();
         self.beacon_period = Duration::from_secs(env::beacon_period_secs());
+        // Keep the pvxs short:long = 15:180 = 1:12 ratio when the
+        // operator tunes only the short period; an explicit
+        // `EPICS_PVAS_BEACON_PERIOD_LONG` override wins. Floor at
+        // `beacon_period + 1s` so the long path never goes faster
+        // than the burst path (beacon_loop assumes long > short).
+        let long = env::beacon_period_long_secs()
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| self.beacon_period.saturating_mul(12));
+        self.beacon_period_long = long.max(self.beacon_period + Duration::from_secs(1));
         self.beacon_destinations = env::server_beacon_addr_list();
         self.auto_beacon = env::auto_beacon_addr_list_enabled();
         self.interfaces = env::server_intf_addr_list();
@@ -311,6 +342,8 @@ impl PvaServer {
             guid,
             protocol,
             config.beacon_period,
+            config.beacon_period_long,
+            config.beacon_burst_count,
             config.beacon_destinations.clone(),
             config.auto_beacon,
             config.ignore_addrs.clone(),

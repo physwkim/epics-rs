@@ -86,13 +86,24 @@ pub fn auto_beacon_addr_list_enabled() -> bool {
     }
 }
 
-/// `EPICS_PVAS_BEACON_PERIOD` — default 15s.
+/// `EPICS_PVAS_BEACON_PERIOD` — default 15s. Controls the *short*
+/// burst-interval; see [`crate::server_native::runtime::PvaServerConfig`]
+/// for the burst-then-slowdown semantics.
 pub fn beacon_period_secs() -> u64 {
     std::env::var("EPICS_PVAS_BEACON_PERIOD")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .map(|f| f as u64)
         .unwrap_or(15)
+}
+
+/// `EPICS_PVAS_BEACON_PERIOD_LONG` — explicit long-interval override.
+/// `None` falls back to 12× the short interval (pvxs 15→180 ratio).
+pub fn beacon_period_long_secs() -> Option<u64> {
+    std::env::var("EPICS_PVAS_BEACON_PERIOD_LONG")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|f| f as u64)
 }
 
 /// `EPICS_PVA_CONN_TMO` — connection idle timeout (default 30s, pvxs
