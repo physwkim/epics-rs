@@ -19,6 +19,10 @@ thiserror = "2"
 socket2 = "0.5"
 hostname = "0.4"
 tokio-util = { version = "0.7", default-features = false }
+# Refcounted byte buffer used by the raw-frame monitor forwarding path
+# (F-G12). Lets fan-out broadcast `Bytes` clones (atomic increment)
+# without copying multi-MB NTNDArray payloads.
+bytes = "1"
 parking_lot = "0.12"
 if-addrs = "0.13"
 

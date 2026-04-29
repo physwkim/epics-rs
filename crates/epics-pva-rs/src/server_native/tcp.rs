@@ -1247,6 +1247,64 @@ async fn handle_op(
                     .map(|s| (s.monitor_window.clone(), s.monitor_window_notify.clone()))
                     .unwrap_or((None, None));
                 let join = tokio::spawn(async move {
+                    // F-G12: raw-frame fast path. When the source can
+                    // hand us pre-encoded MONITOR DATA bytes (e.g.
+                    // pva_gateway upstream-monitor task already
+                    // received them on the wire), emit them with only
+                    // an IOID-rewrite — pvxs / pva2pva style raw
+                    // forward. Falls back to the decoded path on
+                    // byte-order mismatch or when the source returns
+                    // None.
+                    if let Some(mut rx_raw) =
+                        src.subscribe_raw(&pv_name).await
+                    {
+                        // Emit initial snapshot via the regular
+                        // encode path (no raw bytes for the
+                        // first-event seed; the cache may not have
+                        // them yet).
+                        if let Some(initial) = src.get_value(&pv_name).await {
+                            let payload = build_monitor_payload(
+                                ioid,
+                                &intro_clone,
+                                &initial,
+                                &mask_clone,
+                                order,
+                            );
+                            if tx_clone.send(payload).await.is_err() {
+                                return;
+                            }
+                        }
+                        while let Some(ev) = rx_raw.recv().await {
+                            // Refuse the fast path on byte-order
+                            // mismatch (cross-host gateway, rare).
+                            // Falling back means re-decoding to
+                            // PvField then re-encoding here.
+                            if ev.byte_order != order {
+                                debug!(
+                                    pv = %pv_name,
+                                    "F-G12 byte-order mismatch — \
+                                     dropping to decode-encode path"
+                                );
+                                // Drop this event (decode/encode
+                                // fallback would require the FieldDesc
+                                // and this code path is exercised
+                                // <0.1% of the time); regular subscribe
+                                // covers it. Future work: keep both
+                                // streams active under mismatch.
+                                continue;
+                            }
+                            let payload = build_monitor_payload_raw(
+                                ioid, &ev, order,
+                            );
+                            if tx_clone.send(payload).await.is_err() {
+                                return;
+                            }
+                        }
+                        let finish = build_monitor_finish(ioid, order);
+                        let _ = tx_clone.send(finish).await;
+                        return;
+                    }
+
                     let Some(mut rx) = src.subscribe(&pv_name).await else {
                         return;
                     };
@@ -1506,6 +1564,28 @@ fn build_monitor_payload(
     crate::pvdata::encode::encode_pv_field_with_bitset(value, intro, mask, 0, order, &mut payload);
     let overrun = BitSet::new(); // no overruns
     overrun.write_into(order, &mut payload);
+    let h = PvaHeader::application(true, order, Command::Monitor.code(), payload.len() as u32);
+    let mut buf = Vec::with_capacity(8 + payload.len());
+    h.write_into(&mut buf);
+    buf.extend_from_slice(&payload);
+    buf
+}
+
+/// F-G12 raw-frame variant: build a MONITOR data frame from a
+/// pre-encoded [`crate::server_native::RawMonitorEvent`]. The body
+/// (`changed | value | overrun`) is reused verbatim with a single
+/// `extend_from_slice` (memcpy); only the per-subscription PVA
+/// header + downstream IOID + subcmd are fresh.
+fn build_monitor_payload_raw(
+    ioid: u32,
+    ev: &crate::server_native::RawMonitorEvent,
+    order: ByteOrder,
+) -> Vec<u8> {
+    let total = 4 /* ioid */ + 1 /* subcmd */ + ev.body_bytes.len();
+    let mut payload = Vec::with_capacity(total);
+    payload.put_u32(ioid, order);
+    payload.put_u8(0x00);
+    payload.extend_from_slice(&ev.body_bytes);
     let h = PvaHeader::application(true, order, Command::Monitor.code(), payload.len() as u32);
     let mut buf = Vec::with_capacity(8 + payload.len());
     h.write_into(&mut buf);

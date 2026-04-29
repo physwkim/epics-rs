@@ -49,6 +49,8 @@ dual-ioc-bin = ["dual-ioc", "dep:clap", "dep:tracing-subscriber"]
 [dependencies]
 epics-base-rs = { workspace = true }
 tokio = { version = "1", features = ["full"] }
+# Refcounted byte buffer for the raw-frame fan-out path (F-G12).
+bytes = "1"
 thiserror = "2"
 chrono = "0.4"
 tracing = "0.1"

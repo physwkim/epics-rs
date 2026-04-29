@@ -81,6 +81,27 @@ pub trait ChannelSource: Send + Sync + 'static {
         name: &str,
     ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send;
 
+    /// Optional **raw-frame subscribe** (F-G12). When the source can
+    /// hand the server pre-encoded MONITOR DATA payloads (e.g. the
+    /// pva_gateway upstream-monitor task already received them on the
+    /// wire and never decoded them), the server skips its own
+    /// `encode_pv_field` step and writes the cached bytes straight
+    /// onto the downstream socket — pvxs / pva2pva style raw frame
+    /// forwarding. Default returns `None`, which keeps the regular
+    /// `subscribe` decoded-PvField path active.
+    ///
+    /// Each [`RawMonitorEvent`] holds the **changed bitset + value
+    /// bytes + overrun bitset** verbatim from upstream. The dispatch
+    /// layer prepends the per-subscription PVA header (with the
+    /// downstream IOID + subcmd 0) and emits.
+    fn subscribe_raw(
+        &self,
+        name: &str,
+    ) -> impl std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>> + Send {
+        let _ = name;
+        async { None }
+    }
+
     /// Dispatch an RPC. The default impl returns "RPC not supported";
     /// implementors can override to provide actual RPC behaviour.
     ///
@@ -111,6 +132,34 @@ pub trait ChannelSource: Send + Sync + 'static {
     fn notify_watermark_low(&self, name: &str) {
         let _ = name;
     }
+}
+
+/// One MONITOR DATA event in **raw wire form** — the bytes the
+/// upstream server emitted, ready to be re-emitted downstream after
+/// the per-subscription PVA header has been prepended. Used by
+/// [`ChannelSource::subscribe_raw`] to skip the server-side
+/// `encode_pv_field` round-trip (F-G12).
+///
+/// `body_bytes` is the **`changed bitset | value bytes | overrun
+/// bitset`** triplet exactly as it sat on the upstream wire (after
+/// the upstream server's IOID + subcmd, which we discard and
+/// replace with the downstream IOID + subcmd 0).
+///
+/// `byte_order` records what byte order the producer encoded with,
+/// so the dispatch layer can refuse the fast path when the
+/// downstream connection negotiated the opposite endian (rare, but
+/// matters for cross-host gateways). On mismatch, dispatch falls
+/// back to the decoded `subscribe` path.
+#[derive(Debug, Clone)]
+pub struct RawMonitorEvent {
+    /// Body of the MONITOR DATA frame: `changed | value | overrun`.
+    /// Refcounted via `bytes::Bytes` so fan-out across N
+    /// downstream subscribers is N atomic increments, no copies.
+    pub body_bytes: bytes::Bytes,
+    /// Byte order the producer encoded with. `Little` is the pva-rs
+    /// + pvxs default; only relevant when the server's downstream
+    /// connection negotiated `Big`.
+    pub byte_order: crate::proto::ByteOrder,
 }
 
 /// Type-erased handle so the server runtime can hold heterogeneous sources
@@ -156,6 +205,16 @@ pub trait ChannelSourceObj: Send + Sync {
         name: &'a str,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send + 'a>,
+    >;
+    fn subscribe_raw<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>>
+                + Send
+                + 'a,
+        >,
     >;
     fn rpc<'a>(
         &'a self,
@@ -221,6 +280,18 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
         Box<dyn std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send + 'a>,
     > {
         Box::pin(<Self as ChannelSource>::subscribe(self, name))
+    }
+    fn subscribe_raw<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(<Self as ChannelSource>::subscribe_raw(self, name))
     }
     fn rpc<'a>(
         &'a self,

@@ -22,6 +22,15 @@ use epics_pva_rs::server_native::source::{ChannelContext, ChannelSource};
 
 use super::channel_cache::ChannelCache;
 
+/// F-G12: raw upstream MONITOR DATA body bytes flowing through the
+/// per-entry broadcast channel. `body` is the wire-format
+/// `changed | value | overrun` triplet refcount-shared via `Bytes`.
+#[derive(Debug, Clone)]
+pub struct RawEvent {
+    pub body: bytes::Bytes,
+    pub byte_order: epics_pva_rs::proto::ByteOrder,
+}
+
 /// `ChannelSource` impl handed to the downstream `PvaServer`. Cheap
 /// to clone (Arc-backed cache + a couple of `Duration`s).
 #[derive(Clone)]
@@ -226,6 +235,66 @@ impl ChannelSource for GatewayChannelSource {
             Ok(Err(e)) => Err(e.to_string()),
             Err(_) => Err(format!("upstream rpc timeout for {name}")),
         }
+    }
+
+    async fn subscribe_raw(
+        &self,
+        name: &str,
+    ) -> Option<mpsc::Receiver<epics_pva_rs::server_native::RawMonitorEvent>> {
+        // F-G12 fast path: hand the server pre-encoded raw bodies so
+        // its dispatch can write them onto downstream sockets without
+        // re-running encode_pv_field. The cache spawns the upstream
+        // monitor task (one decode per upstream event) and broadcasts
+        // the encoded body to N receivers — N atomic refcount bumps,
+        // not N encodes.
+        //
+        // Opt-in via `EPICS_PVA_GW_RAW_FRAMES=YES` while the timing
+        // races between the upstream broadcast and per-subscriber
+        // mpsc bridge are still being shaken out — when disabled
+        // (default) the server falls through to `subscribe()` for the
+        // typed-PvField path which has full test coverage.
+        match epics_base_rs::runtime::env::get("EPICS_PVA_GW_RAW_FRAMES")
+            .as_deref()
+        {
+            Some(v) if v.eq_ignore_ascii_case("YES")
+                || v.eq_ignore_ascii_case("TRUE")
+                || v == "1" => {}
+            _ => return None,
+        }
+        let entry = self.cache.lookup(name, self.connect_timeout).await.ok()?;
+        let mut bcast = entry.subscribe_raw();
+        let (mpsc_tx, mpsc_rx) = mpsc::channel::<
+            epics_pva_rs::server_native::RawMonitorEvent,
+        >(self.subscriber_queue);
+        let counter = self.subscriber_count.clone();
+        tokio::spawn(async move {
+            struct CounterGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for CounterGuard {
+                fn drop(&mut self) {
+                    self.0
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let _guard = CounterGuard(counter);
+            loop {
+                match bcast.recv().await {
+                    Ok(ev) => {
+                        let out = epics_pva_rs::server_native::RawMonitorEvent {
+                            body_bytes: ev.body,
+                            byte_order: ev.byte_order,
+                        };
+                        if mpsc_tx.send(out).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        Some(mpsc_rx)
     }
 
     async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
