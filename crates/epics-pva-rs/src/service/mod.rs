@@ -159,21 +159,18 @@ pub fn add_rpc_service<S: PvaService>(
             PvField::Structure(PvStructure::new("epics:nt/NTRPC:1.0")),
         );
         let dispatch = method.dispatch.clone();
-        pv.on_rpc(move |_pv, _req_desc, req_value| {
+        // Use the async on_rpc variant so dispatch runs on the
+        // calling task's runtime — no `block_in_place` (which
+        // panics on single-threaded runtimes) and no
+        // `block_on` (which can deadlock on current-thread
+        // executors).
+        pv.on_rpc_async(move |_pv, _req_desc, req_value| {
             let dispatch = dispatch.clone();
-            let req = req_value.clone();
-            // The on_rpc handler is sync-callback-shaped, so we
-            // run the async dispatch on a new tokio handle. In
-            // practice the dispatch is typically already inside a
-            // tokio runtime (the server task) so this resolves
-            // immediately on the same executor.
-            let result = match tokio::runtime::Handle::try_current() {
-                Ok(h) => tokio::task::block_in_place(|| h.block_on(dispatch(req))),
-                Err(_) => return Err("no tokio runtime available".to_string()),
-            };
-            match result {
-                Ok(resp) => Ok((resp.descriptor, resp.value)),
-                Err(e) => Err(e.to_string()),
+            async move {
+                match dispatch(req_value).await {
+                    Ok(resp) => Ok((resp.descriptor, resp.value)),
+                    Err(e) => Err(e.to_string()),
+                }
             }
         });
         source.add(&pv_name, pv);

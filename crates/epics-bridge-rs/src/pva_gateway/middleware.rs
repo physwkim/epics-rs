@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use epics_pva_rs::pvdata::{FieldDesc, PvField};
 use epics_pva_rs::server_native::ChannelContext;
-use epics_pva_rs::server_native::source::ChannelSource;
+use epics_pva_rs::server_native::source::{ChannelSource, RawMonitorEvent};
 use tokio::sync::mpsc;
 
 /// Wrap a [`ChannelSource`] and produce a new one with extra
@@ -84,6 +84,26 @@ impl<S: ChannelSource> ChannelSource for ReadOnly<S> {
     }
     async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
         self.inner.subscribe(name).await
+    }
+    // Forward read-only methods so wrapping a Layer doesn't silently
+    // turn off F-G12 raw-frame forwarding or RPC dispatch on the
+    // inner source.
+    async fn subscribe_raw(&self, name: &str) -> Option<mpsc::Receiver<RawMonitorEvent>> {
+        self.inner.subscribe_raw(name).await
+    }
+    async fn rpc(
+        &self,
+        name: &str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> Result<(FieldDesc, PvField), String> {
+        self.inner.rpc(name, request_desc, request_value).await
+    }
+    fn notify_watermark_high(&self, name: &str) {
+        self.inner.notify_watermark_high(name);
+    }
+    fn notify_watermark_low(&self, name: &str) {
+        self.inner.notify_watermark_low(name);
     }
 }
 
@@ -206,6 +226,29 @@ impl<S: ChannelSource> ChannelSource for Acl<S> {
             return None;
         }
         self.inner.subscribe(name).await
+    }
+    async fn subscribe_raw(&self, name: &str) -> Option<mpsc::Receiver<RawMonitorEvent>> {
+        if !self.config.allowed(name) {
+            return None;
+        }
+        self.inner.subscribe_raw(name).await
+    }
+    async fn rpc(
+        &self,
+        name: &str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> Result<(FieldDesc, PvField), String> {
+        if !self.config.allowed(name) {
+            return Err(format!("ACL: PV '{name}' denied"));
+        }
+        self.inner.rpc(name, request_desc, request_value).await
+    }
+    fn notify_watermark_high(&self, name: &str) {
+        self.inner.notify_watermark_high(name);
+    }
+    fn notify_watermark_low(&self, name: &str) {
+        self.inner.notify_watermark_low(name);
     }
 }
 
@@ -336,6 +379,23 @@ impl<S: ChannelSource, A: AuditSink> ChannelSource for Audited<S, A> {
     }
     async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
         self.inner.subscribe(name).await
+    }
+    async fn subscribe_raw(&self, name: &str) -> Option<mpsc::Receiver<RawMonitorEvent>> {
+        self.inner.subscribe_raw(name).await
+    }
+    async fn rpc(
+        &self,
+        name: &str,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> Result<(FieldDesc, PvField), String> {
+        self.inner.rpc(name, request_desc, request_value).await
+    }
+    fn notify_watermark_high(&self, name: &str) {
+        self.inner.notify_watermark_high(name);
+    }
+    fn notify_watermark_low(&self, name: &str) {
+        self.inner.notify_watermark_low(name);
     }
 }
 

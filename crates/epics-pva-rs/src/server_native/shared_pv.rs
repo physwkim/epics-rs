@@ -44,6 +44,23 @@ pub type OnRpcFn = Arc<
     dyn Fn(&SharedPV, FieldDesc, PvField) -> Result<(FieldDesc, PvField), String> + Send + Sync,
 >;
 
+/// Async RPC handler. Returns a boxed future the dispatch path
+/// awaits, so the user's async work runs on the calling task's
+/// runtime without `block_in_place`/`block_on`. Used by the
+/// `#[pva_service]` framework.
+pub type OnRpcAsyncFn = Arc<
+    dyn Fn(
+            SharedPV,
+            FieldDesc,
+            PvField,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 /// Lifecycle callback fired when the first subscriber connects or the
 /// last one disappears. pvxs `SharedPV::onFirstConnect` /
 /// `SharedPV::onLastDisconnect` (sharedpv.cpp:303-323).
@@ -94,6 +111,11 @@ struct Inner {
     /// Optional user RPC handler; when None RPC returns "not
     /// supported". pvxs `onRPC` parity.
     on_rpc: Option<OnRpcFn>,
+    /// Optional async RPC handler. Takes precedence over `on_rpc`
+    /// when both are set. Used by the `service` framework
+    /// (`#[pva_service]`) so dispatch can run on the calling task's
+    /// own runtime without `block_in_place`/`block_on`.
+    on_rpc_async: Option<OnRpcAsyncFn>,
     /// First-subscriber-arrived hook.
     on_first_connect: Option<LifecycleFn>,
     /// Last-subscriber-left hook.
@@ -117,6 +139,7 @@ impl Default for Inner {
             is_open: false,
             on_put: None,
             on_rpc: None,
+            on_rpc_async: None,
             on_first_connect: None,
             on_last_disconnect: None,
             on_high_mark: None,
@@ -287,6 +310,30 @@ impl SharedPV {
         }
     }
 
+    /// Async RPC dispatch. Tries the async handler first
+    /// (registered via [`Self::on_rpc_async`]); falls back to the
+    /// sync `on_rpc` handler when only that one is set; finally
+    /// returns "not supported" when neither is installed. The
+    /// `#[pva_service]` framework uses this so user async methods
+    /// run on the calling task's runtime, no `block_in_place`.
+    pub async fn rpc_async(
+        &self,
+        request_desc: FieldDesc,
+        request_value: PvField,
+    ) -> Result<(FieldDesc, PvField), String> {
+        let (sync, async_h) = {
+            let g = self.inner.lock();
+            (g.on_rpc.clone(), g.on_rpc_async.clone())
+        };
+        if let Some(f) = async_h {
+            return f(self.clone(), request_desc, request_value).await;
+        }
+        match sync {
+            Some(f) => f(self, request_desc, request_value),
+            None => Err("RPC not supported by this SharedPV".into()),
+        }
+    }
+
     /// Install a put handler. Pass `None` to clear. Mirrors pvxs
     /// `SharedPV::onPut`.
     pub fn on_put<F>(&self, handler: F)
@@ -305,6 +352,20 @@ impl SharedPV {
             + 'static,
     {
         self.inner.lock().on_rpc = Some(Arc::new(handler));
+    }
+
+    /// Install an async RPC handler. Used by `#[pva_service]` so the
+    /// generated dispatch can `await` user code without bouncing
+    /// through `block_on`. Takes a closure that returns a future;
+    /// the dispatch path awaits the future on the same tokio task
+    /// that delivered the RPC frame.
+    pub fn on_rpc_async<F, Fut>(&self, handler: F)
+    where
+        F: Fn(SharedPV, FieldDesc, PvField) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send + 'static,
+    {
+        let arc: OnRpcAsyncFn = Arc::new(move |pv, d, v| Box::pin(handler(pv, d, v)));
+        self.inner.lock().on_rpc_async = Some(arc);
     }
 
     /// Hook fired when the *first* subscriber connects (subscribers
@@ -497,9 +558,15 @@ impl super::source::ChannelSource for SharedSource {
         request_value: PvField,
     ) -> impl std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send {
         let pv = self.pvs.lock().get(name).cloned();
+        let name = name.to_string();
         async move {
             match pv {
-                Some(p) => p.rpc(request_desc, request_value),
+                // Routes through rpc_async so a SharedPV with an
+                // `on_rpc_async` handler (typical of services
+                // registered by `#[pva_service]`) runs the user's
+                // future on this task's runtime — no block_on or
+                // block_in_place needed.
+                Some(p) => p.rpc_async(request_desc, request_value).await,
                 None => Err(format!("no such PV: {name}")),
             }
         }
