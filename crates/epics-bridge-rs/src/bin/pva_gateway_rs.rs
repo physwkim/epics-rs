@@ -98,6 +98,10 @@ async fn main() -> ExitCode {
         server_config,
         cleanup_interval: Duration::from_secs(args.cleanup_interval_secs),
         connect_timeout: Duration::from_secs(args.connect_timeout_secs),
+        // Inherit from the type's defaults — operators tune these via
+        // EPICS_PVA_GW_MAX_CACHE_ENTRIES / EPICS_PVA_GW_MAX_SUBSCRIBERS
+        // in PvaGatewayConfig::with_env, or via PvaGatewayConfig::default().
+        ..PvaGatewayConfig::default()
     };
 
     let gateway = match PvaGateway::start(cfg) {

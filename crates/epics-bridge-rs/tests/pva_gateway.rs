@@ -97,6 +97,8 @@ async fn gateway_get_forwards_upstream_value() {
         server_config,
         cleanup_interval: Duration::from_secs(60),
         connect_timeout: Duration::from_secs(2),
+        max_cache_entries: 1024,
+        max_subscribers: 1024,
     };
     let gw = PvaGateway::start(cfg).expect("gateway start");
 
@@ -148,6 +150,8 @@ async fn gateway_monitor_fans_out_to_two_clients() {
         server_config,
         cleanup_interval: Duration::from_secs(60),
         connect_timeout: Duration::from_secs(2),
+        max_cache_entries: 1024,
+        max_subscribers: 1024,
     };
     let gw = PvaGateway::start(cfg).expect("gateway start");
 
