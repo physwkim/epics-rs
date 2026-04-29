@@ -404,7 +404,22 @@ impl CaClient {
             }
         }
 
-        let nameserver_addrs = parse_nameserver_list();
+        let nameserver_entries = parse_nameserver_list();
+        // Build the per-address SNI map: when EPICS_CA_NAME_SERVERS lists
+        // an IOC by hostname, every TCP connection to that resolved IP
+        // uses the operator-supplied hostname as the TLS SNI / cert
+        // verification name. Multi-IOC TLS deployments with
+        // hostname-bound certs no longer need a single global override.
+        // EPICS_CA_TLS_SERVER_NAME (config.tls_server_name) remains as
+        // the catch-all fallback for addresses not in the map.
+        #[cfg(feature = "experimental-rust-tls")]
+        let sni_overrides: std::collections::HashMap<SocketAddr, String> =
+            nameserver_entries
+                .iter()
+                .filter_map(|(addr, host)| host.clone().map(|h| (*addr, h)))
+                .collect();
+        let nameserver_addrs: Vec<SocketAddr> =
+            nameserver_entries.iter().map(|(a, _)| *a).collect();
 
         let (search_tx, search_rx) = mpsc::unbounded_channel();
         let (search_resp_tx, search_resp_rx) = mpsc::unbounded_channel();
@@ -438,6 +453,7 @@ impl CaClient {
                     transport_evt_tx,
                     tls_arc,
                     config.tls_server_name.clone(),
+                    sni_overrides,
                 ))
             }
             #[cfg(not(feature = "experimental-rust-tls"))]
@@ -1889,25 +1905,51 @@ fn expand_shell_vars(s: &str) -> String {
 }
 
 /// Parse `EPICS_CA_NAME_SERVERS` — whitespace-separated host[:port] entries
-/// reachable over TCP. Returns an empty vec when the variable is unset, so
-/// the search engine simply doesn't spawn any nameserver tasks.
-fn parse_nameserver_list() -> Vec<SocketAddr> {
+/// reachable over TCP. Returns each entry's resolved [`SocketAddr`] alongside
+/// the operator-supplied hostname when one was given (None for raw-IP
+/// entries). The hostname is later threaded into the TLS handshake as the
+/// SNI / cert-verification name for that specific server, so multi-IOC TLS
+/// deployments with hostname-bound certs work without a single global
+/// `EPICS_CA_TLS_SERVER_NAME` override.
+pub(crate) fn parse_nameserver_list() -> Vec<(SocketAddr, Option<String>)> {
     let Some(list) = epics_base_rs::runtime::env::get("EPICS_CA_NAME_SERVERS") else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for entry in list.split_whitespace() {
-        let resolved = if entry.contains(':') {
-            entry.parse::<SocketAddr>().ok().or_else(|| {
-                let (host, port_str) = entry.rsplit_once(':')?;
-                let port: u16 = port_str.parse().ok()?;
-                resolve_host(host, port).ok()
-            })
+        if entry.contains(':') {
+            // Try as raw `IP:port` first — if it parses, no hostname.
+            if let Ok(addr) = entry.parse::<SocketAddr>() {
+                out.push((addr, None));
+                continue;
+            }
+            // Otherwise treat it as `host:port` and remember the host.
+            let Some((host, port_str)) = entry.rsplit_once(':') else {
+                continue;
+            };
+            let Ok(port) = port_str.parse::<u16>() else {
+                continue;
+            };
+            if let Ok(addr) = resolve_host(host, port) {
+                let hostname = if host.parse::<std::net::IpAddr>().is_ok() {
+                    None
+                } else {
+                    Some(host.to_string())
+                };
+                out.push((addr, hostname));
+            }
         } else {
-            resolve_host(entry, CA_SERVER_PORT).ok()
-        };
-        if let Some(addr) = resolved {
-            out.push(addr);
+            // Bare hostname (no port) — treat as DNS name even if it
+            // happens to look like an IP literal (caller intent is
+            // unambiguous when no port is specified).
+            if let Ok(addr) = resolve_host(entry, CA_SERVER_PORT) {
+                let hostname = if entry.parse::<std::net::IpAddr>().is_ok() {
+                    None
+                } else {
+                    Some(entry.to_string())
+                };
+                out.push((addr, hostname));
+            }
         }
     }
     out

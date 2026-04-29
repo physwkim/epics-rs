@@ -55,8 +55,26 @@ pub(crate) async fn run_transport_manager(
     event_tx: mpsc::UnboundedSender<TransportEvent>,
     #[cfg(feature = "experimental-rust-tls")] tls: Option<ClientTlsConfig>,
     #[cfg(feature = "experimental-rust-tls")] tls_server_name: Option<String>,
+    // Per-server SNI / cert-verification overrides built from the
+    // hostname half of EPICS_CA_NAME_SERVERS=host:port entries.
+    // Looked up per connect_server call so each TLS handshake uses
+    // the operator-supplied DNS name for that specific peer; falls
+    // back to tls_server_name (the global override), then the IP
+    // literal. Empty when no name servers were given by hostname.
+    #[cfg(feature = "experimental-rust-tls")] sni_overrides: HashMap<SocketAddr, String>,
 ) {
     let mut connections: HashMap<SocketAddr, ServerConnection> = HashMap::new();
+    // Helper: resolve the right SNI / cert-verification name for a
+    // particular target address. Per-server map wins over the global
+    // EPICS_CA_TLS_SERVER_NAME (matches operator intent: a name in
+    // EPICS_CA_NAME_SERVERS is more specific than a global default).
+    #[cfg(feature = "experimental-rust-tls")]
+    let pick_sni = |addr: SocketAddr| -> Option<String> {
+        sni_overrides
+            .get(&addr)
+            .cloned()
+            .or_else(|| tls_server_name.clone())
+    };
 
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
@@ -70,11 +88,12 @@ pub(crate) async fn run_transport_manager(
                     let result = {
                         #[cfg(feature = "experimental-rust-tls")]
                         {
+                            let sni = pick_sni(server_addr);
                             connect_server(
                                 server_addr,
                                 event_tx.clone(),
                                 tls.as_ref(),
-                                tls_server_name.as_deref(),
+                                sni.as_deref(),
                             )
                             .await
                         }
@@ -109,11 +128,12 @@ pub(crate) async fn run_transport_manager(
                     let result = {
                         #[cfg(feature = "experimental-rust-tls")]
                         {
+                            let sni = pick_sni(server_addr);
                             connect_server(
                                 server_addr,
                                 event_tx.clone(),
                                 tls.as_ref(),
-                                tls_server_name.as_deref(),
+                                sni.as_deref(),
                             )
                             .await
                         }
