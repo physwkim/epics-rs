@@ -141,13 +141,40 @@ pub async fn op_put(
     value_str: &str,
     op_timeout: Duration,
 ) -> PvaResult<()> {
+    op_put_inner(channel, value_str, None, op_timeout).await
+}
+
+/// `op_put` variant accepting a pre-built pvRequest blob. Lets
+/// callers thread `record[process=true]` (RPC-like blocking puts) or
+/// custom field-mask selections through. Bytes typically built via
+/// [`crate::pv_request::PvRequestBuilder::build`] +
+/// [`crate::pv_request::PvRequestExpr::encode`]. pvxs
+/// `Context::put(name).pvRequest(...)` parity.
+pub async fn op_put_raw(
+    channel: &Arc<Channel>,
+    pv_req: &[u8],
+    value_str: &str,
+    op_timeout: Duration,
+) -> PvaResult<()> {
+    op_put_inner(channel, value_str, Some(pv_req), op_timeout).await
+}
+
+async fn op_put_inner(
+    channel: &Arc<Channel>,
+    value_str: &str,
+    raw_pv_req: Option<&[u8]>,
+    op_timeout: Duration,
+) -> PvaResult<()> {
     let (server, sid) = channel.ensure_active().await?;
     let order = server.byte_order;
     let big_endian = matches!(order, ByteOrder::Big);
     let codec = PvaCodec { big_endian };
     let ioid = alloc_ioid();
 
-    let pv_req = build_pv_request_value_only(big_endian);
+    let pv_req = match raw_pv_req {
+        Some(b) => b.to_vec(),
+        None => build_pv_request_value_only(big_endian),
+    };
     let mut stream = server.register_ioid_stream(ioid);
     let cache = server.type_cache();
 
@@ -449,13 +476,43 @@ pub async fn op_monitor<F>(
     channel: &Arc<Channel>,
     fields: &[&str],
     pipeline_size: u32,
-    mut callback: F,
+    callback: F,
 ) -> PvaResult<()>
 where
     F: FnMut(&FieldDesc, &PvField) + Send,
 {
     let fields_owned: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+    op_monitor_inner(channel, fields_owned, None, pipeline_size, callback).await
+}
 
+/// `op_monitor` variant accepting a pre-built pvRequest blob. Threads
+/// `record[queueSize=N,pipeline=true,...]` and custom field-mask
+/// selections through to MONITOR INIT. pvxs
+/// `Context::monitor(name).pvRequest(...)` parity. The raw bytes win
+/// over the field-list path; field reconnect-replay still works
+/// because the bytes are reused on every reconnect cycle.
+pub async fn op_monitor_raw<F>(
+    channel: &Arc<Channel>,
+    pv_req: Vec<u8>,
+    pipeline_size: u32,
+    callback: F,
+) -> PvaResult<()>
+where
+    F: FnMut(&FieldDesc, &PvField) + Send,
+{
+    op_monitor_inner(channel, Vec::new(), Some(pv_req), pipeline_size, callback).await
+}
+
+async fn op_monitor_inner<F>(
+    channel: &Arc<Channel>,
+    fields_owned: Vec<String>,
+    raw_pv_req: Option<Vec<u8>>,
+    pipeline_size: u32,
+    mut callback: F,
+) -> PvaResult<()>
+where
+    F: FnMut(&FieldDesc, &PvField) + Send,
+{
     loop {
         let (server, sid) = match channel.ensure_active().await {
             Ok(p) => p,
@@ -475,6 +532,7 @@ where
             server.clone(),
             sid,
             &fields_owned,
+            raw_pv_req.as_deref(),
             pipeline_size,
             &mut callback,
             None,
@@ -549,6 +607,7 @@ where
                 server.clone(),
                 sid,
                 &fields_owned,
+                None,
                 pipeline_size,
                 &mut callback,
                 Some(state_for_task.clone()),
@@ -622,6 +681,7 @@ where
             server.clone(),
             sid,
             &fields_owned,
+            None,
             pipeline_size,
             &mut data_callback,
             None,
@@ -669,6 +729,7 @@ async fn run_monitor_loop<F>(
     server: Arc<super::server_conn::ServerConn>,
     sid: u32,
     fields: &[String],
+    raw_pv_req: Option<&[u8]>,
     pipeline_size: u32,
     callback: &mut F,
     state: Option<Arc<SubscriptionState>>,
@@ -681,11 +742,13 @@ where
     let codec = PvaCodec { big_endian };
     let ioid = alloc_ioid();
 
-    let pv_req = if fields.is_empty() {
-        sentinel_all_fields()
-    } else {
-        let refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-        build_pv_request_fields(&refs, big_endian)
+    let pv_req = match raw_pv_req {
+        Some(b) => b.to_vec(),
+        None if fields.is_empty() => sentinel_all_fields(),
+        None => {
+            let refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+            build_pv_request_fields(&refs, big_endian)
+        }
     };
 
     let mut stream = server.register_ioid_stream(ioid);

@@ -504,6 +504,31 @@ impl PvaClient {
         op_put(&ch, value_str, self.inner.timeout).await
     }
 
+    /// `pvput` with a custom pvRequest. The most common use is
+    /// `record[process=true]` to request a synchronous PROC after the
+    /// PUT — RPC-like semantics for IOCs that have side effects on
+    /// process. pvxs `Context::put(name).pvRequest(...)` parity.
+    pub async fn pvput_with_request(
+        &self,
+        pv_name: &str,
+        request: &crate::pv_request::PvRequestExpr,
+        value_str: &str,
+    ) -> PvaResult<()> {
+        let ch = self.channel(pv_name).await?;
+        let big_endian = matches!(
+            ch.ensure_active().await?.0.byte_order,
+            crate::proto::ByteOrder::Big
+        );
+        let bytes = request.encode(big_endian);
+        crate::client_native::ops_v2::op_put_raw(
+            &ch,
+            &bytes,
+            value_str,
+            self.inner.timeout,
+        )
+        .await
+    }
+
     pub async fn pvmonitor<F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
     where
         F: FnMut(&PvField) + Send,
@@ -512,6 +537,37 @@ impl PvaClient {
         op_monitor(&ch, &[], self.inner.pipeline_size, move |_desc, value| {
             callback(value)
         })
+        .await
+    }
+
+    /// `pvmonitor` with a custom pvRequest. Common uses:
+    ///   `record[queueSize=N]` — pipeline window size.
+    ///   `record[pipeline=true]` — flow-control mode.
+    ///   `field(value,alarm.severity)` — projection.
+    /// The custom request is reused on every reconnect cycle, so the
+    /// queueSize / pipeline negotiation is preserved across server
+    /// restarts. pvxs `Context::monitor(name).pvRequest(...)` parity.
+    pub async fn pvmonitor_with_request<F>(
+        &self,
+        pv_name: &str,
+        request: &crate::pv_request::PvRequestExpr,
+        mut callback: F,
+    ) -> PvaResult<()>
+    where
+        F: FnMut(&PvField) + Send,
+    {
+        let ch = self.channel(pv_name).await?;
+        let big_endian = matches!(
+            ch.ensure_active().await?.0.byte_order,
+            crate::proto::ByteOrder::Big
+        );
+        let bytes = request.encode(big_endian);
+        crate::client_native::ops_v2::op_monitor_raw(
+            &ch,
+            bytes,
+            self.inner.pipeline_size,
+            move |_desc, value| callback(value),
+        )
         .await
     }
 
