@@ -830,6 +830,7 @@ name = "epics-bridge-rs"
 version = "0.10.5"
 dependencies = [
  "arc-swap",
+ "bytes",
  "chrono",
  "clap",
  "epics-base-rs",
@@ -901,6 +902,7 @@ dependencies = [
 name = "epics-pva-rs"
 version = "0.10.5"
 dependencies = [
+ "bytes",
  "chrono",
  "clap",
  "epics-base-rs",

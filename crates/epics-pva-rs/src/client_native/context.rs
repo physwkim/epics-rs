@@ -618,6 +618,29 @@ impl PvaClient {
         .await
     }
 
+    /// F-G12: monitor that surfaces **raw MONITOR DATA body bytes**
+    /// (`changed | value | overrun` triplet from the wire) instead of
+    /// a decoded [`PvField`]. Used by bridge `pva_gateway` upstream
+    /// task to skip the decode-and-re-encode round-trip when fanning
+    /// events out to many downstream subscribers.
+    pub async fn pvmonitor_raw_frames<F>(
+        &self,
+        pv_name: &str,
+        mut callback: F,
+    ) -> PvaResult<()>
+    where
+        F: FnMut(&FieldDesc, bytes::Bytes, crate::proto::ByteOrder) + Send,
+    {
+        let ch = self.channel(pv_name).await?;
+        crate::client_native::ops_v2::op_monitor_raw_frames(
+            &ch,
+            &[],
+            self.inner.pipeline_size,
+            move |desc, body, order| callback(desc, body, order),
+        )
+        .await
+    }
+
     /// `pvmonitor` with a custom pvRequest. Common uses:
     ///   `record[queueSize=N]` — pipeline window size.
     ///   `record[pipeline=true]` — flow-control mode.

@@ -608,6 +608,158 @@ impl Pauser {
     }
 }
 
+/// F-G12 raw-frame monitor entry: like [`op_monitor`] but the
+/// callback receives the **raw MONITOR DATA body bytes** (the
+/// `changed | value | overrun` triplet from the wire) instead of a
+/// decoded [`PvField`]. Bridge gateways feed these directly into
+/// [`crate::server_native::RawMonitorEvent`] for downstream
+/// re-emission without an intermediate decode.
+///
+/// Callback shape: `(intro: &FieldDesc, body: bytes::Bytes,
+/// byte_order: ByteOrder)`. Body is refcount-shared (cheap clone).
+pub async fn op_monitor_raw_frames<F>(
+    channel: &Arc<Channel>,
+    fields: &[&str],
+    pipeline_size: u32,
+    mut callback: F,
+) -> PvaResult<()>
+where
+    F: FnMut(&FieldDesc, bytes::Bytes, ByteOrder) + Send,
+{
+    let fields_owned: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+    loop {
+        let (server, sid) = match channel.ensure_active().await {
+            Ok(p) => p,
+            Err(e) => {
+                if matches!(
+                    channel.current_state(),
+                    super::channel::ChannelState::Closed
+                ) {
+                    return Ok(());
+                }
+                debug!(pv = %channel.pv_name, err = %e,
+                    "raw monitor reconnect failed; retrying in 500ms");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        match run_raw_monitor_loop(server.clone(), sid, &fields_owned, pipeline_size, &mut callback)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(MonitorEnd::ChannelClosed) => return Ok(()),
+            Err(MonitorEnd::ConnectionLost) => {
+                debug!(pv = %channel.pv_name, "raw monitor lost connection; will retry");
+                if matches!(
+                    channel.current_state(),
+                    super::channel::ChannelState::Closed
+                ) {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(MonitorEnd::Fatal(e)) => return Err(e),
+        }
+    }
+}
+
+async fn run_raw_monitor_loop<F>(
+    server: Arc<super::server_conn::ServerConn>,
+    sid: u32,
+    fields: &[String],
+    pipeline_size: u32,
+    callback: &mut F,
+) -> Result<(), MonitorEnd>
+where
+    F: FnMut(&FieldDesc, bytes::Bytes, ByteOrder) + Send,
+{
+    let order = server.byte_order;
+    let big_endian = matches!(order, ByteOrder::Big);
+    let codec = PvaCodec { big_endian };
+    let ioid = alloc_ioid();
+    let pv_req = if fields.is_empty() {
+        sentinel_all_fields()
+    } else {
+        let refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        build_pv_request_fields(&refs, big_endian)
+    };
+    let mut stream = server.register_ioid_stream(ioid);
+    let init_req = codec.build_monitor_init(sid, ioid, &pv_req);
+    server
+        .send(init_req)
+        .await
+        .map_err(|_| MonitorEnd::ConnectionLost)?;
+    let init_frame = stream.recv().await.ok_or(MonitorEnd::ConnectionLost)?;
+    let cache = server.type_cache();
+    let init = match decode_op_response_cached(&init_frame, None, &mut cache.lock()) {
+        Ok(OpResponse::Init(i)) => i,
+        Ok(other) => {
+            server.unregister_ioid(ioid);
+            return Err(MonitorEnd::Fatal(PvaError::Protocol(format!(
+                "expected MONITOR INIT, got {other:?}"
+            ))));
+        }
+        Err(e) => {
+            server.unregister_ioid(ioid);
+            return Err(MonitorEnd::Fatal(e));
+        }
+    };
+    if !init.status.is_success() {
+        server.unregister_ioid(ioid);
+        return Err(MonitorEnd::Fatal(PvaError::Protocol(format!(
+            "MONITOR INIT failed: {:?}",
+            init.status
+        ))));
+    }
+    let intro = init.introspection;
+    let start = codec.build_monitor_start(sid, ioid, pipeline_size);
+    server
+        .send(start)
+        .await
+        .map_err(|_| MonitorEnd::ConnectionLost)?;
+    let mut events_since_ack: u32 = 0;
+    loop {
+        let frame = match stream.recv().await {
+            Some(f) => f,
+            None => {
+                server.unregister_ioid(ioid);
+                return Err(MonitorEnd::ConnectionLost);
+            }
+        };
+        // Inspect subcmd (first byte after the u32 ioid) to filter
+        // out non-DATA frames (FINISH at 0x10, OK status, etc.).
+        if frame.payload.len() < 5 {
+            continue;
+        }
+        let subcmd = frame.payload[4];
+        if subcmd != 0x00 {
+            // Pipeline ack / FINISH / status — fall through to the
+            // regular decode path so we can recognize FINISH and
+            // unwind. ACK frames have subcmd 0x80; we ignore them
+            // here since we drive ACKs ourselves below.
+            if subcmd & 0x10 != 0 {
+                server.unregister_ioid(ioid);
+                return Ok(());
+            }
+            continue;
+        }
+        // Body = payload[5..] = changed | value | overrun (raw).
+        // Wrap in `Bytes` so the broadcast fan-out shares this
+        // allocation refcount-style.
+        let body = bytes::Bytes::copy_from_slice(&frame.payload[5..]);
+        callback(&intro, body, order);
+        events_since_ack += 1;
+        if pipeline_size > 0 && events_since_ack >= pipeline_size {
+            let ack = codec.build_monitor_ack(sid, ioid, events_since_ack);
+            if server.send(ack).await.is_err() {
+                server.unregister_ioid(ioid);
+                return Err(MonitorEnd::ConnectionLost);
+            }
+            events_since_ack = 0;
+        }
+    }
+}
+
 pub async fn op_monitor<F>(
     channel: &Arc<Channel>,
     fields: &[&str],

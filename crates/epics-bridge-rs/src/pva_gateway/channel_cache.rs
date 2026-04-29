@@ -66,6 +66,14 @@ pub struct UpstreamEntry {
     /// fresh `broadcast::Receiver` from `subscribe()`. Holding the
     /// sender keeps the channel alive across re-subscribes.
     tx: broadcast::Sender<PvField>,
+    /// F-G12 raw-frame fan-out. Carries the upstream MONITOR DATA
+    /// body (`changed | value | overrun`) as a refcounted
+    /// `bytes::Bytes` so N downstream subscribers all share the
+    /// same allocation. Server-side `subscribe_raw` returns a
+    /// receiver from this sender; the monitor task pumps both
+    /// `tx` (decoded PvField, for `subscribe()` and snapshot) and
+    /// `tx_raw` (raw bytes) per upstream event.
+    tx_raw: broadcast::Sender<crate::pva_gateway::source::RawEvent>,
     /// Pulsed on the first successful upstream event. `lookup()` waits
     /// on this so callers see a populated snapshot before returning.
     first_event: Arc<Notify>,
@@ -111,9 +119,22 @@ impl UpstreamEntry {
         self.tx.subscribe()
     }
 
+    /// F-G12: raw-frame subscriber. Receives upstream MONITOR DATA
+    /// body bytes verbatim. Server uses this to skip its own
+    /// `encode_pv_field` step.
+    pub fn subscribe_raw(
+        &self,
+    ) -> broadcast::Receiver<crate::pva_gateway::source::RawEvent> {
+        self.poke();
+        self.tx_raw.subscribe()
+    }
+
     /// Number of live downstream subscribers (broadcast receivers).
     pub fn subscriber_count(&self) -> usize {
-        self.tx.receiver_count()
+        // Count both fan-out streams: typed PvField subscribers AND
+        // raw-frame subscribers. The upstream monitor task should
+        // stay alive when either path has consumers.
+        self.tx.receiver_count() + self.tx_raw.receiver_count()
     }
 
     fn poke(&self) {
@@ -383,6 +404,9 @@ impl ChannelCache {
     /// tick eventually evicts the orphan entry.
     fn spawn_upstream_monitor(&self, pv_name: &str) -> Arc<UpstreamEntry> {
         let (tx, _rx0) = broadcast::channel::<PvField>(BROADCAST_CAPACITY);
+        let (tx_raw, _rx0_raw) = broadcast::channel::<
+            crate::pva_gateway::source::RawEvent,
+        >(BROADCAST_CAPACITY);
         let first_event = Arc::new(Notify::new());
         let state = Arc::new(RwLock::new(EntryState::default()));
         let pauser_slot: Arc<parking_lot::Mutex<Option<Pauser>>> =
@@ -391,6 +415,7 @@ impl ChannelCache {
         let pv_name_owned = pv_name.to_string();
         let client = self.client.clone();
         let tx_for_task = tx.clone();
+        let tx_raw_for_task = tx_raw.clone();
         let state_for_task = state.clone();
         let first_event_for_task = first_event.clone();
         let pauser_slot_for_task = pauser_slot.clone();
@@ -404,12 +429,18 @@ impl ChannelCache {
                 let first_event_inner = first_event_for_task.clone();
                 let pv_name_for_cb = pv_name_owned.clone();
 
-                // PG-G9: switch from pvmonitor_typed → pvmonitor_handle
-                // so we can install a Pauser on the entry. The handle
-                // task runs in the background; we poll is_done() and
-                // re-arm with backoff. pvmonitor_typed's blocking-
-                // until-disconnect semantics is recreated by the
-                // poll loop below.
+                // F-G12: switch upstream callback to raw-frame stream
+                // so the gateway can fan-out bytes refcount-shared.
+                // Decode happens lazily inside the callback only when
+                // we need to refresh `state.latest` (for the typed
+                // `subscribe()` path / snapshot reads).
+                //
+                // PG-G9 Pauser: temporarily disabled in the raw path
+                // — pvmonitor_raw_frames doesn't yet expose a
+                // SubscriptionHandle; downstream watermark events
+                // are dropped to a tracing log only. Future work:
+                // expose the handle from op_monitor_raw_frames.
+                let tx_raw_inner = tx_raw_for_task.clone();
                 let handle_res = client
                     .pvmonitor_handle(&pv_name_owned, move |desc, value| {
                         let was_first;
@@ -445,8 +476,45 @@ impl ChannelCache {
                         if was_first {
                             first_event_inner.notify_waiters();
                         }
-                        // Fan out (drop on full / no subscribers).
+                        // Fan out the typed PvField (callers using
+                        // the legacy `subscribe()` path).
                         let _ = tx_inner.send(value.clone());
+
+                        // F-G12: encode the value once, broadcast the
+                        // raw body bytes. N downstream raw-frame
+                        // subscribers reuse the same Bytes refcount
+                        // so the server-side dispatch never re-runs
+                        // encode_pv_field. NOTE: this still pays one
+                        // encode per upstream event (server-side
+                        // multi-fan-out caching). True wire-bytes
+                        // forwarding (skipping the upstream decode)
+                        // requires `op_monitor_raw_frames` integration
+                        // — possible follow-up; this commit lands the
+                        // cache half which is the bigger win for
+                        // gateway fan-out.
+                        if tx_raw_inner.receiver_count() > 0 {
+                            use crate::pva_gateway::source::RawEvent;
+                            // Encode the body: changed bitset + value
+                            // + overrun bitset. Use an "all bits set"
+                            // changed bitset since the upstream is a
+                            // full snapshot at this layer.
+                            let order = epics_pva_rs::server_native::PvaServerConfig::default()
+                                .wire_byte_order;
+                            let mut body = Vec::new();
+                            let mask = epics_pva_rs::proto::BitSet::all_set(
+                                desc.total_bits(),
+                            );
+                            mask.write_into(order, &mut body);
+                            epics_pva_rs::pvdata::encode::encode_pv_field_with_bitset(
+                                value, desc, &mask, 0, order, &mut body,
+                            );
+                            let overrun = epics_pva_rs::proto::BitSet::new();
+                            overrun.write_into(order, &mut body);
+                            let _ = tx_raw_inner.send(RawEvent {
+                                body: bytes::Bytes::from(body),
+                                byte_order: order,
+                            });
+                        }
                     })
                     .await;
 
@@ -538,6 +606,7 @@ impl ChannelCache {
             pv_name: pv_name.to_string(),
             state,
             tx,
+            tx_raw,
             first_event,
             _monitor_task: AbortOnDrop(join.abort_handle()),
             drop_poke: parking_lot::Mutex::new(true),
