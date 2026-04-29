@@ -654,6 +654,13 @@ async fn rust_client_to_rust_server_ntndarray_full_roundtrip() {
                         assert_eq!(n, 1023);
                     }
                 }
+                // F-G10: typed fast-path landing.
+                PvField::ScalarArrayTyped(arr) => {
+                    let ints = arr.as_ints().expect("expected int array");
+                    assert_eq!(ints.len(), 1024);
+                    assert_eq!(ints[0], 0);
+                    assert_eq!(ints[1023], 1023);
+                }
                 other => panic!("expected ScalarArray, got {other:?}"),
             }
         }
@@ -905,6 +912,13 @@ async fn rust_client_ntscalar_array_get_from_pvxs() {
                 if let ScalarValue::Double(d) = items[9] {
                     assert!((d - 10.5).abs() < 1e-6);
                 }
+            }
+            // F-G10: typed fast-path landing.
+            Some(PvField::ScalarArrayTyped(arr)) => {
+                let doubles = arr.as_doubles().expect("expected double array");
+                assert_eq!(doubles.len(), 10);
+                assert!((doubles[0] - 1.5).abs() < 1e-6);
+                assert!((doubles[9] - 10.5).abs() < 1e-6);
             }
             other => panic!("expected ScalarArray, got {other:?}"),
         }

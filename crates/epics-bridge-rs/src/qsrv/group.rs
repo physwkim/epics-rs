@@ -1189,6 +1189,7 @@ fn pv_field_to_field_desc(field: &PvField) -> FieldDesc {
                 .unwrap_or(ScalarType::Double);
             FieldDesc::ScalarArray(elem_type)
         }
+        PvField::ScalarArrayTyped(arr) => FieldDesc::ScalarArray(arr.scalar_type()),
         PvField::Structure(s) => FieldDesc::Structure {
             struct_id: s.struct_id.clone(),
             fields: s

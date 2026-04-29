@@ -25,7 +25,251 @@
 
 use std::io::Cursor;
 
+use super::TypedScalarArray;
 use super::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue, UnionItem, VariantValue};
+
+/// Bulk-emit a [`TypedScalarArray`] body (no length prefix; caller
+/// emits the Size). pvxs `to_wire(shared_array)` parity:
+///
+/// - For POD primitives (i8/u8/i16/u16/i32/u32/i64/u64/f32/f64) and a
+///   matching host/wire endian, this is **a single
+///   `Vec::extend_from_slice` call** which LLVM lowers to SIMD
+///   memcpy. 1 M f64 elements = ~one memcpy invocation.
+/// - For mismatched endian we walk the typed slice with `to_be_bytes`
+///   / `to_le_bytes` (one byte-swap per element, no enum match).
+/// - Boolean is encoded as 1-byte 0/1; we still use a tight loop
+///   because Rust `bool` and wire `Boolean` have the same layout but
+///   strict spec says only 0x00/0x01 are valid.
+/// - String falls back to per-element `encode_string_into`.
+#[inline]
+pub(crate) fn encode_typed_scalar_array(
+    arr: &TypedScalarArray,
+    order: ByteOrder,
+    out: &mut Vec<u8>,
+) {
+    let host_be = cfg!(target_endian = "big");
+    let wire_be = matches!(order, ByteOrder::Big);
+    let same_endian = host_be == wire_be;
+    match arr {
+        TypedScalarArray::Boolean(a) => {
+            for &b in a.iter() {
+                out.put_u8(if b { 1 } else { 0 });
+            }
+        }
+        TypedScalarArray::Byte(a) => {
+            // 1-byte primitive: endian doesn't apply. Single memcpy.
+            // SAFETY: Arc<[i8]> is contiguous; cast to &[u8] is sound
+            // because i8 and u8 share repr.
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(a.as_ptr() as *const u8, a.len())
+            };
+            out.extend_from_slice(bytes);
+        }
+        TypedScalarArray::UByte(a) => {
+            out.extend_from_slice(a);
+        }
+        TypedScalarArray::Short(a) => emit_pod(a, same_endian, out, |x: i16| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::UShort(a) => emit_pod(a, same_endian, out, |x: u16| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::Int(a) => emit_pod(a, same_endian, out, |x: i32| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::UInt(a) => emit_pod(a, same_endian, out, |x: u32| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::Long(a) => emit_pod(a, same_endian, out, |x: i64| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::ULong(a) => emit_pod(a, same_endian, out, |x: u64| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::Float(a) => emit_pod(a, same_endian, out, |x: f32| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::Double(a) => emit_pod(a, same_endian, out, |x: f64| {
+            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+        }),
+        TypedScalarArray::String(a) => {
+            for s in a.iter() {
+                encode_string_into(s, order, out);
+            }
+        }
+    }
+}
+
+/// Decode a scalar array of length `n` into a [`TypedScalarArray`].
+/// Returns `Ok(Some(_))` for POD primitives + variable-length types
+/// where we can safely build an `Arc<[T]>`, `Ok(None)` when the type
+/// is not yet handled by the typed path (e.g. obscure encodings —
+/// today none, all map to typed variants), and `Err` on a wire
+/// decode error. F-G10.
+#[inline]
+pub(crate) fn decode_typed_scalar_array(
+    st: ScalarType,
+    n: usize,
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+) -> Result<Option<TypedScalarArray>, DecodeError> {
+    let host_be = cfg!(target_endian = "big");
+    let wire_be = matches!(order, ByteOrder::Big);
+    let same_endian = host_be == wire_be;
+    Ok(Some(match st {
+        ScalarType::Boolean => {
+            let bytes = cur.get_bytes(n)?;
+            TypedScalarArray::Boolean(bytes.iter().map(|&b| b != 0).collect::<Vec<_>>().into())
+        }
+        ScalarType::Byte => {
+            let bytes = cur.get_bytes(n)?;
+            // SAFETY: bytes is owned Vec<u8>; reinterpret as Vec<i8>
+            // via pointer cast preserves layout (i8 and u8 are repr-
+            // compatible) and length / capacity.
+            let v: Vec<i8> = bytes.into_iter().map(|b| b as i8).collect();
+            TypedScalarArray::Byte(v.into())
+        }
+        ScalarType::UByte => {
+            let bytes = cur.get_bytes(n)?;
+            TypedScalarArray::UByte(bytes.into())
+        }
+        ScalarType::Short => TypedScalarArray::Short(read_pod_array::<i16, 2, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { i16::from_be_bytes(b) } else { i16::from_le_bytes(b) },
+        )?),
+        ScalarType::UShort => TypedScalarArray::UShort(read_pod_array::<u16, 2, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) },
+        )?),
+        ScalarType::Int => TypedScalarArray::Int(read_pod_array::<i32, 4, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { i32::from_be_bytes(b) } else { i32::from_le_bytes(b) },
+        )?),
+        ScalarType::UInt => TypedScalarArray::UInt(read_pod_array::<u32, 4, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) },
+        )?),
+        ScalarType::Long => TypedScalarArray::Long(read_pod_array::<i64, 8, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { i64::from_be_bytes(b) } else { i64::from_le_bytes(b) },
+        )?),
+        ScalarType::ULong => TypedScalarArray::ULong(read_pod_array::<u64, 8, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { u64::from_be_bytes(b) } else { u64::from_le_bytes(b) },
+        )?),
+        ScalarType::Float => TypedScalarArray::Float(read_pod_array::<f32, 4, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { f32::from_be_bytes(b) } else { f32::from_le_bytes(b) },
+        )?),
+        ScalarType::Double => TypedScalarArray::Double(read_pod_array::<f64, 8, _>(
+            n,
+            cur,
+            same_endian,
+            |b| if wire_be { f64::from_be_bytes(b) } else { f64::from_le_bytes(b) },
+        )?),
+        ScalarType::String => {
+            let mut v: Vec<String> = Vec::with_capacity(safe_capacity(n, cur));
+            for _ in 0..n {
+                v.push(decode_string(cur, order)?.unwrap_or_default());
+            }
+            TypedScalarArray::String(v.into())
+        }
+    }))
+}
+
+/// Read `n` POD-T elements from `cur`. Single memcpy when endian
+/// matches; per-element swap loop otherwise. Returns an `Arc<[T]>`
+/// to share data with downstream consumers without copying.
+#[inline]
+fn read_pod_array<T: Copy, const N: usize, F>(
+    n: usize,
+    cur: &mut Cursor<&[u8]>,
+    same_endian: bool,
+    swap: F,
+) -> Result<std::sync::Arc<[T]>, DecodeError>
+where
+    F: Fn([u8; N]) -> T,
+{
+    let nbytes = n
+        .checked_mul(N)
+        .ok_or_else(|| DecodeError("scalar array element count × size overflows".into()))?;
+    let bytes = cur.get_bytes(nbytes)?;
+    if same_endian {
+        // Allocate an aligned Vec<T>, memcpy bytes in.
+        let mut v: Vec<T> = Vec::with_capacity(n);
+        // SAFETY: T is a fixed-size POD primitive (i16/i32/i64/u*/f32/f64);
+        // Vec<T>::with_capacity gives an alloc with align_of::<T>() and
+        // capacity for n*N bytes; copy_nonoverlapping fills the prefix.
+        // set_len(n) is sound because every byte was written.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                v.as_mut_ptr() as *mut u8,
+                nbytes,
+            );
+            v.set_len(n);
+        }
+        Ok(v.into())
+    } else {
+        // Mismatched endian: per-element swap. Still no enum match,
+        // tight inlinable loop; LLVM auto-vectorizes the byte-reverse.
+        let mut v: Vec<T> = Vec::with_capacity(n);
+        let mut buf = [0u8; N];
+        let mut off = 0usize;
+        for _ in 0..n {
+            buf.copy_from_slice(&bytes[off..off + N]);
+            v.push(swap(buf));
+            off += N;
+        }
+        Ok(v.into())
+    }
+}
+
+/// Helper: emit a `Pod` slice as bulk bytes when endian matches,
+/// per-element fallback otherwise. `swap` is only consulted on the
+/// mismatched-endian path. Marked `#[inline]` so the closure inlines.
+#[inline]
+fn emit_pod<T: Copy, const N: usize, F>(
+    a: &[T],
+    same_endian: bool,
+    out: &mut Vec<u8>,
+    swap: F,
+) where
+    F: Fn(T) -> [u8; N],
+{
+    if same_endian {
+        // Single memcpy: pointer-cast to &[u8] then extend.
+        // SAFETY: T is a fixed-size POD primitive; `a` is a
+        // contiguous slice owned by the caller's Arc, alive for
+        // this function's scope.
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                a.as_ptr() as *const u8,
+                a.len() * std::mem::size_of::<T>(),
+            )
+        };
+        out.extend_from_slice(bytes);
+    } else {
+        out.reserve(a.len() * N);
+        for &x in a {
+            out.extend_from_slice(&swap(x));
+        }
+    }
+}
 use crate::proto::{
     ByteOrder, DecodeError, ReadExt, WriteExt, decode_size, decode_string, encode_size_into,
     encode_string_into,
@@ -477,7 +721,19 @@ pub fn decode_scalar_value(
 pub fn encode_pv_field(value: &PvField, desc: &FieldDesc, order: ByteOrder, out: &mut Vec<u8>) {
     match (desc, value) {
         (FieldDesc::Scalar(_), PvField::Scalar(sv)) => encode_scalar_value(sv, order, out),
+        (FieldDesc::ScalarArray(_), PvField::ScalarArrayTyped(arr)) => {
+            // F-G9 fast path: typed array → bulk memcpy when host
+            // endian == wire endian, per-element byte-swap loop
+            // otherwise (still O(n) but no enum match per element).
+            // pvxs `to_wire(shared_array)` parity (pvaproto.h:477).
+            encode_size_into(arr.len() as u32, order, out);
+            encode_typed_scalar_array(arr, order, out);
+        }
         (FieldDesc::ScalarArray(_), PvField::ScalarArray(items)) => {
+            // Slow path: legacy Vec<ScalarValue>. The per-element
+            // enum match + write makes this allocator- and CPU-bound
+            // for large arrays; new code should use the typed
+            // constructors (PvField::scalar_array_double etc).
             encode_size_into(items.len() as u32, order, out);
             for sv in items {
                 encode_scalar_value(sv, order, out);
@@ -720,6 +976,14 @@ pub fn decode_pv_field(
             let n = decode_size(cur, order)?
                 .ok_or_else(|| DecodeError("scalar array length cannot be null".into()))?
                 as usize;
+            // F-G10 fast path: decode straight into a typed Arc<[T]>
+            // when the element is a fixed-size POD primitive. Single
+            // memcpy when host endian matches wire; per-element
+            // byte-swap loop otherwise. Same semantics as pvxs
+            // `from_wire(shared_array)`.
+            if let Some(typed) = decode_typed_scalar_array(*st, n, cur, order)? {
+                return Ok(PvField::ScalarArrayTyped(typed));
+            }
             let mut items = Vec::with_capacity(safe_capacity(n, cur));
             for _ in 0..n {
                 items.push(decode_scalar_value(*st, cur, order)?);
@@ -1051,12 +1315,17 @@ mod tests {
         encode_pv_field(&v, &desc, ByteOrder::Little, &mut buf);
         let mut cur = Cursor::new(buf.as_slice());
         let dec = decode_pv_field(&desc, &mut cur, ByteOrder::Little).unwrap();
-        if let PvField::ScalarArray(items) = dec {
-            assert_eq!(items.len(), 3);
-            assert_eq!(items[0], ScalarValue::Int(1));
-            assert_eq!(items[2], ScalarValue::Int(3));
-        } else {
-            panic!("expected ScalarArray");
+        // After F-G10 the decoder lands the typed fast path.
+        match dec {
+            PvField::ScalarArrayTyped(arr) => {
+                assert_eq!(arr.as_ints().unwrap(), &[1, 2, 3]);
+            }
+            PvField::ScalarArray(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], ScalarValue::Int(1));
+                assert_eq!(items[2], ScalarValue::Int(3));
+            }
+            other => panic!("expected ScalarArray or ScalarArrayTyped, got {other:?}"),
         }
     }
 

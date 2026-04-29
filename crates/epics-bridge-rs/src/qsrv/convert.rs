@@ -165,6 +165,13 @@ pub fn epics_to_pv_field(val: &EpicsValue) -> PvField {
 
 /// Extract EpicsValue from a PvField.
 pub fn pv_field_to_epics(field: &PvField) -> Option<EpicsValue> {
+    // F-G11 transition: typed scalar arrays land here too. Convert
+    // back through `to_scalar_values` so the existing per-type
+    // dispatch keeps working without duplicating the logic.
+    if let PvField::ScalarArrayTyped(arr) = field {
+        let legacy = PvField::ScalarArray(arr.to_scalar_values());
+        return pv_field_to_epics(&legacy);
+    }
     match field {
         PvField::Scalar(sv) => Some(scalar_to_epics(sv)),
         PvField::ScalarArray(arr) => {
@@ -205,6 +212,8 @@ pub fn pv_field_to_epics(field: &PvField) -> Option<EpicsValue> {
         | PvField::Variant(_)
         | PvField::VariantArray(_)
         | PvField::Null => None,
+        // Handled at the top of the function — unreachable here.
+        PvField::ScalarArrayTyped(_) => unreachable!(),
     }
 }
 
