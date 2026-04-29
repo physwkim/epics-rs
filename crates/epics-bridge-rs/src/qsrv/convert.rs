@@ -31,6 +31,7 @@ pub fn epics_to_scalar(val: &EpicsValue) -> ScalarValue {
         EpicsValue::DoubleArray(a) => ScalarValue::Double(a.first().copied().unwrap_or(0.0)),
         EpicsValue::LongArray(a) => ScalarValue::Int(a.first().copied().unwrap_or(0)),
         EpicsValue::CharArray(a) => ScalarValue::UByte(a.first().copied().unwrap_or(0)),
+        EpicsValue::StringArray(a) => ScalarValue::String(a.first().cloned().unwrap_or_default()),
     }
 }
 

@@ -565,13 +565,28 @@ fn encode_structure_body_cached(
 /// never produces 0xFD/0xFE; we accept them for interop only.
 pub type TypeCache = std::collections::HashMap<u16, FieldDesc>;
 
+/// Hard ceiling on FieldDesc / PvField nesting depth during decode.
+/// pvxs uses the same convention (`Decoder::max_depth = 64`); without
+/// it an adversarial peer can craft a deeply-nested Structure tree
+/// that blows the per-task stack (tokio default 2 MB / ~256 KB on
+/// macOS — well within reach at ~50K levels of recursion).
+const MAX_FIELD_DEPTH: u32 = 64;
+
 /// Decode a top-level `FieldDesc` (`name` + type description).
 pub fn decode_field_desc(
     cur: &mut Cursor<&[u8]>,
     order: ByteOrder,
 ) -> Result<(String, FieldDesc), DecodeError> {
+    decode_field_desc_at_depth(cur, order, 0)
+}
+
+fn decode_field_desc_at_depth(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    depth: u32,
+) -> Result<(String, FieldDesc), DecodeError> {
     let name = decode_string(cur, order)?.unwrap_or_default();
-    let desc = decode_type_desc(cur, order)?;
+    let desc = decode_type_desc_at_depth(cur, order, depth)?;
     Ok((name, desc))
 }
 
@@ -582,8 +597,17 @@ pub fn decode_field_desc_cached(
     order: ByteOrder,
     cache: &mut TypeCache,
 ) -> Result<(String, FieldDesc), DecodeError> {
+    decode_field_desc_cached_at_depth(cur, order, cache, 0)
+}
+
+fn decode_field_desc_cached_at_depth(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    cache: &mut TypeCache,
+    depth: u32,
+) -> Result<(String, FieldDesc), DecodeError> {
     let name = decode_string(cur, order)?.unwrap_or_default();
-    let desc = decode_type_desc_cached(cur, order, cache)?;
+    let desc = decode_type_desc_cached_at_depth(cur, order, cache, depth)?;
     Ok((name, desc))
 }
 
@@ -592,8 +616,16 @@ pub fn decode_type_desc(
     cur: &mut Cursor<&[u8]>,
     order: ByteOrder,
 ) -> Result<FieldDesc, DecodeError> {
+    decode_type_desc_at_depth(cur, order, 0)
+}
+
+fn decode_type_desc_at_depth(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    depth: u32,
+) -> Result<FieldDesc, DecodeError> {
     let mut empty = TypeCache::new();
-    decode_type_desc_cached(cur, order, &mut empty)
+    decode_type_desc_cached_at_depth(cur, order, &mut empty, depth)
 }
 
 /// Decode a type descriptor honouring 0xFD (define) / 0xFE (lookup)
@@ -614,12 +646,26 @@ pub fn decode_type_desc_cached(
     order: ByteOrder,
     cache: &mut TypeCache,
 ) -> Result<FieldDesc, DecodeError> {
+    decode_type_desc_cached_at_depth(cur, order, cache, 0)
+}
+
+fn decode_type_desc_cached_at_depth(
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    cache: &mut TypeCache,
+    depth: u32,
+) -> Result<FieldDesc, DecodeError> {
+    if depth > MAX_FIELD_DEPTH {
+        return Err(DecodeError(format!(
+            "FieldDesc nesting exceeds MAX_FIELD_DEPTH ({MAX_FIELD_DEPTH})"
+        )));
+    }
     let tag = cur.get_u8()?;
     match tag {
         0xFD => {
             // define new cache slot, then full inline descriptor.
             let key = cur.get_u16(order)?;
-            let desc = decode_type_desc_cached(cur, order, cache)?;
+            let desc = decode_type_desc_cached_at_depth(cur, order, cache, depth + 1)?;
             cache.insert(key, desc.clone());
             Ok(desc)
         }
@@ -631,8 +677,8 @@ pub fn decode_type_desc_cached(
                 .cloned()
                 .ok_or_else(|| DecodeError(format!("typecache miss for slot {key}")))
         }
-        TAG_STRUCTURE => decode_structure_body_cached(cur, order, false, cache),
-        TAG_UNION => decode_union_body_cached(cur, order, false, cache),
+        TAG_STRUCTURE => decode_structure_body_cached_at_depth(cur, order, false, cache, depth + 1),
+        TAG_UNION => decode_union_body_cached_at_depth(cur, order, false, cache, depth + 1),
         TAG_STRUCTURE_ARRAY => {
             let inner = cur.get_u8()?;
             if inner != TAG_STRUCTURE {
@@ -640,7 +686,7 @@ pub fn decode_type_desc_cached(
                     "structure-array element tag 0x{inner:02X} (expected 0x80)"
                 )));
             }
-            decode_structure_body_cached(cur, order, true, cache)
+            decode_structure_body_cached_at_depth(cur, order, true, cache, depth + 1)
         }
         TAG_UNION_ARRAY => {
             let inner = cur.get_u8()?;
@@ -649,7 +695,7 @@ pub fn decode_type_desc_cached(
                     "union-array element tag 0x{inner:02X} (expected 0x81)"
                 )));
             }
-            decode_union_body_cached(cur, order, true, cache)
+            decode_union_body_cached_at_depth(cur, order, true, cache, depth + 1)
         }
         TAG_VARIANT => Ok(FieldDesc::Variant),
         TAG_VARIANT_ARRAY => Ok(FieldDesc::VariantArray),
@@ -671,11 +717,12 @@ pub fn decode_type_desc_cached(
     }
 }
 
-fn decode_structure_body_cached(
+fn decode_structure_body_cached_at_depth(
     cur: &mut Cursor<&[u8]>,
     order: ByteOrder,
     is_array: bool,
     cache: &mut TypeCache,
+    depth: u32,
 ) -> Result<FieldDesc, DecodeError> {
     let struct_id = decode_string(cur, order)?.unwrap_or_default();
     let n = decode_size(cur, order)?
@@ -683,7 +730,7 @@ fn decode_structure_body_cached(
         as usize;
     let mut fields = Vec::with_capacity(safe_capacity(n, cur));
     for _ in 0..n {
-        fields.push(decode_field_desc_cached(cur, order, cache)?);
+        fields.push(decode_field_desc_cached_at_depth(cur, order, cache, depth)?);
     }
     Ok(if is_array {
         FieldDesc::StructureArray { struct_id, fields }
@@ -692,11 +739,12 @@ fn decode_structure_body_cached(
     })
 }
 
-fn decode_union_body_cached(
+fn decode_union_body_cached_at_depth(
     cur: &mut Cursor<&[u8]>,
     order: ByteOrder,
     is_array: bool,
     cache: &mut TypeCache,
+    depth: u32,
 ) -> Result<FieldDesc, DecodeError> {
     let struct_id = decode_string(cur, order)?.unwrap_or_default();
     let n = decode_size(cur, order)?
@@ -704,7 +752,7 @@ fn decode_union_body_cached(
         as usize;
     let mut variants = Vec::with_capacity(safe_capacity(n, cur));
     for _ in 0..n {
-        variants.push(decode_field_desc_cached(cur, order, cache)?);
+        variants.push(decode_field_desc_cached_at_depth(cur, order, cache, depth)?);
     }
     Ok(if is_array {
         FieldDesc::UnionArray {

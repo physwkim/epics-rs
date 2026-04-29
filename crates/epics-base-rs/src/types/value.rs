@@ -20,6 +20,11 @@ pub enum EpicsValue {
     DoubleArray(Vec<f64>),
     LongArray(Vec<i32>),
     CharArray(Vec<u8>),
+    /// DBR_STRING with `count > 1`. Each element is at most 40 bytes
+    /// per the DBR_STRING spec; the wire layout is `count * 40` bytes
+    /// of NUL-padded strings. Used by `mbbo`/`mbbi` choice arrays
+    /// (ZNAM..FFNAM as a single read), NTNDArray dim labels, etc.
+    StringArray(Vec<String>),
 }
 
 impl fmt::Display for EpicsValue {
@@ -56,6 +61,16 @@ impl fmt::Display for EpicsValue {
                 Ok(s) => write!(f, "{s}"),
                 Err(_) => write!(f, "{arr:?}"),
             },
+            Self::StringArray(arr) => {
+                write!(f, "[")?;
+                for (i, s) in arr.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{s:?}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -83,6 +98,16 @@ impl EpicsValue {
             Self::EnumArray(arr) => render(arr, max_elems),
             Self::DoubleArray(arr) => render(arr, max_elems),
             Self::LongArray(arr) => render(arr, max_elems),
+            Self::StringArray(arr) => {
+                if arr.len() <= max_elems {
+                    let parts: Vec<String> = arr.iter().map(|s| format!("{s:?}")).collect();
+                    format!("[{}]", parts.join(", "))
+                } else {
+                    let parts: Vec<String> =
+                        arr[..max_elems].iter().map(|s| format!("{s:?}")).collect();
+                    format!("[{}, …+{} more]", parts.join(", "), arr.len() - max_elems)
+                }
+            }
             Self::CharArray(arr) if arr.len() > max_elems * 4 => {
                 // 4× because chars are bytes; let scalar+small-array
                 // CharArray fall through to Display.
@@ -207,6 +232,15 @@ impl EpicsValue {
                 buf
             }
             Self::CharArray(arr) => arr.clone(),
+            Self::StringArray(arr) => {
+                let mut buf = vec![0u8; arr.len() * 40];
+                for (i, s) in arr.iter().enumerate() {
+                    let bytes = s.as_bytes();
+                    let len = bytes.len().min(39);
+                    buf[i * 40..i * 40 + len].copy_from_slice(&bytes[..len]);
+                }
+                buf
+            }
         }
     }
 
@@ -303,14 +337,33 @@ impl EpicsValue {
                 let len = count.min(data.len());
                 Ok(Self::CharArray(data[..len].to_vec()))
             }
-            _ => Self::from_bytes(dbr_type, data),
+            DbFieldType::String => {
+                // DBR_STRING is fixed-width 40 bytes per element. The
+                // wire delivers `count * 40` bytes; each slot is
+                // NUL-padded. Walk in 40-byte slots and strip at the
+                // first NUL (if any).
+                let mut arr = Vec::with_capacity(cap_for(40));
+                for i in 0..count {
+                    let start = i * 40;
+                    let end = start + 40;
+                    if end > data.len() {
+                        break;
+                    }
+                    let slot = &data[start..end];
+                    let nul = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
+                    let s = std::str::from_utf8(&slot[..nul])
+                        .map_err(|e| CaError::Protocol(format!("invalid UTF-8: {e}")))?;
+                    arr.push(s.to_string());
+                }
+                Ok(Self::StringArray(arr))
+            }
         }
     }
 
     /// Get the DBR type for this value
     pub fn dbr_type(&self) -> DbFieldType {
         match self {
-            Self::String(_) => DbFieldType::String,
+            Self::String(_) | Self::StringArray(_) => DbFieldType::String,
             Self::Short(_) | Self::ShortArray(_) => DbFieldType::Short,
             Self::Float(_) | Self::FloatArray(_) => DbFieldType::Float,
             Self::Enum(_) | Self::EnumArray(_) => DbFieldType::Enum,
@@ -329,6 +382,7 @@ impl EpicsValue {
             Self::DoubleArray(arr) => arr.len() as u32,
             Self::LongArray(arr) => arr.len() as u32,
             Self::CharArray(arr) => arr.len() as u32,
+            Self::StringArray(arr) => arr.len() as u32,
             _ => 1,
         }
     }
@@ -342,6 +396,7 @@ impl EpicsValue {
             Self::DoubleArray(arr) => arr.truncate(max),
             Self::LongArray(arr) => arr.truncate(max),
             Self::CharArray(arr) => arr.truncate(max),
+            Self::StringArray(arr) => arr.truncate(max),
             _ => {}
         }
     }
@@ -403,6 +458,7 @@ impl EpicsValue {
             Self::EnumArray(_) => DbFieldType::Enum,
             Self::FloatArray(_) => DbFieldType::Float,
             Self::DoubleArray(_) => DbFieldType::Double,
+            Self::StringArray(_) => DbFieldType::String,
         }
     }
 

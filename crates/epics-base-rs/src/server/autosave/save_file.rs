@@ -250,6 +250,13 @@ pub fn value_to_save_str(value: &EpicsValue) -> String {
             let parts: Vec<_> = arr.iter().map(|v| v.to_string()).collect();
             format!("[{}]", parts.join(","))
         }
+        EpicsValue::StringArray(arr) => {
+            let parts: Vec<_> = arr
+                .iter()
+                .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
     }
 }
 
@@ -289,6 +296,25 @@ pub fn parse_save_value(s: &str, template: &EpicsValue) -> Option<EpicsValue> {
         }
         EpicsValue::EnumArray(_) => {
             parse_array_str(s, |v| v.parse::<u16>().ok()).map(EpicsValue::EnumArray)
+        }
+        EpicsValue::StringArray(_) => {
+            let inner = s.trim_start_matches('[').trim_end_matches(']');
+            if inner.is_empty() {
+                return Some(EpicsValue::StringArray(Vec::new()));
+            }
+            let mut out = Vec::new();
+            for tok in inner.split(',') {
+                let tok = tok.trim();
+                let unq = if tok.starts_with('"') && tok.ends_with('"') && tok.len() >= 2 {
+                    tok[1..tok.len() - 1]
+                        .replace("\\\"", "\"")
+                        .replace("\\\\", "\\")
+                } else {
+                    tok.to_string()
+                };
+                out.push(unq);
+            }
+            Some(EpicsValue::StringArray(out))
         }
     }
 }

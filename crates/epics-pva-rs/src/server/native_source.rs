@@ -60,6 +60,9 @@ fn snapshot_to_pv_field(snap: &Snapshot) -> PvField {
         EpicsValue::EnumArray(v) => {
             PvField::ScalarArray(v.iter().map(|x| ScalarValue::Int(*x as i32)).collect())
         }
+        EpicsValue::StringArray(v) => {
+            PvField::ScalarArray(v.iter().map(|x| ScalarValue::String(x.clone())).collect())
+        }
     };
 
     let is_array = matches!(value_field, PvField::ScalarArray(_));
@@ -97,6 +100,7 @@ fn snapshot_to_field_desc(snap: &Snapshot) -> FieldDesc {
         EpicsValue::ShortArray(_) => (FieldDesc::ScalarArray(ScalarType::Short), true),
         EpicsValue::CharArray(_) => (FieldDesc::ScalarArray(ScalarType::UByte), true),
         EpicsValue::EnumArray(_) => (FieldDesc::ScalarArray(ScalarType::Int), true),
+        EpicsValue::StringArray(_) => (FieldDesc::ScalarArray(ScalarType::String), true),
     };
     let struct_id = if is_array {
         "epics:nt/NTScalarArray:1.0"
