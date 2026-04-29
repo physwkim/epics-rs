@@ -377,7 +377,13 @@ fn parse_search_request(frame: &[u8]) -> Option<SearchRequest> {
         let _ = decode_string(&mut p, order).ok()?;
     }
     let n = p.get_u16(order).ok()? as usize;
-    let mut queries = Vec::with_capacity(n);
+    // P-G22 follow-up: cap pre-alloc against attacker-announced
+    // count. Each (cid u32, String) consumes >= 5 wire bytes; in
+    // practice n is u16-bounded so the worst case is ~1.5MB but
+    // capping at remaining-bytes keeps the small-datagram common
+    // case tight.
+    let remaining = p.get_ref().len().saturating_sub(p.position() as usize);
+    let mut queries = Vec::with_capacity(n.min(remaining));
     for _ in 0..n {
         let cid = p.get_u32(order).ok()?;
         let name = decode_string(&mut p, order).ok().flatten()?;
