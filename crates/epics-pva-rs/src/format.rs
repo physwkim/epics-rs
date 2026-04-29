@@ -335,6 +335,16 @@ fn value_to_json(value: &PvField) -> String {
             format!("[{}]", parts.join(","))
         }
         PvField::Null => "null".to_string(),
+        PvField::ScalarArrayTyped(arr) => {
+            // Same JSON shape as the legacy ScalarArray branch; delegate
+            // through the lossy round-trip helper.
+            let parts: Vec<String> = arr
+                .to_scalar_values()
+                .iter()
+                .map(scalar_to_json)
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
     }
 }
 
@@ -454,6 +464,7 @@ fn value_type_name(v: &PvField) -> &'static str {
     match v {
         PvField::Scalar(sv) => scalar_type_name(sv.scalar_type()),
         PvField::ScalarArray(_) => "array",
+        PvField::ScalarArrayTyped(_) => "array",
         PvField::Structure(_) => "structure",
         PvField::StructureArray(_) => "structure[]",
         PvField::Union { .. } => "union",

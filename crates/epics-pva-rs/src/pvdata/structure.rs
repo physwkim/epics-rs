@@ -4,12 +4,23 @@ use std::fmt;
 
 use super::field::FieldDesc;
 use super::scalar::ScalarValue;
+use super::typed_array::TypedScalarArray;
 
 /// Runtime PV field value (recursive). Mirrors the full pvData value space.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PvField {
     Scalar(ScalarValue),
+    /// Generic scalar array — backwards-compatible enum-tagged form.
+    /// Cloning is O(n) (deep copy). For new code prefer
+    /// [`Self::ScalarArrayTyped`] which carries an `Arc<[T]>` and
+    /// clones in O(1). Encoders accept either variant; the typed
+    /// path takes a single bulk `memcpy` when host endian matches
+    /// wire endian.
     ScalarArray(Vec<ScalarValue>),
+    /// Typed scalar array — refcount-shared, zero-copy-friendly.
+    /// pvxs `shared_array<T>` analogue. Constructors:
+    /// [`PvField::scalar_array_double`], `_float`, `_int`, etc.
+    ScalarArrayTyped(TypedScalarArray),
     Structure(PvStructure),
     StructureArray(Vec<PvStructure>),
     /// A union value — `selector >= 0` and `value` is the chosen variant's
@@ -59,6 +70,7 @@ impl fmt::Display for PvField {
                 }
                 write!(f, "]")
             }
+            Self::ScalarArrayTyped(arr) => write!(f, "{arr}"),
             Self::Structure(s) => write!(f, "{s}"),
             Self::StructureArray(arr) => {
                 write!(f, "[")?;
@@ -108,6 +120,32 @@ impl fmt::Display for PvField {
             }
             Self::Null => write!(f, "null"),
         }
+    }
+}
+
+impl PvField {
+    /// Construct a typed `Double` scalar array. Wraps `data` in
+    /// `Arc<[f64]>` so subsequent clones are refcount bumps.
+    pub fn scalar_array_double(data: impl Into<std::sync::Arc<[f64]>>) -> Self {
+        Self::ScalarArrayTyped(super::TypedScalarArray::Double(data.into()))
+    }
+    pub fn scalar_array_float(data: impl Into<std::sync::Arc<[f32]>>) -> Self {
+        Self::ScalarArrayTyped(super::TypedScalarArray::Float(data.into()))
+    }
+    pub fn scalar_array_int(data: impl Into<std::sync::Arc<[i32]>>) -> Self {
+        Self::ScalarArrayTyped(super::TypedScalarArray::Int(data.into()))
+    }
+    pub fn scalar_array_long(data: impl Into<std::sync::Arc<[i64]>>) -> Self {
+        Self::ScalarArrayTyped(super::TypedScalarArray::Long(data.into()))
+    }
+    pub fn scalar_array_short(data: impl Into<std::sync::Arc<[i16]>>) -> Self {
+        Self::ScalarArrayTyped(super::TypedScalarArray::Short(data.into()))
+    }
+    pub fn scalar_array_byte(data: impl Into<std::sync::Arc<[i8]>>) -> Self {
+        Self::ScalarArrayTyped(super::TypedScalarArray::Byte(data.into()))
+    }
+    pub fn scalar_array_ubyte(data: impl Into<std::sync::Arc<[u8]>>) -> Self {
+        Self::ScalarArrayTyped(super::TypedScalarArray::UByte(data.into()))
     }
 }
 

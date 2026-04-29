@@ -200,7 +200,9 @@ pub fn pv_structure_to_epics(pv: &PvStructure) -> Option<EpicsValue> {
     let field = pv.get_field("value")?;
     match field {
         PvField::Scalar(sv) => Some(super::convert::scalar_to_epics(sv)),
-        PvField::ScalarArray(_) => super::convert::pv_field_to_epics(field),
+        PvField::ScalarArray(_) | PvField::ScalarArrayTyped(_) => {
+            super::convert::pv_field_to_epics(field)
+        }
         PvField::Structure(s) => {
             // NTEnum: value is a sub-structure with "index" field
             if let Some(PvField::Scalar(sv)) = s.get_field("index") {
