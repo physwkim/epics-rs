@@ -42,6 +42,61 @@ fn alloc_sid() -> u32 {
     NEXT_SID.fetch_add(1, Ordering::Relaxed)
 }
 
+struct PipelineOptions {
+    enabled: bool,
+    queue_size: u32,
+}
+
+/// Inspect a decoded pvRequest for `record._options.pipeline` and
+/// `record._options.queueSize`. pvxs `Subscription` defaults to
+/// `queueSize = 4` when pipeline is enabled; we follow.
+fn monitor_pipeline_options(req: &PvField) -> Option<PipelineOptions> {
+    use crate::pvdata::ScalarValue;
+    let root = match req {
+        PvField::Structure(s) => s,
+        _ => return None,
+    };
+    let record = root
+        .fields
+        .iter()
+        .find_map(|(k, v)| (k == "record").then_some(v))?;
+    let record_s = match record {
+        PvField::Structure(s) => s,
+        _ => return None,
+    };
+    let options = record_s
+        .fields
+        .iter()
+        .find_map(|(k, v)| (k == "_options").then_some(v))?;
+    let opt_s = match options {
+        PvField::Structure(s) => s,
+        _ => return None,
+    };
+    let pipeline_str = opt_s.fields.iter().find_map(|(k, v)| {
+        (k == "pipeline").then_some(v).and_then(|v| match v {
+            PvField::Scalar(ScalarValue::String(s)) => Some(s.as_str()),
+            _ => None,
+        })
+    });
+    let enabled = matches!(pipeline_str, Some("true") | Some("1"));
+    let queue_size = opt_s
+        .fields
+        .iter()
+        .find_map(|(k, v)| {
+            (k == "queueSize").then_some(v).and_then(|v| match v {
+                PvField::Scalar(ScalarValue::String(s)) => s.parse::<u32>().ok(),
+                PvField::Scalar(ScalarValue::Int(i)) => Some(*i as u32),
+                PvField::Scalar(ScalarValue::Long(l)) => Some(*l as u32),
+                _ => None,
+            })
+        })
+        .unwrap_or(4);
+    Some(PipelineOptions {
+        enabled,
+        queue_size: queue_size.max(1),
+    })
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct ChannelState {
@@ -1179,28 +1234,30 @@ async fn handle_op(
         let intro = ch.introspection.clone().unwrap_or(FieldDesc::Variant);
 
         let req_desc = decode_type_desc(&mut cur, order).ok();
-        if let Some(d) = req_desc.as_ref() {
-            let _ = decode_pv_field(d, &mut cur, order);
-        }
+        let req_value = req_desc
+            .as_ref()
+            .and_then(|d| decode_pv_field(d, &mut cur, order).ok());
         let mask = req_desc
             .as_ref()
             .and_then(|d| crate::pv_request::request_to_mask(&intro, d).ok())
             .unwrap_or_else(|| BitSet::all_set(intro.total_bits()));
 
-        // Pipeline parameters are negotiated via pvRequest at INIT.
-        // pvxs encodes `record._options.pipeline = true` and
-        // `queueSize = N` in the request structure; the server reads
-        // them, advertises a `queueSize` back in the INIT response,
-        // and starts the window at that value. We don't yet parse
-        // the request `_options` substructure — for now we apply a
-        // conservative default that matches pvxs `Subscription`'s
-        // 4-event window, which is large enough for typical 1 Hz
-        // monitor traffic but bounded so a slow client can't fill an
-        // unlimited buffer. When the request explicitly sets
-        // pipeline=false the window stays None (no flow control).
-        let (monitor_window, monitor_window_notify) = if kind == OpKind::Monitor {
+        // Pipeline flow control is opt-in via pvRequest:
+        // `record[pipeline=true,queueSize=N]`. pvxs only enables the
+        // credit/ACK window when the client explicitly sets it;
+        // applying it unconditionally produced a 5-event-then-stall
+        // bug for default `pvmonitor` callers (initial snapshot + 4
+        // window credits). Without pipeline=true we don't gate the
+        // emit loop — mpsc backpressure remains the only limiter.
+        let pipeline_opt = req_value
+            .as_ref()
+            .and_then(monitor_pipeline_options)
+            .filter(|o| o.enabled);
+        let (monitor_window, monitor_window_notify) = if kind == OpKind::Monitor
+            && let Some(opt) = pipeline_opt
+        {
             (
-                Some(Arc::new(std::sync::atomic::AtomicU32::new(4))),
+                Some(Arc::new(std::sync::atomic::AtomicU32::new(opt.queue_size))),
                 Some(Arc::new(tokio::sync::Notify::new())),
             )
         } else {

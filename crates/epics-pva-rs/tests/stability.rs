@@ -332,6 +332,117 @@ async fn p5_monitor_pipeline_does_not_drop() {
     h.abort();
 }
 
+/// Regression: P-G11 (commit c3f286c) added a server-side pipeline
+/// credit window unconditionally for every Monitor op, but pvxs only
+/// applies flow control when the client's pvRequest explicitly
+/// negotiates `record[pipeline=true]`. Default `pvmonitor` callers
+/// don't, so the always-on 4-credit window stalled after ~5 frames
+/// (initial snapshot + 4) waiting for an ACK refill that was
+/// happening at the wire level but not closing the cycle in time —
+/// regressing pre-v0.10.5 behaviour where the producer ran freely.
+/// The fix: gate the window on the actual pipeline=true option.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p5_monitor_default_pvrequest_streams_freely() {
+    let source = Arc::new(MemSource::new());
+    source.add_pv("STAB:MON:LONG", 0.0).await;
+
+    let (tcp, _udp, h) = spawn_server(source.clone()).await;
+    let client = client_for(tcp);
+
+    let last_seen = Arc::new(parking_lot::Mutex::new(None::<f64>));
+    let last_seen_cb = last_seen.clone();
+
+    let monitor_handle = tokio::spawn({
+        let client = client.clone();
+        async move {
+            let _ = client
+                .pvmonitor("STAB:MON:LONG", move |value| {
+                    if let PvField::Structure(s) = value
+                        && let Some(ScalarValue::Double(v)) = s.get_value()
+                    {
+                        *last_seen_cb.lock() = Some(*v);
+                    }
+                })
+                .await;
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 50 events at 20 ms = 1 s of traffic. With default pipeline_size=4
+    // this is ~12 ACK refill cycles. Pre-fix: stalls after ~5 events.
+    const N: i32 = 50;
+    for i in 1..=N {
+        source.push("STAB:MON:LONG", i as f64).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let last = last_seen.lock();
+    assert_eq!(
+        *last,
+        Some(N as f64),
+        "monitor stalled mid-stream — last seen value did not reach final publish"
+    );
+
+    monitor_handle.abort();
+    h.abort();
+}
+
+/// Companion to the regression above: when the client *does* opt in
+/// via `record[pipeline=true,queueSize=N]`, the server-side window
+/// must still gate emission and the ACK refill loop must keep
+/// running. Verifies the pipeline path is preserved, not removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p5_monitor_explicit_pipeline_window_works() {
+    use epics_pva_rs::pv_request::PvRequestExpr;
+
+    let source = Arc::new(MemSource::new());
+    source.add_pv("STAB:MON:PIPE", 0.0).await;
+
+    let (tcp, _udp, h) = spawn_server(source.clone()).await;
+    let client = client_for(tcp);
+
+    let last_seen = Arc::new(parking_lot::Mutex::new(None::<f64>));
+    let last_seen_cb = last_seen.clone();
+
+    let monitor_handle = tokio::spawn({
+        let client = client.clone();
+        async move {
+            let req =
+                PvRequestExpr::parse("record[pipeline=true,queueSize=4]").expect("parse pvRequest");
+            let _ = client
+                .pvmonitor_with_request("STAB:MON:PIPE", &req, move |value| {
+                    if let PvField::Structure(s) = value
+                        && let Some(ScalarValue::Double(v)) = s.get_value()
+                    {
+                        *last_seen_cb.lock() = Some(*v);
+                    }
+                })
+                .await;
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    const N: i32 = 30;
+    for i in 1..=N {
+        source.push("STAB:MON:PIPE", i as f64).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let last = last_seen.lock();
+    assert_eq!(
+        *last,
+        Some(N as f64),
+        "explicit-pipeline monitor stalled — ACK/window cycle broken"
+    );
+
+    monitor_handle.abort();
+    h.abort();
+}
+
 #[tokio::test]
 async fn p8_channel_coalesces_concurrent_pvget() {
     let source = Arc::new(MemSource::new());
