@@ -7,7 +7,6 @@ use std::time::Duration;
 use crate::error::PvaResult;
 
 use super::source::{ChannelSource, ChannelSourceObj, DynSource};
-use super::tcp::run_tcp_server;
 use super::udp::{random_guid, run_udp_responder_with_config};
 
 /// Runtime configuration for [`run_pva_server`].
@@ -288,6 +287,14 @@ pub struct PvaServer {
     bound_tcp_port: u16,
     /// Programmatic interrupt for [`Self::run`]. Not used by `wait()`.
     interrupt: Arc<tokio::sync::Notify>,
+    /// Per-peer book-keeping registry shared with `run_tcp_server`'s
+    /// per-connection task (F-G7). The accept loop registers an entry
+    /// on connect; the connection task updates `last_rx_at` and
+    /// `channels` periodically; the entry is removed on disconnect.
+    /// `PvaServer::report()` snapshots the registry to surface per-
+    /// connection diagnostics (pvxs `Server::report()` parity at the
+    /// "live peers + channel counts" level).
+    pub(crate) peers: Arc<crate::server_native::peers::PeerRegistry>,
 }
 
 impl PvaServer {
@@ -348,7 +355,13 @@ impl PvaServer {
             config.auto_beacon,
             config.ignore_addrs.clone(),
         ));
-        let tcp_handle = tokio::spawn(run_tcp_server(dyn_source, bind_addr, config.clone()));
+        let peers = crate::server_native::peers::PeerRegistry::new();
+        let tcp_handle = tokio::spawn(crate::server_native::tcp::run_tcp_server_with_peers(
+            dyn_source,
+            bind_addr,
+            config.clone(),
+            peers.clone(),
+        ));
         let bound_tcp_port = config.tcp_port;
 
         Self {
@@ -357,6 +370,7 @@ impl PvaServer {
             effective_config: config,
             bound_tcp_port,
             interrupt: Arc::new(tokio::sync::Notify::new()),
+            peers,
         }
     }
 
@@ -423,6 +437,8 @@ impl PvaServer {
             beacon_period_secs: self.effective_config.beacon_period.as_secs(),
             udp_alive: !self.udp_handle.is_finished(),
             tcp_alive: !self.tcp_handle.is_finished(),
+            peers: self.peers.snapshot(),
+            peer_count: self.peers.len(),
         }
     }
 
@@ -465,4 +481,10 @@ pub struct ServerReport {
     pub beacon_period_secs: u64,
     pub udp_alive: bool,
     pub tcp_alive: bool,
+    /// Live per-connection counters captured under the registry's
+    /// read lock (F-G7). pvxs `Server::report()` parity at the
+    /// "live peers + per-peer channel/op/byte counters" level.
+    pub peers: Vec<(SocketAddr, crate::server_native::peers::PeerSnapshot)>,
+    /// Total currently-active connections.
+    pub peer_count: usize,
 }

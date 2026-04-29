@@ -65,15 +65,25 @@ pub(crate) async fn run_transport_manager(
 ) {
     let mut connections: HashMap<SocketAddr, ServerConnection> = HashMap::new();
     // Helper: resolve the right SNI / cert-verification name for a
-    // particular target address. Per-server map wins over the global
-    // EPICS_CA_TLS_SERVER_NAME (matches operator intent: a name in
-    // EPICS_CA_NAME_SERVERS is more specific than a global default).
+    // particular target address. Lookup order:
+    //   1. Exact (ip:port) match — EPICS_CA_NAME_SERVERS hostname or
+    //      EPICS_CA_TLS_SNI_MAP "ip:port=host" entry.
+    //   2. Wildcard (ip:0) match — EPICS_CA_TLS_SNI_MAP "ip=host"
+    //      entry (any port). F-G6: lets operators map an IOC's IP
+    //      once and have it apply to every port the search engine
+    //      finds it on.
+    //   3. Global EPICS_CA_TLS_SERVER_NAME fallback.
+    //   4. (Caller's last fallback) IP literal as SNI.
     #[cfg(feature = "experimental-rust-tls")]
     let pick_sni = |addr: SocketAddr| -> Option<String> {
-        sni_overrides
-            .get(&addr)
-            .cloned()
-            .or_else(|| tls_server_name.clone())
+        if let Some(h) = sni_overrides.get(&addr) {
+            return Some(h.clone());
+        }
+        let wildcard = SocketAddr::new(addr.ip(), 0);
+        if let Some(h) = sni_overrides.get(&wildcard) {
+            return Some(h.clone());
+        }
+        tls_server_name.clone()
     };
 
     while let Some(cmd) = command_rx.recv().await {
