@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.11.0 — 2026-04-29
+
+Highlights since v0.10.5:
+
+### epics-pva-rs
+- Axum-style PVA service framework: `#[pva_service]` attribute macro,
+  `#[derive(NTScalar)]` / `#[derive(NTTable)]`, `pvget_typed` /
+  `pvput_typed` / `pvmonitor_typed` typed entry points.
+- Zero-copy `ScalarArray` encode/decode (memcpy fast path) and
+  raw-frame monitor forwarding (default-on in bridge gateways).
+- `PvaClient` API: `discover()`, `pvget_with_request()`,
+  `pvput_with_request()`, `pvmonitor_with_request()`, `pvput_field()`,
+  `pvinfo()` now uses `GET_FIELD` instead of full `GET`,
+  per-server TLS SNI from `EPICS_CA_NAME_SERVERS` hostnames,
+  peer connection stats, async `Operation` handle.
+- `PvaServer::start` binds the TCP listener synchronously inside
+  `start()`, removing the pick-and-drop race that previously needed
+  cross-binary serialisation in tests.
+
+### epics-bridge-rs
+- `pva_gateway` — PVA-to-PVA proxy mirroring pvAccessCPP's `pva2pva`
+  / `p2pApp`, with multi-downstream fan-out and tower-style
+  middleware (`ReadOnlyLayer`, `AclLayer`, `AuditLayer` with mpsc
+  sink + `Put` / `Get` / `Subscribe` / `Rpc` event kinds).
+- Stability gap closures from kodex-driven re-audits (rounds 4–18):
+  segmented-message reassembly, `Vec::with_capacity` OOM caps,
+  beacon burst-then-slowdown smoothing, server task leak on
+  disconnect, GET_FIELD on unknown SID, audit-string allocation
+  cap, search-request OOM follow-up.
+
+### epics-tools-rs
+- `procserv` — Rust port of `epics-modules/procServ` (forkpty
+  child supervisor with restart policy and telnet log shell).
+
+### Tooling
+- `cargo-nextest` adoption (`.config/nextest.toml`) — default-suite
+  warm runtime drops from ~30 s to ~7 s. Test-groups cap concurrency
+  on PVA listener / softIoc / tempfile-bound suites.
+- Workspace clippy clean under `-D warnings`.
+
 ## v0.10.5 — 2026-04-28 — libca/RSRV deeper parity + kodex-driven review fixes
 
 Continues the v0.10.4 line by closing the deeper libca/RSRV gaps surfaced
