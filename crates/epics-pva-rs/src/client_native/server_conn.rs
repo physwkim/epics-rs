@@ -320,6 +320,21 @@ impl ServerConn {
                                     seg_flags = frame.header.flags;
                                     seg_buf.clear();
                                 }
+                                // Cap reassembly: peer that streams
+                                // SegFirst → SegMiddle … forever would
+                                // grow seg_buf without bound otherwise.
+                                if seg_buf.len().saturating_add(frame.payload.len())
+                                    > MAX_MESSAGE_SIZE
+                                {
+                                    warn!(
+                                        accumulated = seg_buf.len(),
+                                        next = frame.payload.len(),
+                                        cap = MAX_MESSAGE_SIZE,
+                                        "PVA reassembled message exceeds cap, closing"
+                                    );
+                                    cancel_reader.cancel();
+                                    return;
+                                }
                                 seg_buf.extend_from_slice(&frame.payload);
                                 if raw_seg != 0
                                     && raw_seg

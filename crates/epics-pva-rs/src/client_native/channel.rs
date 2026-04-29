@@ -499,6 +499,12 @@ impl Channel {
     pub async fn wait_until_inactive(&self) {
         loop {
             let notify = self.state_changed.notified();
+            tokio::pin!(notify);
+            // enable() registers the waiter eagerly, so a notify_waiters
+            // that fires between the recheck and the await is captured.
+            // Without it, a state transition firing in that window
+            // leaves this loop blocked until the next transition.
+            notify.as_mut().enable();
             if !self.is_active() {
                 return;
             }

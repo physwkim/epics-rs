@@ -172,11 +172,21 @@ impl PvaLinkResolver {
                 scan_on_update: false,
                 direction: LinkDirection::Inp,
             };
-            let link = resolver
-                .handle
-                .block_on(async { resolver.registry.get_or_open(cfg).await })
-                .ok()?;
-            let value = resolver.handle.block_on(async { link.read().await }).ok()?;
+            // The Lset external resolver is invoked from inside an
+            // async context (PvDatabase::resolve_external_pv runs on a
+            // tokio worker). Bare Handle::block_on panics under those
+            // conditions. block_in_place yields the worker thread for
+            // the duration of the inner block_on so the runtime stays
+            // healthy. Requires the multi-threaded runtime, which is
+            // the only flavour our IOC binaries use.
+            let (link, value) = tokio::task::block_in_place(|| {
+                resolver.handle.block_on(async {
+                    let link = resolver.registry.get_or_open(cfg).await.ok()?;
+                    let value = link.read().await.ok()?;
+                    Some((link, value))
+                })
+            })?;
+            let _ = link;
             resolver
                 .reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -243,9 +253,11 @@ impl LinkSet for PvaLinkResolver {
             scan_on_update: false,
             direction: LinkDirection::Inp,
         };
-        let value = self.handle.block_on(async {
-            let link = self.registry.get_or_open(cfg).await.ok()?;
-            link.read().await.ok()
+        let value = tokio::task::block_in_place(|| {
+            self.handle.block_on(async {
+                let link = self.registry.get_or_open(cfg).await.ok()?;
+                link.read().await.ok()
+            })
         })?;
         self.reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -269,29 +281,33 @@ impl LinkSet for PvaLinkResolver {
         // Format the EpicsValue as a string using its Display impl
         // — pvput accepts the string form and the server coerces.
         let value_str = value.to_string();
-        self.handle.block_on(async {
-            let link = self
-                .registry
-                .get_or_open(cfg)
-                .await
-                .map_err(|e| e.to_string())?;
-            link.write(&value_str).await.map_err(|e| e.to_string())
+        tokio::task::block_in_place(|| {
+            self.handle.block_on(async {
+                let link = self
+                    .registry
+                    .get_or_open(cfg)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                link.write(&value_str).await.map_err(|e| e.to_string())
+            })
         })
     }
 
     fn alarm_message(&self, name: &str) -> Option<String> {
         let name = strip_scheme(name);
-        let link = self
-            .handle
-            .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })?;
+        let link = tokio::task::block_in_place(|| {
+            self.handle
+                .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })
+        })?;
         link.alarm_message()
     }
 
     fn time_stamp(&self, name: &str) -> Option<(i64, i32)> {
         let name = strip_scheme(name);
-        let link = self
-            .handle
-            .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })?;
+        let link = tokio::task::block_in_place(|| {
+            self.handle
+                .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })
+        })?;
         link.time_stamp()
     }
 

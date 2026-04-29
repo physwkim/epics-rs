@@ -147,6 +147,55 @@ impl PvField {
     pub fn scalar_array_ubyte(data: impl Into<std::sync::Arc<[u8]>>) -> Self {
         Self::ScalarArrayTyped(super::TypedScalarArray::UByte(data.into()))
     }
+
+    /// Recover a [`FieldDesc`] from a concrete value. Used by paths
+    /// that cache values without a separate descriptor (e.g. QSRV
+    /// PVA-plugin PV registry, gateway snapshot replay).
+    pub fn descriptor(&self) -> FieldDesc {
+        match self {
+            Self::Scalar(v) => FieldDesc::Scalar(v.scalar_type()),
+            Self::ScalarArray(arr) => FieldDesc::ScalarArray(
+                arr.first()
+                    .map(|v| v.scalar_type())
+                    .unwrap_or(super::ScalarType::Double),
+            ),
+            Self::ScalarArrayTyped(arr) => FieldDesc::ScalarArray(arr.scalar_type()),
+            Self::Structure(s) => FieldDesc::Structure {
+                struct_id: s.struct_id.clone(),
+                fields: s
+                    .fields
+                    .iter()
+                    .map(|(n, f)| (n.clone(), f.descriptor()))
+                    .collect(),
+            },
+            Self::StructureArray(arr) => {
+                let (struct_id, fields) = arr
+                    .first()
+                    .map(|s| {
+                        (
+                            s.struct_id.clone(),
+                            s.fields
+                                .iter()
+                                .map(|(n, f)| (n.clone(), f.descriptor()))
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_default();
+                FieldDesc::StructureArray { struct_id, fields }
+            }
+            Self::Union { variant_name, value, .. } => FieldDesc::Union {
+                struct_id: String::new(),
+                variants: vec![(variant_name.clone(), value.descriptor())],
+            },
+            Self::UnionArray(_) => FieldDesc::UnionArray {
+                struct_id: String::new(),
+                variants: Vec::new(),
+            },
+            Self::Variant(v) => v.desc.clone().unwrap_or(FieldDesc::Variant),
+            Self::VariantArray(_) => FieldDesc::VariantArray,
+            Self::Null => FieldDesc::Variant,
+        }
+    }
 }
 
 /// A PVA structure with ordered named fields.

@@ -415,11 +415,20 @@ impl PvDatabase {
         // Set up put_notify completion channel BEFORE processing.
         // If process returns AsyncPendingNotify, the handler will take
         // the sender and hold it until processing truly completes.
+        // Refuse a second concurrent WRITE_NOTIFY on the same record:
+        // C EPICS returns S_db_Blocked / ECA_PUTCBINPROG, and silently
+        // overwriting put_notify_tx would drop the prior Sender,
+        // waking the prior caller's rx with RecvError that the CA
+        // dispatcher treats as success.
         let (completion_tx, completion_rx) = crate::runtime::sync::oneshot::channel();
         {
             let rec = self.inner.records.read().await;
             if let Some(rec_arc) = rec.get(record_name) {
-                rec_arc.write().await.put_notify_tx = Some(completion_tx);
+                let mut guard = rec_arc.write().await;
+                if guard.put_notify_tx.is_some() {
+                    return Err(CaError::PutCallbackInProgress(record_name.to_string()));
+                }
+                guard.put_notify_tx = Some(completion_tx);
             }
         }
 

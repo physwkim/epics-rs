@@ -40,6 +40,20 @@ pub struct PvaLink {
     /// Subscriber channel for record-side notification (INP monitor mode).
     #[allow(dead_code)]
     notify_tx: Option<mpsc::Sender<PvField>>,
+    /// Aborts the spawned `pvmonitor` task when the last `Arc<PvaLink>`
+    /// drops. Without this guard, registry eviction or
+    /// open-and-discard races leak monitor tasks (each owning a
+    /// PvaClient + UDP socket + search engine task) for the lifetime
+    /// of the process.
+    _monitor_abort: Option<MonitorAbort>,
+}
+
+struct MonitorAbort(tokio::task::AbortHandle);
+
+impl Drop for MonitorAbort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl PvaLink {
@@ -51,6 +65,7 @@ impl PvaLink {
 
         let latest = Arc::new(Mutex::new(None));
         let mut notify_tx = None;
+        let mut monitor_abort = None;
 
         if matches!(config.direction, LinkDirection::Inp) && config.monitor {
             let (tx, _rx) = mpsc::channel::<PvField>(64);
@@ -59,7 +74,7 @@ impl PvaLink {
             let pv_name = config.pv_name.clone();
             let latest_clone = latest.clone();
             let client_clone = client.clone();
-            tokio::spawn(async move {
+            let join = tokio::spawn(async move {
                 let _ = client_clone
                     .pvmonitor(&pv_name, |value| {
                         *latest_clone.lock() = Some(value.clone());
@@ -67,6 +82,7 @@ impl PvaLink {
                     })
                     .await;
             });
+            monitor_abort = Some(MonitorAbort(join.abort_handle()));
         }
 
         Ok(Self {
@@ -74,6 +90,7 @@ impl PvaLink {
             client,
             latest,
             notify_tx,
+            _monitor_abort: monitor_abort,
         })
     }
 

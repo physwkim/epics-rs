@@ -1343,12 +1343,18 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                         // Wait indefinitely for record processing to complete,
                         // matching C EPICS rsrv behavior. The task is cleaned up
                         // automatically if the client disconnects (rx sender dropped).
-                        let _ = rx.await;
+                        // RecvError means the Sender was dropped without firing —
+                        // typically because record processing aborted. Surface as
+                        // ECA_PUTFAIL so the client doesn't observe a false success.
+                        let final_status = match rx.await {
+                            Ok(()) => eca_status,
+                            Err(_) => ECA_PUTFAIL,
+                        };
 
                         let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);
                         resp.data_type = write_type as u16;
                         resp.count = write_count;
-                        resp.cid = eca_status;
+                        resp.cid = final_status;
                         resp.available = ioid;
 
                         let mut w = writer_c.lock().await;

@@ -149,7 +149,17 @@ impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
         name: &str,
     ) -> impl std::future::Future<Output = Option<epics_pva_rs::pvdata::FieldDesc>> + Send {
         let name_owned = name.to_string();
+        let pva_pvs = self.pva_pvs.clone();
         async move {
+            // Plugin-registered PVA PVs (NTNDArray etc.) live only in
+            // pva_pvs — the BridgeProvider has no record for them, so
+            // self.channel() would return None and the descriptor
+            // would be lost. Probe the PVA registry first.
+            if let Some(handle) = pva_pvs.read().await.get(&name_owned).cloned()
+                && let Some(value) = handle.latest.lock().clone()
+            {
+                return Some(value.descriptor());
+            }
             let channel = self.channel(&name_owned).await?;
             channel.get_field().await.ok()
         }
@@ -157,7 +167,13 @@ impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
 
     fn get_value(&self, name: &str) -> impl std::future::Future<Output = Option<PvField>> + Send {
         let name_owned = name.to_string();
+        let pva_pvs = self.pva_pvs.clone();
         async move {
+            if let Some(handle) = pva_pvs.read().await.get(&name_owned).cloned()
+                && let Some(value) = handle.latest.lock().clone()
+            {
+                return Some(value);
+            }
             let channel = self.channel(&name_owned).await?;
             let empty_request = PvStructure::new("");
             match channel.get(&empty_request).await {
@@ -200,7 +216,17 @@ impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
         name: &str,
     ) -> impl std::future::Future<Output = Option<mpsc::Receiver<PvField>>> + Send {
         let name_owned = name.to_string();
+        let pva_pvs = self.pva_pvs.clone();
         async move {
+            // Plugin-registered PVA PVs publish into their own
+            // subscriber list maintained by the registering plugin
+            // (NDPluginPva); the QSRV side just appends a tx so the
+            // plugin's `post()` fans out into the PVA server.
+            if let Some(handle) = pva_pvs.read().await.get(&name_owned).cloned() {
+                let (tx, rx) = mpsc::channel::<PvField>(64);
+                handle.subscribers.lock().push(tx);
+                return Some(rx);
+            }
             let channel = self.channel(&name_owned).await?;
             let mut monitor = channel.create_monitor().await.ok()?;
             monitor.start().await.ok()?;

@@ -661,6 +661,16 @@ async fn handle_connection_io(
             seg_cmd = frame.header.command;
             seg_buf.clear();
         }
+        // Cap reassembly at max_msg_size. read_frame already enforces
+        // it per-frame; without this an adversary streams SegFirst →
+        // SegMiddle … forever, growing seg_buf without bound.
+        if seg_buf.len().saturating_add(frame.payload.len()) > max_msg_size {
+            return Err(PvaError::Protocol(format!(
+                "segmented PVA message exceeds max_message_size ({} > {})",
+                seg_buf.len() + frame.payload.len(),
+                max_msg_size
+            )));
+        }
         seg_buf.extend_from_slice(&frame.payload);
         if raw_seg != 0 && raw_seg != HeaderFlags::SEGMENT_LAST {
             // SegFirst (with following segments) or SegMiddle: keep
@@ -1443,6 +1453,16 @@ async fn handle_op(
                     .get(&ioid)
                     .map(|s| (s.monitor_window.clone(), s.monitor_window_notify.clone()))
                     .unwrap_or((None, None));
+                let total_bits = intro_clone.total_bits();
+                // Raw fast path is correct only when the downstream's
+                // pvRequest matches the upstream's bytes 1:1 — i.e. no
+                // per-field projection, and no negotiated pipeline
+                // credit window (the raw branch has no per-event
+                // window-decrement / wait-for-ACK gating). Fall back to
+                // the decoded subscribe path otherwise.
+                let raw_path_eligible = mask_clone.count() == total_bits
+                    && mask_clone.size() >= total_bits
+                    && window.is_none();
                 let join = tokio::spawn(async move {
                     // F-G12: raw-frame fast path. When the source can
                     // hand us pre-encoded MONITOR DATA bytes (e.g.
@@ -1452,7 +1472,9 @@ async fn handle_op(
                     // forward. Falls back to the decoded path on
                     // byte-order mismatch or when the source returns
                     // None.
-                    if let Some(mut rx_raw) = src.subscribe_raw(&pv_name).await {
+                    if raw_path_eligible
+                        && let Some(mut rx_raw) = src.subscribe_raw(&pv_name).await
+                    {
                         // Emit initial snapshot via the regular
                         // encode path (no raw bytes for the
                         // first-event seed; the cache may not have

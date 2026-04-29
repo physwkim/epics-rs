@@ -547,7 +547,15 @@ impl ChannelCache {
                 }
                 backoff = Duration::from_millis(250);
 
-                if tx_for_task.receiver_count() == 0 {
+                // Both typed (PvField) and raw-frame channels feed
+                // downstreams; F-G12 raw-forwarding is default-on so
+                // most production subscribers ride tx_raw and tx is
+                // empty. Only exit when BOTH have no live receivers,
+                // otherwise upstream IOC restart silently kills every
+                // raw-path downstream monitor.
+                if tx_for_task.receiver_count() == 0
+                    && tx_raw_for_task.receiver_count() == 0
+                {
                     tracing::debug!(
                         pv = %pv_name_owned,
                         "pva-gateway: monitor exit (no subscribers)"
