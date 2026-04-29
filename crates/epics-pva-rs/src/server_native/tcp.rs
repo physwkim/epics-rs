@@ -360,7 +360,7 @@ async fn handle_connection_io(
     let send_tmo = config.send_timeout;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(config.write_queue_depth);
     let writer_peer = peer;
-    let _writer_task = tokio::spawn(async move {
+    let writer_task = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
             match tokio::time::timeout(send_tmo, writer_raw.write_all(&frame)).await {
                 Ok(Ok(())) => {}
@@ -379,6 +379,13 @@ async fn handle_connection_io(
             }
         }
     });
+    // P-G18: abort the writer + heartbeat tasks the moment the read
+    // loop returns. Without this, both linger up to `idle_timeout`
+    // (default 45s) emitting ECHOes into a channel nobody is reading
+    // and holding the writer half of the (now-disconnected) socket.
+    // pvxs uses libevent-driven cleanup that shuts everything in one
+    // pass; we rely on tokio JoinHandle::abort() via AbortOnDrop.
+    let _writer_guard = AbortOnDrop(writer_task.abort_handle());
 
     // Track per-connection liveness for the idle-timeout watchdog and the
     // server-side echo heartbeat task.
@@ -389,7 +396,7 @@ async fn handle_connection_io(
     let last_rx_hb = last_rx.clone();
     let tx_hb = tx.clone();
     let order_hb = config.wire_byte_order;
-    let _hb_handle = tokio::spawn(async move {
+    let hb_handle = tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(15));
         tick.tick().await;
         loop {
@@ -408,6 +415,7 @@ async fn handle_connection_io(
             }
         }
     });
+    let _hb_guard = AbortOnDrop(hb_handle.abort_handle());
 
     let order = config.wire_byte_order;
 
