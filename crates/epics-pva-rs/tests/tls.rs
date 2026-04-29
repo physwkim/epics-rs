@@ -21,7 +21,6 @@ use epics_pva_rs::auth::{TlsClientConfig, TlsServerConfig};
 use epics_pva_rs::client_native::context::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{ChannelSource, PvaServerConfig, run_pva_server};
-use serial_test::file_serial;
 
 // Generate a self-signed cert + matching key pair for tests.
 fn generate_self_signed() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
@@ -116,7 +115,6 @@ fn alloc_port_pair() -> (u16, u16) {
 }
 
 #[tokio::test]
-#[file_serial(pva_listener)]
 async fn tls_client_to_tls_server_full_handshake() {
     // Reseed the global rustls crypto provider with ring (otherwise
     // ServerConfig::builder() panics on default-features=false rustls).

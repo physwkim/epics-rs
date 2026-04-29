@@ -257,6 +257,18 @@ impl<S: ChannelSource> ChannelSource for Acl<S> {
 /// Hook fired on every PUT. Ops typically wire this into a file
 /// sink (line-based JSON, libca-asLib text, etc.) — the layer
 /// stays format-agnostic.
+///
+/// **Implementation contract**: `record` is called synchronously
+/// from inside the `put_value` async path. Any blocking I/O the
+/// implementation does (file write, network send) blocks the
+/// calling tokio worker thread for the duration of the PUT, so
+/// real-world implementations should either:
+/// - keep `record` purely in-memory (counter increment, mpsc
+///   try_send into a background drain task), or
+/// - use the bundled mpsc-buffered wrapper (see
+///   `epics_ca_rs::audit::AuditLogger` for the same pattern).
+///
+/// The default `ClosureAudit` is fine for tests and counters.
 pub trait AuditSink: Send + Sync + 'static {
     fn record(&self, event: AuditEvent);
 }
@@ -278,18 +290,106 @@ impl<F: Fn(AuditEvent) + Send + Sync + 'static> AuditSink for ClosureAudit<F> {
     }
 }
 
+/// Bounded-mpsc adapter that drains audit events on a background
+/// task. Use this when the underlying sink does blocking I/O
+/// (file write, network send, syslog) — the AuditLayer's
+/// `record()` becomes a non-blocking `try_send` that drops on
+/// queue overflow rather than stalling the PUT path.
+///
+/// The drainer task keeps running until both: (a) every clone of
+/// this sink has been dropped, and (b) the receiver has drained.
+/// Drop order matters in shutdown — drop the gateway / Arc<Audited>
+/// chain BEFORE waiting on `.flush()` to avoid leaving events
+/// in flight.
+///
+/// Mirrors the pattern in `epics_ca_rs::audit::AuditLogger` but
+/// generalised to the gateway's `AuditEvent` shape.
+pub struct MpscAuditSink {
+    tx: tokio::sync::mpsc::Sender<AuditEvent>,
+    /// Counter of events dropped due to a full queue. Read via
+    /// [`Self::drops`] for diagnostics. Drops happen when the
+    /// blocking sink can't keep up — losing audit events under
+    /// sustained overload is strictly better than pinning a
+    /// downstream PUT.
+    drops: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl MpscAuditSink {
+    /// Wrap a blocking sink (anything that impls AuditSink) in a
+    /// bounded queue. `capacity` is the max in-flight events; past
+    /// that the layer's `record()` becomes a no-op + drop counter
+    /// increment. `inner` runs on the spawned drainer task — its
+    /// `record()` is allowed to block.
+    pub fn wrap<A: AuditSink>(capacity: usize, inner: A) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AuditEvent>(capacity.max(1));
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                inner.record(ev);
+            }
+        });
+        Self {
+            tx,
+            drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Number of audit events dropped due to a full queue. Stays
+    /// at 0 in normal operation; growing values mean the sink is
+    /// slower than the PUT rate and the operator should look at
+    /// the underlying I/O stack.
+    pub fn drops(&self) -> u64 {
+        self.drops.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl AuditSink for MpscAuditSink {
+    fn record(&self, event: AuditEvent) {
+        if self.tx.try_send(event).is_err() {
+            self.drops
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AuditEvent {
+    /// PV name the operation targeted.
     pub pv: String,
+    /// Operation type. Currently only PUT triggers the layer; new
+    /// variants will be additive when other op types start
+    /// auditing.
     pub event: AuditEventKind,
+    /// Authenticated user from the downstream peer's
+    /// `ChannelContext`. Empty for `put_value` (non-credentialed)
+    /// path.
     pub user: String,
+    /// Authenticated host. Same caveat as `user`.
     pub host: String,
+    /// Outcome — see [`AuditResult`].
     pub result: AuditResult,
+    /// Wall-clock at the moment `record()` was called. Useful for
+    /// log shippers that need their own canonical timestamp rather
+    /// than the time-of-write.
+    pub timestamp: std::time::SystemTime,
+    /// Error message body when `result` is `Failed` / `Denied`.
+    /// Empty otherwise.
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditEventKind {
+    /// PUT operation — the layer always audits these.
     Put,
+    /// GET operation. Audited only when [`AuditLayer::with_get`]
+    /// is enabled; defaults off because GET frequency is
+    /// typically much higher than PUT.
+    Get,
+    /// Subscribe / monitor INIT. Logged when an audit-enabled
+    /// layer wraps a source whose `subscribe` returns a fresh
+    /// receiver. Distinct from individual update events.
+    Subscribe,
+    /// RPC dispatch.
+    Rpc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,21 +399,90 @@ pub enum AuditResult {
     Failed,
 }
 
+/// Build an [`AuditEvent`] from the inner-call outcome. Detects
+/// `Denied` vs `Failed` heuristically: error messages produced by
+/// [`AclLayer`] / [`ReadOnlyLayer`] / source-level ACF checks
+/// usually contain "denied" / "deny" / "ACL" / "read-only", so the
+/// downstream operator gets the right bucket without each layer
+/// having to invent a structured-error type.
+fn make_audit_event(
+    name: &str,
+    user: &str,
+    host: &str,
+    result: &Result<(), String>,
+) -> AuditEvent {
+    let (kind, error) = match result {
+        Ok(_) => (AuditResult::Ok, String::new()),
+        Err(msg) => {
+            let lower = msg.to_lowercase();
+            if lower.contains("deny")
+                || lower.contains("denied")
+                || lower.contains("acl:")
+                || lower.contains("read-only")
+            {
+                (AuditResult::Denied, msg.clone())
+            } else {
+                (AuditResult::Failed, msg.clone())
+            }
+        }
+    };
+    AuditEvent {
+        pv: name.to_string(),
+        event: AuditEventKind::Put,
+        user: user.to_string(),
+        host: host.to_string(),
+        result: kind,
+        timestamp: std::time::SystemTime::now(),
+        error,
+    }
+}
+
 pub struct AuditLayer<A: AuditSink> {
     sink: Arc<A>,
+    audit_get: bool,
+    audit_subscribe: bool,
+    audit_rpc: bool,
 }
 
 impl<A: AuditSink> AuditLayer<A> {
+    /// New layer that audits PUT only (high-signal events).
     pub fn new(sink: A) -> Self {
         Self {
             sink: Arc::new(sink),
+            audit_get: false,
+            audit_subscribe: false,
+            audit_rpc: false,
         }
+    }
+
+    /// Also emit an audit event on every GET. Off by default
+    /// because GET frequency dominates real workloads (a Phoebus
+    /// dashboard polls dozens per second).
+    pub fn with_get(mut self) -> Self {
+        self.audit_get = true;
+        self
+    }
+
+    /// Also audit subscribe (monitor INIT). One event per
+    /// subscriber connect — distinct from per-update events.
+    pub fn with_subscribe(mut self) -> Self {
+        self.audit_subscribe = true;
+        self
+    }
+
+    /// Also audit RPC dispatch.
+    pub fn with_rpc(mut self) -> Self {
+        self.audit_rpc = true;
+        self
     }
 }
 
 pub struct Audited<S, A> {
     inner: Arc<S>,
     sink: Arc<A>,
+    audit_get: bool,
+    audit_subscribe: bool,
+    audit_rpc: bool,
 }
 
 impl<S: ChannelSource, A: AuditSink> Layer<S> for AuditLayer<A> {
@@ -322,6 +491,9 @@ impl<S: ChannelSource, A: AuditSink> Layer<S> for AuditLayer<A> {
         Audited {
             inner: Arc::new(inner),
             sink: self.sink,
+            audit_get: self.audit_get,
+            audit_subscribe: self.audit_subscribe,
+            audit_rpc: self.audit_rpc,
         }
     }
 }
@@ -337,20 +509,24 @@ impl<S: ChannelSource, A: AuditSink> ChannelSource for Audited<S, A> {
         self.inner.get_introspection(name).await
     }
     async fn get_value(&self, name: &str) -> Option<PvField> {
-        self.inner.get_value(name).await
+        let result = self.inner.get_value(name).await;
+        if self.audit_get {
+            // GET has no error path here — None means "missing" not
+            // "denied" — so we model it as Ok with empty error.
+            let outcome: Result<(), String> = if result.is_some() {
+                Ok(())
+            } else {
+                Err(format!("PV '{name}' not found"))
+            };
+            let mut ev = make_audit_event(name, "", "", &outcome);
+            ev.event = AuditEventKind::Get;
+            self.sink.record(ev);
+        }
+        result
     }
     async fn put_value(&self, name: &str, value: PvField) -> Result<(), String> {
         let result = self.inner.put_value(name, value).await;
-        self.sink.record(AuditEvent {
-            pv: name.to_string(),
-            event: AuditEventKind::Put,
-            user: String::new(),
-            host: String::new(),
-            result: match &result {
-                Ok(_) => AuditResult::Ok,
-                Err(_) => AuditResult::Failed,
-            },
-        });
+        self.sink.record(make_audit_event(name, "", "", &result));
         result
     }
     async fn put_value_ctx(
@@ -362,26 +538,42 @@ impl<S: ChannelSource, A: AuditSink> ChannelSource for Audited<S, A> {
         let user = ctx.account.clone();
         let host = ctx.host.clone();
         let result = self.inner.put_value_ctx(name, value, ctx).await;
-        self.sink.record(AuditEvent {
-            pv: name.to_string(),
-            event: AuditEventKind::Put,
-            user,
-            host,
-            result: match &result {
-                Ok(_) => AuditResult::Ok,
-                Err(_) => AuditResult::Failed,
-            },
-        });
+        self.sink.record(make_audit_event(name, &user, &host, &result));
         result
     }
     async fn is_writable(&self, name: &str) -> bool {
         self.inner.is_writable(name).await
     }
     async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
-        self.inner.subscribe(name).await
+        let result = self.inner.subscribe(name).await;
+        if self.audit_subscribe {
+            let outcome: Result<(), String> = if result.is_some() {
+                Ok(())
+            } else {
+                Err(format!("PV '{name}' not subscribable"))
+            };
+            let mut ev = make_audit_event(name, "", "", &outcome);
+            ev.event = AuditEventKind::Subscribe;
+            self.sink.record(ev);
+        }
+        result
     }
     async fn subscribe_raw(&self, name: &str) -> Option<mpsc::Receiver<RawMonitorEvent>> {
-        self.inner.subscribe_raw(name).await
+        // Audit on subscribe_raw too, since the F-G12 zero-copy
+        // path bypasses the typed `subscribe` and would otherwise
+        // miss the audit event entirely.
+        let result = self.inner.subscribe_raw(name).await;
+        if self.audit_subscribe {
+            let outcome: Result<(), String> = if result.is_some() {
+                Ok(())
+            } else {
+                Err(format!("PV '{name}' not subscribable (raw)"))
+            };
+            let mut ev = make_audit_event(name, "", "", &outcome);
+            ev.event = AuditEventKind::Subscribe;
+            self.sink.record(ev);
+        }
+        result
     }
     async fn rpc(
         &self,
@@ -389,7 +581,17 @@ impl<S: ChannelSource, A: AuditSink> ChannelSource for Audited<S, A> {
         request_desc: FieldDesc,
         request_value: PvField,
     ) -> Result<(FieldDesc, PvField), String> {
-        self.inner.rpc(name, request_desc, request_value).await
+        let result = self.inner.rpc(name, request_desc, request_value).await;
+        if self.audit_rpc {
+            let outcome: Result<(), String> = match &result {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.clone()),
+            };
+            let mut ev = make_audit_event(name, "", "", &outcome);
+            ev.event = AuditEventKind::Rpc;
+            self.sink.record(ev);
+        }
+        result
     }
     fn notify_watermark_high(&self, name: &str) {
         self.inner.notify_watermark_high(name);
@@ -431,5 +633,39 @@ mod tests {
         assert!(cfg.allowed("MOTOR:VAL"));
         assert!(!cfg.allowed("MOTOR:JOG:UP"));
         assert!(!cfg.allowed("OTHER:PV"));
+    }
+
+    /// Audit-event classifier tags ACL/read-only error messages
+    /// as Denied; other errors as Failed; Ok results as Ok.
+    #[test]
+    fn audit_event_classifies_results() {
+        let denied = make_audit_event(
+            "MOTOR:VAL",
+            "alice",
+            "host1",
+            &Err("ACL: PV 'MOTOR:VAL' denied".into()),
+        );
+        assert_eq!(denied.result, AuditResult::Denied);
+        assert!(!denied.error.is_empty());
+
+        let read_only = make_audit_event(
+            "MOTOR:VAL",
+            "",
+            "",
+            &Err("read-only mode: PUT rejected".into()),
+        );
+        assert_eq!(read_only.result, AuditResult::Denied);
+
+        let failed = make_audit_event(
+            "MOTOR:VAL",
+            "alice",
+            "host1",
+            &Err("upstream timeout".into()),
+        );
+        assert_eq!(failed.result, AuditResult::Failed);
+
+        let ok = make_audit_event("MOTOR:VAL", "alice", "host1", &Ok(()));
+        assert_eq!(ok.result, AuditResult::Ok);
+        assert!(ok.error.is_empty());
     }
 }

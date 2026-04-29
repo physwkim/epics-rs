@@ -42,5 +42,5 @@ pub use uri::NTURI;
 /// }
 /// ```
 pub mod derive {
-    pub use epics_macros_rs::NTScalar;
+    pub use epics_macros_rs::{NTScalar, NTTable};
 }

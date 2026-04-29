@@ -182,6 +182,13 @@ impl MultiTenantPvaGatewayBuilder {
                 "MultiTenantPvaGatewayBuilder: at least one upstream required".into(),
             ));
         }
+        if self.downstreams.is_empty() {
+            return Err(GwError::Other(
+                "MultiTenantPvaGatewayBuilder: at least one downstream required \
+                 (a gateway with no listeners would resolve no clients)"
+                    .into(),
+            ));
+        }
         // Detect duplicate upstream labels — a server's label list is
         // matched against this set, so duplicates would silently
         // route to whichever entry came first.
@@ -193,6 +200,25 @@ impl MultiTenantPvaGatewayBuilder {
                         a.label
                     )));
                 }
+            }
+        }
+        // Same check for downstreams. `downstream(label)` accessor
+        // returns the FIRST match, so duplicate labels would silently
+        // shadow the second one — better to refuse at build time.
+        for (i, a) in self.downstreams.iter().enumerate() {
+            for b in &self.downstreams[i + 1..] {
+                if a.label == b.label {
+                    return Err(GwError::Other(format!(
+                        "duplicate downstream label '{}'",
+                        a.label
+                    )));
+                }
+            }
+            if a.upstream_labels.is_empty() {
+                return Err(GwError::Other(format!(
+                    "downstream '{}' must reference at least one upstream",
+                    a.label
+                )));
             }
         }
         // Build a cache per upstream. Sized identically — the per-PV

@@ -41,7 +41,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 [dev-dependencies]
 rcgen = "0.13"
 tempfile = "3"
-serial_test = { version = "3", features = ["file_locks"] }
+serial_test = "3"
 
 [[bin]]
 name = "pvget-rs"

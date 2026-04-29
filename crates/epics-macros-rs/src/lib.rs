@@ -528,6 +528,22 @@ pub fn derive_nt_scalar(input: TokenStream) -> TokenStream {
     let krate = epics_pva_path();
     let name = &input.ident;
 
+    // The derive does not yet handle generic / lifetime params —
+    // `descriptor()` would need to resolve every `T: TypedNT`
+    // bound at expansion time, and the runtime helpers don't know
+    // how to wrap a borrow. Reject up front with a clear message
+    // instead of emitting code that fails with a confusing trait
+    // resolution error 200 lines later.
+    if !input.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            &input.generics,
+            "NTScalar derive does not support generic or lifetime \
+             parameters; implement TypedNT manually for parameterised types",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     let fields = match &input.data {
         Data::Struct(s) => match &s.fields {
             Fields::Named(named) => &named.named,
@@ -826,6 +842,196 @@ pub fn pva_service(_attr: TokenStream, item: TokenStream) -> TokenStream {
         impl #krate::service::PvaService for #self_ty {
             fn methods(self: ::std::sync::Arc<Self>) -> ::std::vec::Vec<#krate::service::ServiceMethod> {
                 ::std::vec![ #( #method_arms ),* ]
+            }
+        }
+    };
+    expanded.into()
+}
+
+/// `#[derive(NTTable)]` — generate a [`TypedNT`] impl for a
+/// table-shaped struct. Every field of the annotated struct must
+/// be a `Vec<T>` where `T: TypedNT` (the column type). Field
+/// names become column labels.
+///
+/// Wire shape:
+/// ```text
+/// epics:nt/NTTable:1.0 {
+///     labels: Vec<String>,    // column names (declared field order)
+///     value: {                // one Vec<T> per column
+///         col1: Vec<T1>,
+///         col2: Vec<T2>,
+///         ...
+///     },
+/// }
+/// ```
+///
+/// ```ignore
+/// use epics_pva_rs::nt::derive::NTTable;
+///
+/// #[derive(NTTable)]
+/// struct ScanResult {
+///     timestamp: Vec<f64>,
+///     position:  Vec<f64>,
+///     intensity: Vec<f64>,
+/// }
+/// ```
+#[proc_macro_derive(NTTable)]
+pub fn derive_nt_table(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let krate = epics_pva_path();
+    let name = &input.ident;
+
+    if !input.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            &input.generics,
+            "NTTable derive does not support generic or lifetime parameters; \
+             implement TypedNT manually for parameterised tables",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let fields = match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(named) => &named.named,
+            _ => {
+                return syn::Error::new_spanned(
+                    name,
+                    "NTTable derive requires a struct with named fields",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        _ => {
+            return syn::Error::new_spanned(name, "NTTable derive only works on structs")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let mut col_idents: Vec<syn::Ident> = Vec::new();
+    let mut col_tys: Vec<syn::Type> = Vec::new();
+    for field in fields {
+        let Some(ident) = field.ident.clone() else {
+            continue;
+        };
+        col_idents.push(ident);
+        col_tys.push(field.ty.clone());
+    }
+    let col_names: Vec<String> = col_idents.iter().map(|i| i.to_string()).collect();
+
+    if col_idents.is_empty() {
+        return syn::Error::new_spanned(
+            name,
+            "NTTable derive requires at least one column field",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Each column is encoded as Vec<T>; we extract the wire-format
+    // descriptor's `value` slot from <Vec<T> as TypedNT>::descriptor()
+    // and wrap into the inner `value` struct of NTTable.
+    let expanded = quote! {
+        impl #krate::nt::TypedNT for #name {
+            fn descriptor() -> #krate::pvdata::FieldDesc {
+                use #krate::nt::typed::__rt;
+                let mut __value_fields: ::std::vec::Vec<(::std::string::String, __rt::FieldDesc)> =
+                    ::std::vec::Vec::new();
+                #(
+                    let __inner = <#col_tys as #krate::nt::TypedNT>::descriptor();
+                    let __slot = match __inner {
+                        __rt::FieldDesc::Structure { fields, .. } => {
+                            fields.into_iter()
+                                .find(|(n, _)| n == "value")
+                                .map(|(_, f)| f)
+                                .unwrap_or(__rt::FieldDesc::Variant)
+                        }
+                        other => other,
+                    };
+                    __value_fields.push((#col_names.into(), __slot));
+                )*
+                __rt::FieldDesc::Structure {
+                    struct_id: "epics:nt/NTTable:1.0".into(),
+                    fields: ::std::vec![
+                        ("labels".into(), __rt::FieldDesc::ScalarArray(__rt::ScalarType::String)),
+                        ("value".into(), __rt::FieldDesc::Structure {
+                            struct_id: "".into(),
+                            fields: __value_fields,
+                        }),
+                    ],
+                }
+            }
+
+            fn to_pv_field(&self) -> #krate::pvdata::PvField {
+                use #krate::nt::typed::__rt;
+                let mut __value_struct = __rt::PvStructure::new("");
+                #(
+                    let __col_field = <#col_tys as #krate::nt::TypedNT>::to_pv_field(&self.#col_idents);
+                    let __slot = match __col_field {
+                        __rt::PvField::Structure(inner) => {
+                            inner.fields.into_iter()
+                                .find(|(n, _)| n == "value")
+                                .map(|(_, f)| f)
+                                .unwrap_or(__rt::PvField::Scalar(__rt::ScalarValue::Int(0)))
+                        }
+                        other => other,
+                    };
+                    __value_struct.fields.push((#col_names.into(), __slot));
+                )*
+                let mut __labels: ::std::vec::Vec<__rt::ScalarValue> = ::std::vec::Vec::new();
+                #(
+                    __labels.push(__rt::ScalarValue::String(#col_names.into()));
+                )*
+                let mut __root = __rt::PvStructure::new("epics:nt/NTTable:1.0");
+                __root.fields.push((
+                    "labels".into(),
+                    __rt::PvField::ScalarArray(__labels),
+                ));
+                __root.fields.push((
+                    "value".into(),
+                    __rt::PvField::Structure(__value_struct),
+                ));
+                __rt::PvField::Structure(__root)
+            }
+
+            fn from_pv_field(
+                __field: &#krate::pvdata::PvField,
+            ) -> ::std::result::Result<Self, #krate::nt::TypedNTError> {
+                use #krate::nt::typed::__rt;
+                let __s = match __field {
+                    __rt::PvField::Structure(s) => s,
+                    _ => return Err(__rt::wrong_type("<root>", "expected NTTable wrapper")),
+                };
+                if !(__s.struct_id.is_empty() || __s.struct_id == "epics:nt/NTTable:1.0") {
+                    return Err(__rt::wrong_struct_id("epics:nt/NTTable:1.0", &__s.struct_id));
+                }
+                let __value_struct = match __s.get_field("value") {
+                    ::std::option::Option::Some(__rt::PvField::Structure(v)) => v,
+                    _ => return Err(__rt::missing("value")),
+                };
+                #(
+                    let #col_idents: #col_tys = {
+                        let raw = __value_struct
+                            .get_field(#col_names)
+                            .ok_or_else(|| __rt::missing(#col_names))?;
+                        // Wrap the raw column value in the inner type's
+                        // expected NTScalarArray wrapper.
+                        let __wrap_sid = match <#col_tys as #krate::nt::TypedNT>::descriptor() {
+                            __rt::FieldDesc::Structure { struct_id, .. } => struct_id,
+                            _ => "epics:nt/NTScalarArray:1.0".to_string(),
+                        };
+                        let mut __wrap = __rt::PvStructure::new(&__wrap_sid);
+                        __wrap.fields.push(("value".into(), raw.clone()));
+                        let __wrapped = __rt::PvField::Structure(__wrap);
+                        <#col_tys as #krate::nt::TypedNT>::from_pv_field(&__wrapped)
+                            .map_err(|e| __rt::wrong_type(#col_names, &e.to_string()))?
+                    };
+                )*
+                Ok(Self {
+                    #( #col_idents, )*
+                })
             }
         }
     };

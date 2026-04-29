@@ -11,6 +11,8 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use serial_test::serial;
+
 /// Allocate two ephemeral UDP ports by binding+dropping. There's a
 /// micro-window where another process could grab them, but for a
 /// single-test loopback scenario the chance is negligible.
@@ -35,6 +37,7 @@ impl Drop for ChildGuard {
 }
 
 #[test]
+#[serial]
 fn mshim_forwards_loopback_datagram() {
     // Skip on platforms where the binary path env var isn't set
     // (older cargo) — environment_var-based binary lookup is the
@@ -101,6 +104,7 @@ fn mshim_forwards_loopback_datagram() {
 }
 
 #[test]
+#[serial]
 fn mshim_rejects_invalid_listen_endpoint() {
     let bin = match option_env!("CARGO_BIN_EXE_mshim-rs") {
         Some(p) => p,

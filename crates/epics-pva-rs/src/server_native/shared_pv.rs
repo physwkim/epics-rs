@@ -489,6 +489,15 @@ impl SharedSource {
         self.pvs.lock().insert(name.into(), pv);
     }
 
+    /// Remove a previously-added PV by name. Returns the removed
+    /// SharedPV when the name was present. Used by
+    /// [`crate::service::remove_rpc_service`] to tear down an RPC
+    /// service registered via `add_rpc_service`; also useful for
+    /// dynamic IOC topologies where PVs come and go at runtime.
+    pub fn remove(&self, name: &str) -> Option<SharedPV> {
+        self.pvs.lock().remove(name)
+    }
+
     pub fn get(&self, name: &str) -> Option<SharedPV> {
         self.pvs.lock().get(name).cloned()
     }

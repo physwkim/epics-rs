@@ -179,6 +179,21 @@ pub fn add_rpc_service<S: PvaService>(
     registered
 }
 
+/// Tear down a previously-registered service. Pass the same
+/// `prefix` and the list of method names returned from
+/// [`add_rpc_service`]; each entry is removed from `source` so the
+/// PVs disappear from search responses and any further RPC frames
+/// surface as "unknown PV". Idempotent — names not present in the
+/// source are silently ignored.
+pub fn remove_rpc_service(
+    source: &crate::server_native::SharedSource,
+    registered_names: &[String],
+) {
+    for name in registered_names {
+        let _ = source.remove(name);
+    }
+}
+
 /// Re-export the attribute macro under the conventional path
 /// `epics_pva_rs::service::pva_service`.
 pub use epics_macros_rs::pva_service;

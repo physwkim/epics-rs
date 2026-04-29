@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use common::{require_tool, spawn_softioc};
 use epics_base_rs::types::EpicsValue;
-use serial_test::file_serial;
+use serial_test::serial;
 
 const STRESS_DB: &str = "
 record(longout, \"S:0\") { field(VAL, \"0\") }
@@ -41,7 +41,8 @@ fn set_client_env(addr_list: &str, port: u16) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[file_serial(ca_softioc)]
+#[serial]
+#[ignore = "spawns external libca softIoc; run with --include-ignored"]
 async fn many_concurrent_channels_connect() {
     if !require_tool("softIoc") {
         return;
@@ -71,7 +72,8 @@ async fn many_concurrent_channels_connect() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[file_serial(ca_softioc)]
+#[serial]
+#[ignore = "spawns external libca softIoc; run with --include-ignored"]
 async fn rapid_create_drop_cycles() {
     if !require_tool("softIoc") {
         return;
@@ -99,7 +101,8 @@ async fn rapid_create_drop_cycles() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[file_serial(ca_softioc)]
+#[serial]
+#[ignore = "spawns external libca softIoc; run with --include-ignored"]
 async fn burst_of_writes_completes() {
     if !require_tool("softIoc") {
         return;
@@ -131,7 +134,8 @@ async fn burst_of_writes_completes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[file_serial(ca_softioc)]
+#[serial]
+#[ignore = "spawns external libca softIoc; run with --include-ignored"]
 async fn monitor_keeps_up_with_high_update_rate() {
     if !require_tool("softIoc") {
         return;

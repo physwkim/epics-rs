@@ -6,12 +6,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use epics_pva_rs::nt::derive::NTScalar;
+use epics_pva_rs::nt::derive::{NTScalar, NTTable};
 use epics_pva_rs::nt::{Alarm, TimeStamp, TypedNT};
 use epics_pva_rs::nt::typed::EnumValue;
 use epics_pva_rs::pvdata::{FieldDesc, ScalarType};
 use epics_pva_rs::server_native::{PvaServer, SharedPV, SharedSource};
-use serial_test::file_serial;
+// PVA listener tests run in parallel: PvaServer::start now binds
+// the TCP listener synchronously inside `start()` so the
+// pick-and-drop race that motivated file_serial is gone. CA-side
+// softIoc tests still need cross-binary serialisation because the
+// C process owns the EPICS_CA_SERVER_PORT env var globally.
 
 #[derive(Debug, Clone, NTScalar, PartialEq)]
 struct MotorPos {
@@ -60,7 +64,6 @@ fn typed_nt_round_trip_local() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[file_serial(pva_listener)]
 async fn pvget_typed_against_local_server() {
     // Build a SharedPV holding a 3-field NTScalar (value + alarm +
     // timestamp). The descriptor we open with must match the
@@ -164,7 +167,6 @@ fn typed_nt_enum_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[file_serial(pva_listener)]
 async fn pvget_typed_primitive_f64() {
     // Bare f64 against a plain NTScalar<double> source.
     let pv = SharedPV::new();
@@ -185,4 +187,57 @@ async fn pvget_typed_primitive_f64() {
     .expect("timeout")
     .expect("typed get");
     assert_eq!(temp, 7.5);
+}
+
+/// I-2 follow-up: NTTable derive — multi-column table.
+#[derive(Debug, Clone, NTTable, PartialEq)]
+struct ScanResult {
+    timestamp: Vec<f64>,
+    position: Vec<f64>,
+    intensity: Vec<f64>,
+}
+
+#[test]
+fn typed_nt_table_descriptor_shape() {
+    let d = ScanResult::descriptor();
+    match d {
+        FieldDesc::Structure { struct_id, fields } => {
+            assert_eq!(struct_id, "epics:nt/NTTable:1.0");
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0, "labels");
+            assert!(matches!(
+                fields[0].1,
+                FieldDesc::ScalarArray(ScalarType::String)
+            ));
+            assert_eq!(fields[1].0, "value");
+            match &fields[1].1 {
+                FieldDesc::Structure { fields: cols, .. } => {
+                    assert_eq!(cols.len(), 3);
+                    assert_eq!(cols[0].0, "timestamp");
+                    assert_eq!(cols[1].0, "position");
+                    assert_eq!(cols[2].0, "intensity");
+                    for (_, col_desc) in cols {
+                        assert!(matches!(
+                            col_desc,
+                            FieldDesc::ScalarArray(ScalarType::Double)
+                        ));
+                    }
+                }
+                other => panic!("unexpected value descriptor: {other:?}"),
+            }
+        }
+        other => panic!("unexpected NTTable descriptor: {other:?}"),
+    }
+}
+
+#[test]
+fn typed_nt_table_round_trip() {
+    let scan = ScanResult {
+        timestamp: vec![1.0, 2.0, 3.0],
+        position: vec![10.0, 20.0, 30.0],
+        intensity: vec![0.1, 0.2, 0.3],
+    };
+    let f = scan.to_pv_field();
+    let back = ScanResult::from_pv_field(&f).expect("decode");
+    assert_eq!(scan, back);
 }

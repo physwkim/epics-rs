@@ -25,6 +25,8 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use serial_test::serial;
+
 fn libca_paths() -> Option<(String, String, String)> {
     let softioc = which("softIoc")?;
     let caget = which("caget")?;
@@ -139,7 +141,8 @@ fn free_port_pair() -> (u16, u16) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "differential libca; run with --include-ignored"]
+#[serial]
 #[allow(clippy::approx_constant)]
 async fn caget_double_matches_libca() {
     let Some(_) = libca_paths() else {
@@ -185,7 +188,8 @@ async fn caget_double_matches_libca() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "differential libca; run with --include-ignored"]
+#[serial]
 async fn caput_then_caget_matches_libca() {
     let Some(_) = libca_paths() else {
         eprintln!("skipping: libca not on PATH");

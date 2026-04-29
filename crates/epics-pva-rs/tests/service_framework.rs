@@ -9,7 +9,6 @@ use std::time::Duration;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{PvaServer, SharedSource};
 use epics_pva_rs::service::pva_service;
-use serial_test::file_serial;
 
 #[derive(Default)]
 struct Counter {
@@ -75,7 +74,6 @@ fn nturi_request(args: &[(&str, ScalarValue)]) -> (FieldDesc, PvField) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[file_serial(pva_listener)]
 async fn pva_service_dispatch_round_trip() {
     let source = SharedSource::new();
     let registered =
@@ -140,4 +138,80 @@ async fn pva_service_dispatch_round_trip() {
         other => panic!("wrapper: {other:?}"),
     };
     assert_eq!(v2, 8); // 5 + 3
+}
+
+/// Direct-struct RPC request shape: arguments live at the top
+/// level instead of inside `query.<name>`. pvxs `pvxcall` and
+/// pvAccessJava both send NTURI by default, but custom services
+/// (RPCBuilder.set("name", val).build() in pvxs) emit a flat
+/// struct. The `Args::from_pv_field` fallback handles this.
+fn direct_struct_request(args: &[(&str, ScalarValue)]) -> (FieldDesc, PvField) {
+    let mut fields = Vec::new();
+    let mut desc_fields = Vec::new();
+    for (name, val) in args {
+        let st = match val {
+            ScalarValue::Long(_) => ScalarType::Long,
+            ScalarValue::Int(_) => ScalarType::Int,
+            ScalarValue::Double(_) => ScalarType::Double,
+            ScalarValue::String(_) => ScalarType::String,
+            _ => ScalarType::String,
+        };
+        fields.push((name.to_string(), PvField::Scalar(val.clone())));
+        desc_fields.push((name.to_string(), FieldDesc::Scalar(st)));
+    }
+    let mut s = PvStructure::new("");
+    s.fields = fields;
+    let desc = FieldDesc::Structure {
+        struct_id: String::new(),
+        fields: desc_fields,
+    };
+    (desc, PvField::Structure(s))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pva_service_accepts_direct_struct_request() {
+    let source = SharedSource::new();
+    let _ = epics_pva_rs::service::add_rpc_service(
+        &source,
+        "calc",
+        Counter::default(),
+    );
+    let server = PvaServer::isolated(Arc::new(source));
+    let client = server.client_config();
+
+    // square(9.0) without NTURI wrapper.
+    let (desc, value) = direct_struct_request(&[("x", ScalarValue::Double(9.0))]);
+    let (_, resp) = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.pvrpc("calc:square", &desc, &value),
+    )
+    .await
+    .expect("rpc timeout")
+    .expect("rpc err");
+    let result = match resp {
+        PvField::Structure(s) => match s.get_field("value") {
+            Some(PvField::Scalar(ScalarValue::Double(v))) => *v,
+            other => panic!("unexpected square shape: {other:?}"),
+        },
+        other => panic!("unexpected wrapper: {other:?}"),
+    };
+    assert_eq!(result, 81.0);
+
+    // add(7) with the direct-struct shape.
+    let (desc, value) = direct_struct_request(&[("delta", ScalarValue::Long(7))]);
+    let (_, resp) = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.pvrpc("calc:add", &desc, &value),
+    )
+    .await
+    .expect("add timeout")
+    .expect("add err");
+    let v = match resp {
+        PvField::Structure(s) => match s.get_field("value") {
+            Some(PvField::Scalar(ScalarValue::Long(v))) => *v,
+            other => panic!("unexpected add shape: {other:?}"),
+        },
+        other => panic!("unexpected wrapper: {other:?}"),
+    };
+    assert_eq!(v, 7);
 }

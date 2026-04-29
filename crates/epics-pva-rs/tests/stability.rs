@@ -24,8 +24,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use serial_test::file_serial;
-
 use tokio::sync::{Mutex, mpsc};
 
 use epics_pva_rs::client_native::beacon_throttle::BeaconTracker;
@@ -222,7 +220,6 @@ fn client_for(tcp_port: u16) -> PvaClient {
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-#[file_serial(pva_listener)]
 async fn p2_auto_reconnect_after_server_restart() {
     let source = Arc::new(MemSource::new());
     source.add_pv("STAB:RECON", 1.0).await;
@@ -271,7 +268,6 @@ async fn p2_auto_reconnect_after_server_restart() {
 }
 
 #[tokio::test]
-#[file_serial(pva_listener)]
 async fn p3_p4_beacon_throttle_5min_rule() {
     let t = BeaconTracker::new();
     let addr: std::net::SocketAddr = "127.0.0.1:5075".parse().unwrap();
@@ -286,7 +282,6 @@ async fn p3_p4_beacon_throttle_5min_rule() {
 }
 
 #[tokio::test]
-#[file_serial(pva_listener)]
 async fn p5_monitor_pipeline_does_not_drop() {
     let source = Arc::new(MemSource::new());
     source.add_pv("STAB:MON", 0.0).await;
@@ -338,7 +333,6 @@ async fn p5_monitor_pipeline_does_not_drop() {
 }
 
 #[tokio::test]
-#[file_serial(pva_listener)]
 async fn p8_channel_coalesces_concurrent_pvget() {
     let source = Arc::new(MemSource::new());
     source.add_pv("STAB:COAL", 7.0).await;
