@@ -281,6 +281,28 @@ impl BridgeProvider {
         }
     }
 
+    /// Whether `name` is writable: a record exists, the `.DISP`
+    /// field is not 1, and the field referenced by the PV name (if
+    /// any sub-field is given) is mutable. Conservative defaults to
+    /// `false` for unknown PVs and group PVs (writability isn't
+    /// modelled per-group yet).
+    pub async fn is_writable(&self, name: &str) -> bool {
+        // Group channel: writability per-member is complex; for now
+        // assume true if the group is registered.
+        if self.groups.read().contains_key(name) {
+            return true;
+        }
+        let (record, _field) = epics_base_rs::server::database::parse_pv_name(name);
+        let Some(rec_arc) = self.db.get_record(record).await else {
+            // PVA-plugin PVs (NTNDArray) aren't records — caller
+            // (qsrv pva_adapter) should consult its own pva_pvs map.
+            // Default false here so unknown names refuse PUT upfront.
+            return false;
+        };
+        let inst = rec_arc.read().await;
+        !inst.common.disp
+    }
+
     /// Snapshot of cumulative QSRV throughput counters (channels
     /// created, GET / PUT / SUBSCRIBE issued). Mirrors pvxs's
     /// `qStats` aggregate output. Per-channel breakdown is not

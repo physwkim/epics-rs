@@ -84,13 +84,14 @@ impl SyncGroup {
     pub async fn block(self, timeout: Duration) -> CaResult<SyncGroupResults> {
         let SyncGroup { gets, puts } = self;
 
+        // libca `ca_sg_block` is a parallel barrier — gets and puts
+        // run concurrently and the call returns when both fronts
+        // finish. The previous `g.await; p.await` collapsed that to
+        // a sequential pipeline, so a single slow get blocked all
+        // unrelated puts in the same group.
         let get_join = futures_util::future::join_all(gets);
         let put_join = futures_util::future::join_all(puts);
-        let combined = async {
-            let g = get_join.await;
-            let p = put_join.await;
-            (g, p)
-        };
+        let combined = async { tokio::join!(get_join, put_join) };
 
         let (gets_res, puts_res) = tokio::time::timeout(timeout, combined)
             .await

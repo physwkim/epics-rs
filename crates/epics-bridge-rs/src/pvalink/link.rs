@@ -33,6 +33,14 @@ pub type PvaLinkResult<T> = Result<T, PvaLinkError>;
 /// monitor task spawns automatically; for OUT links the link just owns the
 /// PvaClient and writes synchronously.
 pub struct PvaLink {
+    /// Field declaration order matters: Rust drops fields in
+    /// declaration order, so `_monitor_abort` MUST come BEFORE
+    /// `client`. The spawned monitor task holds its own clone of the
+    /// PvaClient; if the parent client field drops first and that
+    /// shutdown is cancellation-token-driven (not refcount-only),
+    /// the still-running task hits I/O errors before the abort
+    /// lands. Order: abort first → task stops → client drops cleanly.
+    _monitor_abort: Option<MonitorAbort>,
     config: PvaLinkConfig,
     client: PvaClient,
     /// Latest received value (INP only — None until first event).
@@ -40,12 +48,6 @@ pub struct PvaLink {
     /// Subscriber channel for record-side notification (INP monitor mode).
     #[allow(dead_code)]
     notify_tx: Option<mpsc::Sender<PvField>>,
-    /// Aborts the spawned `pvmonitor` task when the last `Arc<PvaLink>`
-    /// drops. Without this guard, registry eviction or
-    /// open-and-discard races leak monitor tasks (each owning a
-    /// PvaClient + UDP socket + search engine task) for the lifetime
-    /// of the process.
-    _monitor_abort: Option<MonitorAbort>,
 }
 
 struct MonitorAbort(tokio::task::AbortHandle);

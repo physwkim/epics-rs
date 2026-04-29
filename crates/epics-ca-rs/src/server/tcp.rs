@@ -1379,6 +1379,10 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     // Track for connection-scoped cleanup (CR-3): a stuck
                     // async record would otherwise pin this task and the
                     // captured writer Arc forever after the client drops.
+                    // Reap finished handles opportunistically so the Vec
+                    // doesn't grow unbounded over a long-lived connection
+                    // that issues many WRITE_NOTIFYs (F1).
+                    state.write_notify_tasks.retain(|h| !h.is_finished());
                     state.write_notify_tasks.push(join.abort_handle());
                 } else {
                     // Synchronous completion — respond immediately

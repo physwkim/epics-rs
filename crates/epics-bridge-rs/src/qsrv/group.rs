@@ -878,8 +878,14 @@ impl super::provider::PvaMonitor for GroupMonitor {
             )));
         }
 
-        // Create fan-in channel for member events
-        let (tx, rx) = tokio::sync::mpsc::channel::<MemberEvent>(64);
+        // Create fan-in channel for member events. Capacity scales
+        // with member count so a many-record group with simultaneous
+        // updates doesn't backpressure each member's
+        // DbSubscription (which would lose events to broadcast Lag).
+        // 64 was the original constant; 4× members.len() gives slow
+        // groups the same headroom while bounded by member count.
+        let cap = (self.def.members.len() * 4).max(64);
+        let (tx, rx) = tokio::sync::mpsc::channel::<MemberEvent>(cap);
 
         // Subscribe to ALL members with channels, regardless of trigger
         // setting. pvxs subscribes every field with a dbChannel for the

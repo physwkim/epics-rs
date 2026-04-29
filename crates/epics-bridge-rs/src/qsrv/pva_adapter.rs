@@ -207,8 +207,21 @@ impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
 
     fn is_writable(&self, name: &str) -> impl std::future::Future<Output = bool> + Send {
         let provider = self.provider.clone();
+        let pva_pvs = self.pva_pvs.clone();
         let name = name.to_string();
-        async move { provider.channel_find(&name).await }
+        async move {
+            // F-G3: previously returned `true` for any existing PV via
+            // channel_find, lying for read-only records (DISP=1) and
+            // delaying the PUT refusal until the actual write attempt.
+            // Now consult provider.is_writable (DISP-aware), and treat
+            // PVA-plugin PVs (NTNDArray cache from NDPluginPva) as
+            // read-only — they're produced server-side, not driven by
+            // downstream PUTs.
+            if pva_pvs.read().await.contains_key(&name) {
+                return false;
+            }
+            provider.is_writable(&name).await
+        }
     }
 
     fn subscribe(

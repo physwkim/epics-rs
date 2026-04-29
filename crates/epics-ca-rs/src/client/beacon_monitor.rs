@@ -120,6 +120,19 @@ async fn run_beacon_monitor_inner(
             };
             let payload_padded = ((hdr.postsize as usize) + 7) & !7;
             let frame_len = (CaHeader::SIZE + payload_padded).max(CaHeader::SIZE);
+            // Bail out before advancing if the announced frame
+            // length runs past the datagram. Otherwise the
+            // post-advance slice clamp would silently hand the
+            // verifier a truncated body and the parser would
+            // continue from a misaligned offset (CR-10/F6).
+            if offset.saturating_add(frame_len) > len {
+                break;
+            }
+            // Used by the cap-tokens companion-frame slice below; the
+            // attribute keeps the unused-variable lint quiet when the
+            // feature is off.
+            #[cfg_attr(not(feature = "cap-tokens"), allow(unused_variables))]
+            let frame_start = offset;
             offset += frame_len;
 
             // Signed-beacon companion (cmmd=0xCAFE, cap-tokens
@@ -128,7 +141,7 @@ async fn run_beacon_monitor_inner(
             #[cfg(feature = "cap-tokens")]
             if hdr.cmmd == crate::server::signed_beacon::CA_PROTO_RSRV_BEACON_SIG {
                 if let Some(ref v) = verifier {
-                    let frame = &buf[offset.saturating_sub(frame_len)..offset.min(len)];
+                    let frame = &buf[frame_start..frame_start + frame_len];
                     match v.verify(frame) {
                         Ok((ip, port, beacon_id)) => {
                             verified_tuples
@@ -200,6 +213,7 @@ fn handle_beacon(
     let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
     let now = Instant::now();
 
+    let first_sighting = !servers.contains_key(&server_addr);
     let entry = servers.entry(server_addr).or_insert_with(|| BeaconState {
         last_id: beacon_id.wrapping_sub(1),
         last_seen: now,
@@ -213,8 +227,12 @@ fn handle_beacon(
     // Anomaly: beacon_id not monotonically increasing (IOC restarted
     // with a fresh sequence), OR period suddenly dropped below 1/3 of
     // the estimated steady-state period (IOC restarted and is in its
-    // fast-beacon initial phase).
-    let is_anomaly = beacon_id != expected_next_id
+    // fast-beacon initial phase). Also: first time we've seen this
+    // server — libca treats unknown-server beacons as a hint to
+    // re-search immediately so channels still in `Searching` wake up
+    // on the new IOC instead of waiting their full bucket cycle.
+    let is_anomaly = first_sighting
+        || beacon_id != expected_next_id
         || (entry.count > 3 && actual_interval < entry.period_estimate / 3);
 
     // Update state.

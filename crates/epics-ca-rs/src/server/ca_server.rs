@@ -458,7 +458,15 @@ impl CaServer {
     /// Re-read ACF from an arbitrary path. Use this when the source has
     /// moved or when the server was originally configured in-memory.
     pub async fn reload_acf_from(&self, path: &str) -> CaResult<()> {
-        let content = std::fs::read_to_string(path).map_err(CaError::Io)?;
+        // F9: std::fs::read_to_string blocks the worker thread on slow
+        // NFS / FUSE / network FS. Run it on the blocking pool so
+        // concurrent CA TCP traffic on the same worker doesn't stall
+        // for the duration of the read.
+        let path_owned = path.to_string();
+        let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(path_owned))
+            .await
+            .map_err(|e| CaError::Io(std::io::Error::other(e)))?
+            .map_err(CaError::Io)?;
         let parsed = access_security::parse_acf(&content)?;
         {
             let mut guard = self.acf.write().await;

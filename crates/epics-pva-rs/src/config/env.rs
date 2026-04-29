@@ -93,7 +93,11 @@ pub fn beacon_period_secs() -> u64 {
     std::env::var("EPICS_PVAS_BEACON_PERIOD")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| f as u64)
+        // Reject negatives, NaN, infinity, and zero — `f as u64` would
+        // saturate to 0 silently, producing `Duration::ZERO` and a
+        // beacon emit-loop that spins at memory bandwidth.
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .map(|f| f.max(0.1) as u64)
         .unwrap_or(15)
 }
 
@@ -103,7 +107,8 @@ pub fn beacon_period_long_secs() -> Option<u64> {
     std::env::var("EPICS_PVAS_BEACON_PERIOD_LONG")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| f as u64)
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .map(|f| f.max(0.1) as u64)
 }
 
 /// `EPICS_PVAS_MAX_CONNECTIONS` — server hard cap on simultaneous
@@ -148,7 +153,8 @@ pub fn conn_timeout_secs() -> u64 {
     std::env::var("EPICS_PVA_CONN_TMO")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| f as u64)
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .map(|f| f.max(1.0) as u64)
         .unwrap_or(30)
 }
 

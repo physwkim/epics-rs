@@ -123,7 +123,18 @@ pub async fn run_udp_responder_with_config(
     let beacon_socket = socket.clone();
     let beacon_guid = guid;
     let beacon_source = source.clone();
-    let _beacon = tokio::spawn(async move {
+    // F2: bind the JoinHandle to an AbortOnDrop guard scoped to this
+    // function's stack so the beacon task is aborted when the parent
+    // UDP responder unwinds (PvaServer Drop, listener task panic).
+    // Without this the bound socket-cloning beacon task lingered
+    // until runtime shutdown across server restart cycles.
+    struct AbortOnDrop(tokio::task::AbortHandle);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let beacon_join = tokio::spawn(async move {
         // Burst-then-slowdown cadence (P-G17): emit `beacon_burst_count`
         // beacons at `beacon_period` (default 15s × 10), then drop to
         // `beacon_period_long` (default 180s) for steady state. Mirrors
@@ -177,6 +188,7 @@ pub async fn run_udp_responder_with_config(
             emitted = emitted.saturating_add(1);
         }
     });
+    let _beacon_guard = AbortOnDrop(beacon_join.abort_handle());
 
     // 64 KB receive buffer — IPv4 maximum. The previous 1500-byte
     // (Ethernet MTU) cap silently truncated large multi-PV searches:
@@ -263,11 +275,10 @@ pub async fn run_udp_responder_with_config(
         }
     }
 
+    // Beacon task is aborted via the AbortOnDrop guard (`_beacon_guard`)
+    // when this function unwinds.
     #[allow(unreachable_code)]
-    {
-        _beacon.abort();
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Build a (one-PV) SEARCH_RESPONSE frame with explicit protocol name.
