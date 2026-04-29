@@ -14,3 +14,6 @@ __pycache__/
 
 # kodex MCP scratch output
 kodex-out/
+
+# Claude Code per-project state
+.claude/
