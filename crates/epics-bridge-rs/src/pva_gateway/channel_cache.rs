@@ -689,6 +689,9 @@ mod tests {
     async fn entry_subscribe_returns_fresh_receivers() {
         let (tx, rx0) = broadcast::channel::<PvField>(4);
         drop(rx0);
+        let (tx_raw, rx0_raw) =
+            broadcast::channel::<crate::pva_gateway::source::RawEvent>(4);
+        drop(rx0_raw);
         let task = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
@@ -696,6 +699,7 @@ mod tests {
             pv_name: "X".into(),
             state: Arc::new(RwLock::new(EntryState::default())),
             tx,
+            tx_raw,
             first_event: Arc::new(Notify::new()),
             _monitor_task: AbortOnDrop(task.abort_handle()),
             drop_poke: parking_lot::Mutex::new(false),
