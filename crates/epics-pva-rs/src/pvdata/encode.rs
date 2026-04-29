@@ -33,6 +33,18 @@ use crate::proto::{
 
 const TAG_STRUCTURE: u8 = 0x80;
 const TAG_UNION: u8 = 0x81;
+
+/// P-G22: bound a `Vec::with_capacity` against an attacker-controlled
+/// element count read from the wire. Every PVA decoded element must
+/// consume at least 1 byte, so capping at the cursor's remaining-byte
+/// count means a hostile peer announcing `n=0xFFFF_FFFF` allocates
+/// `data_remaining` rather than 4 billion. Real producers stay below
+/// the cap because their messages are sized accordingly.
+#[inline]
+fn safe_capacity(n: usize, cur: &Cursor<&[u8]>) -> usize {
+    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
+    n.min(remaining)
+}
 const TAG_VARIANT: u8 = 0x82;
 const TAG_BOUNDED_STRING: u8 = 0x83;
 const TAG_STRUCTURE_ARRAY: u8 = 0x88;
@@ -381,7 +393,7 @@ fn decode_structure_body_cached(
     let n = decode_size(cur, order)?
         .ok_or_else(|| DecodeError("structure field count cannot be null".into()))?
         as usize;
-    let mut fields = Vec::with_capacity(n);
+    let mut fields = Vec::with_capacity(safe_capacity(n, cur));
     for _ in 0..n {
         fields.push(decode_field_desc_cached(cur, order, cache)?);
     }
@@ -402,7 +414,7 @@ fn decode_union_body_cached(
     let n = decode_size(cur, order)?
         .ok_or_else(|| DecodeError("union variant count cannot be null".into()))?
         as usize;
-    let mut variants = Vec::with_capacity(n);
+    let mut variants = Vec::with_capacity(safe_capacity(n, cur));
     for _ in 0..n {
         variants.push(decode_field_desc_cached(cur, order, cache)?);
     }
@@ -708,7 +720,7 @@ pub fn decode_pv_field(
             let n = decode_size(cur, order)?
                 .ok_or_else(|| DecodeError("scalar array length cannot be null".into()))?
                 as usize;
-            let mut items = Vec::with_capacity(n);
+            let mut items = Vec::with_capacity(safe_capacity(n, cur));
             for _ in 0..n {
                 items.push(decode_scalar_value(*st, cur, order)?);
             }
@@ -726,7 +738,7 @@ pub fn decode_pv_field(
             let n = decode_size(cur, order)?
                 .ok_or_else(|| DecodeError("structure array length cannot be null".into()))?
                 as usize;
-            let mut out = Vec::with_capacity(n);
+            let mut out = Vec::with_capacity(safe_capacity(n, cur));
             for _ in 0..n {
                 // pvxs dataencode.cpp:359-361 — `to_wire(buf, uint8_t(0u))`
                 // for null, `uint8_t(1u)` for present. Anything else is a
@@ -784,7 +796,7 @@ pub fn decode_pv_field(
             let n = decode_size(cur, order)?
                 .ok_or_else(|| DecodeError("union array length cannot be null".into()))?
                 as usize;
-            let mut items = Vec::with_capacity(n);
+            let mut items = Vec::with_capacity(safe_capacity(n, cur));
             for _ in 0..n {
                 // Per-element selector encoding matches the scalar Union
                 // case: Size with 0xFF as the null sentinel.
@@ -836,7 +848,7 @@ pub fn decode_pv_field(
             let n = decode_size(cur, order)?
                 .ok_or_else(|| DecodeError("variant array length".into()))?
                 as usize;
-            let mut items = Vec::with_capacity(n);
+            let mut items = Vec::with_capacity(safe_capacity(n, cur));
             for _ in 0..n {
                 let peek = cur.get_u8()?;
                 if peek == 0xFF {
