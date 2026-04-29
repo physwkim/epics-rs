@@ -119,6 +119,20 @@ pub fn send_timeout_secs() -> f64 {
         .unwrap_or(5.0)
 }
 
+/// `EPICS_PVAS_TLS_HANDSHAKE_TMO` — server-side TLS handshake timeout
+/// (default 10s). Without an upper bound on `TlsAcceptor::accept` a
+/// peer that completes TCP but stalls during ClientHello holds a slot
+/// in `max_connections` until OS keepalive reaps the half-open TCP
+/// (~30s on default keepalive); coordinated peers can exhaust the
+/// connection limit. Floored at 1.0s.
+pub fn tls_handshake_timeout_secs() -> f64 {
+    std::env::var("EPICS_PVAS_TLS_HANDSHAKE_TMO")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|v| v.max(1.0))
+        .unwrap_or(10.0)
+}
+
 /// Parse `EPICS_PVA_NAME_SERVERS` into TCP socket addresses. Default
 /// port 5075. Empty when the variable is unset.
 pub fn name_servers() -> Vec<SocketAddr> {

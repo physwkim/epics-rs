@@ -409,10 +409,30 @@ async fn connect_server(
             }
         };
         let connector = TlsConnector::from(tls_cfg.clone());
-        let tls_stream = match connector.connect(server_name, stream).await {
-            Ok(s) => s,
-            Err(e) => {
+        // C-G13: cap the client-side TLS handshake. A misbehaving (or
+        // hostile) server that completes TCP but stalls during
+        // ServerHello would otherwise leave the client awaiting
+        // forever. Pairs with the existing TCP-connect timeout above.
+        // 10s default — long enough for a normal cert exchange, short
+        // enough to fall through to the next NAME_SERVER candidate.
+        let hs_timeout = epics_base_rs::runtime::env::get("EPICS_CA_TLS_HANDSHAKE_TMO")
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|v| Duration::from_secs_f64(v.max(1.0)))
+            .unwrap_or(Duration::from_secs(10));
+        let tls_stream = match tokio::time::timeout(
+            hs_timeout,
+            connector.connect(server_name, stream),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 tracing::warn!(server = %server_addr, error = %e, "TLS handshake failed");
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!(server = %server_addr,
+                    timeout = ?hs_timeout, "TLS handshake timed out");
                 return None;
             }
         };
