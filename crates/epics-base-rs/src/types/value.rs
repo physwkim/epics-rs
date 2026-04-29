@@ -97,11 +97,16 @@ impl EpicsValue {
     pub fn from_bytes(dbr_type: DbFieldType, data: &[u8]) -> CaResult<Self> {
         match dbr_type {
             DbFieldType::String => {
-                let end = data
+                // DBR_STRING is fixed-width 40 bytes (MAX_STRING_SIZE). A
+                // peer-overflowed buffer with NUL past byte 40 must
+                // still produce a ≤40-byte string per spec; otherwise
+                // a downstream consumer that assumes the bound breaks.
+                let bounded = &data[..data.len().min(40)];
+                let end = bounded
                     .iter()
                     .position(|&b| b == 0)
-                    .unwrap_or(data.len().min(40));
-                let s = std::str::from_utf8(&data[..end])
+                    .unwrap_or(bounded.len());
+                let s = std::str::from_utf8(&bounded[..end])
                     .map_err(|e| CaError::Protocol(format!("invalid UTF-8: {e}")))?;
                 Ok(Self::String(s.to_string()))
             }

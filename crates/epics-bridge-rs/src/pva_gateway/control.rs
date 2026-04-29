@@ -163,18 +163,42 @@ impl ChannelSource for ControlSource {
     }
 
     async fn subscribe(&self, name: &str) -> Option<mpsc::Receiver<PvField>> {
-        // Control PVs are snapshots: no live event source. The PVA
-        // server's MONITOR INIT path bails when both subscribe_raw
-        // and subscribe return None — the initial-snapshot emit
-        // doesn't run, so a returning-None subscribe makes
-        // `pvmonitor <prefix>:cacheSize` silently produce zero
-        // frames. Return an empty channel: the server then falls
-        // through to the get_value initial-snapshot path and emits
-        // the current reading once before the channel idles.
+        // Control PVs are snapshots, but a `pvmonitor` against one of
+        // them needs a live channel — without one the server emits
+        // the initial value, sees rx close, and sends MONITOR FINISH
+        // (subcmd 0x10), which pvxs interprets as "channel closed"
+        // and reconnect-spins. Spawn a 1 Hz refresh task that holds
+        // the tx alive and pushes the latest snapshot whenever a
+        // counter changes. The task exits when the receiver is
+        // dropped (downstream client unsubscribed).
         if !self.matches(name) {
             return None;
         }
-        let (_tx, rx) = mpsc::channel::<PvField>(1);
+        let (tx, rx) = mpsc::channel::<PvField>(4);
+        let me = self.clone();
+        let pv_name = name.to_string();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.tick().await; // skip the immediate fire — server emits
+            // initial via get_value.
+            let mut last: Option<PvField> = None;
+            loop {
+                tick.tick().await;
+                let snapshot = me.get_value(&pv_name).await;
+                if let Some(value) = snapshot {
+                    let changed = match &last {
+                        Some(prev) => prev != &value,
+                        None => true,
+                    };
+                    if changed {
+                        if tx.send(value.clone()).await.is_err() {
+                            break;
+                        }
+                        last = Some(value);
+                    }
+                }
+            }
+        });
         Some(rx)
     }
 }

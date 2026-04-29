@@ -27,6 +27,34 @@ use super::config::{LinkDirection, PvaLinkConfig};
 use super::link::{PvaLink, PvaLinkResult};
 use super::registry::PvaLinkRegistry;
 
+/// Wrap `tokio::task::block_in_place(f)` with a runtime-flavour check.
+/// Tokio's block_in_place panics under the current_thread runtime; on
+/// that flavour we run `f` directly (the caller's outer block_on then
+/// has nothing to fall back to and may itself fail, but we surface
+/// that as a regular error rather than a panic). Used by every
+/// pvalink LinkSet/Resolver entry point — they're invoked from inside
+/// `PvDatabase::resolve_external_pv`'s async context.
+fn block_in_place_or_warn<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    if let Ok(handle) = Handle::try_current() {
+        match handle.runtime_flavor() {
+            RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+            // CurrentThread (or any other future flavour) can't park
+            // a worker, so we just call directly. Inside the closure
+            // the caller will likely call Handle::block_on which
+            // panics on current_thread; catch_unwind would mask real
+            // bugs, so we let it propagate. Production IOC binaries
+            // use the multi-threaded runtime.
+            _ => f(),
+        }
+    } else {
+        f()
+    }
+}
+
 /// Resolver wrapping a [`PvaLinkRegistry`] and a tokio runtime handle.
 /// Cheap to clone — both fields are `Arc`-backed.
 #[derive(Clone)]
@@ -179,7 +207,7 @@ impl PvaLinkResolver {
             // the duration of the inner block_on so the runtime stays
             // healthy. Requires the multi-threaded runtime, which is
             // the only flavour our IOC binaries use.
-            let (link, value) = tokio::task::block_in_place(|| {
+            let (link, value) = block_in_place_or_warn(|| {
                 resolver.handle.block_on(async {
                     let link = resolver.registry.get_or_open(cfg).await.ok()?;
                     let value = link.read().await.ok()?;
@@ -253,7 +281,7 @@ impl LinkSet for PvaLinkResolver {
             scan_on_update: false,
             direction: LinkDirection::Inp,
         };
-        let value = tokio::task::block_in_place(|| {
+        let value = block_in_place_or_warn(|| {
             self.handle.block_on(async {
                 let link = self.registry.get_or_open(cfg).await.ok()?;
                 link.read().await.ok()
@@ -281,7 +309,7 @@ impl LinkSet for PvaLinkResolver {
         // Format the EpicsValue as a string using its Display impl
         // — pvput accepts the string form and the server coerces.
         let value_str = value.to_string();
-        tokio::task::block_in_place(|| {
+        block_in_place_or_warn(|| {
             self.handle.block_on(async {
                 let link = self
                     .registry
@@ -295,7 +323,7 @@ impl LinkSet for PvaLinkResolver {
 
     fn alarm_message(&self, name: &str) -> Option<String> {
         let name = strip_scheme(name);
-        let link = tokio::task::block_in_place(|| {
+        let link = block_in_place_or_warn(|| {
             self.handle
                 .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })
         })?;
@@ -304,7 +332,7 @@ impl LinkSet for PvaLinkResolver {
 
     fn time_stamp(&self, name: &str) -> Option<(i64, i32)> {
         let name = strip_scheme(name);
-        let link = tokio::task::block_in_place(|| {
+        let link = block_in_place_or_warn(|| {
             self.handle
                 .block_on(async { self.registry.get_or_open(default_inp_cfg(name)).await.ok() })
         })?;

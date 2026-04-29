@@ -222,9 +222,18 @@ impl epics_pva_rs::server_native::ChannelSource for QsrvPvStore {
             // subscriber list maintained by the registering plugin
             // (NDPluginPva); the QSRV side just appends a tx so the
             // plugin's `post()` fans out into the PVA server.
+            // Reap any subscriber whose receiver was already dropped
+            // before pushing — without this, an idle camera that
+            // never calls `process_array` (the only existing reaper)
+            // accumulates one closed Sender per subscribe-and-disconnect
+            // cycle, growing the Vec without bound.
             if let Some(handle) = pva_pvs.read().await.get(&name_owned).cloned() {
                 let (tx, rx) = mpsc::channel::<PvField>(64);
-                handle.subscribers.lock().push(tx);
+                {
+                    let mut subs = handle.subscribers.lock();
+                    subs.retain(|s| !s.is_closed());
+                    subs.push(tx);
+                }
                 return Some(rx);
             }
             let channel = self.channel(&name_owned).await?;

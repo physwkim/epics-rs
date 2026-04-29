@@ -53,6 +53,16 @@ pub struct IntrospectionState {
     /// Hook for POST /reload-tls. None when the server has no TLS
     /// source paths registered.
     pub reload_tls: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    /// Optional shared-secret token. When `Some`, every POST request
+    /// must include `X-Reload-Token: <token>` (case-insensitive
+    /// header name) or the server replies 401. When `None`,
+    /// authenticated mutations are allowed unauthenticated — keep
+    /// the bind on loopback or trusted admin networks in that case.
+    pub reload_token: Option<String>,
+    /// Concurrent-connection cap. Slowloris guard so a peer that
+    /// dribbles bytes (or completes TCP and never sends any) can't
+    /// pin spawned tasks indefinitely.
+    pub conn_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl IntrospectionState {
@@ -70,7 +80,22 @@ impl IntrospectionState {
             drain: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reload_acf: None,
             reload_tls: None,
+            reload_token: None,
+            // 32 concurrent admin requests is generous for what is in
+            // practice a probe / dashboard endpoint. Above that we
+            // 503 instead of accepting and queueing.
+            conn_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
         })
+    }
+
+    /// Set a shared-secret token required for POST routes
+    /// (`/drain`, `/reload-acf`, `/reload-tls`). Without this, any
+    /// process that can reach the bind address can mutate live
+    /// server config.
+    pub fn with_reload_token(mut self: Arc<Self>, token: String) -> Arc<Self> {
+        let inner = Arc::get_mut(&mut self).expect("with_reload_token on shared Arc");
+        inner.reload_token = Some(token);
+        self
     }
 
     /// Builder-style: set the shared drain flag (so POST /drain
@@ -141,13 +166,47 @@ pub async fn run_introspection(
                 continue;
             }
         };
+        // Concurrency cap (CR-5). Without this, a peer opening N
+        // trickle connections holds N tasks for the per-line read
+        // timeout × header count = ~2.5 minutes each. The semaphore
+        // permit lives for the duration of the spawned handler.
+        let permit = match state.conn_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(peer = %peer, "introspection: rejecting (semaphore full)");
+                let mut s = stream;
+                let _ = write_response_raw(
+                    &mut s,
+                    503,
+                    "Service Unavailable",
+                    "{\"error\":\"too many connections\"}",
+                )
+                .await;
+                continue;
+            }
+        };
         let state = state.clone();
         tokio::spawn(async move {
+            let _permit = permit; // released on task drop
             if let Err(e) = handle_request(stream, state).await {
                 tracing::debug!(peer = %peer, error = %e, "introspection request error");
             }
         });
     }
+}
+
+async fn write_response_raw(
+    stream: &mut TcpStream,
+    status: u16,
+    text: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 {status} {text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.flush().await
 }
 
 async fn handle_request(stream: TcpStream, state: Arc<IntrospectionState>) -> std::io::Result<()> {
@@ -168,12 +227,11 @@ async fn handle_request(stream: TcpStream, state: Arc<IntrospectionState>) -> st
     if read_request_line == 0 {
         return Ok(());
     }
-    // Drain remaining headers — we don't need them, but RFC 7230
-    // requires reading until the empty line so the client doesn't see
-    // a half-read connection.
-    let mut header_count = 0usize;
+    // Capture headers so we can check X-Reload-Token on POST routes.
+    // RFC 7230 requires reading until the empty line.
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
-        if header_count >= MAX_HEADERS {
+        if headers.len() >= MAX_HEADERS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "too many headers",
@@ -191,7 +249,12 @@ async fn handle_request(stream: TcpStream, state: Arc<IntrospectionState>) -> st
         if header == "\r\n" || header == "\n" {
             break;
         }
-        header_count += 1;
+        if let Some((name, value)) = header.split_once(':') {
+            headers.push((
+                name.trim().to_ascii_lowercase(),
+                value.trim().trim_end_matches(['\r', '\n']).to_string(),
+            ));
+        }
     }
 
     let (method, path) = parse_request_line(&request_line);
@@ -200,27 +263,64 @@ async fn handle_request(stream: TcpStream, state: Arc<IntrospectionState>) -> st
         ("GET", "/info") => (200, render_info(&state)),
         ("GET", "/clients") => (200, render_clients(&state).await),
         ("GET", "/queues") => (200, render_queues(&state)),
-        ("POST", "/drain") => {
-            state
-                .drain
-                .store(true, std::sync::atomic::Ordering::Release);
-            metrics::counter!("ca_server_drain_total").increment(1);
-            (200, "{\"drain\":true}".to_string())
+        ("POST", route) if matches!(route, "/drain" | "/reload-acf" | "/reload-tls") => {
+            // Authn (CR-7). When reload_token is configured, every
+            // mutating POST must present X-Reload-Token. Without
+            // configuration the routes fall through to the legacy
+            // unauthenticated path; bind on loopback or trusted
+            // admin nets in that case.
+            let token_ok = match &state.reload_token {
+                Some(expected) => headers
+                    .iter()
+                    .find(|(k, _)| k == "x-reload-token")
+                    .map(|(_, v)| v == expected)
+                    .unwrap_or(false),
+                None => true,
+            };
+            if !token_ok {
+                (401, "{\"error\":\"unauthorized\"}".to_string())
+            } else {
+                match route {
+                    "/drain" => {
+                        state
+                            .drain
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        metrics::counter!("ca_server_drain_total").increment(1);
+                        (200, "{\"drain\":true}".to_string())
+                    }
+                    "/reload-acf" => match state.reload_acf.clone() {
+                        Some(f) => {
+                            // CR-6: closure does blocking std::fs reads;
+                            // run on the blocking pool so a slow NFS
+                            // mount doesn't freeze the worker.
+                            match tokio::task::spawn_blocking(move || f()).await {
+                                Ok(Ok(())) => (200, "{\"reload_acf\":\"ok\"}".to_string()),
+                                Ok(Err(e)) => {
+                                    (500, format!("{{\"error\":\"{}\"}}", escape_json(&e)))
+                                }
+                                Err(e) => (
+                                    500,
+                                    format!("{{\"error\":\"{}\"}}", escape_json(&e.to_string())),
+                                ),
+                            }
+                        }
+                        None => (501, "{\"error\":\"reload_acf not configured\"}".to_string()),
+                    },
+                    "/reload-tls" => match state.reload_tls.clone() {
+                        Some(f) => match tokio::task::spawn_blocking(move || f()).await {
+                            Ok(Ok(())) => (200, "{\"reload_tls\":\"ok\"}".to_string()),
+                            Ok(Err(e)) => (500, format!("{{\"error\":\"{}\"}}", escape_json(&e))),
+                            Err(e) => (
+                                500,
+                                format!("{{\"error\":\"{}\"}}", escape_json(&e.to_string())),
+                            ),
+                        },
+                        None => (501, "{\"error\":\"reload_tls not configured\"}".to_string()),
+                    },
+                    _ => unreachable!(),
+                }
+            }
         }
-        ("POST", "/reload-acf") => match &state.reload_acf {
-            Some(f) => match f() {
-                Ok(()) => (200, "{\"reload_acf\":\"ok\"}".to_string()),
-                Err(e) => (500, format!("{{\"error\":\"{}\"}}", escape_json(&e))),
-            },
-            None => (501, "{\"error\":\"reload_acf not configured\"}".to_string()),
-        },
-        ("POST", "/reload-tls") => match &state.reload_tls {
-            Some(f) => match f() {
-                Ok(()) => (200, "{\"reload_tls\":\"ok\"}".to_string()),
-                Err(e) => (500, format!("{{\"error\":\"{}\"}}", escape_json(&e))),
-            },
-            None => (501, "{\"error\":\"reload_tls not configured\"}".to_string()),
-        },
         ("GET", _) | ("POST", _) => (404, "{\"error\":\"not_found\"}".to_string()),
         _ => return write_response(reader.into_inner(), 405, "Method Not Allowed", "").await,
     };

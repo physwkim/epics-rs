@@ -404,10 +404,16 @@ async fn run_nameserver_connection(
                     if accumulated.len() - consumed < CaHeader::SIZE {
                         break;
                     }
-                    let Ok(hdr) = CaHeader::from_bytes(&accumulated[consumed..]) else {
-                        break;
-                    };
-                    let msg_size = CaHeader::SIZE + align8(hdr.postsize as usize);
+                    // CR-11: handle extended postsize (postsize=0xFFFF,
+                    // count=0 → 8 extra header bytes + true u32 size).
+                    // Pure 16-byte parse would consume 65,540 bytes for
+                    // a frame whose true size is 24 + payload.
+                    let (hdr, hdr_size) =
+                        match CaHeader::from_bytes_extended(&accumulated[consumed..]) {
+                            Ok(v) => v,
+                            Err(_) => break,
+                        };
+                    let msg_size = hdr_size + align8(hdr.actual_postsize());
                     if accumulated.len() - consumed < msg_size {
                         break;
                     }

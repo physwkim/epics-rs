@@ -198,6 +198,11 @@ struct ClientState {
     /// username.
     #[cfg(feature = "cap-tokens")]
     cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
+    /// Pending WRITE_NOTIFY completion tasks. Each entry is the
+    /// AbortHandle of a task awaiting `put_notify_tx` for an async
+    /// record write. Aborted on connection drop so a stuck async
+    /// device doesn't leak the task forever.
+    write_notify_tasks: Vec<tokio::task::AbortHandle>,
 }
 
 impl ClientState {
@@ -222,6 +227,7 @@ impl ClientState {
             rate_limit_strike_threshold: 0,
             #[cfg(feature = "cap-tokens")]
             cap_token_verifier: None,
+            write_notify_tasks: Vec::new(),
         }
     }
 
@@ -745,6 +751,14 @@ where
                 record.write().await.remove_subscriber(sub.sub_id);
             }
         }
+    }
+
+    // Abort any in-flight WRITE_NOTIFY completion tasks (CR-3). A
+    // stuck async record (motor hung, asyn device unresponsive) would
+    // otherwise hold the spawned task and its captured writer Arc
+    // forever after the client disconnects.
+    for handle in state.write_notify_tasks.drain(..) {
+        handle.abort();
     }
 
     // Emit a `ChannelCleared` event for every channel still open at
@@ -1341,13 +1355,12 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
 
                 if let Some(rx) = completion_rx {
                     let writer_c = writer.clone();
-                    tokio::spawn(async move {
+                    let join = tokio::spawn(async move {
                         // Wait indefinitely for record processing to complete,
-                        // matching C EPICS rsrv behavior. The task is cleaned up
-                        // automatically if the client disconnects (rx sender dropped).
-                        // RecvError means the Sender was dropped without firing —
-                        // typically because record processing aborted. Surface as
-                        // ECA_PUTFAIL so the client doesn't observe a false success.
+                        // matching C EPICS rsrv behavior. RecvError means the
+                        // Sender was dropped without firing — typically because
+                        // record processing aborted. Surface as ECA_PUTFAIL so
+                        // the client doesn't observe a false success.
                         let final_status = match rx.await {
                             Ok(()) => eca_status,
                             Err(_) => ECA_PUTFAIL,
@@ -1363,6 +1376,10 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                         let _ = w.write_all(&resp.to_bytes()).await;
                         let _ = w.flush().await;
                     });
+                    // Track for connection-scoped cleanup (CR-3): a stuck
+                    // async record would otherwise pin this task and the
+                    // captured writer Arc forever after the client drops.
+                    state.write_notify_tasks.push(join.abort_handle());
                 } else {
                     // Synchronous completion — respond immediately
                     let mut resp = CaHeader::new(CA_PROTO_WRITE_NOTIFY);

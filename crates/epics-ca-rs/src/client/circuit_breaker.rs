@@ -37,6 +37,13 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub struct CircuitBreaker {
     state: BreakerState,
+    /// When the current HalfOpen probe started. The probe is normally
+    /// resolved by record_success/record_failure, but if the probe
+    /// future is dropped without firing either (cancellation, panic
+    /// in caller), the breaker would be stuck in HalfOpen forever
+    /// (allow() returns false) without this. We treat probes older
+    /// than `probe_timeout` as failed and allow a fresh attempt.
+    probe_started_at: Option<Instant>,
     /// Recent failure timestamps within the rolling window.
     failures: Vec<Instant>,
     /// When the current OPEN cooldown ends. Only meaningful in OPEN state.
@@ -63,6 +70,11 @@ pub struct BreakerConfig {
     pub initial_cooldown: Duration,
     /// Cap on the doubled cooldown.
     pub max_cooldown: Duration,
+    /// Maximum time a HalfOpen probe is allowed to run without
+    /// firing record_success/record_failure. After this, allow()
+    /// treats the probe as failed and admits a fresh attempt — without
+    /// it a dropped probe future strands the breaker in HalfOpen.
+    pub probe_timeout: Duration,
 }
 
 impl Default for BreakerConfig {
@@ -72,6 +84,7 @@ impl Default for BreakerConfig {
             failure_threshold: 5,
             initial_cooldown: Duration::from_secs(60),
             max_cooldown: Duration::from_secs(600),
+            probe_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -83,6 +96,7 @@ impl CircuitBreaker {
             failures: Vec::new(),
             cooldown_until: None,
             current_cooldown: initial_cooldown,
+            probe_started_at: None,
         }
     }
 
@@ -130,18 +144,30 @@ impl CircuitBreakerRegistry {
                         // permit the probe.
                         breaker.state = BreakerState::HalfOpen;
                         breaker.cooldown_until = None;
+                        breaker.probe_started_at = Some(now);
                         true
                     } else {
                         false
                     }
                 } else {
                     breaker.state = BreakerState::HalfOpen;
+                    breaker.probe_started_at = Some(now);
                     true
                 }
             }
             BreakerState::HalfOpen => {
                 // Probe already in flight, deny additional traffic until
                 // we hear back via record_success / record_failure.
+                // Exception: if the probe is older than `probe_timeout`,
+                // assume the future was dropped without firing either
+                // outcome (caller cancellation, panic) and admit a fresh
+                // probe rather than locking the breaker forever.
+                if let Some(started) = breaker.probe_started_at
+                    && now.duration_since(started) >= self.config.probe_timeout
+                {
+                    breaker.probe_started_at = Some(now);
+                    return true;
+                }
                 false
             }
         }
@@ -154,6 +180,7 @@ impl CircuitBreakerRegistry {
             breaker.failures.clear();
             breaker.cooldown_until = None;
             breaker.current_cooldown = self.config.initial_cooldown;
+            breaker.probe_started_at = None;
         }
     }
 
@@ -215,6 +242,7 @@ mod tests {
             failure_threshold: 3,
             initial_cooldown: Duration::from_millis(50),
             max_cooldown: Duration::from_millis(400),
+            probe_timeout: Duration::from_millis(500),
         }
     }
 
