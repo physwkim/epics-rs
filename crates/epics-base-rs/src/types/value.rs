@@ -173,14 +173,23 @@ impl EpicsValue {
         }
     }
 
-    /// Deserialize an array value from raw bytes
+    /// Deserialize an array value from raw bytes.
+    ///
+    /// C-G16: `count` comes directly from the wire (CA `m_count`,
+    /// 16-bit native or 32-bit "extended"). A malicious peer can send
+    /// `m_count = 0xFFFF_FFFF` with a tiny payload, and a naive
+    /// `Vec::with_capacity(count)` allocates ~8 GiB for shorts /
+    /// ~16 GiB for doubles before the bounds check inside the loop
+    /// can short-circuit. Cap the allocation at `data.len() / size`
+    /// so the capacity tracks the bytes that actually arrived.
     pub fn from_bytes_array(dbr_type: DbFieldType, data: &[u8], count: usize) -> CaResult<Self> {
         if count <= 1 {
             return Self::from_bytes(dbr_type, data);
         }
+        let cap_for = |elem_size: usize| count.min(data.len() / elem_size.max(1));
         match dbr_type {
             DbFieldType::Short => {
-                let mut arr = Vec::with_capacity(count);
+                let mut arr = Vec::with_capacity(cap_for(2));
                 for i in 0..count {
                     let offset = i * 2;
                     if offset + 2 > data.len() {
@@ -191,7 +200,7 @@ impl EpicsValue {
                 Ok(Self::ShortArray(arr))
             }
             DbFieldType::Float => {
-                let mut arr = Vec::with_capacity(count);
+                let mut arr = Vec::with_capacity(cap_for(4));
                 for i in 0..count {
                     let offset = i * 4;
                     if offset + 4 > data.len() {
@@ -207,7 +216,7 @@ impl EpicsValue {
                 Ok(Self::FloatArray(arr))
             }
             DbFieldType::Enum => {
-                let mut arr = Vec::with_capacity(count);
+                let mut arr = Vec::with_capacity(cap_for(2));
                 for i in 0..count {
                     let offset = i * 2;
                     if offset + 2 > data.len() {
@@ -218,7 +227,7 @@ impl EpicsValue {
                 Ok(Self::EnumArray(arr))
             }
             DbFieldType::Double => {
-                let mut arr = Vec::with_capacity(count);
+                let mut arr = Vec::with_capacity(cap_for(8));
                 for i in 0..count {
                     let offset = i * 8;
                     if offset + 8 > data.len() {
@@ -238,7 +247,7 @@ impl EpicsValue {
                 Ok(Self::DoubleArray(arr))
             }
             DbFieldType::Long => {
-                let mut arr = Vec::with_capacity(count);
+                let mut arr = Vec::with_capacity(cap_for(4));
                 for i in 0..count {
                     let offset = i * 4;
                     if offset + 4 > data.len() {

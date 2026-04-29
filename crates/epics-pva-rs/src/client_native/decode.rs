@@ -156,7 +156,11 @@ pub fn decode_connection_validation_request(
     let count = decode_size(&mut cur, order)
         .map_err(|e| PvaError::Decode(e.to_string()))?
         .unwrap_or(0) as usize;
-    let mut auth_methods = Vec::with_capacity(count);
+    // P-G22: cap allocation against attacker-controlled count. Each
+    // auth method string consumes at least 1 byte (Size + NUL); the
+    // remaining cursor bytes bound how many can really arrive.
+    let remaining = cur.get_ref().len().saturating_sub(cur.position() as usize);
+    let mut auth_methods = Vec::with_capacity(count.min(remaining));
     for _ in 0..count {
         auth_methods.push(
             decode_string(&mut cur, order)
