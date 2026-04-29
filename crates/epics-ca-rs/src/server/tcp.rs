@@ -1421,16 +1421,29 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     ChannelTarget::SimplePv(pv) => {
                         let rx_opt = pv.add_subscriber(sub_id, native_type, mask).await;
                         let Some(rx) = rx_opt else {
-                            // P-G14: per-PV subscriber cap reached.
-                            // Skip the registration silently — the
-                            // warn log inside add_subscriber surfaces
-                            // it for operators. Client's outstanding
-                            // EVENT_ADD will eventually time out.
+                            // C-G14: per-PV subscriber cap reached.
+                            // Round 12: previously dropped silently
+                            // (let the client time out). Now sends
+                            // ECA_ALLOCMEM so the client surfaces the
+                            // refusal immediately and can fall back to
+                            // a different transport, retry strategy,
+                            // or operator alert. Mirrors the
+                            // already-existing per-channel-cap response
+                            // a few lines above — same ECA code, same
+                            // shape.
                             tracing::warn!(
                                 pv = %pv.name,
                                 sub_id,
                                 "EVENT_ADD refused: PV subscriber cap reached"
                             );
+                            send_cmd_error(
+                                writer,
+                                CA_PROTO_EVENT_ADD,
+                                requested_type,
+                                ECA_ALLOCMEM,
+                                sub_id,
+                            )
+                            .await?;
                             return Ok(());
                         };
 
@@ -1460,7 +1473,29 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                     }
                     ChannelTarget::RecordField { record, field } => {
                         let mut instance = record.write().await;
-                        let rx = instance.add_subscriber(field, sub_id, native_type, mask);
+                        let Some(rx) = instance.add_subscriber(field, sub_id, native_type, mask)
+                        else {
+                            // C-G15: record-field subscriber cap reached.
+                            // Symmetric with C-G14 (SimplePv path); send
+                            // ECA_ALLOCMEM so the client surfaces the
+                            // refusal instead of timing out silently.
+                            tracing::warn!(
+                                record = %instance.name,
+                                field = %field,
+                                sub_id,
+                                "EVENT_ADD refused: record-field subscriber cap reached"
+                            );
+                            drop(instance);
+                            send_cmd_error(
+                                writer,
+                                CA_PROTO_EVENT_ADD,
+                                requested_type,
+                                ECA_ALLOCMEM,
+                                sub_id,
+                            )
+                            .await?;
+                            return Ok(());
+                        };
 
                         // Send initial value with full metadata
                         if let Some(snap) = instance.snapshot_for_field(field) {

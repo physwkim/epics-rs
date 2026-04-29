@@ -23,7 +23,7 @@ fn per_channel_event_depth() -> usize {
 /// any realistic dashboard fan-out, small enough to bound the
 /// per-PV `Vec<Subscriber>` under abuse. Override via
 /// `EPICS_CAS_MAX_SUBSCRIBERS_PER_PV`.
-fn max_subscribers_per_pv() -> usize {
+pub(crate) fn max_subscribers_per_pv() -> usize {
     crate::runtime::env::get("EPICS_CAS_MAX_SUBSCRIBERS_PER_PV")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(1024)
