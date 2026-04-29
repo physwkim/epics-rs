@@ -467,6 +467,18 @@ impl ServerConn {
             .map_err(|_| PvaError::Protocol("writer queue closed".into()))
     }
 
+    /// Best-effort, non-blocking enqueue. Returns `false` if the queue is
+    /// full or the connection has shut down. Intended for `Drop` paths
+    /// where awaiting is impossible — callers must accept the lossy
+    /// behaviour and rely on the server's own cleanup-on-disconnect for
+    /// the case the frame doesn't make it on the wire.
+    pub fn try_send(&self, frame: Vec<u8>) -> bool {
+        if !self.is_alive() {
+            return false;
+        }
+        self.writer_tx.try_send(frame).is_ok()
+    }
+
     /// Register a one-shot waiter for a CREATE_CHANNEL response.
     pub fn register_cid_waiter(&self, cid: u32) -> oneshot::Receiver<Frame> {
         let (tx, rx) = oneshot::channel();

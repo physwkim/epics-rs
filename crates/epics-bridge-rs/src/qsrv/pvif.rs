@@ -64,6 +64,11 @@ impl NtType {
 pub fn snapshot_to_nt_scalar(snapshot: &Snapshot) -> PvStructure {
     let mut pv = PvStructure::new("epics:nt/NTScalar:1.0");
 
+    // F6: an empty array landing in NTScalar conversion can't yield a real
+    // scalar — `epics_to_scalar` will fall back to 0/0.0/"". Surface that as
+    // INVALID/UDF so clients don't treat the placeholder as a valid reading.
+    let empty_array = is_empty_array(&snapshot.value);
+
     // value
     pv.fields.push((
         "value".into(),
@@ -71,8 +76,13 @@ pub fn snapshot_to_nt_scalar(snapshot: &Snapshot) -> PvStructure {
     ));
 
     // alarm
+    let alarm_struct = if empty_array {
+        build_alarm_overlay(snapshot, /*severity*/ 3, /*status (UDF)*/ 17)
+    } else {
+        build_alarm(snapshot)
+    };
     pv.fields
-        .push(("alarm".into(), PvField::Structure(build_alarm(snapshot))));
+        .push(("alarm".into(), PvField::Structure(alarm_struct)));
 
     // timeStamp
     pv.fields.push((
@@ -382,6 +392,58 @@ fn build_alarm(snapshot: &Snapshot) -> PvStructure {
     alarm
 }
 
+/// Build an alarm overlay that escalates severity/status without losing the
+/// underlying record context. Used when a structural mismatch (e.g. empty
+/// array fed to NTScalar) makes the value field unreliable.
+fn build_alarm_overlay(snapshot: &Snapshot, severity: u16, status: u16) -> PvStructure {
+    let eff_severity = snapshot.alarm.severity.max(severity);
+    let eff_status = if snapshot.alarm.status == 0 {
+        status
+    } else {
+        snapshot.alarm.status
+    };
+    let mut alarm = PvStructure::new("alarm_t");
+    alarm.fields.push((
+        "severity".into(),
+        PvField::Scalar(ScalarValue::Int(eff_severity as i32)),
+    ));
+    alarm.fields.push((
+        "status".into(),
+        PvField::Scalar(ScalarValue::Int(eff_status as i32)),
+    ));
+    alarm.fields.push((
+        "message".into(),
+        PvField::Scalar(ScalarValue::String(alarm_severity_string(eff_severity))),
+    ));
+    alarm
+}
+
+/// True when `value` is an array variant containing zero elements.
+fn is_empty_array(value: &EpicsValue) -> bool {
+    matches!(
+        value,
+        EpicsValue::ShortArray(a) if a.is_empty()
+    ) || matches!(
+        value,
+        EpicsValue::FloatArray(a) if a.is_empty()
+    ) || matches!(
+        value,
+        EpicsValue::EnumArray(a) if a.is_empty()
+    ) || matches!(
+        value,
+        EpicsValue::DoubleArray(a) if a.is_empty()
+    ) || matches!(
+        value,
+        EpicsValue::LongArray(a) if a.is_empty()
+    ) || matches!(
+        value,
+        EpicsValue::CharArray(a) if a.is_empty()
+    ) || matches!(
+        value,
+        EpicsValue::StringArray(a) if a.is_empty()
+    )
+}
+
 fn build_timestamp(time: SystemTime, user_tag: i32) -> PvStructure {
     let mut ts = PvStructure::new("time_t");
     let (secs, nanos) = match time.duration_since(UNIX_EPOCH) {
@@ -607,6 +669,37 @@ mod tests {
             assert!(va_struct.get_field("highWarningLimit").is_some());
         } else {
             panic!("expected valueAlarm structure");
+        }
+    }
+
+    #[test]
+    fn nt_scalar_empty_array_marks_invalid_udf() {
+        // F6: when an empty array reaches NTScalar conversion, value cannot
+        // be recovered — alarm must escalate to INVALID severity / UDF status
+        // so clients don't read the placeholder zero as a valid sample.
+        let snap = test_snapshot(EpicsValue::DoubleArray(vec![]));
+        let pv = snapshot_to_nt_scalar(&snap);
+
+        if let Some(PvField::Structure(alarm)) = pv.get_field("alarm") {
+            let sev = alarm.get_field("severity");
+            let st = alarm.get_field("status");
+            assert!(matches!(sev, Some(PvField::Scalar(ScalarValue::Int(3)))));
+            assert!(matches!(st, Some(PvField::Scalar(ScalarValue::Int(17)))));
+        } else {
+            panic!("expected alarm structure");
+        }
+    }
+
+    #[test]
+    fn nt_scalar_non_empty_keeps_original_alarm() {
+        // Sanity: non-empty array (or scalar) does NOT trigger the overlay.
+        let snap = test_snapshot(EpicsValue::Double(1.0));
+        let pv = snapshot_to_nt_scalar(&snap);
+        if let Some(PvField::Structure(alarm)) = pv.get_field("alarm") {
+            let sev = alarm.get_field("severity");
+            assert!(matches!(sev, Some(PvField::Scalar(ScalarValue::Int(0)))));
+        } else {
+            panic!("expected alarm structure");
         }
     }
 

@@ -2,13 +2,17 @@ use epics_base_rs::types::{DbFieldType, EpicsValue};
 use epics_pva_rs::pvdata::{PvField, ScalarType, ScalarValue};
 
 /// Convert EPICS DBF type to PVA ScalarType.
+///
+/// Note: `DBF_CHAR` maps to `pvByte` (signed i8) per C qsrv, not `pvUByte`.
+/// libca commit 7cb80d5a1 made `epicsInt8` signed; the PVA mapping follows
+/// suit so a negative DBF_CHAR value round-trips with sign intact.
 pub fn dbf_to_scalar_type(dbf: DbFieldType) -> ScalarType {
     match dbf {
         DbFieldType::String => ScalarType::String,
         DbFieldType::Short => ScalarType::Short,
         DbFieldType::Float => ScalarType::Float,
         DbFieldType::Enum => ScalarType::UShort, // C++ maps DBR_ENUM to pvUShort
-        DbFieldType::Char => ScalarType::UByte,
+        DbFieldType::Char => ScalarType::Byte,
         DbFieldType::Long => ScalarType::Int,
         DbFieldType::Double => ScalarType::Double,
     }
@@ -21,7 +25,10 @@ pub fn epics_to_scalar(val: &EpicsValue) -> ScalarValue {
         EpicsValue::Short(v) => ScalarValue::Short(*v),
         EpicsValue::Float(v) => ScalarValue::Float(*v),
         EpicsValue::Enum(v) => ScalarValue::UShort(*v), // C++: pvUShort
-        EpicsValue::Char(v) => ScalarValue::UByte(*v),
+        // C qsrv: DBF_CHAR → pvByte (signed). Bit-preserving cast keeps
+        // the on-the-wire byte identical; only the typed interpretation
+        // changes from unsigned to signed.
+        EpicsValue::Char(v) => ScalarValue::Byte(*v as i8),
         EpicsValue::Long(v) => ScalarValue::Int(*v),
         EpicsValue::Double(v) => ScalarValue::Double(*v),
         // Arrays: take first element or default
@@ -30,7 +37,7 @@ pub fn epics_to_scalar(val: &EpicsValue) -> ScalarValue {
         EpicsValue::EnumArray(a) => ScalarValue::UShort(a.first().copied().unwrap_or(0)),
         EpicsValue::DoubleArray(a) => ScalarValue::Double(a.first().copied().unwrap_or(0.0)),
         EpicsValue::LongArray(a) => ScalarValue::Int(a.first().copied().unwrap_or(0)),
-        EpicsValue::CharArray(a) => ScalarValue::UByte(a.first().copied().unwrap_or(0)),
+        EpicsValue::CharArray(a) => ScalarValue::Byte(a.first().copied().unwrap_or(0) as i8),
         EpicsValue::StringArray(a) => ScalarValue::String(a.first().cloned().unwrap_or_default()),
     }
 }
@@ -46,8 +53,11 @@ pub fn scalar_to_epics(val: &ScalarValue) -> EpicsValue {
         ScalarValue::Double(v) => EpicsValue::Double(*v),
         ScalarValue::Int(v) => EpicsValue::Long(*v),
         ScalarValue::Long(v) => EpicsValue::Double(*v as f64),
-        ScalarValue::Byte(v) => EpicsValue::Short(*v as i16),
-        ScalarValue::UByte(v) => EpicsValue::Char(*v),
+        // C qsrv: DBF_CHAR is signed (pvByte). Bit-preserving cast keeps
+        // the storage byte identical; legacy UByte input still accepted
+        // — we widen to Short to avoid clipping the unsigned 128..255 range.
+        ScalarValue::Byte(v) => EpicsValue::Char(*v as u8),
+        ScalarValue::UByte(v) => EpicsValue::Short(*v as i16),
         ScalarValue::UShort(v) => EpicsValue::Enum(*v),
         ScalarValue::UInt(v) => EpicsValue::Long(*v as i32),
         ScalarValue::ULong(v) => EpicsValue::Double(*v as f64),
@@ -158,7 +168,7 @@ pub fn epics_to_pv_field(val: &EpicsValue) -> PvField {
             PvField::ScalarArray(a.iter().map(|v| ScalarValue::Int(*v)).collect())
         }
         EpicsValue::CharArray(a) => {
-            PvField::ScalarArray(a.iter().map(|v| ScalarValue::UByte(*v)).collect())
+            PvField::ScalarArray(a.iter().map(|v| ScalarValue::Byte(*v as i8)).collect())
         }
         EpicsValue::StringArray(a) => {
             PvField::ScalarArray(a.iter().map(|v| ScalarValue::String(v.clone())).collect())
@@ -195,8 +205,15 @@ pub fn pv_field_to_epics(field: &PvField) -> Option<EpicsValue> {
                 ScalarValue::Int(_) => Some(EpicsValue::LongArray(
                     arr.iter().map(|v| scalar_to_i64(v) as i32).collect(),
                 )),
-                ScalarValue::UByte(_) => Some(EpicsValue::CharArray(
+                // Canonical: DBF_CHAR ↔ pvByte (signed).
+                ScalarValue::Byte(_) => Some(EpicsValue::CharArray(
                     arr.iter().map(|v| scalar_to_i64(v) as u8).collect(),
+                )),
+                // Legacy: pvUByte arrays widen to Short to preserve the
+                // unsigned range; never silently fold into the new signed
+                // DBF_CHAR mapping.
+                ScalarValue::UByte(_) => Some(EpicsValue::ShortArray(
+                    arr.iter().map(|v| scalar_to_i64(v) as i16).collect(),
                 )),
                 ScalarValue::UShort(_) => Some(EpicsValue::EnumArray(
                     arr.iter().map(|v| scalar_to_i64(v) as u16).collect(),
@@ -280,7 +297,7 @@ mod tests {
         assert_eq!(dbf_to_scalar_type(DbFieldType::String), ScalarType::String);
         assert_eq!(dbf_to_scalar_type(DbFieldType::Short), ScalarType::Short);
         assert_eq!(dbf_to_scalar_type(DbFieldType::Long), ScalarType::Int);
-        assert_eq!(dbf_to_scalar_type(DbFieldType::Char), ScalarType::UByte);
+        assert_eq!(dbf_to_scalar_type(DbFieldType::Char), ScalarType::Byte);
         assert_eq!(dbf_to_scalar_type(DbFieldType::Enum), ScalarType::UShort);
     }
 
@@ -303,5 +320,42 @@ mod tests {
         let sv = ScalarValue::Double(2.5);
         let ev = scalar_to_epics_typed(&sv, DbFieldType::String);
         assert!(matches!(ev, EpicsValue::String(_)));
+    }
+
+    #[test]
+    fn f9_dbf_char_signed_roundtrip() {
+        // F9: DBF_CHAR maps to pvByte (signed). A negative value (-1 stored
+        // as 0xFF) must serialize as ScalarValue::Byte(-1), then round-trip
+        // back to the same byte pattern in EpicsValue::Char.
+        let orig = EpicsValue::Char(0xFFu8); // bit pattern for -1 as i8
+        let sv = epics_to_scalar(&orig);
+        assert!(matches!(sv, ScalarValue::Byte(-1)));
+        let back = scalar_to_epics(&sv);
+        assert_eq!(back, EpicsValue::Char(0xFFu8));
+    }
+
+    #[test]
+    fn f9_dbf_char_array_signed_roundtrip() {
+        // Array path mirrors the scalar path: bit-preserving Byte mapping.
+        let orig = EpicsValue::CharArray(vec![0u8, 1, 0xFE, 0xFF]); // 0,1,-2,-1 as i8
+        let pf = epics_to_pv_field(&orig);
+        if let PvField::ScalarArray(arr) = &pf {
+            assert!(matches!(arr[0], ScalarValue::Byte(0)));
+            assert!(matches!(arr[2], ScalarValue::Byte(-2)));
+            assert!(matches!(arr[3], ScalarValue::Byte(-1)));
+        } else {
+            panic!("expected ScalarArray");
+        }
+        let back = pv_field_to_epics(&pf).unwrap();
+        assert_eq!(back, orig);
+    }
+
+    #[test]
+    fn f9_legacy_ubyte_widens_to_short() {
+        // For backward compat: an incoming pvUByte (unsigned) widens to
+        // Short rather than collapsing into the new signed DBF_CHAR space.
+        let sv = ScalarValue::UByte(200);
+        let ev = scalar_to_epics(&sv);
+        assert_eq!(ev, EpicsValue::Short(200));
     }
 }

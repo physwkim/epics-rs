@@ -469,7 +469,9 @@ fn scalar_to_epics(sv: &ScalarValue) -> EpicsValue {
         ScalarValue::ULong(v) => EpicsValue::Long(*v as i32),
         ScalarValue::UInt(v) => EpicsValue::Long(*v as i32),
         ScalarValue::UShort(v) => EpicsValue::Short(*v as i16),
-        ScalarValue::UByte(v) => EpicsValue::Char(*v),
+        // F9: DBF_CHAR is signed (pvByte). Widen UByte to Short so the
+        // unsigned 128..255 range survives the cross-protocol hop.
+        ScalarValue::UByte(v) => EpicsValue::Short(*v as i16),
         ScalarValue::Boolean(v) => EpicsValue::Long(if *v { 1 } else { 0 }),
         ScalarValue::String(s) => EpicsValue::String(s.clone()),
     }

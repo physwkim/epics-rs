@@ -42,27 +42,70 @@ fn alloc_ioid() -> u32 {
 /// Default pipeline window for monitors. Tuned to match pvxs.
 pub const DEFAULT_PIPELINE_SIZE: u32 = 4;
 
-/// C-G1: drop-guard for the per-IOID router entry. Every op that
-/// calls `server.register_ioid_stream(ioid)` must arrange for
-/// `unregister_ioid(ioid)` to fire on every exit path — including the
-/// `?` early-returns that were previously missing it (each `?` after
-/// register would leak the router HashMap slot under network/server
-/// failure). The remove is idempotent, so an explicit
-/// `unregister_ioid` at the success-path tail and the guard's
-/// drop-time call cooperate without double-fault.
+/// C-G1 / Agent-C: drop-guard for the per-IOID router entry.
+///
+/// **Client-side**: `unregister_ioid` is always called, even on `?`
+/// early-returns from inside `op_*` helpers. The remove is idempotent,
+/// so an explicit `unregister_ioid` at the success-path tail and the
+/// guard's drop-time call cooperate without double-fault.
+///
+/// **Server-side**: when an op is abandoned mid-flight (caller drops
+/// the future, or a long-running monitor handle is dropped without an
+/// explicit `stop()`), the server still holds an in-flight operation
+/// keyed by `(sid, ioid)`. If `sid` is set, the guard emits a
+/// best-effort DESTROY_REQUEST via `try_send` so the server can free
+/// that slot. The send is non-blocking — Drop is sync, and we'd rather
+/// drop the cleanup frame than block the runtime; the server reaps
+/// stranded ops on disconnect anyway.
 struct IoidGuard {
     server: Arc<super::server_conn::ServerConn>,
     ioid: u32,
+    /// `Some(sid)` when DESTROY_REQUEST should be sent on drop. Cleared
+    /// to `None` (via `disarm()`) once the op has explicitly cleaned up,
+    /// to avoid emitting a redundant DESTROY after the success-path
+    /// destroy has already been sent.
+    destroy_sid: Option<u32>,
 }
 
 impl IoidGuard {
     fn new(server: Arc<super::server_conn::ServerConn>, ioid: u32) -> Self {
-        Self { server, ioid }
+        Self {
+            server,
+            ioid,
+            destroy_sid: None,
+        }
+    }
+
+    /// Arm the drop-time DESTROY_REQUEST emitter with this `sid`.
+    /// Call after the op has been registered server-side so that any
+    /// abandonment (caller drops the future / handle) trips the cleanup.
+    fn arm_destroy(&mut self, sid: u32) {
+        self.destroy_sid = Some(sid);
+    }
+
+    /// Disarm the DESTROY_REQUEST emitter — the success path has already
+    /// sent its own cleanup, so the guard should only release the
+    /// client-side router slot on drop.
+    fn disarm(&mut self) {
+        self.destroy_sid = None;
     }
 }
 
 impl Drop for IoidGuard {
     fn drop(&mut self) {
+        if let Some(sid) = self.destroy_sid.take() {
+            // Best-effort server-side cleanup. We can't `await`, so we
+            // fall back to a non-blocking enqueue and ignore the result.
+            // The frame format is identical to what op_get / op_put emit
+            // on success, just synthesised here from the cached
+            // byte-order. Failure to enqueue is benign: the server
+            // reaps stranded ops when the TCP circuit drops.
+            let codec = PvaCodec {
+                big_endian: matches!(self.server.byte_order, ByteOrder::Big),
+            };
+            let frame = codec.build_destroy_request(sid, self.ioid);
+            let _ = self.server.try_send(frame);
+        }
         self.server.unregister_ioid(self.ioid);
     }
 }
@@ -111,7 +154,7 @@ async fn op_get_inner(
     };
 
     let mut stream = server.register_ioid_stream(ioid);
-    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
+    let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
     // INIT
@@ -134,6 +177,9 @@ async fn op_get_inner(
             init.status
         )));
     }
+    // INIT succeeded → server has registered (sid, ioid). Arm so any
+    // mid-op drop fires a DESTROY_REQUEST to release that slot.
+    ioid_guard.arm_destroy(sid);
     let intro = init.introspection;
 
     // DATA
@@ -153,7 +199,9 @@ async fn op_get_inner(
         ))),
     };
 
-    // Best-effort cleanup
+    // Best-effort cleanup. Disarm the guard first so it doesn't fire a
+    // redundant DESTROY when it drops below.
+    ioid_guard.disarm();
     let destroy = codec.build_destroy_request(sid, ioid);
     let _ = server.send(destroy).await;
     server.unregister_ioid(ioid);
@@ -258,7 +306,7 @@ pub async fn op_put_field(
         build_pv_request_fields(&[field_path], big_endian)
     };
     let mut stream = server.register_ioid_stream(ioid);
-    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
+    let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
     let init_req = codec.build_put_init(sid, ioid, &pv_req);
@@ -280,6 +328,7 @@ pub async fn op_put_field(
             init.status
         )));
     }
+    ioid_guard.arm_destroy(sid);
     let intro = init.introspection;
 
     let parts: Vec<&str> = field_path.split('.').filter(|s| !s.is_empty()).collect();
@@ -318,6 +367,7 @@ pub async fn op_put_field(
         ))),
     };
 
+    ioid_guard.disarm();
     let destroy = codec.build_destroy_request(sid, ioid);
     let _ = server.send(destroy).await;
     server.unregister_ioid(ioid);
@@ -345,7 +395,7 @@ pub async fn op_put_value(
 
     let pv_req = build_pv_request_value_only(big_endian);
     let mut stream = server.register_ioid_stream(ioid);
-    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
+    let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
     let init_req = codec.build_put_init(sid, ioid, &pv_req);
@@ -365,6 +415,7 @@ pub async fn op_put_value(
             init.status
         )));
     }
+    ioid_guard.arm_destroy(sid);
     let intro = init.introspection;
 
     let mut payload = Vec::new();
@@ -399,6 +450,7 @@ pub async fn op_put_value(
         ))),
     };
 
+    ioid_guard.disarm();
     let destroy = codec.build_destroy_request(sid, ioid);
     let _ = server.send(destroy).await;
     result
@@ -421,7 +473,7 @@ async fn op_put_inner(
         None => build_pv_request_value_only(big_endian),
     };
     let mut stream = server.register_ioid_stream(ioid);
-    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
+    let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
     // INIT
@@ -444,6 +496,7 @@ async fn op_put_inner(
             init.status
         )));
     }
+    ioid_guard.arm_destroy(sid);
     let intro = init.introspection;
 
     // Build value matching introspection.
@@ -482,6 +535,7 @@ async fn op_put_inner(
         ))),
     };
 
+    ioid_guard.disarm();
     let destroy = codec.build_destroy_request(sid, ioid);
     let _ = server.send(destroy).await;
     server.unregister_ioid(ioid);
@@ -688,6 +742,39 @@ impl SubscriptionHandle {
         Pauser {
             state: self.state.clone(),
         }
+    }
+}
+
+/// Agent-C cleanup: when a SubscriptionHandle is dropped without an
+/// explicit `stop()` / `stop_sync()`, signal the inner loop to bail and
+/// fire a best-effort DESTROY_REQUEST so the server releases the IOID
+/// slot rather than waiting for the TCP circuit to die. The send is
+/// non-blocking (`try_send`) because Drop runs on whichever runtime the
+/// handle was dropped on, and we'd rather drop the cleanup frame than
+/// stall a runtime worker.
+impl Drop for SubscriptionHandle {
+    fn drop(&mut self) {
+        // Cooperative: tell the loop to terminate at its next stop check.
+        self.state
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Server-side teardown: only fire while we still have a live
+        // (server, sid, ioid) triple. Reconnect-gap drops have nothing
+        // to send, which is fine — the next reconnect cycle won't fire
+        // because `stop` is now set.
+        let snapshot = self.state.active.lock().take();
+        if let Some((server, sid, ioid)) = snapshot {
+            let codec = PvaCodec {
+                big_endian: matches!(server.byte_order, ByteOrder::Big),
+            };
+            let frame = codec.build_destroy_request(sid, ioid);
+            let _ = server.try_send(frame);
+            server.unregister_ioid(ioid);
+        }
+        // Don't await/abort the task here — letting it run to a clean
+        // exit on the next `stop` check matches the existing
+        // `stop()`-then-drop semantics. Callers that need synchronous
+        // teardown should call `stop_sync().await`.
     }
 }
 
@@ -1442,7 +1529,7 @@ pub async fn op_rpc(
     encode_type_desc(request_desc, order, &mut pv_req);
 
     let mut stream = server.register_ioid_stream(ioid);
-    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
+    let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
 
     // INIT
     let mut init = Vec::with_capacity(9 + pv_req.len());
@@ -1473,6 +1560,7 @@ pub async fn op_rpc(
             init_resp.status
         )));
     }
+    ioid_guard.arm_destroy(sid);
     let response_intro = init_resp.introspection;
 
     // DATA — RPC argument: `type(arg) + full_value(arg)`.
@@ -1508,6 +1596,7 @@ pub async fn op_rpc(
         ))),
     };
 
+    ioid_guard.disarm();
     let destroy = codec.build_destroy_request(sid, ioid);
     let _ = server.send(destroy).await;
     server.unregister_ioid(ioid);
