@@ -1,0 +1,90 @@
+# cargo-nextest configuration for the epics-rs workspace.
+#
+# Why this exists
+# ───────────────
+# nextest runs every test in its own process, plus several processes
+# in parallel. That's much more concurrency than `cargo test` (which
+# multiplexes tests as threads inside one binary). For most tests it's
+# a strict win — full default-suite runtime drops from ~30 s to ~8 s.
+#
+# But our integration suites that bind real network listeners
+# (PvaServer / softIoc / mshim-rs) need throttled concurrency to avoid
+# port-allocation races between simultaneous test processes. Group
+# definitions below cap their max-threads.
+#
+# Conventions
+# ───────────
+# - `pva_listener` — any test that opens a `PvaServer::isolated()` or
+#   binds an ephemeral PVA port. Capped at 4 parallel processes.
+# - `ca_softioc`   — any test that spawns the C `softIoc` binary or
+#   the Rust IOC under test. Capped at 1 because softIoc owns the
+#   `EPICS_CA_SERVER_PORT` env-var scope and racing instances inherit
+#   each other's vars.
+# - `ndarray_io`   — file_magick tests in `ad-plugins-rs` that read /
+#   write tempfile-backed image fixtures. Capped at 1 because
+#   `tempfile` collisions surface as PNG decode errors.
+#
+# Apply via `[[profile.default.overrides]]` blocks below.
+#
+# Tip: a one-off `cargo nextest run --no-fail-fast --retries 2` is the
+# recommended dev loop — flaky integration suites still occasionally
+# need a retry under unusual load.
+
+[profile.default]
+# Stop after the first 5 failures in a default run so a regression
+# storm in one binary doesn't drown other failures' output.
+fail-fast = true
+# Per-test soft timeout. A real bug surfaces in seconds; anything
+# longer is worth flagging. Increase per-suite via overrides if you
+# really need it.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# CI profile: friendlier output + retries for the genuinely flaky
+# integration suites. Use via `cargo nextest run --profile ci`.
+[profile.ci]
+fail-fast = false
+retries = 2
+slow-timeout = { period = "60s", terminate-after = 4 }
+status-level = "retry"
+final-status-level = "flaky"
+
+# Test groups — cap per-group parallelism to match the resource the
+# group contends on (network ports, env vars, tempfiles).
+[[profile.default.overrides]]
+filter = 'binary(stability) | binary(tls) | binary(typed_nt) | binary(service_framework) | binary(pva_gateway) | binary(parity_interop)'
+test-group = 'pva_listener'
+
+[[profile.default.overrides]]
+filter = 'binary(interop_rust_client_c_ioc) | binary(interop_c_client_rust_ioc) | binary(stress_load) | binary(differential_libca)'
+test-group = 'ca_softioc'
+
+[[profile.default.overrides]]
+filter = 'package(ad-plugins-rs) and test(file_magick::)'
+test-group = 'ndarray_io'
+
+# Same overrides apply under the `ci` profile.
+[[profile.ci.overrides]]
+filter = 'binary(stability) | binary(tls) | binary(typed_nt) | binary(service_framework) | binary(pva_gateway) | binary(parity_interop)'
+test-group = 'pva_listener'
+
+[[profile.ci.overrides]]
+filter = 'binary(interop_rust_client_c_ioc) | binary(interop_c_client_rust_ioc) | binary(stress_load) | binary(differential_libca)'
+test-group = 'ca_softioc'
+
+[[profile.ci.overrides]]
+filter = 'package(ad-plugins-rs) and test(file_magick::)'
+test-group = 'ndarray_io'
+
+[test-groups]
+# PVA listener-binding tests serialise process-wide. With max-threads
+# higher than 1 we observed flakes in `parity_interop`, `stability`
+# (auto-reconnect, channel-coalescing, pipeline) when several PVA
+# servers raced against each other's UDP responder + beacon emitter.
+# Locking to 1 still gives ~3× nextest speedup over `cargo test`
+# because dispatch + per-test setup is faster than the thread-pool
+# variant inside a single binary.
+pva_listener = { max-threads = 1 }
+# softIoc spawns share `EPICS_CA_SERVER_PORT` globally. 1 only.
+ca_softioc = { max-threads = 1 }
+# tempfile / PNG fixture collisions surface as decode errors.
+ndarray_io = { max-threads = 1 }
