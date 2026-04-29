@@ -781,6 +781,58 @@ async fn handle_connection_io(
             Some(Command::Message) => {
                 handle_message(&frame, order, &peer);
             }
+            Some(Command::PutGet) => {
+                // I-1 (Round I): atomic put-then-get. The pvxs
+                // wire spec defines this as a separate command but
+                // pvxs itself rarely implements it — production
+                // sites use `record[process=true]` in the PUT
+                // pvRequest options instead. We respond with a
+                // typed "not supported" error so legacy clients
+                // get a clean failure message rather than a
+                // protocol parse error or silent timeout.
+                handle_unsupported_op(&frame, &tx, Command::PutGet, "PUT_GET", order).await;
+            }
+            Some(Command::Process) => {
+                // I-1: same handling as PutGet — modern PVA uses
+                // pvRequest options, not the wire-level PROCESS
+                // command. Respond clean.
+                handle_unsupported_op(&frame, &tx, Command::Process, "PROCESS", order).await;
+            }
+            Some(Command::OriginTag) => {
+                // I-5: pvxs origin-tag is an optional payload for
+                // tracing/debugging that the spec lets servers
+                // ignore. We log at debug level and carry on so a
+                // client that sends one still works.
+                debug!(
+                    peer = ?peer,
+                    bytes = frame.payload.len(),
+                    "OriginTag received (silently consumed)"
+                );
+            }
+            Some(Command::AclChange) => {
+                // I-5: AclChange is a server → client push that
+                // pvxs / pvAccessCPP servers emit when access
+                // rights for a channel change. We don't yet wire
+                // up server-side ACF mutation events, so receiving
+                // one as a server (which shouldn't happen) is
+                // logged-and-ignored. As a client we'd react in
+                // the read loop.
+                debug!(
+                    peer = ?peer,
+                    "AclChange received as server (unexpected); ignoring"
+                );
+            }
+            Some(Command::MultipleData) => {
+                // I-5: MultipleData was a never-really-deployed
+                // batch monitor delivery format. pvxs decodes it
+                // but our client/server only emit single-data
+                // monitor frames. Server-side receipt is
+                // inappropriate — log and drop.
+                debug!(
+                    peer = ?peer,
+                    "MultipleData received as server (unexpected); ignoring"
+                );
+            }
             Some(Command::Echo) => {
                 // Echo back the same frame.
                 let mut buf = Vec::new();
@@ -799,6 +851,37 @@ async fn handle_connection_io(
             }
         }
     }
+}
+
+/// I-1: respond to a wire command we don't implement with a typed
+/// error frame instead of letting the client time out. The
+/// response shape mirrors the standard op error response so a
+/// pvxs / pvAccessJava client surfaces the message verbatim
+/// instead of a protocol violation.
+async fn handle_unsupported_op(
+    frame: &Frame,
+    tx: &SrvTx,
+    cmd: Command,
+    label: &str,
+    order: ByteOrder,
+) {
+    use crate::proto::WriteExt;
+    let mut cur = frame.cursor();
+    let _sid = cur.get_u32(order).unwrap_or(0);
+    let ioid = cur.get_u32(order).unwrap_or(0);
+    let _subcmd = cur.get_u8().unwrap_or(0);
+
+    let mut payload = Vec::new();
+    payload.put_u32(ioid, order);
+    payload.put_u8(0x00); // subcmd 0 = data response
+    let status = Status::error(format!("{label} not supported by this server"));
+    status.write_into(order, &mut payload);
+
+    let header = PvaHeader::application(true, order, cmd.code(), payload.len() as u32);
+    let mut buf = Vec::new();
+    header.write_into(&mut buf);
+    buf.extend_from_slice(&payload);
+    let _ = tx.send(buf).await;
 }
 
 async fn read_frame<R: tokio::io::AsyncRead + Unpin>(

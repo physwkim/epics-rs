@@ -10,6 +10,7 @@ use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{PvaServer, SharedSource};
 use epics_pva_rs::service::pva_service;
+use serial_test::serial;
 
 #[derive(Default)]
 struct Counter {
@@ -75,6 +76,7 @@ fn nturi_request(args: &[(&str, ScalarValue)]) -> (FieldDesc, PvField) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn pva_service_dispatch_round_trip() {
     let source = SharedSource::new();
     let registered =

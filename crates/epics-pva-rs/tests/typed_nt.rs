@@ -9,8 +9,10 @@ use std::time::Duration;
 use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::nt::derive::NTScalar;
 use epics_pva_rs::nt::{Alarm, TimeStamp, TypedNT};
+use epics_pva_rs::nt::typed::EnumValue;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{PvaServer, SharedPV, SharedSource};
+use serial_test::serial;
 
 #[derive(Debug, Clone, NTScalar, PartialEq)]
 struct MotorPos {
@@ -59,6 +61,7 @@ fn typed_nt_round_trip_local() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn pvget_typed_against_local_server() {
     // Build a SharedPV holding a 3-field NTScalar (value + alarm +
     // timestamp). The descriptor we open with must match the
@@ -94,7 +97,75 @@ async fn pvget_typed_against_local_server() {
     assert_eq!(pos.alarm.message, "");
 }
 
+/// I-2: same NTScalar derive, value field is `Vec<f64>` — wrapper
+/// struct_id auto-flips to `epics:nt/NTScalarArray:1.0`.
+#[derive(Debug, Clone, NTScalar, PartialEq)]
+struct Trajectory {
+    value: Vec<f64>,
+    #[nt(meta)]
+    alarm: Alarm,
+}
+
+#[test]
+fn typed_nt_array_descriptor() {
+    let d = Trajectory::descriptor();
+    match d {
+        FieldDesc::Structure { struct_id, fields } => {
+            assert_eq!(struct_id, "epics:nt/NTScalarArray:1.0");
+            assert_eq!(fields[0].0, "value");
+            assert!(matches!(
+                fields[0].1,
+                FieldDesc::ScalarArray(ScalarType::Double)
+            ));
+        }
+        other => panic!("unexpected descriptor: {other:?}"),
+    }
+}
+
+#[test]
+fn typed_nt_array_round_trip() {
+    let t = Trajectory {
+        value: vec![1.0, 2.0, 3.0, 4.0],
+        alarm: Alarm::default(),
+    };
+    let f = t.to_pv_field();
+    let back = Trajectory::from_pv_field(&f).expect("decode");
+    assert_eq!(t, back);
+}
+
+/// I-2: NTEnum via EnumValue runtime helper.
+#[derive(Debug, Clone, NTScalar, PartialEq)]
+struct ValveState {
+    value: EnumValue,
+    #[nt(meta)]
+    alarm: Alarm,
+}
+
+#[test]
+fn typed_nt_enum_round_trip() {
+    let v = ValveState {
+        value: EnumValue {
+            index: 1,
+            choices: vec!["closed".into(), "open".into(), "fault".into()],
+        },
+        alarm: Alarm::default(),
+    };
+    let f = v.to_pv_field();
+    let back = ValveState::from_pv_field(&f).expect("decode");
+    assert_eq!(v, back);
+
+    // Wrapper struct_id is NTEnum (forwarded from EnumValue::descriptor()).
+    let d = ValveState::descriptor();
+    match d {
+        FieldDesc::Structure { struct_id, .. } => {
+            assert_eq!(struct_id, "epics:nt/NTEnum:1.0");
+        }
+        other => panic!("unexpected descriptor: {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn pvget_typed_primitive_f64() {
     // Bare f64 against a plain NTScalar<double> source.
     let pv = SharedPV::new();

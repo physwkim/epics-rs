@@ -103,3 +103,6 @@ required-features = ["pva-gateway-bin"]
 name = "dual-gateway-rs"
 path = "src/bin/dual_gateway_rs.rs"
 required-features = ["dual-gateway-bin"]
+
+[dev-dependencies]
+serial_test = "3"

@@ -390,6 +390,181 @@ impl TypedNT for String {
     }
 }
 
+// ── NT Scalar-array wrappers (Vec<T> → NTScalarArray) ─────────────
+//
+// Round I-2 derive matrix runtime support. The `#[derive(NTScalarArray)]`
+// macro emits a `TypedNT` impl that funnels element encoding through the
+// helpers below — keeps the wire-format quirks in one place rather than
+// inside every macro expansion.
+
+fn nt_scalar_array_root(elem_type: crate::pvdata::ScalarType) -> FieldDesc {
+    FieldDesc::Structure {
+        struct_id: "epics:nt/NTScalarArray:1.0".into(),
+        fields: vec![("value".into(), FieldDesc::ScalarArray(elem_type))],
+    }
+}
+
+macro_rules! impl_typed_nt_scalar_array {
+    ($t:ty, $st:ident, $sv:ident) => {
+        impl TypedNT for ::std::vec::Vec<$t> {
+            fn descriptor() -> FieldDesc {
+                nt_scalar_array_root(crate::pvdata::ScalarType::$st)
+            }
+            fn to_pv_field(&self) -> PvField {
+                let mut s = PvStructure::new("epics:nt/NTScalarArray:1.0");
+                let items: ::std::vec::Vec<ScalarValue> = self
+                    .iter()
+                    .map(|v| ScalarValue::$sv(v.clone()))
+                    .collect();
+                s.fields
+                    .push(("value".into(), PvField::ScalarArray(items)));
+                PvField::Structure(s)
+            }
+            fn from_pv_field(field: &PvField) -> Result<Self, TypedNTError> {
+                let s = match field {
+                    PvField::Structure(s) => s,
+                    _ => {
+                        return Err(TypedNTError::WrongType {
+                            field: "<root>".into(),
+                            detail: "expected NTScalarArray wrapper".into(),
+                        });
+                    }
+                };
+                if !(s.struct_id.is_empty() || s.struct_id == "epics:nt/NTScalarArray:1.0") {
+                    return Err(TypedNTError::WrongStructId {
+                        expected: "epics:nt/NTScalarArray:1.0".into(),
+                        got: s.struct_id.clone(),
+                    });
+                }
+                let items = match s.get_field("value") {
+                    Some(PvField::ScalarArray(items)) => items,
+                    _ => return Err(TypedNTError::MissingField("value".into())),
+                };
+                let mut out = ::std::vec::Vec::with_capacity(items.len());
+                for v in items {
+                    match v {
+                        ScalarValue::$sv(x) => out.push(x.clone()),
+                        other => {
+                            return Err(TypedNTError::WrongType {
+                                field: "value[]".into(),
+                                detail: format!("expected {} element, got {other:?}", stringify!($t)),
+                            });
+                        }
+                    }
+                }
+                Ok(out)
+            }
+        }
+    };
+}
+
+impl_typed_nt_scalar_array!(f64, Double, Double);
+impl_typed_nt_scalar_array!(f32, Float, Float);
+impl_typed_nt_scalar_array!(i64, Long, Long);
+impl_typed_nt_scalar_array!(i32, Int, Int);
+impl_typed_nt_scalar_array!(i16, Short, Short);
+impl_typed_nt_scalar_array!(i8, Byte, Byte);
+impl_typed_nt_scalar_array!(u64, ULong, ULong);
+impl_typed_nt_scalar_array!(u32, UInt, UInt);
+impl_typed_nt_scalar_array!(u16, UShort, UShort);
+impl_typed_nt_scalar_array!(u8, UByte, UByte);
+impl_typed_nt_scalar_array!(String, String, String);
+
+// ── NTEnum: index + choices[] ─────────────────────────────────────
+
+/// NTEnum mirror — what a `#[derive(NTEnum)]` user-defined enum
+/// reduces to on the wire after the macro discharges.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumValue {
+    pub index: i32,
+    pub choices: ::std::vec::Vec<String>,
+}
+
+impl TypedNT for EnumValue {
+    fn descriptor() -> FieldDesc {
+        FieldDesc::Structure {
+            struct_id: "epics:nt/NTEnum:1.0".into(),
+            fields: vec![(
+                "value".into(),
+                FieldDesc::Structure {
+                    struct_id: "enum_t".into(),
+                    fields: vec![
+                        ("index".into(), FieldDesc::Scalar(crate::pvdata::ScalarType::Int)),
+                        (
+                            "choices".into(),
+                            FieldDesc::ScalarArray(crate::pvdata::ScalarType::String),
+                        ),
+                    ],
+                },
+            )],
+        }
+    }
+
+    fn to_pv_field(&self) -> PvField {
+        let mut value_struct = PvStructure::new("enum_t");
+        value_struct.fields.push((
+            "index".into(),
+            PvField::Scalar(ScalarValue::Int(self.index)),
+        ));
+        let choices_items: ::std::vec::Vec<ScalarValue> = self
+            .choices
+            .iter()
+            .map(|c| ScalarValue::String(c.clone()))
+            .collect();
+        value_struct
+            .fields
+            .push(("choices".into(), PvField::ScalarArray(choices_items)));
+
+        let mut root = PvStructure::new("epics:nt/NTEnum:1.0");
+        root.fields
+            .push(("value".into(), PvField::Structure(value_struct)));
+        PvField::Structure(root)
+    }
+
+    fn from_pv_field(field: &PvField) -> Result<Self, TypedNTError> {
+        let s = match field {
+            PvField::Structure(s) => s,
+            _ => {
+                return Err(TypedNTError::WrongType {
+                    field: "<root>".into(),
+                    detail: "expected NTEnum wrapper".into(),
+                });
+            }
+        };
+        if !(s.struct_id.is_empty() || s.struct_id == "epics:nt/NTEnum:1.0") {
+            return Err(TypedNTError::WrongStructId {
+                expected: "epics:nt/NTEnum:1.0".into(),
+                got: s.struct_id.clone(),
+            });
+        }
+        let value_struct = match s.get_field("value") {
+            Some(PvField::Structure(v)) => v,
+            _ => return Err(TypedNTError::MissingField("value".into())),
+        };
+        let index = get_i32(value_struct, "index").unwrap_or(0);
+        let choices = match value_struct.get_field("choices") {
+            Some(PvField::ScalarArray(items)) => items
+                .iter()
+                .map(|v| match v {
+                    ScalarValue::String(s) => Ok(s.clone()),
+                    other => Err(TypedNTError::WrongType {
+                        field: "choices[]".into(),
+                        detail: format!("expected string, got {other:?}"),
+                    }),
+                })
+                .collect::<Result<::std::vec::Vec<_>, _>>()?,
+            Some(other) => {
+                return Err(TypedNTError::WrongType {
+                    field: "choices".into(),
+                    detail: format!("expected scalar-array, got {other:?}"),
+                });
+            }
+            None => ::std::vec::Vec::new(),
+        };
+        Ok(Self { index, choices })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

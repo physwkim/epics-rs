@@ -601,32 +601,29 @@ pub fn derive_nt_scalar(input: TokenStream) -> TokenStream {
             .map_err(|e| __rt::wrong_type("value", &e.to_string()))?
     };
 
-    // Extract the inner `value` PvField from a parent NTScalar
-    // structure. The primitive `TypedNT` impls accept either bare
-    // ScalarValue OR an NTScalar wrapper, so we hand them the entire
-    // wrapper struct on the way down.
+    // Extract the inner `value` PvField from the parent wrapper
+    // structure and pass it to the value type's TypedNT impl. The
+    // primitive impls (and Vec<T>, EnumValue, ...) all expect to
+    // see their full-wrapper shape (e.g. `epics:nt/NTScalar:1.0` for
+    // f64, `epics:nt/NTScalarArray:1.0` for Vec<f64>), so we
+    // re-wrap the raw `value` field in the inner type's expected
+    // wrapper before forwarding.
     let value_extract = quote! {
         {
             let raw = __s
                 .get_field("value")
                 .ok_or_else(|| __rt::missing("value"))?;
-            // Primitive scalars decode directly; sub-structures
-            // pass through.
-            match raw {
-                __rt::PvField::Scalar(_) => {
-                    let mut __wrap = __rt::PvStructure::new("epics:nt/NTScalar:1.0");
-                    __wrap
-                        .fields
-                        .push(("value".into(), raw.clone()));
-                    let __field = __rt::PvField::Structure(__wrap);
-                    let __field = &__field;
-                    #value_from_field
-                }
-                _ => {
-                    let __field = raw;
-                    #value_from_field
-                }
-            }
+            let __wrap_sid = match #value_ty_path {
+                __rt::FieldDesc::Structure { struct_id, .. } => struct_id,
+                _ => "epics:nt/NTScalar:1.0".to_string(),
+            };
+            let mut __wrap = __rt::PvStructure::new(&__wrap_sid);
+            __wrap
+                .fields
+                .push(("value".into(), raw.clone()));
+            let __field = __rt::PvField::Structure(__wrap);
+            let __field = &__field;
+            #value_from_field
         }
     };
 
@@ -642,15 +639,19 @@ pub fn derive_nt_scalar(input: TokenStream) -> TokenStream {
                 // we pull out its `value` field. Falling back to
                 // Variant when the wrapper looks unexpected keeps
                 // user-defined nested NT compositions working.
+                // I-2: derive the wrapper struct_id from the inner
+                // value type's descriptor so the same derive macro
+                // covers NTScalar / NTScalarArray / NTEnum.
                 let __inner = #value_ty_path;
-                let __value_field = match __inner {
-                    __rt::FieldDesc::Structure { fields, .. } => {
-                        fields.into_iter()
+                let (__sid, __value_field) = match __inner {
+                    __rt::FieldDesc::Structure { struct_id, fields } => {
+                        let __value_field = fields.into_iter()
                             .find(|(n, _)| n == "value")
                             .map(|(_, f)| f)
-                            .unwrap_or(__rt::FieldDesc::Variant)
+                            .unwrap_or(__rt::FieldDesc::Variant);
+                        (struct_id, __value_field)
                     }
-                    other => other,
+                    other => ("epics:nt/NTScalar:1.0".to_string(), other),
                 };
                 __fields.push(("value".into(), __value_field));
                 #(
@@ -660,14 +661,18 @@ pub fn derive_nt_scalar(input: TokenStream) -> TokenStream {
                     ));
                 )*
                 __rt::FieldDesc::Structure {
-                    struct_id: "epics:nt/NTScalar:1.0".into(),
+                    struct_id: __sid,
                     fields: __fields,
                 }
             }
 
             fn to_pv_field(&self) -> #krate::pvdata::PvField {
                 use #krate::nt::typed::__rt;
-                let mut __s = __rt::PvStructure::new("epics:nt/NTScalar:1.0");
+                let __sid = match #value_ty_path {
+                    __rt::FieldDesc::Structure { struct_id, .. } => struct_id,
+                    _ => "epics:nt/NTScalar:1.0".to_string(),
+                };
+                let mut __s = __rt::PvStructure::new(&__sid);
                 // Inner TypedNT impl may return either a bare scalar
                 // or an NTScalar wrapper struct. Unwrap to grab the
                 // `value` slot so the parent struct stays
@@ -701,8 +706,18 @@ pub fn derive_nt_scalar(input: TokenStream) -> TokenStream {
                     __rt::PvField::Structure(s) => s,
                     _ => return Err(__rt::wrong_type("<root>", "expected NTScalar wrapper")),
                 };
-                if !(__s.struct_id.is_empty() || __s.struct_id == "epics:nt/NTScalar:1.0") {
-                    return Err(__rt::wrong_struct_id("epics:nt/NTScalar:1.0", &__s.struct_id));
+                // I-2: accept any wrapper id, including
+                // NTScalar / NTScalarArray / NTEnum / empty,
+                // since the derive emits whatever the value's
+                // TypedNT impl declared. Concrete shape mismatch
+                // surfaces inside `from_pv_field` for the value
+                // type via WrongType.
+                let __expected_sid = match #value_ty_path {
+                    __rt::FieldDesc::Structure { struct_id, .. } => struct_id,
+                    _ => "epics:nt/NTScalar:1.0".to_string(),
+                };
+                if !(__s.struct_id.is_empty() || __s.struct_id == __expected_sid) {
+                    return Err(__rt::wrong_struct_id(&__expected_sid, &__s.struct_id));
                 }
                 let __value: #value_ty = #value_extract;
                 #(

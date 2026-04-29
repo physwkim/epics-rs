@@ -357,6 +357,31 @@ impl PvaClient {
         Ok(v)
     }
 
+    /// I-3: explicit "connect, then return" — wait for the named
+    /// channel to reach `Active` state without issuing a GET/PUT/
+    /// MONITOR. Mirrors pvxs `Context::connect(pvname)`. Useful
+    /// when an application wants to validate that a PV resolves
+    /// before kicking off real ops, or to pre-warm the connection
+    /// pool. Returns the resolved server address.
+    pub async fn pvconnect(&self, pv_name: &str) -> PvaResult<SocketAddr> {
+        let ch = self.channel(pv_name).await?;
+        let (server, _sid) = ch.ensure_active().await?;
+        Ok(server.addr)
+    }
+
+    /// I-3: same as [`Self::pvconnect`] but pinned to a specific
+    /// upstream server (skips UDP search). Mirrors pvxs
+    /// `ConnectBuilder::server(addr).exec()`.
+    pub async fn pvconnect_from(
+        &self,
+        pv_name: &str,
+        server: SocketAddr,
+    ) -> PvaResult<SocketAddr> {
+        let ch = self.channel_with_forced(pv_name, Some(server)).await?;
+        let (sc, _sid) = ch.ensure_active().await?;
+        Ok(sc.addr)
+    }
+
     /// Typed `pvget` — returns the value already decoded into a Rust
     /// type that implements [`crate::nt::TypedNT`]. Most users get
     /// `T` from `#[derive(NTScalar)]` on their own struct.
