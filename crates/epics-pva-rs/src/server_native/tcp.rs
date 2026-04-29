@@ -25,8 +25,8 @@ use tracing::{debug, error, warn};
 use crate::client_native::decode::{Frame, try_parse_frame};
 use crate::error::{PvaError, PvaResult};
 use crate::proto::{
-    BitSet, ByteOrder, Command, ControlCommand, PVA_VERSION, PvaHeader, Status, WriteExt,
-    encode_size_into, encode_string_into,
+    BitSet, ByteOrder, Command, ControlCommand, HeaderFlags, PVA_VERSION, PvaHeader, Status,
+    WriteExt, encode_size_into, encode_string_into,
 };
 use crate::pvdata::encode::{
     EncodeTypeCache, decode_pv_field, decode_type_desc, encode_pv_field, encode_type_desc,
@@ -449,6 +449,17 @@ async fn handle_connection_io(
     let mut encode_type_cache = crate::pvdata::encode::EncodeTypeCache::new();
 
     let max_msg_size = config.max_message_size;
+    // P-G20: segmented-message reassembly state. pvxs conn.cpp:228-291
+    // accumulates SegFirst..SegMiddle..SegLast bodies into `segBuf`
+    // before dispatching. Without this, our server would treat every
+    // segment as a fresh message, decode garbage, and likely return
+    // a Decode error mid-payload. Sites that put bulk values
+    // (NTTable, large NTNDArray, multi-MiB NTScalarArray) over PVA
+    // hit segmented frames whenever the message exceeds the peer's
+    // buffer-size hint negotiated in CONNECTION_VALIDATION.
+    let mut seg_buf: Vec<u8> = Vec::new();
+    let mut seg_cmd: u8 = 0;
+    let mut expect_seg = false;
     loop {
         let frame = read_frame(&mut reader, &mut rx_buf, op_timeout, max_msg_size).await?;
         last_rx.store(now_nanos(), Ordering::SeqCst);
@@ -467,6 +478,57 @@ async fn handle_connection_io(
             }
             continue;
         }
+
+        // P-G20: segmentation gate. Mirrors pvxs conn.cpp:228-244.
+        //   continuation = SegLast bit set (true for mid OR last)
+        //   * Violation when (continuation XOR expect_seg) — peer
+        //     interleaved a fresh first/unsegmented frame inside a
+        //     pending segmented message, OR sent a continuation when
+        //     none was pending.
+        //   * Violation when continuation && cmd != saved_cmd.
+        // Either case → drop connection (decode would be undefined).
+        let raw_seg = frame.header.flags.0 & HeaderFlags::SEGMENT_MASK;
+        let continuation = raw_seg & HeaderFlags::SEGMENT_LAST != 0;
+        if continuation ^ expect_seg
+            || (continuation && frame.header.command != seg_cmd)
+        {
+            return Err(PvaError::Protocol(format!(
+                "PVA segmentation violation: expect_seg={} continuation={} cmd 0x{:02x} vs saved 0x{:02x}",
+                expect_seg, continuation, frame.header.command, seg_cmd
+            )));
+        }
+        if raw_seg == 0 || raw_seg == HeaderFlags::SEGMENT_FIRST {
+            // Start of a new logical message — reset the accumulator
+            // (in unsegmented case both reset and dispatch happen
+            // below).
+            expect_seg = true;
+            seg_cmd = frame.header.command;
+            seg_buf.clear();
+        }
+        seg_buf.extend_from_slice(&frame.payload);
+        if raw_seg != 0 && raw_seg != HeaderFlags::SEGMENT_LAST {
+            // SegFirst (with following segments) or SegMiddle: keep
+            // accumulating, do not dispatch yet.
+            continue;
+        }
+        // Reaching here means: unsegmented (raw_seg==0) OR SegLast.
+        expect_seg = false;
+        // Build a synthetic Frame whose payload is the reassembled
+        // body; dispatch path inspects only `header.command` and
+        // `payload`, plus byte-order via `frame.order()`.
+        let frame = if raw_seg == 0 {
+            frame
+        } else {
+            Frame {
+                header: PvaHeader {
+                    version: frame.header.version,
+                    flags: HeaderFlags::new(false, false, order),
+                    command: seg_cmd,
+                    payload_length: seg_buf.len() as u32,
+                },
+                payload: std::mem::take(&mut seg_buf),
+            }
+        };
 
         // Pre-handshake: only CONNECTION_VALIDATION (1) is meaningful; client
         // replies with its buffer/registry/qos/auth payload. We accept any
