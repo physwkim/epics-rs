@@ -125,11 +125,22 @@ impl CircuitBreakerRegistry {
         }
     }
 
+    /// Soft cap on the number of per-address breaker entries. A
+    /// long-lived client probing many transient servers (k8s pods,
+    /// dev hosts) would otherwise grow `breakers` without bound at
+    /// ~80 B/entry. When the map exceeds this, opportunistically
+    /// drop entries that are Closed and have no recent failures —
+    /// they hold no state worth preserving.
+    const MAX_BREAKERS: usize = 4096;
+
     /// Should we currently allow traffic to this server?
     /// Called before scheduling a search/connect attempt. The HALF_OPEN
     /// state allows exactly **one** probe — once the probe is in flight,
     /// further calls return false until the probe resolves.
     pub fn allow(&mut self, server: SocketAddr) -> bool {
+        if self.breakers.len() >= Self::MAX_BREAKERS && !self.breakers.contains_key(&server) {
+            self.evict_idle_closed();
+        }
         let now = Instant::now();
         let breaker = self
             .breakers
@@ -229,6 +240,19 @@ impl CircuitBreakerRegistry {
             .get(&server)
             .map(|b| matches!(b.state, BreakerState::Open))
             .unwrap_or(false)
+    }
+
+    /// Drop entries that are Closed AND have no recent failures and
+    /// no probe in flight — they hold no information that subsequent
+    /// `allow()` calls would need. Called on insert when the map
+    /// crosses MAX_BREAKERS to keep growth bounded against
+    /// long-running clients that probe many transient servers.
+    fn evict_idle_closed(&mut self) {
+        self.breakers.retain(|_, b| {
+            !(matches!(b.state, BreakerState::Closed)
+                && b.failures.is_empty()
+                && b.probe_started_at.is_none())
+        });
     }
 }
 

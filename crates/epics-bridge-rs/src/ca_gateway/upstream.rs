@@ -731,6 +731,10 @@ fn format_value_for_audit(v: &EpicsValue, max_len: usize) -> String {
             truncated = EpicsValue::CharArray(arr[..max_len].to_vec());
             &truncated
         }
+        EpicsValue::StringArray(arr) if arr.len() > HEAD_PEEK_ELEMS => {
+            truncated = EpicsValue::StringArray(arr[..HEAD_PEEK_ELEMS].to_vec());
+            &truncated
+        }
         _ => v,
     };
     let s = format!("{v_for_format}");

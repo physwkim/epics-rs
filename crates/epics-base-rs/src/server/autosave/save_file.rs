@@ -40,13 +40,23 @@ pub async fn write_save_file(path: &Path, entries: &[SaveEntry]) -> AutosaveResu
     content.push_str(END_MARKER);
     content.push('\n');
 
-    // Atomic write: tmp -> fsync -> rename
+    // Atomic write: open RDWR → write → fsync the SAME fd → rename
+    // → fsync parent dir. The previous sequence reopened RDONLY
+    // before fsync; POSIX is silent on whether sync_all on a RDONLY
+    // fd flushes data, and on some FS (older NFS, FUSE) it's a
+    // no-op — silently dropping the write across a power loss.
     let tmp_path = path.with_extension("tmp");
-    tokio::fs::write(&tmp_path, content.as_bytes()).await?;
-    // fsync the file
-    let file = tokio::fs::File::open(&tmp_path).await?;
-    file.sync_all().await?;
-    drop(file);
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)
+            .await?;
+        file.write_all(content.as_bytes()).await?;
+        file.sync_all().await?;
+    }
     tokio::fs::rename(&tmp_path, path).await?;
     // Sync parent directory to make the rename durable across power loss
     if let Some(parent) = path.parent() {

@@ -1093,7 +1093,7 @@ impl super::provider::PvaMonitor for GroupMonitor {
 
 /// Enum dispatch for monitor types (single record vs group).
 pub enum AnyMonitor {
-    Single(BridgeMonitor),
+    Single(Box<BridgeMonitor>),
     Group(Box<GroupMonitor>),
 }
 

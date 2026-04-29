@@ -716,7 +716,18 @@ async fn run_engine(
                         if !responder_dead && p.holdoff_cycles > 0 {
                             p.holdoff_cycles -= 1;
                             send_now = false;
-                            search_buckets[current_bucket].push(sid);
+                            // Re-push to the NEXT tick's bucket (not
+                            // current) so the holdoff counter
+                            // decrements once per tick — matching the
+                            // intent that RETRY_HOLDOFF_BUCKETS is a
+                            // bucket-distance shift (~10 ticks ≈ 10 s
+                            // extra) rather than 10 full N-tick cycles
+                            // (~300 s). Re-pushing into current_bucket
+                            // (the round-3 attempt) only fired the
+                            // search once per cycle, multiplying the
+                            // holdoff by N_SEARCH_BUCKETS.
+                            let next = (current_bucket + 1) % N_SEARCH_BUCKETS;
+                            search_buckets[next].push(sid);
                         }
                     }
                     if responder_dead {

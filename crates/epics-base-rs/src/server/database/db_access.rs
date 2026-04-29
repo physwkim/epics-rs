@@ -223,6 +223,15 @@ pub struct DbSubscription {
     /// If non-zero, events with this origin are silently skipped.
     /// Used to filter out self-triggered events from the same writer.
     ignore_origin: u64,
+    /// Reference back to the record + this subscription's sid so each
+    /// `recv*` can pull any pending coalesced overflow event the
+    /// producer stashed when the bounded mpsc was full. Without this,
+    /// in-process consumers (pvalink, gateway, qsrv) silently dropped
+    /// the latest event of every burst-overrun (F8). The CA TCP
+    /// dispatcher already drains coalesced via `pop_coalesced`; this
+    /// puts every consumer on the same path.
+    record: std::sync::Arc<tokio::sync::RwLock<crate::server::record::RecordInstance>>,
+    sid: u32,
 }
 
 impl DbSubscription {
@@ -264,44 +273,52 @@ impl DbSubscription {
             rx,
             pv_name: pv_name.to_string(),
             ignore_origin,
+            record: rec,
+            sid,
         })
+    }
+
+    /// Drain the latest pending coalesced event (set when the per-
+    /// subscriber mpsc filled mid-burst) AFTER each successful
+    /// `rx.recv()`. Returns the coalesced event when present so the
+    /// caller observes the freshest value of a burst rather than
+    /// stopping at the (now-stale) tail of the bounded queue.
+    async fn next_event(&mut self) -> Option<MonitorEvent> {
+        loop {
+            let queued = self.rx.recv().await?;
+            // Take any newer event the producer stashed in the
+            // coalesce slot while the mpsc was full. Without this,
+            // an in-process consumer that briefly fell behind would
+            // never see the freshest value of a burst.
+            let coalesced = self.record.read().await.pop_coalesced(self.sid);
+            let event = coalesced.unwrap_or(queued);
+            if self.ignore_origin != 0 && event.origin == self.ignore_origin {
+                continue;
+            }
+            return Some(event);
+        }
     }
 
     /// Wait for the next value change. Returns the new value as f64.
     /// Silently skips events matching `ignore_origin`.
     pub async fn recv_f64(&mut self) -> Option<f64> {
-        loop {
-            let event = self.rx.recv().await?;
-            if self.ignore_origin != 0 && event.origin == self.ignore_origin {
-                continue; // Skip self-triggered event
-            }
-            return event.snapshot.value.to_f64();
-        }
+        let event = self.next_event().await?;
+        event.snapshot.value.to_f64()
     }
 
     /// Wait for the next value change. Returns the raw EpicsValue.
     /// Silently skips events matching `ignore_origin`.
     pub async fn recv(&mut self) -> Option<EpicsValue> {
-        loop {
-            let event = self.rx.recv().await?;
-            if self.ignore_origin != 0 && event.origin == self.ignore_origin {
-                continue;
-            }
-            return Some(event.snapshot.value);
-        }
+        let event = self.next_event().await?;
+        Some(event.snapshot.value)
     }
 
     /// Wait for the next change, returning the full Snapshot with metadata.
     /// Includes alarm, display, control, and enum info — not just the value.
     /// Silently skips events matching `ignore_origin`.
     pub async fn recv_snapshot(&mut self) -> Option<crate::server::snapshot::Snapshot> {
-        loop {
-            let event = self.rx.recv().await?;
-            if self.ignore_origin != 0 && event.origin == self.ignore_origin {
-                continue;
-            }
-            return Some(event.snapshot);
-        }
+        let event = self.next_event().await?;
+        Some(event.snapshot)
     }
 
     pub fn pv_name(&self) -> &str {

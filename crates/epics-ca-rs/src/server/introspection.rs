@@ -92,19 +92,31 @@ impl IntrospectionState {
     /// (`/drain`, `/reload-acf`, `/reload-tls`). Without this, any
     /// process that can reach the bind address can mutate live
     /// server config.
+    ///
+    /// Returns the original Arc unchanged if the Arc has already
+    /// been cloned (configuration must precede sharing). Logs a
+    /// warning instead of panicking — CR-14 fixed the previous
+    /// `Arc::get_mut(&mut self).expect(...)` panic on shared Arc.
     pub fn with_reload_token(mut self: Arc<Self>, token: String) -> Arc<Self> {
-        let inner = Arc::get_mut(&mut self).expect("with_reload_token on shared Arc");
-        inner.reload_token = Some(token);
+        if let Some(inner) = Arc::get_mut(&mut self) {
+            inner.reload_token = Some(token);
+        } else {
+            tracing::warn!(
+                "IntrospectionState::with_reload_token: Arc already shared; ignoring \
+                 (configure builders BEFORE sharing the Arc)"
+            );
+        }
         self
     }
 
     /// Builder-style: set the shared drain flag (so POST /drain
     /// signals the same bool the TCP listener checks).
     pub fn with_drain(mut self: Arc<Self>, drain: Arc<std::sync::atomic::AtomicBool>) -> Arc<Self> {
-        // SAFETY: only ever called before the introspection task is
-        // spawned, while the Arc is unique to the configurer.
-        let inner = Arc::get_mut(&mut self).expect("with_drain on shared Arc");
-        inner.drain = drain;
+        if let Some(inner) = Arc::get_mut(&mut self) {
+            inner.drain = drain;
+        } else {
+            tracing::warn!("IntrospectionState::with_drain: Arc already shared; ignoring");
+        }
         self
     }
 
@@ -112,8 +124,11 @@ impl IntrospectionState {
         mut self: Arc<Self>,
         f: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     ) -> Arc<Self> {
-        let inner = Arc::get_mut(&mut self).expect("with_reload_acf on shared Arc");
-        inner.reload_acf = Some(f);
+        if let Some(inner) = Arc::get_mut(&mut self) {
+            inner.reload_acf = Some(f);
+        } else {
+            tracing::warn!("IntrospectionState::with_reload_acf: Arc already shared; ignoring");
+        }
         self
     }
 
@@ -121,8 +136,11 @@ impl IntrospectionState {
         mut self: Arc<Self>,
         f: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     ) -> Arc<Self> {
-        let inner = Arc::get_mut(&mut self).expect("with_reload_tls on shared Arc");
-        inner.reload_tls = Some(f);
+        if let Some(inner) = Arc::get_mut(&mut self) {
+            inner.reload_tls = Some(f);
+        } else {
+            tracing::warn!("IntrospectionState::with_reload_tls: Arc already shared; ignoring");
+        }
         self
     }
 

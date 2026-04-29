@@ -288,10 +288,10 @@ impl Channel for BridgeChannel {
                 self.record_name, self.access.user, self.access.host
             )));
         }
-        Ok(super::group::AnyMonitor::Single(
+        Ok(super::group::AnyMonitor::Single(Box::new(
             BridgeMonitor::new(self.db.clone(), self.record_name.clone(), self.nt_type)
                 .with_access(self.access.clone()),
-        ))
+        )))
     }
 }
 

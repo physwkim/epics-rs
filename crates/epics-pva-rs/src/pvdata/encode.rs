@@ -1062,6 +1062,20 @@ pub fn decode_pv_field(
     cur: &mut Cursor<&[u8]>,
     order: ByteOrder,
 ) -> Result<PvField, DecodeError> {
+    decode_pv_field_at_depth(desc, cur, order, 0)
+}
+
+fn decode_pv_field_at_depth(
+    desc: &FieldDesc,
+    cur: &mut Cursor<&[u8]>,
+    order: ByteOrder,
+    depth: u32,
+) -> Result<PvField, DecodeError> {
+    if depth > MAX_FIELD_DEPTH {
+        return Err(DecodeError(format!(
+            "PvField nesting exceeds MAX_FIELD_DEPTH ({MAX_FIELD_DEPTH})"
+        )));
+    }
     Ok(match desc {
         FieldDesc::Scalar(st) => PvField::Scalar(decode_scalar_value(*st, cur, order)?),
         FieldDesc::ScalarArray(st) => {
@@ -1085,7 +1099,7 @@ pub fn decode_pv_field(
         FieldDesc::Structure { struct_id, fields } => {
             let mut s = PvStructure::new(struct_id);
             for (name, child_desc) in fields {
-                let v = decode_pv_field(child_desc, cur, order)?;
+                let v = decode_pv_field_at_depth(child_desc, cur, order, depth + 1)?;
                 s.fields.push((name.clone(), v));
             }
             PvField::Structure(s)
@@ -1109,7 +1123,9 @@ pub fn decode_pv_field(
                             struct_id: struct_id.clone(),
                             fields: fields.clone(),
                         };
-                        if let PvField::Structure(s) = decode_pv_field(&element_desc, cur, order)? {
+                        if let PvField::Structure(s) =
+                            decode_pv_field_at_depth(&element_desc, cur, order, depth + 1)?
+                        {
                             out.push(s);
                         }
                     }
@@ -1139,7 +1155,7 @@ pub fn decode_pv_field(
                         .get(sel as usize)
                         .ok_or_else(|| DecodeError(format!("union selector {sel} out of range")))?
                         .clone();
-                    let value = decode_pv_field(&vdesc, cur, order)?;
+                    let value = decode_pv_field_at_depth(&vdesc, cur, order, depth + 1)?;
                     PvField::Union {
                         selector: sel,
                         variant_name,
@@ -1170,7 +1186,7 @@ pub fn decode_pv_field(
                                 DecodeError(format!("union array selector {sel} out of range"))
                             })?
                             .clone();
-                        let value = decode_pv_field(&vdesc, cur, order)?;
+                        let value = decode_pv_field_at_depth(&vdesc, cur, order, depth + 1)?;
                         items.push(UnionItem {
                             selector: sel,
                             variant_name,
@@ -1192,8 +1208,14 @@ pub fn decode_pv_field(
             } else {
                 let pos = cur.position();
                 cur.set_position(pos - 1);
+                // Variant peeling: each FieldDesc::Variant value
+                // carries an inline FieldDesc + recursive PvField,
+                // costing only 1 byte on the wire per peel but one
+                // Rust stack frame. R-2: cap the recursion via the
+                // depth counter so an adversary can't blow the
+                // per-task stack with chained Variant tags.
                 let inner = decode_type_desc(cur, order)?;
-                let value = decode_pv_field(&inner, cur, order)?;
+                let value = decode_pv_field_at_depth(&inner, cur, order, depth + 1)?;
                 PvField::Variant(Box::new(VariantValue {
                     desc: Some(inner),
                     value,
@@ -1217,7 +1239,7 @@ pub fn decode_pv_field(
                 let pos = cur.position();
                 cur.set_position(pos - 1);
                 let inner = decode_type_desc(cur, order)?;
-                let value = decode_pv_field(&inner, cur, order)?;
+                let value = decode_pv_field_at_depth(&inner, cur, order, depth + 1)?;
                 items.push(VariantValue {
                     desc: Some(inner),
                     value,

@@ -160,6 +160,9 @@ pub fn epics_to_pv_field(val: &EpicsValue) -> PvField {
         EpicsValue::CharArray(a) => {
             PvField::ScalarArray(a.iter().map(|v| ScalarValue::UByte(*v)).collect())
         }
+        EpicsValue::StringArray(a) => {
+            PvField::ScalarArray(a.iter().map(|v| ScalarValue::String(v.clone())).collect())
+        }
         other => PvField::Scalar(epics_to_scalar(other)),
     }
 }
@@ -197,6 +200,14 @@ pub fn pv_field_to_epics(field: &PvField) -> Option<EpicsValue> {
                 )),
                 ScalarValue::UShort(_) => Some(EpicsValue::EnumArray(
                     arr.iter().map(|v| scalar_to_i64(v) as u16).collect(),
+                )),
+                ScalarValue::String(_) => Some(EpicsValue::StringArray(
+                    arr.iter()
+                        .map(|v| match v {
+                            ScalarValue::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
                 )),
                 _ => Some(EpicsValue::DoubleArray(
                     arr.iter().map(scalar_to_f64).collect(),
