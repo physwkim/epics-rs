@@ -134,6 +134,48 @@ async fn op_get_inner(
     result
 }
 
+// ── GET_FIELD (introspection only) ────────────────────────────────────
+
+/// Fetch the channel's introspection (FieldDesc) without transferring
+/// any value. pvxs `Context::info(name)` parity. Much cheaper than a
+/// full GET for large PVs (NTNDArray, multi-MiB arrays) since the
+/// server replies with descriptor bytes only — no value encoding,
+/// no payload bandwidth proportional to the PV size.
+///
+/// `subfield` (typically the empty string) selects a sub-tree of the
+/// channel's structure; pass "" for the root-level introspection.
+pub async fn op_get_field(
+    channel: &Arc<Channel>,
+    subfield: &str,
+    op_timeout: Duration,
+) -> PvaResult<FieldDesc> {
+    let (server, sid) = channel.ensure_active().await?;
+    let order = server.byte_order;
+    let big_endian = matches!(order, ByteOrder::Big);
+    let codec = PvaCodec { big_endian };
+    let ioid = alloc_ioid();
+    let mut stream = server.register_ioid_stream(ioid);
+
+    let req = codec.build_get_field(sid, ioid, subfield);
+    let send_result = server.send(req).await;
+    if send_result.is_err() {
+        server.unregister_ioid(ioid);
+        return Err(PvaError::Protocol("GET_FIELD send failed".into()));
+    }
+    let frame = await_frame(&mut stream, op_timeout).await;
+    server.unregister_ioid(ioid);
+    let frame = frame?;
+    let resp = super::decode::decode_get_field_response(&frame)?;
+    if !resp.status.is_success() {
+        return Err(PvaError::Protocol(format!(
+            "GET_FIELD failed: {:?}",
+            resp.status
+        )));
+    }
+    resp.introspection
+        .ok_or_else(|| PvaError::Protocol("GET_FIELD: no introspection in successful response".into()))
+}
+
 // ── PUT ────────────────────────────────────────────────────────────────
 
 pub async fn op_put(
