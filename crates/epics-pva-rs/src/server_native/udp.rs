@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
-use tokio::time::interval;
 use tracing::debug;
 
 use crate::error::{PvaError, PvaResult};
@@ -72,6 +71,8 @@ pub async fn run_udp_responder_proto(
         guid,
         protocol,
         Duration::from_secs(15),
+        Duration::from_secs(180),
+        10,
         Vec::new(),
         true,
         Vec::new(),
@@ -92,6 +93,8 @@ pub async fn run_udp_responder_with_config(
     guid: [u8; 12],
     protocol: &'static str,
     beacon_period: Duration,
+    beacon_period_long: Duration,
+    beacon_burst_count: u8,
     destinations: Vec<SocketAddr>,
     auto_beacon: bool,
     ignore_addrs: Vec<(IpAddr, u16)>,
@@ -121,21 +124,26 @@ pub async fn run_udp_responder_with_config(
     let beacon_guid = guid;
     let beacon_source = source.clone();
     let _beacon = tokio::spawn(async move {
-        let mut tick = interval(beacon_period);
-        // Per-emitter monotonically advancing beacon sequence + change
-        // counter. Matches pvxs `server.cpp::doBeacons` so clients can
-        // detect missed beacons (sequence gaps) and topology changes
-        // (change_count mismatch). Sequence is u8 with natural wrap.
-        //
-        // change_count tracks PV-set churn: incremented whenever the
-        // set of names returned by `list_pvs()` differs from the
-        // previous tick. Clients re-issue searches on change_count
-        // mismatch even when their beacon sequence is in lock-step.
+        // Burst-then-slowdown cadence (P-G17): emit `beacon_burst_count`
+        // beacons at `beacon_period` (default 15s × 10), then drop to
+        // `beacon_period_long` (default 180s) for steady state. Mirrors
+        // pvxs `server.cpp:826-832`: after the burst every receiver in
+        // earshot has had multiple chances to notice the new server, so
+        // 12× more steady-state beacons just burn UDP without
+        // information gain. Per-emitter monotonically advancing
+        // beacon_seq + change_count let clients detect missed beacons
+        // and topology changes regardless of cadence.
         let mut beacon_seq: u8 = 0;
         let mut change_count: u16 = 0;
         let mut last_set_hash: u64 = 0;
+        let mut emitted: u32 = 0;
         loop {
-            tick.tick().await;
+            let cur_period = if emitted < beacon_burst_count as u32 {
+                beacon_period
+            } else {
+                beacon_period_long
+            };
+            tokio::time::sleep(cur_period).await;
             // Compute a stable hash of the current PV set so we don't
             // hold an allocated Vec across the await above.
             let pvs = beacon_source.list_pvs().await;
@@ -145,8 +153,14 @@ pub async fn run_udp_responder_with_config(
             sorted.sort();
             sorted.hash(&mut h);
             let cur_hash = h.finish();
-            if cur_hash != last_set_hash && last_set_hash != 0 {
+            let topology_changed =
+                cur_hash != last_set_hash && last_set_hash != 0;
+            if topology_changed {
                 change_count = change_count.wrapping_add(1);
+                // pvxs doesn't reset to short-burst on topology change,
+                // but we also don't lose anything by re-burst on real
+                // PV-set churn (rare event); we leave the counter
+                // alone to keep parity with pvxs.
             }
             last_set_hash = cur_hash;
 
@@ -161,6 +175,7 @@ pub async fn run_udp_responder_with_config(
                 let _ = beacon_socket.send_to(&beacon, dest).await;
             }
             beacon_seq = beacon_seq.wrapping_add(1);
+            emitted = emitted.saturating_add(1);
         }
     });
 
