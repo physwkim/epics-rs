@@ -133,8 +133,15 @@ pub struct UpstreamManager {
     write_env: WriteHookEnv,
     /// Active upstream subscriptions, keyed by PV name. Holding the
     /// channel here keeps it alive for the gateway's lifetime so
-    /// every PUT / GET reuses one circuit.
-    subs: HashMap<String, UpstreamSubscription>,
+    /// every PUT / GET reuses one circuit. Wrapped in parking_lot so
+    /// `ensure_subscribed` can take `&self` and the search-resolver
+    /// hot path doesn't serialise N concurrent first-creates behind
+    /// a single tokio RwLock write held across ~500 ms of network IO.
+    subs: parking_lot::Mutex<HashMap<String, UpstreamSubscription>>,
+    /// In-flight first-create dedupe. A second concurrent caller for
+    /// the same PV awaits the Notify instead of duplicating the
+    /// upstream channel + subscribe + spawn work.
+    pending: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 impl UpstreamManager {
@@ -162,18 +169,19 @@ impl UpstreamManager {
                 stats: cfg.stats,
                 beacon_anomaly: cfg.beacon_anomaly,
             },
-            subs: HashMap::new(),
+            subs: parking_lot::Mutex::new(HashMap::new()),
+            pending: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
     /// Number of active upstream subscriptions.
     pub fn subscription_count(&self) -> usize {
-        self.subs.len()
+        self.subs.lock().len()
     }
 
     /// Whether a given upstream name is currently subscribed.
     pub fn is_subscribed(&self, name: &str) -> bool {
-        self.subs.contains_key(name)
+        self.subs.lock().contains_key(name)
     }
 
     /// Ensure an upstream subscription exists for `upstream_name`.
@@ -189,14 +197,65 @@ impl UpstreamManager {
     /// 5. Spawn forwarding task with auto-restart
     /// 6. Install per-PV WriteHook on the shadow PV
     pub async fn ensure_subscribed(
-        &mut self,
+        &self,
         upstream_name: &str,
         asg: Option<String>,
         asl: i32,
     ) -> BridgeResult<()> {
-        if self.subs.contains_key(upstream_name) {
+        // Fast path: already subscribed.
+        if self.subs.lock().contains_key(upstream_name) {
             return Ok(());
         }
+        // Concurrent first-create dedupe. If another task is already
+        // wiring this PV up, await its completion instead of running
+        // the create_channel/get/subscribe work twice. The Notify is
+        // pulsed in the success and error paths below.
+        enum Decision {
+            WaitFor(Arc<tokio::sync::Notify>),
+            Owner(Arc<tokio::sync::Notify>),
+        }
+        let decision = {
+            let mut pending = self.pending.lock();
+            if let Some(existing) = pending.get(upstream_name) {
+                Decision::WaitFor(existing.clone())
+            } else {
+                let n = Arc::new(tokio::sync::Notify::new());
+                pending.insert(upstream_name.to_string(), n.clone());
+                Decision::Owner(n)
+            }
+        };
+        let dedup_notify = match decision {
+            Decision::WaitFor(n) => {
+                n.notified().await;
+                let already = self.subs.lock().contains_key(upstream_name);
+                return if already {
+                    Ok(())
+                } else {
+                    Err(BridgeError::PutRejected(format!(
+                        "upstream subscribe failed (peer creator): {upstream_name}"
+                    )))
+                };
+            }
+            Decision::Owner(n) => n,
+        };
+        // Ensure the pending entry is removed + Notify pulsed even
+        // on error / panic paths.
+        struct PendingGuard<'a> {
+            owner: &'a UpstreamManager,
+            key: &'a str,
+            notify: Arc<tokio::sync::Notify>,
+        }
+        impl Drop for PendingGuard<'_> {
+            fn drop(&mut self) {
+                self.owner.pending.lock().remove(self.key);
+                self.notify.notify_waiters();
+            }
+        }
+        let _guard = PendingGuard {
+            owner: self,
+            key: upstream_name,
+            notify: dedup_notify.clone(),
+        };
 
         // Add entry to cache (or get existing) and reset to Connecting
         {
@@ -383,7 +442,7 @@ impl UpstreamManager {
             }
         });
 
-        self.subs.insert(
+        self.subs.lock().insert(
             upstream_name.to_string(),
             UpstreamSubscription {
                 channel,
@@ -401,8 +460,9 @@ impl UpstreamManager {
     /// upstream channel — cannot be invoked by a downstream client
     /// that opened the channel before the eviction landed.
     /// Mirrors C ca-gateway's `gatePvData::deactivate` cleanup.
-    pub async fn unsubscribe(&mut self, upstream_name: &str) {
-        if let Some(sub) = self.subs.remove(upstream_name) {
+    pub async fn unsubscribe(&self, upstream_name: &str) {
+        let removed = self.subs.lock().remove(upstream_name);
+        if let Some(sub) = removed {
             sub.task.abort();
         }
         // Best-effort: if the PV is gone already (concurrent reload
@@ -415,9 +475,13 @@ impl UpstreamManager {
     /// fresh CREATE_CHAN round-trip per write. Falls back to a
     /// transient channel only when the PV has no subscription.
     pub async fn put(&self, upstream_name: &str, value: &EpicsValue) -> BridgeResult<()> {
-        if let Some(sub) = self.subs.get(upstream_name) {
-            return sub
-                .channel
+        let channel_for_op = self
+            .subs
+            .lock()
+            .get(upstream_name)
+            .map(|s| s.channel.clone());
+        if let Some(ch) = channel_for_op {
+            return ch
                 .put(value)
                 .await
                 .map_err(|e| BridgeError::PutRejected(format!("upstream put: {e}")));
@@ -432,9 +496,13 @@ impl UpstreamManager {
     /// Get the current value from upstream. Reuses the subscribed
     /// channel when available; otherwise opens a transient one.
     pub async fn get(&self, upstream_name: &str) -> BridgeResult<EpicsValue> {
-        if let Some(sub) = self.subs.get(upstream_name) {
-            let (_dbf, value) = sub
-                .channel
+        let channel_for_op = self
+            .subs
+            .lock()
+            .get(upstream_name)
+            .map(|s| s.channel.clone());
+        if let Some(ch) = channel_for_op {
+            let (_dbf, value) = ch
                 .get()
                 .await
                 .map_err(|e| BridgeError::PutRejected(format!("upstream get: {e}")))?;
@@ -451,29 +519,35 @@ impl UpstreamManager {
     /// ASG/ASL recorded for `upstream_name` at subscription time, if
     /// any. Used by tests + diagnostics.
     pub fn asg_for(&self, upstream_name: &str) -> Option<(Option<String>, i32)> {
-        self.subs.get(upstream_name).map(|s| (s.asg.clone(), s.asl))
+        self.subs
+            .lock()
+            .get(upstream_name)
+            .map(|s| (s.asg.clone(), s.asl))
     }
 
     /// Sweep cache and remove upstream subscriptions for entries that
     /// no longer exist in the cache (e.g., evicted by cleanup).
-    pub async fn sweep_orphaned(&mut self) {
+    pub async fn sweep_orphaned(&self) {
         let cache = self.cache.read().await;
-        let live_names: Vec<String> = self
+        let orphans: Vec<String> = self
             .subs
+            .lock()
             .keys()
             .filter(|name| cache.get(name).is_none())
             .cloned()
             .collect();
         drop(cache);
 
-        for name in live_names {
+        for name in orphans {
             self.unsubscribe(&name).await;
         }
     }
 
     /// Abort all active subscriptions and shut down.
-    pub async fn shutdown(&mut self) {
-        for (_name, sub) in self.subs.drain() {
+    pub async fn shutdown(&self) {
+        let drained: Vec<UpstreamSubscription> =
+            self.subs.lock().drain().map(|(_, sub)| sub).collect();
+        for sub in drained {
             sub.task.abort();
         }
         self.client.shutdown().await;

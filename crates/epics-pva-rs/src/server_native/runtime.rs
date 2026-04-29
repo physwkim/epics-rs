@@ -288,8 +288,16 @@ where
 /// [`PvaServer::wait`] blocks until both tasks have observed the
 /// shutdown and returned.
 pub struct PvaServer {
-    udp_handle: tokio::task::JoinHandle<PvaResult<()>>,
-    tcp_handle: tokio::task::JoinHandle<PvaResult<()>>,
+    /// Wrapped in Option so consuming methods (`run`, `wait`) can
+    /// `.take()` the handles while leaving the struct intact for
+    /// the Drop impl below.
+    udp_handle: Option<tokio::task::JoinHandle<PvaResult<()>>>,
+    tcp_handle: Option<tokio::task::JoinHandle<PvaResult<()>>>,
+    /// Held only for the Drop impl. JoinHandle can't be cloned and
+    /// `run`/`wait` may have already taken it, so Drop uses these
+    /// AbortHandles to reach the live task either way.
+    udp_abort: tokio::task::AbortHandle,
+    tcp_abort: tokio::task::AbortHandle,
     /// Effective config the server is running under. Captured at
     /// `start()` so [`Self::client_config`] can hand back a builder
     /// pre-pointed at the actual bound TCP port without re-reading env
@@ -310,6 +318,28 @@ pub struct PvaServer {
     /// connection diagnostics (pvxs `Server::report()` parity at the
     /// "live peers + channel counts" level).
     pub(crate) peers: Arc<crate::server_native::peers::PeerRegistry>,
+}
+
+impl Drop for PvaServer {
+    /// Abort the listener tasks when the server value is dropped.
+    /// Without this the bound TCP/UDP sockets and their accept loops
+    /// outlive the PvaServer struct, leaking ports across test runs
+    /// and surviving panics in the binary's main task. Per-connection
+    /// handler tasks unwind on their next IO call.
+    ///
+    /// Skipped when the JoinHandles have already been moved out (via
+    /// `run`/`wait`) — in that case the consuming method handles
+    /// shutdown. Without the gating the abort would race with a
+    /// reconnect on the same port: the listener task is killed
+    /// mid-syscall before the OS releases the binding, surfacing as
+    /// ConnectionRefused on the next bind attempt for ~hundreds of ms.
+    fn drop(&mut self) {
+        if self.udp_handle.is_some() || self.tcp_handle.is_some() {
+            self.udp_abort.abort();
+            self.tcp_abort.abort();
+            self.interrupt.notify_waiters();
+        }
+    }
 }
 
 impl PvaServer {
@@ -402,9 +432,13 @@ impl PvaServer {
             peers.clone(),
         ));
 
+        let udp_abort = udp_handle.abort_handle();
+        let tcp_abort = tcp_handle.abort_handle();
         Self {
-            udp_handle,
-            tcp_handle,
+            udp_handle: Some(udp_handle),
+            tcp_handle: Some(tcp_handle),
+            udp_abort,
+            tcp_abort,
             effective_config: config,
             bound_tcp_port,
             interrupt: Arc::new(tokio::sync::Notify::new()),
@@ -435,20 +469,22 @@ impl PvaServer {
     /// or [`Self::interrupt`] is called. pvxs `Server::run` for CLI
     /// daemons. Returns Ok on graceful shutdown, Err if a subsystem
     /// task panicked or exited abnormally.
-    pub async fn run(self) -> PvaResult<()> {
+    pub async fn run(mut self) -> PvaResult<()> {
         let interrupt = self.interrupt.clone();
         let ctrl_c = async {
             let _ = tokio::signal::ctrl_c().await;
         };
+        let udp = self.udp_handle.take().expect("PvaServer::run called twice");
+        let tcp = self.tcp_handle.take().expect("PvaServer::run called twice");
         tokio::select! {
             _ = ctrl_c => Ok(()),
             _ = interrupt.notified() => Ok(()),
-            r = self.udp_handle => match r {
+            r = udp => match r {
                 Ok(res) => res,
                 Err(e) if e.is_cancelled() => Ok(()),
                 Err(e) => Err(crate::error::PvaError::Protocol(format!("udp task panic: {e}"))),
             },
-            r = self.tcp_handle => match r {
+            r = tcp => match r {
                 Ok(res) => res,
                 Err(e) if e.is_cancelled() => Ok(()),
                 Err(e) => Err(crate::error::PvaError::Protocol(format!("tcp task panic: {e}"))),
@@ -473,8 +509,16 @@ impl PvaServer {
             tls_enabled: self.effective_config.tls.is_some(),
             ignore_addrs: self.effective_config.ignore_addrs.len(),
             beacon_period_secs: self.effective_config.beacon_period.as_secs(),
-            udp_alive: !self.udp_handle.is_finished(),
-            tcp_alive: !self.tcp_handle.is_finished(),
+            udp_alive: self
+                .udp_handle
+                .as_ref()
+                .map(|h| !h.is_finished())
+                .unwrap_or(false),
+            tcp_alive: self
+                .tcp_handle
+                .as_ref()
+                .map(|h| !h.is_finished())
+                .unwrap_or(false),
             peers: self.peers.snapshot(),
             peer_count: self.peers.len(),
         }
@@ -486,25 +530,32 @@ impl PvaServer {
     /// (server.cpp:616) at the "no new connections" granularity. For
     /// hard-stop semantics drop the entire `PvaServer` instead.
     pub fn stop(&self) {
-        self.tcp_handle.abort();
-        self.udp_handle.abort();
+        self.tcp_abort.abort();
+        self.udp_abort.abort();
     }
 
     /// Block until either task returns. Either subsystem exiting is
     /// treated as fatal — an Err here means the server is no longer
     /// serving even if `stop()` wasn't called.
-    pub async fn wait(self) -> PvaResult<()> {
+    pub async fn wait(mut self) -> PvaResult<()> {
         // D-G2: select! drops the losing branch's JoinHandle, but
         // dropping a JoinHandle does NOT abort the task. Without an
         // explicit abort, a UDP-side panic leaves the TCP listener
-        // orphaned (and vice versa) — the task keeps running on the
-        // runtime even though the PvaServer wrapper has been
-        // consumed. Capture the AbortHandles up-front so the loser
-        // is aborted regardless of which branch fires first.
-        let udp_abort = self.udp_handle.abort_handle();
-        let tcp_abort = self.tcp_handle.abort_handle();
-        let result = tokio::select! {
-            r = self.udp_handle => {
+        // orphaned (and vice versa). Use the per-server AbortHandles
+        // (also held by Drop) to abort the loser regardless of which
+        // branch fires first.
+        let udp_abort = self.udp_abort.clone();
+        let tcp_abort = self.tcp_abort.clone();
+        let udp = self
+            .udp_handle
+            .take()
+            .expect("PvaServer::wait called twice");
+        let tcp = self
+            .tcp_handle
+            .take()
+            .expect("PvaServer::wait called twice");
+        tokio::select! {
+            r = udp => {
                 tcp_abort.abort();
                 match r {
                     Ok(res) => res,
@@ -512,7 +563,7 @@ impl PvaServer {
                     Err(e) => Err(crate::error::PvaError::Protocol(format!("udp task panic: {e}"))),
                 }
             },
-            r = self.tcp_handle => {
+            r = tcp => {
                 udp_abort.abort();
                 match r {
                     Ok(res) => res,
@@ -520,8 +571,7 @@ impl PvaServer {
                     Err(e) => Err(crate::error::PvaError::Protocol(format!("tcp task panic: {e}"))),
                 }
             },
-        };
-        result
+        }
     }
 }
 

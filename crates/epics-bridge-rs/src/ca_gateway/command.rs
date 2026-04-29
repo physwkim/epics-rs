@@ -75,7 +75,7 @@ pub struct CommandHandler {
     /// pvlist edit and unsubscribes any PVs that no longer match —
     /// without the unsubscribe step, removed entries leak shadow
     /// PVs and upstream channels until restart (B-G12).
-    upstream: Option<Arc<RwLock<UpstreamManager>>>,
+    upstream: Option<Arc<UpstreamManager>>,
     pvlist_path: Option<PathBuf>,
     access_path: Option<PathBuf>,
 }
@@ -101,7 +101,7 @@ impl CommandHandler {
     /// Attach the upstream manager so ReloadPvList can prune
     /// subscriptions for removed PVs (B-G12). Must be called before
     /// the handler is used; cache-stat commands work without it.
-    pub fn with_upstream(mut self, upstream: Arc<RwLock<UpstreamManager>>) -> Self {
+    pub fn with_upstream(mut self, upstream: Arc<UpstreamManager>) -> Self {
         self.upstream = Some(upstream);
         self
     }
@@ -161,7 +161,7 @@ impl CommandHandler {
                     let cached_names: Vec<String> = self.cache.read().await.names();
                     for name in cached_names {
                         if new_arc.match_name(&name).is_none() {
-                            upstream.write().await.unsubscribe(&name).await;
+                            upstream.unsubscribe(&name).await;
                             self.cache.write().await.remove(&name);
                             pruned += 1;
                         }

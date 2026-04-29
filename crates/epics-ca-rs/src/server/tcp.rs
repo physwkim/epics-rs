@@ -1437,6 +1437,27 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                 }
             };
 
+            // Refuse a duplicate sub_id on the same connection. Without
+            // this, two EVENT_ADDs with identical sub_id leave both
+            // subscribers attached to the producer (push without
+            // dedup); EVENT_CANCEL strips both at once via retain, but
+            // until then every event delivery emits two wire frames —
+            // archived data + dashboard counts duplicated.
+            if state.subscriptions.contains_key(&sub_id) {
+                tracing::warn!(
+                    sub_id,
+                    "EVENT_ADD refused: sub_id already in use on this connection"
+                );
+                send_cmd_error(
+                    writer,
+                    CA_PROTO_EVENT_ADD,
+                    requested_type,
+                    ECA_BADMONID,
+                    sub_id,
+                )
+                .await?;
+                return Ok(());
+            }
             {
                 match &entry.target {
                     ChannelTarget::SimplePv(pv) => {

@@ -284,7 +284,11 @@ impl PvDatabase {
                 _ => {}
             }
 
-            // PROC intercept: trigger processing regardless of DISP
+            // PROC intercept: trigger processing regardless of DISP.
+            // Falls through to the put_notify_tx registration below
+            // so async records (motor, asyn-backed AO) signal real
+            // completion; otherwise WRITE_NOTIFY would return ECA_NORMAL
+            // before the device move actually finished.
             if field == "PROC" {
                 let is_nonzero = match &value {
                     EpicsValue::Char(v) => *v != 0,
@@ -293,15 +297,41 @@ impl PvDatabase {
                     EpicsValue::Double(v) => *v != 0.0,
                     _ => true,
                 };
-                if is_nonzero {
-                    drop(instance);
-                    let mut visited = HashSet::new();
-                    let _ = self
-                        .process_record_with_links(record_name, &mut visited, 0)
-                        .await;
+                drop(instance);
+                if !is_nonzero {
                     return Ok(None);
                 }
-                return Ok(None);
+                // Continue to the put_notify_tx setup + process below
+                // by jumping past the field-write step (the value
+                // itself isn't stored; PROC is a trigger).
+                let (completion_tx, completion_rx) = crate::runtime::sync::oneshot::channel();
+                {
+                    let rec = self.inner.records.read().await;
+                    if let Some(rec_arc) = rec.get(record_name) {
+                        let mut guard = rec_arc.write().await;
+                        if guard.put_notify_tx.is_some() {
+                            return Err(CaError::PutCallbackInProgress(record_name.to_string()));
+                        }
+                        guard.put_notify_tx = Some(completion_tx);
+                    }
+                }
+                let mut visited = HashSet::new();
+                let _ = self
+                    .process_record_with_links(record_name, &mut visited, 0)
+                    .await;
+                let pending = {
+                    let rec = self.inner.records.read().await;
+                    if let Some(rec_arc) = rec.get(record_name) {
+                        rec_arc.read().await.put_notify_tx.is_some()
+                    } else {
+                        false
+                    }
+                };
+                return if pending {
+                    Ok(Some(completion_rx))
+                } else {
+                    Ok(None)
+                };
             }
 
             // DISP check: block CA puts to non-DISP fields when DISP=1

@@ -116,7 +116,7 @@ pub struct GatewayServer {
     access: Arc<ArcSwap<AccessConfig>>,
     cache: Arc<RwLock<PvCache>>,
     shadow_db: Arc<PvDatabase>,
-    upstream: Arc<RwLock<UpstreamManager>>,
+    upstream: Arc<UpstreamManager>,
     downstream: Arc<DownstreamServer>,
     stats: Arc<Stats>,
     putlog: Option<Arc<PutLog>>,
@@ -184,7 +184,7 @@ impl GatewayServer {
             beacon_anomaly: beacon_anomaly.clone(),
         })
         .await?;
-        let upstream = Arc::new(RwLock::new(upstream));
+        let upstream = Arc::new(upstream);
 
         // Downstream server — wrap each accepted client in TLS when
         // configured. Upstream traffic to the IOC remains plaintext
@@ -273,15 +273,13 @@ impl GatewayServer {
                     //    shadow database via UpstreamManager::ensure_subscribed.
                     //    Pass the matched ASG/ASL through so the per-PV
                     //    WriteHook can do the right ACL check.
-                    let mut up = upstream.write().await;
-                    if up
+                    if upstream
                         .ensure_subscribed(&m.resolved_name, m.asg.clone(), m.asl.unwrap_or(0))
                         .await
                         .is_err()
                     {
                         return false;
                     }
-                    drop(up);
 
                     // 3. B-G9: trigger a beacon anomaly so other
                     //    gateway-aware downstream clients re-search
@@ -326,8 +324,8 @@ impl GatewayServer {
                 None => continue, // Denied or not in list
             };
 
-            let mut up = self.upstream.write().await;
-            up.ensure_subscribed(&m.resolved_name, m.asg.clone(), m.asl.unwrap_or(0))
+            self.upstream
+                .ensure_subscribed(&m.resolved_name, m.asg.clone(), m.asl.unwrap_or(0))
                 .await?;
             count += 1;
         }
@@ -399,8 +397,7 @@ impl GatewayServer {
                 tick.tick().await;
                 let removed = cache_for_cleanup.write().await.cleanup(&timeouts).await;
                 if !removed.is_empty() {
-                    let mut up = upstream_for_cleanup.write().await;
-                    up.sweep_orphaned().await;
+                    upstream_for_cleanup.sweep_orphaned().await;
                     tracing::info!(evicted = removed.len(), "ca-gateway-rs: cache eviction");
                 }
             }
@@ -417,7 +414,7 @@ impl GatewayServer {
             loop {
                 tick.tick().await;
                 let cache_size = cache_for_stats.read().await.len();
-                let upstream_count = upstream_for_stats.read().await.subscription_count();
+                let upstream_count = upstream_for_stats.subscription_count();
                 stats_for_refresh
                     .refresh(&cache_for_stats, &db_for_stats, cache_size, upstream_count)
                     .await;
@@ -559,7 +556,7 @@ impl GatewayServer {
                 r = &mut downstream_run => r,
                 _ = &mut ctrl_c => {
                     tracing::info!("ca-gateway-rs: SIGINT received — shutting down");
-                    self.upstream.write().await.shutdown().await;
+                    self.upstream.shutdown().await;
                     Ok(())
                 }
             }

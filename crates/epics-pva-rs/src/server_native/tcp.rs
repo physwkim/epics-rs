@@ -1607,9 +1607,15 @@ async fn handle_op(
                                 // Window exhausted — wait for ACK.
                                 let notified = n.notified();
                                 tokio::pin!(notified);
-                                // Re-check after pinning so a refill
-                                // that fired between the load and the
-                                // pin is observed.
+                                // enable() registers the waiter eagerly
+                                // so an ACK firing between the recheck
+                                // and the await is captured. Same
+                                // pattern as channel.rs::wait_until_inactive
+                                // — Notify::notified() does NOT register
+                                // until the future is polled, so the
+                                // recheck-then-await window otherwise
+                                // loses the wake from notify_waiters().
+                                notified.as_mut().enable();
                                 if w.load(std::sync::atomic::Ordering::Relaxed) > 0 {
                                     continue;
                                 }

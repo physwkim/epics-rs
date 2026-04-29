@@ -100,6 +100,18 @@ pub struct ServerConn {
     type_cache: Arc<Mutex<crate::pvdata::encode::TypeCache>>,
 }
 
+// NOTE: ServerConn intentionally does NOT have a Drop impl that fires
+// `cancel.cancel()`. The reader/writer/heartbeat tasks each hold their
+// own clone of the CancellationToken AND clones of the writer_tx /
+// router Arcs, which keep ServerConn's underlying state alive past
+// the last user-facing Arc<ServerConn>. The tasks unwind on socket
+// close (reader Ok(0)) or queue-closed (writer drops once the last
+// writer_tx clone is gone) within ~5 s, and the heartbeat exits on
+// idle_timeout. Adding `cancel.cancel()` to Drop here interferes with
+// the reconnect path (client/channel.rs:355) — by the time Drop fires
+// the new connection's TCP-level connect can race with the OS-level
+// release of the old port, surfacing as ConnectionRefused.
+
 /// Type-erased read half. We accept either a plain TCP read half or a
 /// TLS read half through the same code path.
 type DynRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
