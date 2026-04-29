@@ -479,12 +479,25 @@ impl ChannelCache {
                 // available); poll is_done at 50 ms — well under
                 // typical monitor-event cadence so latency to
                 // restart is bounded.
+                //
+                // **Initial-event grace** (Phase 2 production-parity
+                // fix, April 2026): don't treat receiver_count==0 as
+                // "no subscribers" until at least one event has
+                // populated state.latest. Cache lookups go through
+                // `await_first_event` which blocks on first_event
+                // before returning; if we exit early here on the
+                // initial-no-subscriber state, GET/INFO callers
+                // (which don't add a `tx` receiver) will time out
+                // because their `state.latest` snapshot never gets
+                // written.
                 let mut subscribers_gone = false;
                 loop {
                     if handle.is_done() {
                         break;
                     }
-                    if tx_for_task.receiver_count() == 0 {
+                    let first_event_ready =
+                        state_for_task.read().latest.is_some();
+                    if first_event_ready && tx_for_task.receiver_count() == 0 {
                         subscribers_gone = true;
                         break;
                     }

@@ -780,18 +780,22 @@ async fn test_notify_field_respects_mask() {
     let rec = db.get_record("REC").await.unwrap();
     let (mut value_rx, mut alarm_rx) = {
         let mut inst = rec.write().await;
-        let value_rx = inst.add_subscriber(
-            "VAL",
-            1,
-            epics_base_rs::types::DbFieldType::Double,
-            EventMask::VALUE.bits(),
-        );
-        let alarm_rx = inst.add_subscriber(
-            "VAL",
-            2,
-            epics_base_rs::types::DbFieldType::Double,
-            EventMask::ALARM.bits(),
-        );
+        let value_rx = inst
+            .add_subscriber(
+                "VAL",
+                1,
+                epics_base_rs::types::DbFieldType::Double,
+                EventMask::VALUE.bits(),
+            )
+            .expect("subscribe should not be capped at default");
+        let alarm_rx = inst
+            .add_subscriber(
+                "VAL",
+                2,
+                epics_base_rs::types::DbFieldType::Double,
+                EventMask::ALARM.bits(),
+            )
+            .expect("subscribe should not be capped at default");
         (value_rx, alarm_rx)
     };
     {
@@ -823,6 +827,7 @@ async fn test_sdis_disable_notifies_alarm() {
             epics_base_rs::types::DbFieldType::Short,
             EventMask::ALARM.bits(),
         )
+        .expect("subscribe should not be capped at default")
     };
     let mut visited = HashSet::new();
     db.process_record_with_links("TARGET", &mut visited, 0)

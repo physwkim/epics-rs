@@ -22,6 +22,22 @@ use std::time::Duration;
 use tokio::process::{Child, Command as TokioCommand};
 
 /// Find a pvxs binary by name. Returns `None` when the file isn't found.
+///
+/// Lookup order:
+/// 1. `PVXS_HOME/bin/<host>/`, `bundle/usr/local/bin/`, `bin/`
+/// 2. `PATH` for the exact name
+/// 3. **pvAccessCPP fallback** (production-parity work, April 2026):
+///    when pvxs isn't installed but the older pvAccessCPP toolchain
+///    from EPICS Base is available, map pvxs binary names to their
+///    pvAccessCPP equivalents:
+///        softIocPVX → softIocPVA
+///        pvxget     → pvget
+///        pvxput     → pvput
+///        pvxmonitor → pvmonitor
+///        pvxinfo    → pvinfo
+///    Both implementations honour the same PVA wire protocol so the
+///    same interop assertions exercise our code identically. We log
+///    which fallback was selected so test failures aren't ambiguous.
 fn find_pvxs_bin(name: &str) -> Option<PathBuf> {
     if let Ok(home) = std::env::var("PVXS_HOME") {
         let home = PathBuf::from(home);
@@ -41,6 +57,24 @@ fn find_pvxs_bin(name: &str) -> Option<PathBuf> {
     // Fallback: PATH
     if let Some(found) = which_binary(name) {
         return Some(found);
+    }
+    // pvAccessCPP fallback: same PVA wire spec, different binary names.
+    let alias = match name {
+        "softIocPVX" => Some("softIocPVA"),
+        "pvxget" => Some("pvget"),
+        "pvxput" => Some("pvput"),
+        "pvxmonitor" => Some("pvmonitor"),
+        "pvxinfo" => Some("pvinfo"),
+        _ => None,
+    };
+    if let Some(alt) = alias {
+        if let Some(found) = which_binary(alt) {
+            eprintln!(
+                "interop: {name} not found; using pvAccessCPP fallback {alt} → {}",
+                found.display()
+            );
+            return Some(found);
+        }
     }
     None
 }
