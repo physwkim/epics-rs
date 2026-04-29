@@ -27,6 +27,7 @@ pub mod pv_request;
 pub mod pvdata;
 pub mod server;
 pub mod server_native;
+pub mod service;
 
 pub use error::{PvaError, PvaResult};
 

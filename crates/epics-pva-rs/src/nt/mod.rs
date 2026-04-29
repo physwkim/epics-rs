@@ -17,10 +17,30 @@ pub mod meta;
 pub mod nd_array;
 pub mod scalar;
 pub mod table;
+pub mod typed;
 pub mod uri;
 
 pub use attribute::NTAttribute;
 pub use enum_t::NTEnum;
 pub use scalar::NTScalar;
 pub use table::NTTable;
+pub use typed::{Alarm, TimeStamp, TypedNT, TypedNTError};
 pub use uri::NTURI;
+
+/// Proc-macro re-exports. Kept under a sub-namespace so the
+/// `#[derive(NTScalar)]` macro doesn't collide with the runtime
+/// [`scalar::NTScalar`] builder type at `epics_pva_rs::nt::NTScalar`.
+///
+/// ```ignore
+/// use epics_pva_rs::nt::derive::NTScalar;
+///
+/// #[derive(NTScalar)]
+/// struct MotorPos {
+///     value: f64,
+///     #[nt(meta)] alarm: epics_pva_rs::nt::Alarm,
+///     #[nt(meta)] timestamp: epics_pva_rs::nt::TimeStamp,
+/// }
+/// ```
+pub mod derive {
+    pub use epics_macros_rs::NTScalar;
+}

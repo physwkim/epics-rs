@@ -357,6 +357,66 @@ impl PvaClient {
         Ok(v)
     }
 
+    /// Typed `pvget` — returns the value already decoded into a Rust
+    /// type that implements [`crate::nt::TypedNT`]. Most users get
+    /// `T` from `#[derive(NTScalar)]` on their own struct.
+    ///
+    /// ```ignore
+    /// // built-in types work without a derive
+    /// let temp: f64 = client.pvget_typed("OVEN:TEMP").await?;
+    ///
+    /// // user-defined NT shape
+    /// #[derive(NTScalar)]
+    /// struct MotorPos {
+    ///     value: f64,
+    ///     #[nt(meta)] alarm: Alarm,
+    ///     #[nt(meta)] timestamp: TimeStamp,
+    /// }
+    /// let pos: MotorPos = client.pvget_typed("MOTOR:VAL").await?;
+    /// ```
+    pub async fn pvget_typed<T: crate::nt::TypedNT>(&self, pv_name: &str) -> PvaResult<T> {
+        let ch = self.channel(pv_name).await?;
+        let (_, v) = op_get(&ch, &[], self.inner.timeout).await?;
+        T::from_pv_field(&v).map_err(|e| crate::error::PvaError::InvalidValue(e.to_string()))
+    }
+
+    /// Typed `pvput` — encodes the value via [`crate::nt::TypedNT`]
+    /// and writes it to the target PV. Skips the string-form
+    /// round-trip entirely; the typed shape is sent as-is, so a
+    /// `f64` ends up on the wire as 8 bytes regardless of locale or
+    /// Display formatting.
+    pub async fn pvput_typed<T: crate::nt::TypedNT>(
+        &self,
+        pv_name: &str,
+        value: &T,
+    ) -> PvaResult<()> {
+        let ch = self.channel(pv_name).await?;
+        let pv_field = value.to_pv_field();
+        crate::client_native::ops_v2::op_put_value(&ch, &pv_field, self.inner.timeout).await
+    }
+
+    /// Typed `pvmonitor` — every wire event is decoded into `T`
+    /// before the callback fires. Decode failures surface as
+    /// [`crate::error::PvaError::InvalidValue`] and end the monitor.
+    pub async fn pvmonitor_typed<T, F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
+    where
+        T: crate::nt::TypedNT,
+        F: FnMut(T) + Send,
+    {
+        let ch = self.channel(pv_name).await?;
+        crate::client_native::ops_v2::op_monitor(
+            &ch,
+            &[],
+            self.inner.pipeline_size,
+            move |_desc, value| {
+                if let Ok(typed) = T::from_pv_field(value) {
+                    callback(typed);
+                }
+            },
+        )
+        .await
+    }
+
     /// Start a GET and return a [`PvaOperation`] handle the caller can
     /// `wait()`, `cancel()`, or `interrupt()` from any task. F-G8 —
     /// pvxs `Operation` parity for callers that need to start now and
@@ -694,7 +754,13 @@ impl PvaClient {
         .await
     }
 
-    pub async fn pvmonitor_typed<F>(&self, pv_name: &str, callback: F) -> PvaResult<()>
+    /// `pvmonitor` variant whose callback also receives the field
+    /// descriptor. Useful for clients that want to introspect the
+    /// shape on every event (e.g. for adaptive UI). For typed
+    /// access against a known `T: TypedNT` shape, prefer
+    /// [`Self::pvmonitor_typed`] which decodes into the Rust type
+    /// directly.
+    pub async fn pvmonitor_with_descriptor<F>(&self, pv_name: &str, callback: F) -> PvaResult<()>
     where
         F: FnMut(&FieldDesc, &PvField) + Send,
     {

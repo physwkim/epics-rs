@@ -907,6 +907,7 @@ dependencies = [
  "chrono",
  "clap",
  "epics-base-rs",
+ "epics-macros-rs",
  "hostname",
  "if-addrs",
  "libc",

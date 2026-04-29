@@ -473,3 +473,346 @@ fn value_from_epics(
         }
     }
 }
+
+// ── PVA Typed NT + service framework ─────────────────────────────────
+
+/// Resolve the path to `epics_pva_rs` crate. Mirrors
+/// [`epics_base_path`] for the PVA macros below.
+fn epics_pva_path() -> proc_macro2::TokenStream {
+    if let Ok(found) = crate_name("epics-pva-rs") {
+        match found {
+            FoundCrate::Itself => quote!(crate),
+            FoundCrate::Name(name) => {
+                let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
+                quote!(::#ident)
+            }
+        }
+    } else if let Ok(found) = crate_name("epics-rs") {
+        match found {
+            FoundCrate::Itself => quote!(crate::pva),
+            FoundCrate::Name(name) => {
+                let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
+                quote!(::#ident::pva)
+            }
+        }
+    } else {
+        quote!(::epics_pva_rs)
+    }
+}
+
+/// `#[derive(NTScalar)]` — generate a [`TypedNT`] impl for the
+/// annotated struct. The struct must have:
+///
+/// - exactly one field named `value` of a primitive type (`f64`,
+///   `i32`, `String`, etc.) — encoded as the NTScalar `value` slot
+/// - any number of additional fields. Fields tagged
+///   `#[nt(meta)]` get encoded as their type's
+///   [`TypedNT`] impl (`Alarm`, `TimeStamp`, custom meta structs).
+///
+/// Generated code emits `epics:nt/NTScalar:1.0` as the wrapper
+/// struct id; meta fields are inlined alongside `value`.
+///
+/// ```ignore
+/// use epics_pva_rs::nt::{Alarm, TimeStamp};
+///
+/// #[derive(epics_macros_rs::NTScalar)]
+/// struct MotorPos {
+///     value: f64,
+///     #[nt(meta)] alarm: Alarm,
+///     #[nt(meta)] timestamp: TimeStamp,
+/// }
+/// ```
+#[proc_macro_derive(NTScalar, attributes(nt))]
+pub fn derive_nt_scalar(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let krate = epics_pva_path();
+    let name = &input.ident;
+
+    let fields = match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(named) => &named.named,
+            _ => {
+                return syn::Error::new_spanned(
+                    name,
+                    "NTScalar derive requires a struct with named fields",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        _ => {
+            return syn::Error::new_spanned(name, "NTScalar derive only works on structs")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let mut value_field: Option<(syn::Ident, syn::Type)> = None;
+    let mut meta_fields: Vec<(syn::Ident, syn::Type)> = Vec::new();
+    for field in fields {
+        let Some(ident) = field.ident.clone() else {
+            continue;
+        };
+        let is_meta = field.attrs.iter().any(|a| {
+            a.path().is_ident("nt")
+                && a.parse_nested_meta(|m| {
+                    if m.path.is_ident("meta") {
+                        Ok(())
+                    } else {
+                        Err(m.error("unknown #[nt(...)] arg"))
+                    }
+                })
+                .is_ok()
+        });
+        if is_meta {
+            meta_fields.push((ident, field.ty.clone()));
+        } else if ident == "value" {
+            value_field = Some((ident, field.ty.clone()));
+        } else {
+            // Other fields are forbidden so the generated descriptor
+            // stays predictable. Operators that need richer NT shapes
+            // can still implement TypedNT manually.
+            return syn::Error::new_spanned(
+                ident,
+                "NTScalar derive: only `value` and `#[nt(meta)]`-tagged fields allowed",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
+    let Some((value_ident, value_ty)) = value_field else {
+        return syn::Error::new_spanned(name, "NTScalar derive requires a `value` field")
+            .to_compile_error()
+            .into();
+    };
+
+    let meta_field_names: Vec<String> = meta_fields
+        .iter()
+        .map(|(i, _)| i.to_string())
+        .collect();
+    let meta_field_idents: Vec<&syn::Ident> = meta_fields.iter().map(|(i, _)| i).collect();
+    let meta_field_tys: Vec<&syn::Type> = meta_fields.iter().map(|(_, t)| t).collect();
+
+    let value_ty_path = quote!(<#value_ty as #krate::nt::TypedNT>::descriptor());
+    let value_to_field = quote!(<#value_ty as #krate::nt::TypedNT>::to_pv_field(&self.#value_ident));
+    let value_from_field = quote! {
+        <#value_ty as #krate::nt::TypedNT>::from_pv_field(__field)
+            .map_err(|e| __rt::wrong_type("value", &e.to_string()))?
+    };
+
+    // Extract the inner `value` PvField from a parent NTScalar
+    // structure. The primitive `TypedNT` impls accept either bare
+    // ScalarValue OR an NTScalar wrapper, so we hand them the entire
+    // wrapper struct on the way down.
+    let value_extract = quote! {
+        {
+            let raw = __s
+                .get_field("value")
+                .ok_or_else(|| __rt::missing("value"))?;
+            // Primitive scalars decode directly; sub-structures
+            // pass through.
+            match raw {
+                __rt::PvField::Scalar(_) => {
+                    let mut __wrap = __rt::PvStructure::new("epics:nt/NTScalar:1.0");
+                    __wrap
+                        .fields
+                        .push(("value".into(), raw.clone()));
+                    let __field = __rt::PvField::Structure(__wrap);
+                    let __field = &__field;
+                    #value_from_field
+                }
+                _ => {
+                    let __field = raw;
+                    #value_from_field
+                }
+            }
+        }
+    };
+
+    let expanded = quote! {
+        impl #krate::nt::TypedNT for #name {
+            fn descriptor() -> #krate::pvdata::FieldDesc {
+                use #krate::nt::typed::__rt;
+                let mut __fields: ::std::vec::Vec<(::std::string::String, __rt::FieldDesc)> =
+                    ::std::vec::Vec::new();
+                // The `value` slot's wire type is taken from the
+                // user's `value` field type's TypedNT::descriptor —
+                // that descriptor is itself an NTScalar wrapper, so
+                // we pull out its `value` field. Falling back to
+                // Variant when the wrapper looks unexpected keeps
+                // user-defined nested NT compositions working.
+                let __inner = #value_ty_path;
+                let __value_field = match __inner {
+                    __rt::FieldDesc::Structure { fields, .. } => {
+                        fields.into_iter()
+                            .find(|(n, _)| n == "value")
+                            .map(|(_, f)| f)
+                            .unwrap_or(__rt::FieldDesc::Variant)
+                    }
+                    other => other,
+                };
+                __fields.push(("value".into(), __value_field));
+                #(
+                    __fields.push((
+                        #meta_field_names.into(),
+                        <#meta_field_tys as #krate::nt::TypedNT>::descriptor(),
+                    ));
+                )*
+                __rt::FieldDesc::Structure {
+                    struct_id: "epics:nt/NTScalar:1.0".into(),
+                    fields: __fields,
+                }
+            }
+
+            fn to_pv_field(&self) -> #krate::pvdata::PvField {
+                use #krate::nt::typed::__rt;
+                let mut __s = __rt::PvStructure::new("epics:nt/NTScalar:1.0");
+                // Inner TypedNT impl may return either a bare scalar
+                // or an NTScalar wrapper struct. Unwrap to grab the
+                // `value` slot so the parent struct stays
+                // single-level.
+                let __inner_field = #value_to_field;
+                let __value_slot = match __inner_field {
+                    __rt::PvField::Structure(inner) => {
+                        inner.fields
+                            .into_iter()
+                            .find(|(n, _)| n == "value")
+                            .map(|(_, f)| f)
+                            .unwrap_or(__rt::PvField::Scalar(__rt::ScalarValue::Int(0)))
+                    }
+                    other => other,
+                };
+                __s.fields.push(("value".into(), __value_slot));
+                #(
+                    __s.fields.push((
+                        #meta_field_names.into(),
+                        <#meta_field_tys as #krate::nt::TypedNT>::to_pv_field(&self.#meta_field_idents),
+                    ));
+                )*
+                __rt::PvField::Structure(__s)
+            }
+
+            fn from_pv_field(
+                __field: &#krate::pvdata::PvField,
+            ) -> ::std::result::Result<Self, #krate::nt::TypedNTError> {
+                use #krate::nt::typed::__rt;
+                let __s = match __field {
+                    __rt::PvField::Structure(s) => s,
+                    _ => return Err(__rt::wrong_type("<root>", "expected NTScalar wrapper")),
+                };
+                if !(__s.struct_id.is_empty() || __s.struct_id == "epics:nt/NTScalar:1.0") {
+                    return Err(__rt::wrong_struct_id("epics:nt/NTScalar:1.0", &__s.struct_id));
+                }
+                let __value: #value_ty = #value_extract;
+                #(
+                    let #meta_field_idents: #meta_field_tys = {
+                        let raw = __s
+                            .get_field(#meta_field_names)
+                            .ok_or_else(|| __rt::missing(#meta_field_names))?;
+                        <#meta_field_tys as #krate::nt::TypedNT>::from_pv_field(raw)?
+                    };
+                )*
+                Ok(Self {
+                    #value_ident: __value,
+                    #( #meta_field_idents, )*
+                })
+            }
+        }
+    };
+
+    expanded.into()
+}
+
+/// `#[pva_service]` — turn an `impl Block` for a service struct
+/// into a [`PvaService`] (in `epics_pva_rs::service`). Every async
+/// method becomes a wire-callable RPC; positional parameters are
+/// extracted from the request struct's named fields, the return
+/// value is encoded via [`IntoServiceResponse`].
+///
+/// Restrictions:
+/// - methods must be `&self` async
+/// - parameters must implement `ServiceArg`
+/// - return type must implement `IntoServiceResponse`
+///
+/// ```ignore
+/// struct MotorService { driver: Arc<Driver> }
+///
+/// #[epics_macros_rs::pva_service]
+/// impl MotorService {
+///     async fn r#move(&self, target: f64, velocity: f64) -> Result<f64, String> {
+///         self.driver.start(target, velocity).await
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn pva_service(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let krate = epics_pva_path();
+    let input = parse_macro_input!(item as syn::ItemImpl);
+    let self_ty = &input.self_ty;
+
+    let mut method_arms = Vec::new();
+    for item in &input.items {
+        let syn::ImplItem::Fn(m) = item else {
+            continue;
+        };
+        // Only async fn(&self, ...) methods are exposed.
+        if m.sig.asyncness.is_none() {
+            continue;
+        }
+        let mut iter = m.sig.inputs.iter();
+        match iter.next() {
+            Some(syn::FnArg::Receiver(_)) => {}
+            _ => continue, // skip non-method functions
+        }
+        let method_name = m.sig.ident.to_string();
+        let method_ident = &m.sig.ident;
+
+        let mut arg_names: Vec<String> = Vec::new();
+        let mut arg_idents: Vec<syn::Ident> = Vec::new();
+        let mut arg_tys: Vec<syn::Type> = Vec::new();
+        for arg in iter {
+            let syn::FnArg::Typed(pat_ty) = arg else { continue };
+            let syn::Pat::Ident(pat_ident) = &*pat_ty.pat else {
+                continue;
+            };
+            arg_names.push(pat_ident.ident.to_string());
+            arg_idents.push(pat_ident.ident.clone());
+            arg_tys.push((*pat_ty.ty).clone());
+        }
+
+        let dispatch_arm = quote! {
+            {
+                let __svc: ::std::sync::Arc<#self_ty> = self.clone();
+                #krate::service::ServiceMethod {
+                    name: #method_name.into(),
+                    dispatch: ::std::sync::Arc::new(move |__req: #krate::pvdata::PvField| {
+                        let __svc = __svc.clone();
+                        ::std::boxed::Box::pin(async move {
+                            let __args = #krate::service::Args::from_pv_field(&__req);
+                            #(
+                                let #arg_idents: #arg_tys = __args
+                                    .get_named::<#arg_tys>(#arg_names)?;
+                            )*
+                            let __out = __svc.#method_ident(#( #arg_idents ),*).await;
+                            Ok(#krate::service::types::IntoServiceResponse::into_service_response(__out))
+                        })
+                    }),
+                }
+            }
+        };
+        method_arms.push(dispatch_arm);
+    }
+
+    let impl_block = &input;
+    let expanded = quote! {
+        #impl_block
+
+        impl #krate::service::PvaService for #self_ty {
+            fn methods(self: ::std::sync::Arc<Self>) -> ::std::vec::Vec<#krate::service::ServiceMethod> {
+                ::std::vec![ #( #method_arms ),* ]
+            }
+        }
+    };
+    expanded.into()
+}

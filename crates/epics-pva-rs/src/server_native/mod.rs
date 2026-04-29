@@ -12,4 +12,4 @@ pub use composite::CompositeSource;
 pub use peers::{PeerEntry, PeerRegistry, PeerSnapshot};
 pub use runtime::{PvaServer, PvaServerConfig, run_pva_server};
 pub use shared_pv::{SharedPV, SharedSource};
-pub use source::{ChannelSource, ChannelSourceObj, DynSource, RawMonitorEvent};
+pub use source::{ChannelContext, ChannelSource, ChannelSourceObj, DynSource, RawMonitorEvent};

@@ -71,6 +71,7 @@ pub mod channel_cache;
 pub mod control;
 pub mod error;
 pub mod gateway;
+pub mod middleware;
 pub mod multi_gateway;
 pub mod source;
 

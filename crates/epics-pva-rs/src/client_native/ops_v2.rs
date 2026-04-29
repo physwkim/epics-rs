@@ -323,6 +323,86 @@ pub async fn op_put_field(
     result
 }
 
+/// PUT a pre-built [`PvField`] (typed-NT path). Skips the
+/// string-form round-trip used by [`op_put`] / [`op_put_raw`] —
+/// `value` is encoded directly against the server-supplied
+/// introspection. The caller's typed-NT shape MUST match the
+/// server's introspection at the wire level; mismatch surfaces as
+/// the standard "PUT failed" status from the server.
+///
+/// Used by [`crate::client_native::context::PvaClient::pvput_typed`].
+pub async fn op_put_value(
+    channel: &Arc<Channel>,
+    value: &PvField,
+    op_timeout: Duration,
+) -> PvaResult<()> {
+    let (server, sid) = channel.ensure_active().await?;
+    let order = server.byte_order;
+    let big_endian = matches!(order, ByteOrder::Big);
+    let codec = PvaCodec { big_endian };
+    let ioid = alloc_ioid();
+
+    let pv_req = build_pv_request_value_only(big_endian);
+    let mut stream = server.register_ioid_stream(ioid);
+    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
+    let cache = server.type_cache();
+
+    let init_req = codec.build_put_init(sid, ioid, &pv_req);
+    server.send(init_req).await?;
+    let init_frame = await_frame(&mut stream, op_timeout).await?;
+    let init = match decode_op_response_cached(&init_frame, None, &mut cache.lock())? {
+        OpResponse::Init(i) => i,
+        other => {
+            return Err(PvaError::Protocol(format!(
+                "expected PUT INIT, got {other:?}"
+            )));
+        }
+    };
+    if !init.status.is_success() {
+        return Err(PvaError::Protocol(format!(
+            "PUT INIT failed: {:?}",
+            init.status
+        )));
+    }
+    let intro = init.introspection;
+
+    let mut payload = Vec::new();
+    payload.put_u32(sid, order);
+    payload.put_u32(ioid, order);
+    payload.put_u8(0x00);
+    let mut changed = BitSet::new();
+    if let Some(bit) = intro.bit_for_path("value") {
+        changed.set(bit);
+    } else {
+        changed.set(0);
+    }
+    changed.write_into(order, &mut payload);
+    encode_pv_field(value, &intro, order, &mut payload);
+    let header = PvaHeader::application(false, order, Command::Put.code(), payload.len() as u32);
+    let mut frame = Vec::new();
+    header.write_into(&mut frame);
+    frame.extend_from_slice(&payload);
+    server.send(frame).await?;
+
+    let done_frame = await_frame(&mut stream, op_timeout).await?;
+    let result = match decode_op_response(&done_frame, Some(&intro))? {
+        OpResponse::Status(s) => {
+            if s.status.is_success() {
+                Ok(())
+            } else {
+                Err(PvaError::Protocol(format!("PUT failed: {:?}", s.status)))
+            }
+        }
+        other => Err(PvaError::Protocol(format!(
+            "expected PUT done, got {other:?}"
+        ))),
+    };
+
+    let destroy = codec.build_destroy_request(sid, ioid);
+    let _ = server.send(destroy).await;
+    result
+}
+
 async fn op_put_inner(
     channel: &Arc<Channel>,
     value_str: &str,
