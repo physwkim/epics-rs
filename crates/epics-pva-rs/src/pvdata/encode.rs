@@ -257,10 +257,7 @@ fn emit_pod<T: Copy, const N: usize, F>(
         // contiguous slice owned by the caller's Arc, alive for
         // this function's scope.
         let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                a.as_ptr() as *const u8,
-                a.len() * std::mem::size_of::<T>(),
-            )
+            std::slice::from_raw_parts(a.as_ptr() as *const u8, std::mem::size_of_val(a))
         };
         out.extend_from_slice(bytes);
     } else {

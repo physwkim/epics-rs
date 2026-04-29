@@ -156,9 +156,9 @@ pub struct RawMonitorEvent {
     /// Refcounted via `bytes::Bytes` so fan-out across N
     /// downstream subscribers is N atomic increments, no copies.
     pub body_bytes: bytes::Bytes,
-    /// Byte order the producer encoded with. `Little` is the pva-rs
-    /// + pvxs default; only relevant when the server's downstream
-    /// connection negotiated `Big`.
+    /// Byte order the producer encoded with. `Little` is the
+    /// default for both pva-rs and pvxs; only relevant when the
+    /// server's downstream connection negotiated `Big`.
     pub byte_order: crate::proto::ByteOrder,
 }
 

@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn f64_round_trip() {
-        let v: f64 = 3.14;
+        let v: f64 = 2.71;
         let field = v.to_pv_field();
         let back = f64::from_pv_field(&field).unwrap();
         assert_eq!(v, back);

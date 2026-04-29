@@ -10,6 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use common::{free_tcp_port, free_udp_port, require_tool, run_caget, run_caput};
+use serial_test::serial;
 
 const TEST_DB: &str = "
 record(ai, \"TEST:AI\") {
@@ -66,6 +67,7 @@ fn spawn_rust_ioc(db_content: &str) -> Option<RustIoc> {
 }
 
 #[test]
+#[serial]
 fn c_caget_can_read_from_rust_ioc() {
     if !require_tool("caget") {
         return;
@@ -79,6 +81,7 @@ fn c_caget_can_read_from_rust_ioc() {
 }
 
 #[test]
+#[serial]
 fn c_caput_can_write_to_rust_ioc() {
     if !require_tool("caput") || !require_tool("caget") {
         return;
@@ -92,6 +95,7 @@ fn c_caput_can_write_to_rust_ioc() {
 }
 
 #[test]
+#[serial]
 fn c_camonitor_sees_rust_ioc_changes() {
     if !require_tool("camonitor") || !require_tool("caput") {
         return;
@@ -131,6 +135,7 @@ fn c_camonitor_sees_rust_ioc_changes() {
 }
 
 #[test]
+#[serial]
 fn c_cainfo_describes_rust_ioc_channel() {
     if !require_tool("cainfo") {
         return;
@@ -154,6 +159,7 @@ fn c_cainfo_describes_rust_ioc_channel() {
 }
 
 #[test]
+#[serial]
 fn pyepics_caget_via_libca_against_rust_ioc() {
     // Pyepics uses libca; if the C tools work this is largely covered.
     // Provide an explicit smoke through Python only when pyepics is present.

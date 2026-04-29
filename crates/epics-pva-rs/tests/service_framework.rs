@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, PvStructure, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{PvaServer, SharedSource};
 use epics_pva_rs::service::pva_service;

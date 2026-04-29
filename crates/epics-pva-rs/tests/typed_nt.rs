@@ -6,11 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::nt::derive::NTScalar;
 use epics_pva_rs::nt::{Alarm, TimeStamp, TypedNT};
 use epics_pva_rs::nt::typed::EnumValue;
-use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarType, ScalarValue};
+use epics_pva_rs::pvdata::{FieldDesc, ScalarType};
 use epics_pva_rs::server_native::{PvaServer, SharedPV, SharedSource};
 use serial_test::serial;
 
@@ -43,7 +42,7 @@ fn typed_nt_descriptor_shape() {
 #[test]
 fn typed_nt_round_trip_local() {
     let pos = MotorPos {
-        value: 3.14,
+        value: 2.71,
         alarm: Alarm {
             severity: 1,
             status: 2,

@@ -30,11 +30,11 @@ use tokio::process::{Child, Command as TokioCommand};
 ///    when pvxs isn't installed but the older pvAccessCPP toolchain
 ///    from EPICS Base is available, map pvxs binary names to their
 ///    pvAccessCPP equivalents:
-///        softIocPVX → softIocPVA
-///        pvxget     → pvget
-///        pvxput     → pvput
-///        pvxmonitor → pvmonitor
-///        pvxinfo    → pvinfo
+///    `softIocPVX → softIocPVA`,
+///    `pvxget → pvget`,
+///    `pvxput → pvput`,
+///    `pvxmonitor → pvmonitor`,
+///    `pvxinfo → pvinfo`.
 ///    Both implementations honour the same PVA wire protocol so the
 ///    same interop assertions exercise our code identically. We log
 ///    which fallback was selected so test failures aren't ambiguous.
