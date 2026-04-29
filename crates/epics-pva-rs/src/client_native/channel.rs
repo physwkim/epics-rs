@@ -19,6 +19,7 @@
 //! [`crate::client_native::ops_v2::op_monitor_handle`] for the loop that
 //! re-issues INIT/START on each new server conn.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -184,6 +185,15 @@ impl ConnectionPool {
         map.retain(|_, conn| conn.is_alive());
     }
 
+    /// Drop the cached connection for `addr` regardless of liveness
+    /// (F10). Called when a GUID mismatch is detected at the same
+    /// address — the previous code cleared its own Channel state but
+    /// left the pool entry, so subsequent channels resolving to the
+    /// same addr re-used the stale (wrong-GUID) ServerConn.
+    pub fn invalidate(&self, addr: SocketAddr) {
+        self.inner.lock().remove(&addr);
+    }
+
     /// Drop every cached connection. The underlying `ServerConn`s live
     /// only as long as some `Arc` to them is held, so callers should
     /// already have dropped any operation handles that hold a clone.
@@ -318,6 +328,12 @@ impl Channel {
             }
         }
         if force_research {
+            // F10: also drop the stale pool entry so other channels
+            // resolving to the same addr don't reuse the wrong-GUID
+            // ServerConn until they too discover the mismatch.
+            if let ChannelState::Active { server, .. } = &*self.state.read() {
+                self.pool.invalidate(server.addr);
+            }
             self.set_state(ChannelState::Idle);
             self.alternatives.lock().clear();
         }

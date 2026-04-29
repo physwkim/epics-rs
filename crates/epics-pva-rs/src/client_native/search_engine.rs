@@ -360,6 +360,15 @@ struct Pending {
     /// Which search bucket this pending occupies. Set on first insert
     /// and rotated forward by `nBuckets` after each retry.
     bucket: usize,
+    /// Tick-decremented hold-off counter: when > 0 at the bucket's
+    /// firing tick, the search is NOT transmitted (re-placed in the
+    /// same bucket so it fires again N ticks later, decrementing
+    /// once each cycle). Set to RETRY_HOLDOFF_BUCKETS on first
+    /// retry to avoid storming a slow IOC. The previous formula
+    /// `(current+N+RETRY_HOLDOFF) % N == (current+RETRY_HOLDOFF)` was
+    /// inverted — failed retries fired SOONER (~9 s) than fresh
+    /// (~30 s).
+    holdoff_cycles: u32,
 }
 
 /// pvxs `client.cpp::nBuckets`. 30 buckets at 1 s normal interval gives
@@ -449,6 +458,7 @@ async fn run_engine(
                         last_attempt: Instant::now(),
                         attempt: 0,
                         bucket,
+                        holdoff_cycles: 0,
                     };
                     by_name.insert(pv_name, sid);
                     pending.insert(sid, p);
@@ -471,6 +481,7 @@ async fn run_engine(
                         last_attempt: Instant::now(),
                         attempt: 0,
                         bucket,
+                        holdoff_cycles: 0,
                     };
                     by_name.insert(pv_name, sid);
                     pending.insert(sid, p);
@@ -680,16 +691,55 @@ async fn run_engine(
                 //    (matches pvxs Channel::disconnect holdoff).
                 let bucket_ids = std::mem::take(&mut search_buckets[current_bucket]);
                 for sid in bucket_ids {
+                    // Skip-on-holdoff: a retry sets holdoff_cycles =
+                    // RETRY_HOLDOFF_BUCKETS; the search isn't sent
+                    // this cycle, just re-placed in the same bucket
+                    // and the counter decremented. After holdoff
+                    // expires the search fires again. Replaces the
+                    // arithmetically-broken `(current+N+EXTRA) % N`
+                    // formula that effectively reduced retry holdoff
+                    // to 9 s instead of >30 s.
+                    let mut send_now = true;
+                    let mut still_pending = false;
+                    let mut responder_dead = false;
+                    if let Some(p) = pending.get_mut(&sid) {
+                        still_pending = true;
+                        // F6: drop searches whose oneshot responder
+                        // was already closed (caller cancelled their
+                        // find() future via timeout / abort). Without
+                        // this the bucket loop keeps re-broadcasting
+                        // dead searches forever.
+                        responder_dead = match &p.responder {
+                            Responder::Single(tx) => tx.is_closed(),
+                            Responder::Multi { responder, .. } => responder.is_closed(),
+                        };
+                        if !responder_dead && p.holdoff_cycles > 0 {
+                            p.holdoff_cycles -= 1;
+                            send_now = false;
+                            search_buckets[current_bucket].push(sid);
+                        }
+                    }
+                    if responder_dead {
+                        if let Some(p) = pending.remove(&sid) {
+                            by_name.remove(&p.pv_name);
+                        }
+                        continue;
+                    }
+                    if !still_pending || !send_now {
+                        continue;
+                    }
                     let pkt_opt = pending.get_mut(&sid).map(|p| {
                         p.last_attempt = now;
                         p.attempt = p.attempt.saturating_add(1);
-                        let next_bucket = if p.attempt > 1 {
-                            (current_bucket + N_SEARCH_BUCKETS + RETRY_HOLDOFF_BUCKETS)
-                                % N_SEARCH_BUCKETS
-                        } else {
-                            current_bucket // 30 ticks later (same slot)
-                        };
-                        p.bucket = next_bucket;
+                        // Re-place in next-tick's slot (one full
+                        // cycle = N ticks ahead), but if this was a
+                        // retry, also tag holdoff so we wait an
+                        // extra RETRY_HOLDOFF_BUCKETS cycles before
+                        // actually transmitting again.
+                        if p.attempt > 1 {
+                            p.holdoff_cycles = RETRY_HOLDOFF_BUCKETS as u32;
+                        }
+                        p.bucket = current_bucket;
                         codec.build_search(
                             0, sid, &p.pv_name, [0,0,0,0], response_port, false,
                         )
