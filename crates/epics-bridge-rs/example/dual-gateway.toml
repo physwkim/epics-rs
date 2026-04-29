@@ -1,0 +1,26 @@
+# dual-gateway-rs configuration. Every value is optional; missing
+# fields use the CLI default. CLI flags override TOML at runtime.
+
+[ca]
+# enabled = true                        # set false to disable the CA gateway
+# pvlist = "/etc/gw/gateway.pvlist"
+# access = "/etc/gw/access.acf"
+# putlog = "/var/log/gateway-puts.log"
+# preload = "/etc/gw/preload.txt"
+# command = "/etc/gw/command.cmd"      # SIGUSR1-triggered (Unix)
+# port = 5064
+# read_only = false
+# stats_prefix = "gateway:"
+# heartbeat_interval = 1
+# cleanup_interval = 10
+# stats_interval = 10
+
+[pva]
+# enabled = true                        # set false to disable the PVA gateway
+# bind = "0.0.0.0"
+# tcp_port = 5075
+# udp_port = 5076
+# connect_timeout_secs = 5
+# cleanup_interval_secs = 30
+# control_prefix = "gw"
+# prefetch = ["UPS:VOLTAGE", "UPS:CURRENT"]

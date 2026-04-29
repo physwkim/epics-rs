@@ -68,11 +68,15 @@
 //! ```
 
 pub mod channel_cache;
+pub mod control;
 pub mod error;
 pub mod gateway;
+pub mod multi_gateway;
 pub mod source;
 
 pub use channel_cache::{ChannelCache, DEFAULT_CLEANUP_INTERVAL, UpstreamEntry};
+pub use control::ControlSource;
 pub use error::{GwError, GwResult};
 pub use gateway::{PvaGateway, PvaGatewayConfig};
+pub use multi_gateway::{MultiTenantPvaGateway, MultiTenantPvaGatewayBuilder};
 pub use source::GatewayChannelSource;

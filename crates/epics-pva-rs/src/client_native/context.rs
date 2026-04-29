@@ -29,7 +29,7 @@ use crate::pvdata::{FieldDesc, PvField};
 use super::channel::{Channel, ConnectionPool};
 use super::ops_v2::{
     DEFAULT_PIPELINE_SIZE, MonitorEvent, MonitorEventMask, SubscriptionHandle, op_get, op_monitor,
-    op_monitor_events, op_monitor_handle, op_put, op_rpc,
+    op_monitor_events, op_monitor_handle, op_monitor_raw_frames_handle, op_put, op_rpc,
 };
 use super::search_engine::SearchEngine;
 
@@ -639,6 +639,28 @@ impl PvaClient {
             move |desc, body, order| callback(desc, body, order),
         )
         .await
+    }
+
+    /// PG-G9 final form: like [`Self::pvmonitor_raw_frames`] but returns
+    /// a [`SubscriptionHandle`] for pause/resume/stats. The bridge
+    /// `pva_gateway` uses this to forward downstream watermark events
+    /// into upstream pipeline-pause control msgs without an
+    /// intermediate decode/encode cycle.
+    pub async fn pvmonitor_raw_frames_handle<F>(
+        &self,
+        pv_name: &str,
+        callback: F,
+    ) -> PvaResult<SubscriptionHandle>
+    where
+        F: FnMut(&FieldDesc, bytes::Bytes, crate::proto::ByteOrder) + Send + 'static,
+    {
+        let ch = self.channel(pv_name).await?;
+        Ok(op_monitor_raw_frames_handle(
+            ch,
+            &[],
+            self.inner.pipeline_size,
+            callback,
+        ))
     }
 
     /// `pvmonitor` with a custom pvRequest. Common uses:

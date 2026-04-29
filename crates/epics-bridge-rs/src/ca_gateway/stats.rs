@@ -8,7 +8,9 @@
 //!
 //! ## Exposed PVs
 //!
-//! All names use the configurable prefix (default `"gateway:"`):
+//! All names use the configurable prefix (default `"gateway:"`).
+//!
+//! Native names:
 //!
 //! | PV | Type | Description |
 //! |----|------|-------------|
@@ -24,6 +26,30 @@
 //! | `<prefix>putCount` | Long | Cumulative put count (for putlog) |
 //! | `<prefix>readOnlyRejects` | Long | Puts rejected because read_only=true |
 //! | `<prefix>perHostConnections` | Long | Distinct downstream client hosts |
+//!
+//! C++ ca-gateway compatibility aliases (B-G10) — kept so dashboards
+//! and scripts written against the C source's `gateServer.cc:1903-1965`
+//! names keep working against the Rust gateway:
+//!
+//! | PV | Type | Maps to |
+//! |----|------|---------|
+//! | `<prefix>vctotal` | Long | totalPvs (virtual-channel total) |
+//! | `<prefix>pvtotal` | Long | totalPvs (real-PV total — same source as vctotal in C) |
+//! | `<prefix>connected` | Long | active + inactive (upstream-alive) |
+//! | `<prefix>active` | Long | activeCount |
+//! | `<prefix>inactive` | Long | inactiveCount |
+//! | `<prefix>unconnected` | Long | connecting + dead (upstream-not-alive) |
+//! | `<prefix>dead` | Long | deadCount |
+//! | `<prefix>connecting` | Long | connectingCount |
+//! | `<prefix>disconnected` | Long | deadCount (alias — C source treats these as the same bucket) |
+//! | `<prefix>clientEventRate` | Double | eventRate |
+//!
+//! Not implemented (intentional scope — operational metrics covered by
+//! the [`metrics`] crate Prometheus export instead):
+//! - `fd` (open-file-descriptor count) — Unix-specific syscalls
+//! - RATE_STATS internals (`clientEventCount`, `postEventCount`,
+//!   `loopCount`) — scheduler-loop instrumentation tied to the C++
+//!   event-driven main loop; the Rust async runtime has no equivalent.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};

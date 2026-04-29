@@ -89,7 +89,78 @@ pub struct AuditEvent<'a> {
     pub result: &'a str,
 }
 
+/// Output format for [`AuditLogger`]. JSON is the modern default
+/// (one event per line, easily ingested by Splunk / Loki / ELK).
+/// `LegacyAslog` mirrors the libca `asLib` text format that pre-Rust
+/// EPICS sites already have parsing tooling for:
+///
+/// ```text
+/// 04/29/2026 14:35:21 ASUSER W alice@opi-1 write: MOTOR:VAL=3.14 ok
+/// ```
+///
+/// Pick this when an existing audit pipeline already consumes the
+/// libca format and the rust IOC needs to feed into it without
+/// touching the downstream parsers.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum AuditFormat {
+    /// Modern one-line JSON (default).
+    #[default]
+    Json,
+    /// libca asLib-compatible single-line text format. CA-G3 parity.
+    LegacyAslog,
+}
+
 impl AuditEvent<'_> {
+    /// libca-asLib-compatible single-line text rendering. Used by
+    /// [`AuditFormat::LegacyAslog`]. Format:
+    ///
+    /// `MM/DD/YYYY HH:MM:SS ASUSER <op> <user>@<host> <verb>: <pv>[=<value>] <result>`
+    ///
+    /// `<op>` is `R` (read) for `subscribe`, `W` (write) for `caput`,
+    /// `C` (connect) / `D` (disconnect) for connection lifecycle, or
+    /// `?` for any other event type. `<verb>` is the full event name
+    /// so downstream parsers can disambiguate.
+    fn to_aslog_line(&self) -> String {
+        let now = chrono::Utc::now();
+        let ts = now.format("%m/%d/%Y %H:%M:%S");
+        let op = match self.event {
+            "subscribe" | "unsubscribe" | "caget" => "R",
+            "caput" => "W",
+            "connect" => "C",
+            "disconnect" => "D",
+            "create_chan" => "O",
+            "acf_deny" => "X",
+            _ => "?",
+        };
+        let identity = if self.user.is_empty() && self.host.is_empty() {
+            self.peer.to_string()
+        } else if self.host.is_empty() {
+            self.user.to_string()
+        } else if self.user.is_empty() {
+            format!("anonymous@{}", self.host)
+        } else {
+            format!("{}@{}", self.user, self.host)
+        };
+        let pv_value = if self.value.is_empty() {
+            self.pv.to_string()
+        } else {
+            format!("{}={}", self.pv, self.value)
+        };
+        let result = if self.result.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.result)
+        };
+        let line = format!(
+            "{ts} ASUSER {op} {identity} {ev}: {pv_value}{result}",
+            ev = self.event,
+        );
+        // Drop the trailing space the format leaves when both
+        // pv_value and result are empty (e.g. anonymous connect with
+        // no PV) so log shippers don't index hidden whitespace.
+        line.trim_end().to_string()
+    }
+
     fn to_json(&self) -> String {
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let mut s = String::with_capacity(192);
@@ -154,6 +225,7 @@ fn push_kv(s: &mut String, k: &str, v: &str) {
 #[derive(Clone)]
 pub struct AuditLogger {
     tx: tokio::sync::mpsc::Sender<String>,
+    format: AuditFormat,
 }
 
 const AUDIT_QUEUE_CAPACITY: usize = 4096;
@@ -162,8 +234,15 @@ impl AuditLogger {
     /// Wrap a sink and spawn a single writer task. The writer drains
     /// the queue and serializes writes; if the queue fills, new
     /// events are dropped at `log()` time so the CA hot path never
-    /// stalls on disk I/O.
+    /// stalls on disk I/O. Defaults to [`AuditFormat::Json`].
     pub fn new(sink: AuditSink) -> Self {
+        Self::new_with_format(sink, AuditFormat::Json)
+    }
+
+    /// Like [`Self::new`] but emits in the chosen format. CA-G3:
+    /// pass [`AuditFormat::LegacyAslog`] to feed an existing
+    /// libca-asLib-compatible audit pipeline.
+    pub fn new_with_format(sink: AuditSink, format: AuditFormat) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(AUDIT_QUEUE_CAPACITY);
         let sink = Arc::new(sink);
         tokio::spawn(async move {
@@ -171,11 +250,14 @@ impl AuditLogger {
                 sink.write(&line).await;
             }
         });
-        Self { tx }
+        Self { tx, format }
     }
 
     pub async fn log(&self, ev: AuditEvent<'_>) {
-        let line = ev.to_json();
+        let line = match self.format {
+            AuditFormat::Json => ev.to_json(),
+            AuditFormat::LegacyAslog => ev.to_aslog_line(),
+        };
         // try_send: never block the caller. Drop on full queue and
         // count it — losing a line under sustained overload is
         // strictly better than pinning a CA connection.
@@ -204,6 +286,64 @@ mod tests {
         assert!(s.contains("\"ev\":\"caput\""));
         assert!(s.contains("\"pv\":\"MOTOR:VAL\""));
         assert!(s.contains("\"result\":\"ok\""));
+    }
+
+    /// CA-G3: libca asLib-compatible text format. Verifies the line
+    /// shape, op-letter mapping, identity composition, and
+    /// pv=value rendering for `caput`.
+    #[test]
+    fn aslog_caput_render() {
+        let ev = AuditEvent {
+            event: "caput",
+            peer: "10.0.0.5:1234",
+            user: "alice",
+            host: "opi-1",
+            pv: "MOTOR:VAL",
+            value: "3.14",
+            result: "ok",
+        };
+        let s = ev.to_aslog_line();
+        // Date/time prefix is stable shape, content varies.
+        assert!(s.starts_with(
+            &chrono::Utc::now()
+                .format("%m/%d/%Y")
+                .to_string()
+        ));
+        assert!(s.contains(" ASUSER W alice@opi-1 caput: MOTOR:VAL=3.14 ok"));
+    }
+
+    /// Read events map to `R` and omit value (no `=`).
+    #[test]
+    fn aslog_subscribe_render() {
+        let ev = AuditEvent {
+            event: "subscribe",
+            peer: "p",
+            user: "bob",
+            host: "ws-2",
+            pv: "BL10C:VG-01:PRESSURE",
+            value: "",
+            result: "",
+        };
+        let s = ev.to_aslog_line();
+        assert!(s.contains(" ASUSER R bob@ws-2 subscribe: BL10C:VG-01:PRESSURE"));
+        assert!(!s.contains("="));
+    }
+
+    /// Empty user/host falls back to peer; no trailing result space.
+    #[test]
+    fn aslog_anonymous_no_result() {
+        let ev = AuditEvent {
+            event: "connect",
+            peer: "192.0.2.4:55001",
+            user: "",
+            host: "",
+            pv: "",
+            value: "",
+            result: "",
+        };
+        let s = ev.to_aslog_line();
+        assert!(s.contains(" ASUSER C 192.0.2.4:55001 connect:"));
+        assert!(!s.ends_with(' '));
     }
 
     #[test]

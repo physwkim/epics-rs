@@ -23,7 +23,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use epics_bridge_rs::pva_gateway::{PvaGateway, PvaGatewayConfig};
+use epics_bridge_rs::pva_gateway::{
+    MultiTenantPvaGatewayBuilder, PvaGateway, PvaGatewayConfig,
+};
 use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{PvaServer, PvaServerConfig, SharedPV, SharedSource};
@@ -99,6 +101,7 @@ async fn gateway_get_forwards_upstream_value() {
         connect_timeout: Duration::from_secs(2),
         max_cache_entries: 1024,
         max_subscribers: 1024,
+        control_prefix: None,
     };
     let gw = PvaGateway::start(cfg).expect("gateway start");
 
@@ -152,6 +155,7 @@ async fn gateway_monitor_fans_out_to_two_clients() {
         connect_timeout: Duration::from_secs(2),
         max_cache_entries: 1024,
         max_subscribers: 1024,
+        control_prefix: None,
     };
     let gw = PvaGateway::start(cfg).expect("gateway start");
 
@@ -252,4 +256,150 @@ async fn drain_to_latest(
         }
     }
     last
+}
+
+/// G-G2: when `control_prefix` is set, downstream clients should be
+/// able to `pvget <prefix>:cacheSize` and read the live cache entry
+/// count without that name being forwarded upstream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gateway_control_prefix_cache_size() {
+    let (_us_server, us_addr, _us_pv) = spawn_upstream("GW:CTRL:PV", 1.0);
+    let upstream_client = Arc::new(
+        PvaClient::builder()
+            .server_addr(us_addr)
+            .timeout(Duration::from_secs(2))
+            .build(),
+    );
+
+    let pick = || {
+        let l = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+    let pick_udp = || {
+        let l = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+    let server_config = PvaServerConfig {
+        tcp_port: pick(),
+        udp_port: pick_udp(),
+        ..PvaServerConfig::isolated()
+    };
+    let cfg = PvaGatewayConfig {
+        upstream_client: Some(upstream_client),
+        server_config,
+        cleanup_interval: Duration::from_secs(60),
+        connect_timeout: Duration::from_secs(2),
+        max_cache_entries: 1024,
+        max_subscribers: 1024,
+        control_prefix: Some("gw".to_string()),
+    };
+    let gw = PvaGateway::start(cfg).expect("gateway start");
+
+    let ds = gw.client_config();
+
+    // Initial cache is empty.
+    let snap = ds.pvget_full("gw:cacheSize").await.expect("cacheSize get");
+    let v = match snap.value {
+        PvField::Structure(s) => match s.get_field("value") {
+            Some(PvField::Scalar(ScalarValue::Long(v))) => *v,
+            other => panic!("unexpected cacheSize value shape: {other:?}"),
+        },
+        other => panic!("unexpected cacheSize wrapper: {other:?}"),
+    };
+    assert_eq!(v, 0, "fresh gateway cache is empty before any proxy GET");
+
+    // Trigger a proxy GET to populate the cache, then re-read cacheSize.
+    let _ = ds.pvget_full("GW:CTRL:PV").await.expect("proxy get");
+    let snap = ds.pvget_full("gw:cacheSize").await.expect("cacheSize get post-proxy");
+    let v = match snap.value {
+        PvField::Structure(s) => match s.get_field("value") {
+            Some(PvField::Scalar(ScalarValue::Long(v))) => *v,
+            other => panic!("unexpected cacheSize value shape: {other:?}"),
+        },
+        other => panic!("unexpected cacheSize wrapper: {other:?}"),
+    };
+    assert!(v >= 1, "cacheSize should reflect the proxied PV; got {v}");
+}
+
+/// G-G1: a multi-tenant gateway with two upstreams (each holding a
+/// distinct PV) and one downstream that proxies both. Verifies
+/// per-upstream isolation: PV "A:VAL" is only on upstream A, PV
+/// "B:VAL" only on B, and a single downstream client reaches both
+/// through the gateway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multi_tenant_gateway_routes_to_correct_upstream() {
+    let (_us_a, addr_a, _pv_a) = spawn_upstream("A:VAL", 1.0);
+    let (_us_b, addr_b, _pv_b) = spawn_upstream("B:VAL", 2.0);
+
+    let client_a = Arc::new(
+        PvaClient::builder()
+            .server_addr(addr_a)
+            .timeout(Duration::from_secs(2))
+            .build(),
+    );
+    let client_b = Arc::new(
+        PvaClient::builder()
+            .server_addr(addr_b)
+            .timeout(Duration::from_secs(2))
+            .build(),
+    );
+
+    let pick = || {
+        let l = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+    let pick_udp = || {
+        let l = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+    let server_config = PvaServerConfig {
+        tcp_port: pick(),
+        udp_port: pick_udp(),
+        ..PvaServerConfig::isolated()
+    };
+
+    let gw = MultiTenantPvaGatewayBuilder::new()
+        .add_upstream("A", client_a)
+        .add_upstream("B", client_b)
+        .add_downstream("merged", server_config, &["A", "B"], None)
+        .connect_timeout(Duration::from_secs(2))
+        .start()
+        .expect("multi-tenant start");
+
+    assert_eq!(gw.upstream_count(), 2);
+    assert_eq!(gw.downstream_count(), 1);
+
+    // Build a downstream client pointed at the "merged" server.
+    let server = gw.downstream("merged").expect("merged server present");
+    let ds = server.client_config();
+
+    let snap = ds.pvget_full("A:VAL").await.expect("A:VAL via gateway");
+    let v = match snap.value {
+        PvField::Scalar(ScalarValue::Double(v)) => v,
+        PvField::Structure(s) => match s.get_field("value") {
+            Some(PvField::Scalar(ScalarValue::Double(v))) => *v,
+            other => panic!("unexpected A:VAL shape: {other:?}"),
+        },
+        other => panic!("unexpected A:VAL wrapper: {other:?}"),
+    };
+    assert_eq!(v, 1.0);
+
+    let snap = ds.pvget_full("B:VAL").await.expect("B:VAL via gateway");
+    let v = match snap.value {
+        PvField::Scalar(ScalarValue::Double(v)) => v,
+        PvField::Structure(s) => match s.get_field("value") {
+            Some(PvField::Scalar(ScalarValue::Double(v))) => *v,
+            other => panic!("unexpected B:VAL shape: {other:?}"),
+        },
+        other => panic!("unexpected B:VAL wrapper: {other:?}"),
+    };
+    assert_eq!(v, 2.0);
 }

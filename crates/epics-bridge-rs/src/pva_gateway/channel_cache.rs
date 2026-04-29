@@ -150,13 +150,6 @@ impl UpstreamEntry {
     pub fn pauser_snapshot(&self) -> Option<Pauser> {
         self.pauser.lock().clone()
     }
-
-    /// Internal accessor: the shared Arc the monitor task writes to.
-    /// Used during entry construction so the task and the entry
-    /// observe the same Mutex.
-    fn pauser_slot(&self) -> Arc<parking_lot::Mutex<Option<Pauser>>> {
-        self.pauser.clone()
-    }
 }
 
 /// Drop guard that aborts a tokio task when the entry is dropped.
@@ -430,8 +423,8 @@ impl ChannelCache {
                 let _pv_name_for_cb = pv_name_owned.clone();
 
                 // F-G12 final form: TRUE wire-bytes forwarding via
-                // `pvmonitor_raw_frames` — the upstream monitor task
-                // never decodes the value. The body bytes flow
+                // `pvmonitor_raw_frames_handle` — the upstream monitor
+                // task never decodes the value. The body bytes flow
                 // straight from upstream socket → broadcast →
                 // downstream socket. We only decode lazily when
                 // `state.latest` is genuinely needed (the cache's
@@ -439,15 +432,17 @@ impl ChannelCache {
                 // callers, which today are unused for the gateway
                 // path).
                 //
-                // PG-G9 Pauser: not yet wired through raw-frames;
-                // watermark events are dropped to a tracing log.
-                // Future work: extend `op_monitor_raw_frames` to
-                // return a SubscriptionHandle.
+                // PG-G9 Pauser: the `_handle` variant returns a
+                // SubscriptionHandle whose `pauser()` we install in
+                // `pauser_slot_for_task`. Downstream watermark events
+                // (DownstreamWatermark::High/Low) call into the slot
+                // and pause/resume the upstream pipeline on the wire
+                // — pvxs `MonitorControlOp::pipeline` parity.
                 let tx_raw_inner = tx_raw_for_task.clone();
                 let pv_clone = pv_name_owned.clone();
                 let _ = tx_inner; // typed broadcast retired in raw path
-                let raw_result = client
-                    .pvmonitor_raw_frames(
+                let handle_result = client
+                    .pvmonitor_raw_frames_handle(
                         &pv_name_owned,
                         move |desc, body, order| {
                             let was_first;
@@ -515,10 +510,32 @@ impl ChannelCache {
                         },
                     )
                     .await;
-                // `pvmonitor_raw_frames` blocks until the monitor
-                // ends (clean disconnect, channel close, or fatal
-                // error). No handle to poll — translate the result
-                // into the existing backoff/re-subscribe loop shape.
+                // `pvmonitor_raw_frames_handle` returns immediately
+                // with a handle whose internal task drives the
+                // monitor loop. We install the pauser into the slot
+                // for downstream watermark callbacks, then wait for
+                // the task to terminate (clean disconnect, channel
+                // close, or fatal error).
+                let handle = match handle_result {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(
+                            pv = %pv_name_owned,
+                            error = %e,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "pva-gateway: raw upstream monitor failed to start, will retry"
+                        );
+                        if tx_raw_for_task.receiver_count() == 0 {
+                            return;
+                        }
+                        tokio::time::sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, max_backoff);
+                        continue;
+                    }
+                };
+                *pauser_slot_for_task.lock() = Some(handle.pauser());
+                let raw_result = handle.wait().await;
+                *pauser_slot_for_task.lock() = None;
                 if let Err(e) = raw_result {
                     tracing::warn!(
                         pv = %pv_name_owned,
@@ -533,12 +550,6 @@ impl ChannelCache {
                     backoff = std::cmp::min(backoff * 2, max_backoff);
                     continue;
                 }
-                // F-G12: PG-G9 Pauser temporarily disabled in raw
-                // path; pvmonitor_raw_frames doesn't expose a
-                // handle yet. Watermark events drop to a tracing
-                // log via the source-level callback — no upstream
-                // pipeline pause for now.
-                *pauser_slot_for_task.lock() = None;
                 backoff = Duration::from_millis(250);
 
                 if tx_for_task.receiver_count() == 0 {

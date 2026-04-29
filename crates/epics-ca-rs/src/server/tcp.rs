@@ -347,6 +347,15 @@ pub async fn run_tcp_listener(
     let actual_port = listener.local_addr()?.port();
     let _ = tcp_port_tx.send(actual_port);
 
+    // D-G1: track per-connection tasks in a JoinSet so they're
+    // aborted as a unit when this accept-loop future is dropped (e.g.
+    // CaServer shutdown via tcp_abort.abort()). Without this, every
+    // per-conn task ran detached and lingered until its internal
+    // idle/op timeout. The select! arm on `conn_tasks.join_next()`
+    // also reaps completed tasks so the set doesn't accumulate
+    // finished JoinHandles.
+    let mut conn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
     loop {
         // Drain mode: stop accepting new connections. Existing
         // connections continue to be served by their own tasks; the
@@ -356,7 +365,15 @@ pub async fn run_tcp_listener(
             tracing::info!("TCP listener: drain mode set, exiting accept loop");
             return Ok(());
         }
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = tokio::select! {
+            biased;
+            res = listener.accept() => res?,
+            // Drain finished connection tasks. Returns None when the
+            // set is empty — that branch resolves immediately, but
+            // `biased` makes the listener arm preferred so we never
+            // starve incoming accepts.
+            Some(_) = conn_tasks.join_next() => continue,
+        };
         if drain.load(std::sync::atomic::Ordering::Acquire) {
             tracing::info!(peer = %peer, "drain mode: rejecting new connection");
             drop(stream);
@@ -410,7 +427,7 @@ pub async fn run_tcp_listener(
 
         #[cfg(feature = "cap-tokens")]
         let cap_token_verifier_for_client = cap_token_verifier.clone();
-        epics_base_rs::runtime::task::spawn(async move {
+        conn_tasks.spawn(async move {
             // TLS dispatch: when configured, wrap the accepted TCP
             // stream in a TlsAcceptor handshake. The client cert (if
             // any) is harvested afterwards for mTLS identity.

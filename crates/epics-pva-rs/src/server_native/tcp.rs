@@ -138,8 +138,26 @@ pub async fn run_tcp_server_with_peers(
         .as_ref()
         .map(|cfg| tokio_rustls::TlsAcceptor::from(cfg.config.clone()));
 
+    // D-G1: track per-connection tasks in a JoinSet so they're
+    // aborted as a unit when this accept-loop future is dropped (e.g.
+    // PvaServer::stop() → tcp_handle.abort()). Without this, every
+    // per-conn task ran detached and lingered until its internal
+    // idle_timeout (~45s). The select! arm on `conn_tasks.join_next()`
+    // also reaps completed tasks so the set doesn't accumulate
+    // finished JoinHandles.
+    let mut conn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
     loop {
-        match listener.accept().await {
+        let accept_result = tokio::select! {
+            biased;
+            res = listener.accept() => res,
+            // Drain finished connection tasks. Returns None when the
+            // set is empty — that branch resolves immediately, but
+            // `biased` makes the listener arm preferred so we never
+            // starve incoming accepts.
+            Some(_) = conn_tasks.join_next() => continue,
+        };
+        match accept_result {
             Ok((stream, peer)) => {
                 if config.is_ignored_peer(peer) {
                     debug!(?peer, "rejecting connection: peer on ignore_addrs");
@@ -168,7 +186,7 @@ pub async fn run_tcp_server_with_peers(
                     crate::server_native::peers::PeerEntry::new(tls_in_use);
                 peers.insert(peer, peer_entry.clone());
                 let peers_for_task = peers.clone();
-                tokio::spawn(async move {
+                conn_tasks.spawn(async move {
                     stream.set_nodelay(true).ok();
                     // Enable OS-level TCP keepalive so half-open connections
                     // (NAT timeout, dead client) are detected within ~30s
@@ -514,6 +532,20 @@ async fn handle_connection_io(
     let mut seg_cmd: u8 = 0;
     let mut expect_seg = false;
     loop {
+        // C-G2: if the writer task has died (send_timeout fired,
+        // panic, etc.) the outbound mpsc is closed. Every subsequent
+        // `let _ = tx.send(...).await` in the dispatch path silently
+        // discards its frame and the client never sees the response,
+        // but the read loop would otherwise keep accumulating
+        // per-IOID state until `op_timeout` (default 64,000 s) or
+        // `idle_timeout` (45 s) tore the connection down. Detect
+        // the writer death here and unwind immediately so the
+        // channels HashMap drop fires its AbortOnDrop chain and the
+        // peer's connection slot is released within ms instead of
+        // ~30-45 s.
+        if tx.is_closed() {
+            return Ok(());
+        }
         let frame = read_frame(&mut reader, &mut rx_buf, op_timeout, max_msg_size).await?;
         // F-G7: bytes_in counter (header + payload). Drives
         // PvaServer::report() throughput diagnostics.
@@ -1034,6 +1066,17 @@ async fn handle_op(
     };
 
     if subcmd & 0x08 != 0 {
+        // A-G1: per-channel concurrent-op cap — refuse fresh INITs
+        // once the channel's `ops` map hits the configured ceiling
+        // so a malicious peer can't accumulate IOID state forever
+        // by sending INIT … INIT … without ever issuing DESTROY.
+        // Existing IOIDs (re-INIT on a known IOID) are allowed to
+        // proceed — the insert below replaces the entry without
+        // growing the map.
+        if !ch.ops.contains_key(&ioid) && ch.ops.len() >= config.max_ops_per_channel {
+            send_op_error(tx, kind, ioid, "max ops per channel exceeded", order).await?;
+            return Ok(());
+        }
         // INIT — read pvRequest (`type + full value` per pvxs
         // clientget.cpp:351-352) and translate it to a field mask the
         // emit side will consult.

@@ -449,6 +449,18 @@ impl ServerConn {
     }
 
     /// Register a stream of frames matching a particular ioid.
+    ///
+    /// **Backpressure model**: returns an unbounded channel because the
+    /// PVA monitor protocol bounds inflight frames at the wire level
+    /// via the pipeline-ack window (`pipeline_size`, default 4) — a
+    /// well-behaved server stops emitting once the unacked window is
+    /// full. The unbounded receiver therefore stays bounded in
+    /// practice. A malicious server that ignores the ack window can
+    /// still grow this queue, but the per-frame `max_message_size`
+    /// cap (`PvaServerConfig::max_message_size`, applied in the
+    /// reader) bounds each payload, and the parent connection's
+    /// `op_timeout` / `idle_timeout` machinery eventually tears down
+    /// truly pathological peers.
     pub fn register_ioid_stream(&self, ioid: u32) -> mpsc::UnboundedReceiver<Frame> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.router.lock().by_ioid.insert(ioid, tx);

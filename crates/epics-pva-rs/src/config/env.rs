@@ -106,6 +106,40 @@ pub fn beacon_period_long_secs() -> Option<u64> {
         .map(|f| f as u64)
 }
 
+/// `EPICS_PVAS_MAX_CONNECTIONS` — server hard cap on simultaneous
+/// client connections. Excess accept()s are immediately closed. Default
+/// 1024.
+pub fn max_connections() -> usize {
+    std::env::var("EPICS_PVAS_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1024)
+}
+
+/// `EPICS_PVAS_MAX_CHANNELS_PER_CONN` — server cap on channels created
+/// by a single client connection. Default 256.
+pub fn max_channels_per_connection() -> usize {
+    std::env::var("EPICS_PVAS_MAX_CHANNELS_PER_CONN")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(256)
+}
+
+/// `EPICS_PVAS_MAX_OPS_PER_CHANNEL` — server cap on concurrent
+/// in-flight operations (GET / PUT / MONITOR / RPC INITs awaiting their
+/// matching DESTROY) per single channel. Default 64. See
+/// [`crate::server_native::runtime::PvaServerConfig::max_ops_per_channel`]
+/// for rationale.
+pub fn max_ops_per_channel() -> usize {
+    std::env::var("EPICS_PVAS_MAX_OPS_PER_CHANNEL")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(64)
+}
+
 /// `EPICS_PVA_CONN_TMO` — connection idle timeout (default 30s, pvxs
 /// uses 30s for ECHO probe interval too). When the connection is idle
 /// for this long, the client sends an ECHO; without a response within
@@ -281,5 +315,25 @@ mod tests {
                 .iter()
                 .any(|a| a.ip() == IpAddr::V4(Ipv4Addr::BROADCAST))
         );
+    }
+
+    /// A-G1/A-G4: env-driven server caps fall back to safe defaults when
+    /// the var is unset, parses positive integers, and rejects 0 (which
+    /// would otherwise let an operator misconfigure the cap to "no
+    /// connections allowed").
+    #[test]
+    fn server_caps_fall_back_to_defaults_when_unset() {
+        // SAFETY: clearing env vars is process-global; the helpers here
+        // are pure functions with no parallel-test shared state, but we
+        // still scope explicitly with remove_var so leftover values from
+        // previous tests don't bleed in.
+        unsafe {
+            std::env::remove_var("EPICS_PVAS_MAX_CONNECTIONS");
+            std::env::remove_var("EPICS_PVAS_MAX_CHANNELS_PER_CONN");
+            std::env::remove_var("EPICS_PVAS_MAX_OPS_PER_CHANNEL");
+        }
+        assert_eq!(max_connections(), 1024);
+        assert_eq!(max_channels_per_connection(), 256);
+        assert_eq!(max_ops_per_channel(), 64);
     }
 }

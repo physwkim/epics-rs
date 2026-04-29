@@ -42,6 +42,31 @@ fn alloc_ioid() -> u32 {
 /// Default pipeline window for monitors. Tuned to match pvxs.
 pub const DEFAULT_PIPELINE_SIZE: u32 = 4;
 
+/// C-G1: drop-guard for the per-IOID router entry. Every op that
+/// calls `server.register_ioid_stream(ioid)` must arrange for
+/// `unregister_ioid(ioid)` to fire on every exit path — including the
+/// `?` early-returns that were previously missing it (each `?` after
+/// register would leak the router HashMap slot under network/server
+/// failure). The remove is idempotent, so an explicit
+/// `unregister_ioid` at the success-path tail and the guard's
+/// drop-time call cooperate without double-fault.
+struct IoidGuard {
+    server: Arc<super::server_conn::ServerConn>,
+    ioid: u32,
+}
+
+impl IoidGuard {
+    fn new(server: Arc<super::server_conn::ServerConn>, ioid: u32) -> Self {
+        Self { server, ioid }
+    }
+}
+
+impl Drop for IoidGuard {
+    fn drop(&mut self) {
+        self.server.unregister_ioid(self.ioid);
+    }
+}
+
 // ── GET ────────────────────────────────────────────────────────────────
 
 pub async fn op_get(
@@ -86,6 +111,7 @@ async fn op_get_inner(
     };
 
     let mut stream = server.register_ioid_stream(ioid);
+    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
     // INIT
@@ -155,6 +181,7 @@ pub async fn op_get_field(
     let codec = PvaCodec { big_endian };
     let ioid = alloc_ioid();
     let mut stream = server.register_ioid_stream(ioid);
+    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
 
     let req = codec.build_get_field(sid, ioid, subfield);
     let send_result = server.send(req).await;
@@ -230,6 +257,7 @@ pub async fn op_put_field(
         build_pv_request_fields(&[field_path], big_endian)
     };
     let mut stream = server.register_ioid_stream(ioid);
+    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
     let init_req = codec.build_put_init(sid, ioid, &pv_req);
@@ -312,6 +340,7 @@ async fn op_put_inner(
         None => build_pv_request_value_only(big_endian),
     };
     let mut stream = server.register_ioid_stream(ioid);
+    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
     // INIT
@@ -546,6 +575,22 @@ impl SubscriptionHandle {
         }
     }
 
+    /// Await the inner task without signalling stop. Returns whatever
+    /// the loop returned (Ok on clean channel close, Err on fatal).
+    /// Used by long-lived consumers (the bridge gateway) that want to
+    /// observe the natural lifetime of the subscription while still
+    /// holding a [`Pauser`] cloned out beforehand.
+    pub async fn wait(mut self) -> PvaResult<()> {
+        if let Some(t) = self.task.take() {
+            match t.await {
+                Ok(r) => r,
+                Err(_) => Ok(()),
+            }
+        } else {
+            Ok(())
+        }
+    }
+
     /// True if the inner task has finished (channel closed, fatal
     /// error, or `stop()` was called and the loop drained). Use to
     /// drive an auto-restart wrapper without consuming the handle.
@@ -643,8 +688,15 @@ where
                 continue;
             }
         };
-        match run_raw_monitor_loop(server.clone(), sid, &fields_owned, pipeline_size, &mut callback)
-            .await
+        match run_raw_monitor_loop(
+            server.clone(),
+            sid,
+            &fields_owned,
+            pipeline_size,
+            &mut callback,
+            None,
+        )
+        .await
         {
             Ok(()) => return Ok(()),
             Err(MonitorEnd::ChannelClosed) => return Ok(()),
@@ -663,12 +715,95 @@ where
     }
 }
 
+/// PG-G9 final form: like [`op_monitor_raw_frames`] but returns a
+/// [`SubscriptionHandle`] for pause/resume/stats. The inner raw
+/// monitor loop runs in a spawned task so the bridge gateway can wire
+/// downstream watermark events into upstream pipeline-pause control
+/// messages without an intermediate decode/encode pass.
+pub fn op_monitor_raw_frames_handle<F>(
+    channel: Arc<Channel>,
+    fields: &[&str],
+    pipeline_size: u32,
+    mut callback: F,
+) -> SubscriptionHandle
+where
+    F: FnMut(&FieldDesc, bytes::Bytes, ByteOrder) + Send + 'static,
+{
+    let fields_owned: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+    let state = Arc::new(SubscriptionState {
+        active: parking_lot::Mutex::new(None),
+        paused: std::sync::atomic::AtomicBool::new(false),
+        stop: std::sync::atomic::AtomicBool::new(false),
+        stats: parking_lot::Mutex::new(SubscriptionStat {
+            limit_queue: pipeline_size,
+            ..Default::default()
+        }),
+    });
+    let state_for_task = state.clone();
+
+    let task = tokio::spawn(async move {
+        loop {
+            if state_for_task
+                .stop
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Ok(());
+            }
+            let (server, sid) = match channel.ensure_active().await {
+                Ok(p) => p,
+                Err(e) => {
+                    if matches!(
+                        channel.current_state(),
+                        super::channel::ChannelState::Closed
+                    ) {
+                        return Ok(());
+                    }
+                    debug!(pv = %channel.pv_name, err = %e,
+                        "raw monitor reconnect failed; retrying in 500ms");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
+            match run_raw_monitor_loop(
+                server.clone(),
+                sid,
+                &fields_owned,
+                pipeline_size,
+                &mut callback,
+                Some(state_for_task.clone()),
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(MonitorEnd::ChannelClosed) => return Ok(()),
+                Err(MonitorEnd::ConnectionLost) => {
+                    state_for_task.active.lock().take();
+                    if matches!(
+                        channel.current_state(),
+                        super::channel::ChannelState::Closed
+                    ) {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                Err(MonitorEnd::Fatal(e)) => return Err(e),
+            }
+        }
+    });
+
+    SubscriptionHandle {
+        state,
+        task: Some(task),
+    }
+}
+
 async fn run_raw_monitor_loop<F>(
     server: Arc<super::server_conn::ServerConn>,
     sid: u32,
     fields: &[String],
     pipeline_size: u32,
     callback: &mut F,
+    state: Option<Arc<SubscriptionState>>,
 ) -> Result<(), MonitorEnd>
 where
     F: FnMut(&FieldDesc, bytes::Bytes, ByteOrder) + Send,
@@ -712,17 +847,43 @@ where
         ))));
     }
     let intro = init.introspection;
-    let start = codec.build_monitor_start(sid, ioid, pipeline_size);
+    // PG-G9 raw-path Pauser support: honour the handle's prior
+    // pause state so a SubscriptionHandle::pause() called before
+    // reconnect stays paused after the resubscribe. Mirrors the
+    // typed `run_monitor_loop` path.
+    let initially_paused = state
+        .as_ref()
+        .map(|s| s.paused.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false);
+    let start = if initially_paused {
+        codec.build_monitor_pause(sid, ioid)
+    } else {
+        codec.build_monitor_start(sid, ioid, pipeline_size)
+    };
     server
         .send(start)
         .await
         .map_err(|_| MonitorEnd::ConnectionLost)?;
+    if let Some(s) = &state {
+        *s.active.lock() = Some((server.clone(), sid, ioid));
+    }
     let mut events_since_ack: u32 = 0;
     loop {
+        // Honour stop() — caller dropped the handle or called
+        // stop_sync().
+        if let Some(s) = &state {
+            if s.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                server.unregister_ioid(ioid);
+                return Err(MonitorEnd::ChannelClosed);
+            }
+        }
         let frame = match stream.recv().await {
             Some(f) => f,
             None => {
                 server.unregister_ioid(ioid);
+                if let Some(s) = &state {
+                    s.active.lock().take();
+                }
                 return Err(MonitorEnd::ConnectionLost);
             }
         };
@@ -749,11 +910,21 @@ where
         let body = bytes::Bytes::copy_from_slice(&frame.payload[5..]);
         callback(&intro, body, order);
         events_since_ack += 1;
+        if let Some(s) = &state {
+            let mut st = s.stats.lock();
+            st.n_delivered += 1;
+            if events_since_ack > st.max_queue {
+                st.max_queue = events_since_ack;
+            }
+        }
         if pipeline_size > 0 && events_since_ack >= pipeline_size {
             let ack = codec.build_monitor_ack(sid, ioid, events_since_ack);
             if server.send(ack).await.is_err() {
                 server.unregister_ioid(ioid);
                 return Err(MonitorEnd::ConnectionLost);
+            }
+            if let Some(s) = &state {
+                s.stats.lock().n_acks += 1;
             }
             events_since_ack = 0;
         }
@@ -1176,6 +1347,7 @@ pub async fn op_rpc(
     encode_type_desc(request_desc, order, &mut pv_req);
 
     let mut stream = server.register_ioid_stream(ioid);
+    let _ioid_guard = IoidGuard::new(server.clone(), ioid);
 
     // INIT
     let mut init = Vec::with_capacity(9 + pv_req.len());

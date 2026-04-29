@@ -102,7 +102,14 @@ pub fn decode_search_response(frame: &Frame) -> PvaResult<SearchResponse> {
     let count = cur
         .get_u16(order)
         .map_err(|e| PvaError::Decode(e.to_string()))?;
-    let mut cids = Vec::with_capacity(count as usize);
+    // A-G2: cap pre-allocation at remaining-bytes / 4 so a peer
+    // can't trick us into reserving 256 KB up-front for cids that
+    // the trailing payload could never supply. u16 already bounds
+    // the worst case but the pattern matches `safe_capacity` in
+    // pvdata/encode.rs.
+    let remaining = (cur.get_ref().len()).saturating_sub(cur.position() as usize);
+    let cap = (count as usize).min(remaining / 4);
+    let mut cids = Vec::with_capacity(cap);
     for _ in 0..count {
         cids.push(
             cur.get_u32(order)

@@ -25,6 +25,18 @@ pub struct PvaServerConfig {
     pub max_connections: usize,
     /// Maximum number of channels per single client connection.
     pub max_channels_per_connection: usize,
+    /// Maximum number of concurrent in-flight operations (GET / PUT /
+    /// MONITOR / RPC) that a single channel can accumulate. The
+    /// per-channel `ops` map grows on each `INIT` (subcmd 0x08) and
+    /// shrinks on `DESTROY` (subcmd 0x10). Without a cap, a malicious
+    /// client can `INIT` against the same channel with fresh IOIDs
+    /// indefinitely, exhausting server memory even when
+    /// `max_channels_per_connection` is enforced. Default: 64
+    /// (matches the typical `pvxs` per-channel concurrent op count
+    /// of `Subscription` + the occasional in-flight GET / PUT). Excess
+    /// `INIT`s are rejected with `ECA_ALLOCMEM`-equivalent error
+    /// status. Override via `EPICS_PVAS_MAX_OPS_PER_CHANNEL`.
+    pub max_ops_per_channel: usize,
     /// Idle timeout — server closes connections that haven't received
     /// anything in this window. Applied even if `op_timeout` is longer.
     pub idle_timeout: Duration,
@@ -170,6 +182,7 @@ impl Default for PvaServerConfig {
             bind_ip: Ipv4Addr::UNSPECIFIED,
             max_connections: 1024,
             max_channels_per_connection: 1024,
+            max_ops_per_channel: 64,
             idle_timeout: Duration::from_secs(45),
             monitor_queue_depth: 64,
             tls: None,
@@ -217,6 +230,9 @@ impl PvaServerConfig {
         use crate::config::env;
         self.tcp_port = env::server_port();
         self.udp_port = env::server_broadcast_port();
+        self.max_connections = env::max_connections();
+        self.max_channels_per_connection = env::max_channels_per_connection();
+        self.max_ops_per_channel = env::max_ops_per_channel();
         self.beacon_period = Duration::from_secs(env::beacon_period_secs());
         // Keep the pvxs short:long = 15:180 = 1:12 ratio when the
         // operator tunes only the short period; an explicit
@@ -456,18 +472,34 @@ impl PvaServer {
     /// treated as fatal — an Err here means the server is no longer
     /// serving even if `stop()` wasn't called.
     pub async fn wait(self) -> PvaResult<()> {
-        tokio::select! {
-            r = self.udp_handle => match r {
-                Ok(res) => res,
-                Err(e) if e.is_cancelled() => Ok(()),
-                Err(e) => Err(crate::error::PvaError::Protocol(format!("udp task panic: {e}"))),
+        // D-G2: select! drops the losing branch's JoinHandle, but
+        // dropping a JoinHandle does NOT abort the task. Without an
+        // explicit abort, a UDP-side panic leaves the TCP listener
+        // orphaned (and vice versa) — the task keeps running on the
+        // runtime even though the PvaServer wrapper has been
+        // consumed. Capture the AbortHandles up-front so the loser
+        // is aborted regardless of which branch fires first.
+        let udp_abort = self.udp_handle.abort_handle();
+        let tcp_abort = self.tcp_handle.abort_handle();
+        let result = tokio::select! {
+            r = self.udp_handle => {
+                tcp_abort.abort();
+                match r {
+                    Ok(res) => res,
+                    Err(e) if e.is_cancelled() => Ok(()),
+                    Err(e) => Err(crate::error::PvaError::Protocol(format!("udp task panic: {e}"))),
+                }
             },
-            r = self.tcp_handle => match r {
-                Ok(res) => res,
-                Err(e) if e.is_cancelled() => Ok(()),
-                Err(e) => Err(crate::error::PvaError::Protocol(format!("tcp task panic: {e}"))),
+            r = self.tcp_handle => {
+                udp_abort.abort();
+                match r {
+                    Ok(res) => res,
+                    Err(e) if e.is_cancelled() => Ok(()),
+                    Err(e) => Err(crate::error::PvaError::Protocol(format!("tcp task panic: {e}"))),
+                }
             },
-        }
+        };
+        result
     }
 }
 

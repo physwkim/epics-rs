@@ -11,9 +11,12 @@ use std::time::Duration;
 
 use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::error::PvaResult;
-use epics_pva_rs::server_native::{PvaServer, PvaServerConfig, runtime::ServerReport};
+use epics_pva_rs::server_native::{
+    CompositeSource, PvaServer, PvaServerConfig, runtime::ServerReport,
+};
 
 use super::channel_cache::{ChannelCache, DEFAULT_CLEANUP_INTERVAL};
+use super::control::ControlSource;
 use super::error::GwResult;
 use super::source::GatewayChannelSource;
 
@@ -42,6 +45,19 @@ pub struct PvaGatewayConfig {
     /// Hard cap on simultaneous downstream subscriber bridge tasks
     /// across all peers (PG-G3). Default 100 000.
     pub max_subscribers: usize,
+    /// G-G2: optional namespace prefix for runtime-control PVs. When
+    /// `Some(prefix)`, the gateway exposes a small set of read-only
+    /// diagnostic PVs alongside the proxied namespace:
+    ///
+    /// - `<prefix>:cacheSize` — cached upstream entry count
+    /// - `<prefix>:upstreamCount` — alias of cacheSize (pva2pva-compat)
+    /// - `<prefix>:liveSubscribers` — current downstream bridge tasks
+    /// - `<prefix>:report` — multi-line snapshot of the above
+    ///
+    /// Mirrors pva2pva `ServerConfig::control_prefix`. `None`
+    /// disables the feature so the gateway only proxies upstream PVs.
+    /// Override via `EPICS_PVA_GW_CONTROL_PREFIX` env var.
+    pub control_prefix: Option<String>,
 }
 
 impl Default for PvaGatewayConfig {
@@ -61,6 +77,7 @@ impl Default for PvaGatewayConfig {
             connect_timeout: Duration::from_secs(5),
             max_cache_entries: super::channel_cache::DEFAULT_MAX_ENTRIES,
             max_subscribers: 100_000,
+            control_prefix: None,
         }
     }
 }
@@ -106,6 +123,12 @@ impl PvaGatewayConfig {
                 }
             }
         }
+        if let Ok(s) = std::env::var("EPICS_PVA_GW_CONTROL_PREFIX") {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                self.control_prefix = Some(trimmed.to_string());
+            }
+        }
         self
     }
 }
@@ -138,7 +161,33 @@ impl PvaGateway {
         let mut source = GatewayChannelSource::new(cache.clone());
         source.connect_timeout = config.connect_timeout;
         source.max_subscribers = config.max_subscribers;
-        let server = PvaServer::start(Arc::new(source.clone()), config.server_config);
+        // G-G2: when control_prefix is set, run the proxy and the
+        // diagnostic PVs through a CompositeSource. The control source
+        // is registered at order=-100 so its PV-name lookups always
+        // win over the proxy (which would otherwise try to forward
+        // `<prefix>:cacheSize` upstream and time out).
+        let server = match &config.control_prefix {
+            Some(prefix) if !prefix.is_empty() => {
+                let composite = CompositeSource::new();
+                let control = ControlSource::new(prefix, cache.clone(), source.clone());
+                composite
+                    .add_source("__gw_control", Arc::new(control), -100)
+                    .map_err(|e| {
+                        super::error::GwError::Other(format!(
+                            "control source registration: {e}"
+                        ))
+                    })?;
+                composite
+                    .add_source("gateway", Arc::new(source.clone()), 0)
+                    .map_err(|e| {
+                        super::error::GwError::Other(format!(
+                            "gateway source registration: {e}"
+                        ))
+                    })?;
+                PvaServer::start(composite, config.server_config)
+            }
+            _ => PvaServer::start(Arc::new(source.clone()), config.server_config),
+        };
         Ok(Self {
             cache,
             server,

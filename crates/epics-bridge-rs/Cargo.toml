@@ -39,12 +39,24 @@ pva-gateway = ["dep:epics-pva-rs", "dep:regex"]
 # PVA gateway daemon binary (pva-gateway-rs).
 pva-gateway-bin = ["pva-gateway", "dep:clap", "dep:tracing-subscriber"]
 # Convenience: enable all bridges + binaries
-all-bridges = ["qsrv", "qsrv-bin", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway", "pva-gateway-bin"]
+all-bridges = ["qsrv", "qsrv-bin", "ca-gateway", "ca-gateway-bin", "pvalink", "pva-gateway", "pva-gateway-bin", "dual-gateway", "dual-gateway-bin"]
 # Dual-protocol IOC: serves the same PV database over both CA and PVA
 # from a single process. Drops in for sites whose tooling mix is
 # transitioning to PVA.
 dual-ioc = ["dep:epics-pva-rs", "dep:epics-ca-rs"]
 dual-ioc-bin = ["dual-ioc", "dep:clap", "dep:tracing-subscriber"]
+# Dual-protocol gateway: single binary that runs the CA gateway and
+# the PVA gateway side by side as independent supervisors. Useful for
+# ops teams that want one process to manage instead of two. Each
+# gateway proxies its own protocol — no cross-protocol bridging.
+dual-gateway = ["ca-gateway", "pva-gateway"]
+dual-gateway-bin = [
+    "dual-gateway",
+    "ca-gateway-bin",
+    "pva-gateway-bin",
+    "dep:serde",
+    "dep:toml",
+]
 
 [dependencies]
 epics-base-rs = { workspace = true }
@@ -65,6 +77,7 @@ parking_lot = "0.12"
 arc-swap = "1"
 regex = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
+toml = { version = "0.8", optional = true }
 
 [[bin]]
 name = "ca-gateway-rs"
@@ -85,3 +98,8 @@ required-features = ["dual-ioc-bin"]
 name = "pva-gateway-rs"
 path = "src/bin/pva_gateway_rs.rs"
 required-features = ["pva-gateway-bin"]
+
+[[bin]]
+name = "dual-gateway-rs"
+path = "src/bin/dual_gateway_rs.rs"
+required-features = ["dual-gateway-bin"]

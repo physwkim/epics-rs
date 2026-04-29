@@ -1,0 +1,49 @@
+[package]
+name = "epics-pva-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+epics-pva-rs = { path = ".." }
+
+[[bin]]
+name = "fuzz_pva_header"
+path = "fuzz_targets/fuzz_pva_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_search_response"
+path = "fuzz_targets/fuzz_search_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_type_desc"
+path = "fuzz_targets/fuzz_type_desc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pv_field"
+path = "fuzz_targets/fuzz_pv_field.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_op_response"
+path = "fuzz_targets/fuzz_op_response.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
