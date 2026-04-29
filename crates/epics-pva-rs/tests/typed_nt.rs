@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use epics_pva_rs::nt::derive::{NTScalar, NTTable};
-use epics_pva_rs::nt::{Alarm, TimeStamp, TypedNT};
 use epics_pva_rs::nt::typed::EnumValue;
+use epics_pva_rs::nt::{Alarm, TimeStamp, TypedNT};
 use epics_pva_rs::pvdata::{FieldDesc, ScalarType};
 use epics_pva_rs::server_native::{PvaServer, SharedPV, SharedSource};
 // PVA listener tests run in parallel: PvaServer::start now binds
@@ -170,10 +170,7 @@ fn typed_nt_enum_round_trip() {
 async fn pvget_typed_primitive_f64() {
     // Bare f64 against a plain NTScalar<double> source.
     let pv = SharedPV::new();
-    pv.open(
-        f64::descriptor(),
-        f64::to_pv_field(&7.5),
-    );
+    pv.open(f64::descriptor(), f64::to_pv_field(&7.5));
     let source = SharedSource::new();
     source.add("OVEN:TEMP", pv);
     let _server = PvaServer::isolated(Arc::new(source));

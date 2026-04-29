@@ -60,37 +60,68 @@ pub(crate) fn encode_typed_scalar_array(
             // 1-byte primitive: endian doesn't apply. Single memcpy.
             // SAFETY: Arc<[i8]> is contiguous; cast to &[u8] is sound
             // because i8 and u8 share repr.
-            let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(a.as_ptr() as *const u8, a.len())
-            };
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(a.as_ptr() as *const u8, a.len()) };
             out.extend_from_slice(bytes);
         }
         TypedScalarArray::UByte(a) => {
             out.extend_from_slice(a);
         }
         TypedScalarArray::Short(a) => emit_pod(a, same_endian, out, |x: i16| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::UShort(a) => emit_pod(a, same_endian, out, |x: u16| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::Int(a) => emit_pod(a, same_endian, out, |x: i32| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::UInt(a) => emit_pod(a, same_endian, out, |x: u32| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::Long(a) => emit_pod(a, same_endian, out, |x: i64| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::ULong(a) => emit_pod(a, same_endian, out, |x: u64| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::Float(a) => emit_pod(a, same_endian, out, |x: f32| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::Double(a) => emit_pod(a, same_endian, out, |x: f64| {
-            if wire_be { x.to_be_bytes() } else { x.to_le_bytes() }
+            if wire_be {
+                x.to_be_bytes()
+            } else {
+                x.to_le_bytes()
+            }
         }),
         TypedScalarArray::String(a) => {
             for s in a.iter() {
@@ -133,54 +164,78 @@ pub(crate) fn decode_typed_scalar_array(
             let bytes = cur.get_bytes(n)?;
             TypedScalarArray::UByte(bytes.into())
         }
-        ScalarType::Short => TypedScalarArray::Short(read_pod_array::<i16, 2, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { i16::from_be_bytes(b) } else { i16::from_le_bytes(b) },
-        )?),
-        ScalarType::UShort => TypedScalarArray::UShort(read_pod_array::<u16, 2, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) },
-        )?),
-        ScalarType::Int => TypedScalarArray::Int(read_pod_array::<i32, 4, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { i32::from_be_bytes(b) } else { i32::from_le_bytes(b) },
-        )?),
-        ScalarType::UInt => TypedScalarArray::UInt(read_pod_array::<u32, 4, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) },
-        )?),
-        ScalarType::Long => TypedScalarArray::Long(read_pod_array::<i64, 8, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { i64::from_be_bytes(b) } else { i64::from_le_bytes(b) },
-        )?),
-        ScalarType::ULong => TypedScalarArray::ULong(read_pod_array::<u64, 8, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { u64::from_be_bytes(b) } else { u64::from_le_bytes(b) },
-        )?),
-        ScalarType::Float => TypedScalarArray::Float(read_pod_array::<f32, 4, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { f32::from_be_bytes(b) } else { f32::from_le_bytes(b) },
-        )?),
-        ScalarType::Double => TypedScalarArray::Double(read_pod_array::<f64, 8, _>(
-            n,
-            cur,
-            same_endian,
-            |b| if wire_be { f64::from_be_bytes(b) } else { f64::from_le_bytes(b) },
-        )?),
+        ScalarType::Short => {
+            TypedScalarArray::Short(read_pod_array::<i16, 2, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    i16::from_be_bytes(b)
+                } else {
+                    i16::from_le_bytes(b)
+                }
+            })?)
+        }
+        ScalarType::UShort => {
+            TypedScalarArray::UShort(read_pod_array::<u16, 2, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    u16::from_be_bytes(b)
+                } else {
+                    u16::from_le_bytes(b)
+                }
+            })?)
+        }
+        ScalarType::Int => {
+            TypedScalarArray::Int(read_pod_array::<i32, 4, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    i32::from_be_bytes(b)
+                } else {
+                    i32::from_le_bytes(b)
+                }
+            })?)
+        }
+        ScalarType::UInt => {
+            TypedScalarArray::UInt(read_pod_array::<u32, 4, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    u32::from_be_bytes(b)
+                } else {
+                    u32::from_le_bytes(b)
+                }
+            })?)
+        }
+        ScalarType::Long => {
+            TypedScalarArray::Long(read_pod_array::<i64, 8, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    i64::from_be_bytes(b)
+                } else {
+                    i64::from_le_bytes(b)
+                }
+            })?)
+        }
+        ScalarType::ULong => {
+            TypedScalarArray::ULong(read_pod_array::<u64, 8, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    u64::from_be_bytes(b)
+                } else {
+                    u64::from_le_bytes(b)
+                }
+            })?)
+        }
+        ScalarType::Float => {
+            TypedScalarArray::Float(read_pod_array::<f32, 4, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    f32::from_be_bytes(b)
+                } else {
+                    f32::from_le_bytes(b)
+                }
+            })?)
+        }
+        ScalarType::Double => {
+            TypedScalarArray::Double(read_pod_array::<f64, 8, _>(n, cur, same_endian, |b| {
+                if wire_be {
+                    f64::from_be_bytes(b)
+                } else {
+                    f64::from_le_bytes(b)
+                }
+            })?)
+        }
         ScalarType::String => {
             let mut v: Vec<String> = Vec::with_capacity(safe_capacity(n, cur));
             for _ in 0..n {
@@ -216,11 +271,7 @@ where
         // capacity for n*N bytes; copy_nonoverlapping fills the prefix.
         // set_len(n) is sound because every byte was written.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                v.as_mut_ptr() as *mut u8,
-                nbytes,
-            );
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), v.as_mut_ptr() as *mut u8, nbytes);
             v.set_len(n);
         }
         Ok(v.into())
@@ -243,12 +294,8 @@ where
 /// per-element fallback otherwise. `swap` is only consulted on the
 /// mismatched-endian path. Marked `#[inline]` so the closure inlines.
 #[inline]
-fn emit_pod<T: Copy, const N: usize, F>(
-    a: &[T],
-    same_endian: bool,
-    out: &mut Vec<u8>,
-    swap: F,
-) where
+fn emit_pod<T: Copy, const N: usize, F>(a: &[T], same_endian: bool, out: &mut Vec<u8>, swap: F)
+where
     F: Fn(T) -> [u8; N],
 {
     if same_endian {

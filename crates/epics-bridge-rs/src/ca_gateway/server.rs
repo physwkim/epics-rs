@@ -401,10 +401,7 @@ impl GatewayServer {
                 if !removed.is_empty() {
                     let mut up = upstream_for_cleanup.write().await;
                     up.sweep_orphaned().await;
-                    tracing::info!(
-                        evicted = removed.len(),
-                        "ca-gateway-rs: cache eviction"
-                    );
+                    tracing::info!(evicted = removed.len(), "ca-gateway-rs: cache eviction");
                 }
             }
         });
@@ -493,10 +490,8 @@ impl GatewayServer {
                 // refcounts inflated and entries stuck in the Active
                 // state. We mirror every Created here and drain the
                 // peer's entries on Disconnected as a safety net.
-                let mut peer_channels: HashMap<
-                    std::net::SocketAddr,
-                    Vec<(String, u32)>,
-                > = HashMap::new();
+                let mut peer_channels: HashMap<std::net::SocketAddr, Vec<(String, u32)>> =
+                    HashMap::new();
                 loop {
                     match rx.recv().await {
                         Ok(ServerConnectionEvent::Connected(addr)) => {
@@ -513,25 +508,14 @@ impl GatewayServer {
                                 }
                             }
                         }
-                        Ok(ServerConnectionEvent::ChannelCreated {
-                            peer,
-                            pv_name,
-                            cid,
-                        }) => {
+                        Ok(ServerConnectionEvent::ChannelCreated { peer, pv_name, cid }) => {
                             let sid = synthetic_sid(peer, &pv_name, cid);
                             if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
                                 entry.write().await.add_subscriber(sid);
                             }
-                            peer_channels
-                                .entry(peer)
-                                .or_default()
-                                .push((pv_name, sid));
+                            peer_channels.entry(peer).or_default().push((pv_name, sid));
                         }
-                        Ok(ServerConnectionEvent::ChannelCleared {
-                            peer,
-                            pv_name,
-                            cid,
-                        }) => {
+                        Ok(ServerConnectionEvent::ChannelCleared { peer, pv_name, cid }) => {
                             let sid = synthetic_sid(peer, &pv_name, cid);
                             if let Some(entry) = cache_for_conn.read().await.get(&pv_name) {
                                 entry.write().await.remove_subscriber(sid);

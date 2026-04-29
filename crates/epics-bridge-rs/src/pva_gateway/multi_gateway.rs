@@ -304,10 +304,7 @@ impl MultiTenantPvaGatewayBuilder {
             });
         }
 
-        Ok(MultiTenantPvaGateway {
-            caches,
-            servers,
-        })
+        Ok(MultiTenantPvaGateway { caches, servers })
     }
 }
 

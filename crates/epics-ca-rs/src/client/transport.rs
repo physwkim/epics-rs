@@ -449,23 +449,19 @@ async fn connect_server(
             .and_then(|s| s.parse::<f64>().ok())
             .map(|v| Duration::from_secs_f64(v.max(1.0)))
             .unwrap_or(Duration::from_secs(10));
-        let tls_stream = match tokio::time::timeout(
-            hs_timeout,
-            connector.connect(server_name, stream),
-        )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                tracing::warn!(server = %server_addr, error = %e, "TLS handshake failed");
-                return None;
-            }
-            Err(_) => {
-                tracing::warn!(server = %server_addr,
+        let tls_stream =
+            match tokio::time::timeout(hs_timeout, connector.connect(server_name, stream)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    tracing::warn!(server = %server_addr, error = %e, "TLS handshake failed");
+                    return None;
+                }
+                Err(_) => {
+                    tracing::warn!(server = %server_addr,
                     timeout = ?hs_timeout, "TLS handshake timed out");
-                return None;
-            }
-        };
+                    return None;
+                }
+            };
         tracing::debug!(server = %server_addr, "TLS handshake complete");
         let (reader, writer) = tokio::io::split(tls_stream);
         let write_task = epics_base_rs::runtime::task::spawn(write_loop(

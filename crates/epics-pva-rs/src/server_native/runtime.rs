@@ -247,8 +247,7 @@ impl PvaServerConfig {
         self.auto_beacon = env::auto_beacon_addr_list_enabled();
         self.interfaces = env::server_intf_addr_list();
         self.send_timeout = Duration::from_secs_f64(env::send_timeout_secs());
-        self.tls_handshake_timeout =
-            Duration::from_secs_f64(env::tls_handshake_timeout_secs());
+        self.tls_handshake_timeout = Duration::from_secs_f64(env::tls_handshake_timeout_secs());
         // Effective inactivity timeout = configured CONN_TMO × 4/3.
         // pvxs config.cpp:187 applies the same scaling so a client
         // sending ECHO every CONN_TMO/2 (the protocol convention)
@@ -369,8 +368,8 @@ impl PvaServer {
         // drop and the accept task's bind. tokio's
         // `std::net::TcpListener::bind` is sync; we then promote it
         // to a non-blocking tokio listener after spawning.
-        let std_listener = std::net::TcpListener::bind(bind_addr)
-            .expect("PvaServer::start: bind TCP listener");
+        let std_listener =
+            std::net::TcpListener::bind(bind_addr).expect("PvaServer::start: bind TCP listener");
         std_listener
             .set_nonblocking(true)
             .expect("PvaServer::start: set_nonblocking");
@@ -396,14 +395,12 @@ impl PvaServer {
             config.ignore_addrs.clone(),
         ));
         let peers = crate::server_native::peers::PeerRegistry::new();
-        let tcp_handle = tokio::spawn(
-            crate::server_native::tcp::run_tcp_server_on_listener(
-                dyn_source,
-                tokio_listener,
-                config.clone(),
-                peers.clone(),
-            ),
-        );
+        let tcp_handle = tokio::spawn(crate::server_native::tcp::run_tcp_server_on_listener(
+            dyn_source,
+            tokio_listener,
+            config.clone(),
+            peers.clone(),
+        ));
 
         Self {
             udp_handle,

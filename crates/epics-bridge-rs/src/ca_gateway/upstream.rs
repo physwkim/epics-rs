@@ -217,11 +217,8 @@ impl UpstreamManager {
         // value either way. The timeout/error is logged at INFO so
         // an operator chasing type-mismatch confusion can correlate
         // a confused downstream introspect with its upstream miss.
-        let initial_value = match tokio::time::timeout(
-            Duration::from_millis(500),
-            channel.get(),
-        )
-        .await
+        let initial_value = match tokio::time::timeout(Duration::from_millis(500), channel.get())
+            .await
         {
             Ok(Ok((_dbf, v))) => v,
             Ok(Err(e)) => {
@@ -268,9 +265,7 @@ impl UpstreamManager {
             Ok(m) => m,
             Err(e) => {
                 self.shadow_db.remove_simple_pv(upstream_name).await;
-                return Err(BridgeError::PutRejected(format!(
-                    "subscribe failed: {e}"
-                )));
+                return Err(BridgeError::PutRejected(format!("subscribe failed: {e}")));
             }
         };
 
@@ -456,9 +451,7 @@ impl UpstreamManager {
     /// ASG/ASL recorded for `upstream_name` at subscription time, if
     /// any. Used by tests + diagnostics.
     pub fn asg_for(&self, upstream_name: &str) -> Option<(Option<String>, i32)> {
-        self.subs
-            .get(upstream_name)
-            .map(|s| (s.asg.clone(), s.asl))
+        self.subs.get(upstream_name).map(|s| (s.asg.clone(), s.asl))
     }
 
     /// Sweep cache and remove upstream subscriptions for entries that
@@ -610,13 +603,13 @@ async fn log_denial(env: &WriteHookEnv, ctx: &WriteContext, pv: &str, value: &st
         && let Err(e) = pl
             .log(&ctx.user, &ctx.host, pv, value, PutOutcome::Denied)
             .await
-        {
-            tracing::warn!(
-                target: "ca_gateway::putlog",
-                error = %e,
-                "ca-gateway-rs: putlog write failed"
-            );
-        }
+    {
+        tracing::warn!(
+            target: "ca_gateway::putlog",
+            error = %e,
+            "ca-gateway-rs: putlog write failed"
+        );
+    }
 }
 
 /// Render an `EpicsValue` for the put-audit log, truncating to at

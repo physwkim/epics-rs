@@ -199,8 +199,9 @@ pub async fn op_get_field(
             resp.status
         )));
     }
-    resp.introspection
-        .ok_or_else(|| PvaError::Protocol("GET_FIELD: no introspection in successful response".into()))
+    resp.introspection.ok_or_else(|| {
+        PvaError::Protocol("GET_FIELD: no introspection in successful response".into())
+    })
 }
 
 // ── PUT ────────────────────────────────────────────────────────────────
@@ -1539,8 +1540,10 @@ fn build_put_value_for_path(
             let mut s = PvStructure::new(struct_id);
             for (name, child) in fields {
                 if name == head {
-                    s.fields
-                        .push((name.clone(), build_put_value_for_path(child, tail, value_str)?));
+                    s.fields.push((
+                        name.clone(),
+                        build_put_value_for_path(child, tail, value_str)?,
+                    ));
                 } else {
                     s.fields.push((
                         name.clone(),

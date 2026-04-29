@@ -304,11 +304,7 @@ mod tests {
         };
         let s = ev.to_aslog_line();
         // Date/time prefix is stable shape, content varies.
-        assert!(s.starts_with(
-            &chrono::Utc::now()
-                .format("%m/%d/%Y")
-                .to_string()
-        ));
+        assert!(s.starts_with(&chrono::Utc::now().format("%m/%d/%Y").to_string()));
         assert!(s.contains(" ASUSER W alice@opi-1 caput: MOTOR:VAL=3.14 ok"));
     }
 

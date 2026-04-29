@@ -173,16 +173,12 @@ impl PvaGateway {
                 composite
                     .add_source("__gw_control", Arc::new(control), -100)
                     .map_err(|e| {
-                        super::error::GwError::Other(format!(
-                            "control source registration: {e}"
-                        ))
+                        super::error::GwError::Other(format!("control source registration: {e}"))
                     })?;
                 composite
                     .add_source("gateway", Arc::new(source.clone()), 0)
                     .map_err(|e| {
-                        super::error::GwError::Other(format!(
-                            "gateway source registration: {e}"
-                        ))
+                        super::error::GwError::Other(format!("gateway source registration: {e}"))
                     })?;
                 PvaServer::start(composite, config.server_config)
             }

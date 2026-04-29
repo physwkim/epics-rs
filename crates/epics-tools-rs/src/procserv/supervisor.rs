@@ -40,7 +40,7 @@ use tokio::sync::mpsc;
 
 use crate::procserv::child::{ChildEvent, ChildHandle, ChildSpec};
 use crate::procserv::client::{
-    ClientId, ClientMeta, IncomingClient, InboundEvent, OutboundFrame, spawn_client,
+    ClientId, ClientMeta, InboundEvent, IncomingClient, OutboundFrame, spawn_client,
 };
 use crate::procserv::config::ProcServConfig;
 use crate::procserv::error::{ProcServError, ProcServResult};
@@ -290,16 +290,19 @@ impl SupervisorState {
                 // len, this).
                 self.fanout_excluding(&bytes, None).await;
                 if let Some(log) = &self.log
-                    && let Err(e) = log.write_chunk(&bytes).await {
-                        tracing::warn!(error = %e, "procserv-rs: log write failed");
-                    }
+                    && let Err(e) = log.write_chunk(&bytes).await
+                {
+                    tracing::warn!(error = %e, "procserv-rs: log write failed");
+                }
                 Ok(ChildLoopOutcome::Continue)
             }
             ChildEvent::Exited { status } => {
                 self.child = None;
                 let msg = format!(
                     "\r\n@@@ Child exited (status: {:?})\r\n",
-                    status.map(|s| s.to_string()).unwrap_or_else(|| "unknown".into())
+                    status
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".into())
                 );
                 self.fanout_to_all(msg.as_bytes()).await;
 
@@ -364,12 +367,7 @@ impl SupervisorState {
         // that risk because (a) only this supervisor task touches it,
         // (b) the child gets a fresh copy via execvp at fork time, so
         // a torn read in another supervisor thread is harmless.
-        unsafe {
-            std::env::set_var(
-                "PROCSERV_INFO",
-                render_procserv_info(&pre_spawn_info),
-            )
-        };
+        unsafe { std::env::set_var("PROCSERV_INFO", render_procserv_info(&pre_spawn_info)) };
 
         // 2. Spawn — child inherits the env var.
         let spec = ChildSpec {
@@ -392,11 +390,8 @@ impl SupervisorState {
         }
 
         self.has_run_once = true;
-        self.banner(&format!(
-            "@@@ Child started (pid {})",
-            handle.pid()
-        ))
-        .await;
+        self.banner(&format!("@@@ Child started (pid {})", handle.pid()))
+            .await;
         self.child = Some(ChildSlot { handle, rx });
         Ok(())
     }
@@ -430,7 +425,10 @@ impl SupervisorState {
             self.restart_mode.label()
         ));
         if let Some(c) = self.config.keys.kill {
-            s.push_str(&format!("@@@ Use ^{} to kill the child\r\n", ascii_caret(c)));
+            s.push_str(&format!(
+                "@@@ Use ^{} to kill the child\r\n",
+                ascii_caret(c)
+            ));
         }
         if let Some(c) = self.config.keys.toggle_restart {
             s.push_str(&format!(
@@ -474,9 +472,10 @@ impl SupervisorState {
         // child's stdin.
         if exclude.is_some()
             && let Some(slot) = self.child.as_ref()
-                && let Err(e) = slot.handle.write_stdin(bytes).await {
-                    tracing::debug!(error = %e, "procserv-rs: child stdin write failed");
-                }
+            && let Err(e) = slot.handle.write_stdin(bytes).await
+        {
+            tracing::debug!(error = %e, "procserv-rs: child stdin write failed");
+        }
     }
 
     /// Convenience: emit a `@@@`-prefixed banner line to all clients.

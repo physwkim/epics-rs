@@ -338,11 +338,7 @@ fn value_to_json(value: &PvField) -> String {
         PvField::ScalarArrayTyped(arr) => {
             // Same JSON shape as the legacy ScalarArray branch; delegate
             // through the lossy round-trip helper.
-            let parts: Vec<String> = arr
-                .to_scalar_values()
-                .iter()
-                .map(scalar_to_json)
-                .collect();
+            let parts: Vec<String> = arr.to_scalar_values().iter().map(scalar_to_json).collect();
             format!("[{}]", parts.join(","))
         }
     }

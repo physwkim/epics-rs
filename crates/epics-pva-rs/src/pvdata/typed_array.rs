@@ -227,10 +227,7 @@ impl TypedScalarArray {
             Self::ULong(a) => a.iter().map(|x| ScalarValue::ULong(*x)).collect(),
             Self::Float(a) => a.iter().map(|x| ScalarValue::Float(*x)).collect(),
             Self::Double(a) => a.iter().map(|x| ScalarValue::Double(*x)).collect(),
-            Self::String(a) => a
-                .iter()
-                .map(|x| ScalarValue::String(x.clone()))
-                .collect(),
+            Self::String(a) => a.iter().map(|x| ScalarValue::String(x.clone())).collect(),
         }
     }
 

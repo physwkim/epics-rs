@@ -307,7 +307,10 @@ async fn run_pva_gateway(args: &Args) -> Result<(), String> {
         udp = report.udp_port,
         "dual-gateway-rs: PVA listener up"
     );
-    gateway.run().await.map_err(|e| format!("PVA runtime error: {e}"))
+    gateway
+        .run()
+        .await
+        .map_err(|e| format!("PVA runtime error: {e}"))
 }
 
 /// Merge a TOML `ConfigFile` into the CLI [`Args`]. CLI values that

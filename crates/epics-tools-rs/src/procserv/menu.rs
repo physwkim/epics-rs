@@ -51,27 +51,32 @@ impl Action {
         // back from a manual kill.
         if !child_alive {
             if let Some(c) = keys.restart
-                && byte == c {
-                    return Self::RestartChild;
-                }
+                && byte == c
+            {
+                return Self::RestartChild;
+            }
             if let Some(c) = keys.quit
-                && byte == c {
-                    return Self::QuitServer;
-                }
+                && byte == c
+            {
+                return Self::QuitServer;
+            }
         }
 
         if let Some(c) = keys.logout
-            && byte == c {
-                return Self::LogoutClient;
-            }
+            && byte == c
+        {
+            return Self::LogoutClient;
+        }
         if let Some(c) = keys.toggle_restart
-            && byte == c {
-                return Self::ToggleRestartMode;
-            }
+            && byte == c
+        {
+            return Self::ToggleRestartMode;
+        }
         if let Some(c) = keys.kill
-            && byte == c {
-                return Self::KillChild;
-            }
+            && byte == c
+        {
+            return Self::KillChild;
+        }
         Self::None
     }
 }

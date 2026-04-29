@@ -74,9 +74,7 @@ pub struct ServiceMethod {
     pub name: String,
     /// Dispatch function: receives the decoded request struct,
     /// returns a typed response future.
-    pub dispatch: Arc<
-        dyn Fn(PvField) -> ServiceFuture + Send + Sync,
-    >,
+    pub dispatch: Arc<dyn Fn(PvField) -> ServiceFuture + Send + Sync>,
 }
 
 /// Argument set ergonomics for hand-written services. Provides a
@@ -119,8 +117,7 @@ impl Args {
             .by_name
             .get(name)
             .ok_or_else(|| ServiceError::MissingArg(name.into()))?;
-        T::from_pv_field(raw)
-            .map_err(|e| ServiceError::WrongArgType(name.into(), e.to_string()))
+        T::from_pv_field(raw).map_err(|e| ServiceError::WrongArgType(name.into(), e.to_string()))
     }
 
     pub fn get_named_or<T: ServiceArg>(&self, name: &str, default: T) -> T {

@@ -294,7 +294,10 @@ impl Channel {
             } = &*s
             {
                 if server.is_alive() {
-                    let mismatched = match (expected_guid.as_ref(), self.resolver.last_guid_for(server.addr)) {
+                    let mismatched = match (
+                        expected_guid.as_ref(),
+                        self.resolver.last_guid_for(server.addr),
+                    ) {
                         (Some(exp), Some(obs)) => exp != &obs,
                         _ => false,
                     };

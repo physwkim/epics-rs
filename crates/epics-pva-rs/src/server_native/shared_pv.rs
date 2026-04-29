@@ -54,9 +54,7 @@ pub type OnRpcAsyncFn = Arc<
             FieldDesc,
             PvField,
         ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send,
-            >,
+            Box<dyn std::future::Future<Output = Result<(FieldDesc, PvField), String>> + Send>,
         > + Send
         + Sync,
 >;

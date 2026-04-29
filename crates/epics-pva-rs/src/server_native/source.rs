@@ -210,11 +210,7 @@ pub trait ChannelSourceObj: Send + Sync {
         &'a self,
         name: &'a str,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>> + Send + 'a>,
     >;
     fn rpc<'a>(
         &'a self,
@@ -265,7 +261,9 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
         value: PvField,
         ctx: ChannelContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(<Self as ChannelSource>::put_value_ctx(self, name, value, ctx))
+        Box::pin(<Self as ChannelSource>::put_value_ctx(
+            self, name, value, ctx,
+        ))
     }
     fn is_writable<'a>(
         &'a self,
@@ -285,11 +283,7 @@ impl<T: ChannelSource + 'static> ChannelSourceObj for T {
         &'a self,
         name: &'a str,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Option<mpsc::Receiver<RawMonitorEvent>>> + Send + 'a>,
     > {
         Box::pin(<Self as ChannelSource>::subscribe_raw(self, name))
     }

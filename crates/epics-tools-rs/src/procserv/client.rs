@@ -168,9 +168,9 @@ fn spawn_split<S>(
                                         .send((id, InboundEvent::Data { bytes: d }))
                                         .await
                                         .is_err()
-                                    {
-                                        return;
-                                    }
+                                {
+                                    return;
+                                }
                                 // readonly: silently discard
                             }
                             TelnetEvent::Reply(r) => {
@@ -241,9 +241,7 @@ mod tests {
     /// Helper: a paired (server-side accepted, client-side connected)
     /// loopback TcpStream.
     async fn paired_streams() -> (TcpStream, TcpStream) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
         let (server, _) = listener.accept().await.unwrap();

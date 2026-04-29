@@ -23,9 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use epics_bridge_rs::pva_gateway::{
-    MultiTenantPvaGatewayBuilder, PvaGateway, PvaGatewayConfig,
-};
+use epics_bridge_rs::pva_gateway::{MultiTenantPvaGatewayBuilder, PvaGateway, PvaGatewayConfig};
 use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::pvdata::{FieldDesc, PvField, ScalarType, ScalarValue};
 use epics_pva_rs::server_native::{PvaServer, PvaServerConfig, SharedPV, SharedSource};
@@ -314,7 +312,10 @@ async fn gateway_control_prefix_cache_size() {
 
     // Trigger a proxy GET to populate the cache, then re-read cacheSize.
     let _ = ds.pvget_full("GW:CTRL:PV").await.expect("proxy get");
-    let snap = ds.pvget_full("gw:cacheSize").await.expect("cacheSize get post-proxy");
+    let snap = ds
+        .pvget_full("gw:cacheSize")
+        .await
+        .expect("cacheSize get post-proxy");
     let v = match snap.value {
         PvField::Structure(s) => match s.get_field("value") {
             Some(PvField::Scalar(ScalarValue::Long(v))) => *v,

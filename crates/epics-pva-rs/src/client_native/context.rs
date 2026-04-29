@@ -372,11 +372,7 @@ impl PvaClient {
     /// I-3: same as [`Self::pvconnect`] but pinned to a specific
     /// upstream server (skips UDP search). Mirrors pvxs
     /// `ConnectBuilder::server(addr).exec()`.
-    pub async fn pvconnect_from(
-        &self,
-        pv_name: &str,
-        server: SocketAddr,
-    ) -> PvaResult<SocketAddr> {
+    pub async fn pvconnect_from(&self, pv_name: &str, server: SocketAddr) -> PvaResult<SocketAddr> {
         let ch = self.channel_with_forced(pv_name, Some(server)).await?;
         let (sc, _sid) = ch.ensure_active().await?;
         Ok(sc.addr)
@@ -457,9 +453,9 @@ impl PvaClient {
     ) -> crate::client_native::operation::PvaOperation<PvField> {
         let client = self.clone();
         let name = pv_name.to_string();
-        crate::client_native::operation::PvaOperation::spawn(async move {
-            client.pvget(&name).await
-        })
+        crate::client_native::operation::PvaOperation::spawn(
+            async move { client.pvget(&name).await },
+        )
     }
 
     /// Start a PUT and return a [`PvaOperation`] handle. F-G8.
@@ -514,12 +510,8 @@ impl PvaClient {
             crate::proto::ByteOrder::Big
         );
         let bytes = request.encode(big_endian);
-        let (_, v) = crate::client_native::ops_v2::op_get_raw(
-            &ch,
-            &bytes,
-            self.inner.timeout,
-        )
-        .await?;
+        let (_, v) =
+            crate::client_native::ops_v2::op_get_raw(&ch, &bytes, self.inner.timeout).await?;
         Ok(v)
     }
 
@@ -581,9 +573,8 @@ impl PvaClient {
     /// own receiver). Drop the receiver to unsubscribe.
     pub async fn discover(
         &self,
-    ) -> PvaResult<tokio::sync::mpsc::Receiver<
-        crate::client_native::search_engine::Discovered,
-    >> {
+    ) -> PvaResult<tokio::sync::mpsc::Receiver<crate::client_native::search_engine::Discovered>>
+    {
         self.search_engine().await?.discover().await
     }
 
@@ -658,13 +649,8 @@ impl PvaClient {
         value_str: &str,
     ) -> PvaResult<()> {
         let ch = self.channel(pv_name).await?;
-        crate::client_native::ops_v2::op_put_field(
-            &ch,
-            field_path,
-            value_str,
-            self.inner.timeout,
-        )
-        .await
+        crate::client_native::ops_v2::op_put_field(&ch, field_path, value_str, self.inner.timeout)
+            .await
     }
 
     /// `pvput` with a custom pvRequest. The most common use is
@@ -683,13 +669,7 @@ impl PvaClient {
             crate::proto::ByteOrder::Big
         );
         let bytes = request.encode(big_endian);
-        crate::client_native::ops_v2::op_put_raw(
-            &ch,
-            &bytes,
-            value_str,
-            self.inner.timeout,
-        )
-        .await
+        crate::client_native::ops_v2::op_put_raw(&ch, &bytes, value_str, self.inner.timeout).await
     }
 
     pub async fn pvmonitor<F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
@@ -708,11 +688,7 @@ impl PvaClient {
     /// a decoded [`PvField`]. Used by bridge `pva_gateway` upstream
     /// task to skip the decode-and-re-encode round-trip when fanning
     /// events out to many downstream subscribers.
-    pub async fn pvmonitor_raw_frames<F>(
-        &self,
-        pv_name: &str,
-        mut callback: F,
-    ) -> PvaResult<()>
+    pub async fn pvmonitor_raw_frames<F>(&self, pv_name: &str, mut callback: F) -> PvaResult<()>
     where
         F: FnMut(&FieldDesc, bytes::Bytes, crate::proto::ByteOrder) + Send,
     {
@@ -870,8 +846,7 @@ impl PvaClient {
     /// useful for diagnostics on multi-source / failover deployments.
     pub async fn pvinfo_full(&self, pv_name: &str) -> PvaResult<(FieldDesc, SocketAddr)> {
         let ch = self.channel(pv_name).await?;
-        let intro =
-            crate::client_native::ops_v2::op_get_field(&ch, "", self.inner.timeout).await?;
+        let intro = crate::client_native::ops_v2::op_get_field(&ch, "", self.inner.timeout).await?;
         let server_addr = match ch.current_state() {
             super::channel::ChannelState::Active { server, .. } => server.addr,
             _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),

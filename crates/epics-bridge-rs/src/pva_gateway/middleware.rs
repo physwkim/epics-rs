@@ -128,11 +128,7 @@ impl AclConfig {
         if self.deny.iter().any(|p| matches_pattern(p, name)) {
             return false;
         }
-        if !self.allow_only.is_empty()
-            && !self
-                .allow_only
-                .iter()
-                .any(|p| matches_pattern(p, name))
+        if !self.allow_only.is_empty() && !self.allow_only.iter().any(|p| matches_pattern(p, name))
         {
             return false;
         }
@@ -405,12 +401,7 @@ pub enum AuditResult {
 /// usually contain "denied" / "deny" / "ACL" / "read-only", so the
 /// downstream operator gets the right bucket without each layer
 /// having to invent a structured-error type.
-fn make_audit_event(
-    name: &str,
-    user: &str,
-    host: &str,
-    result: &Result<(), String>,
-) -> AuditEvent {
+fn make_audit_event(name: &str, user: &str, host: &str, result: &Result<(), String>) -> AuditEvent {
     let (kind, error) = match result {
         Ok(_) => (AuditResult::Ok, String::new()),
         Err(msg) => {
@@ -538,7 +529,8 @@ impl<S: ChannelSource, A: AuditSink> ChannelSource for Audited<S, A> {
         let user = ctx.account.clone();
         let host = ctx.host.clone();
         let result = self.inner.put_value_ctx(name, value, ctx).await;
-        self.sink.record(make_audit_event(name, &user, &host, &result));
+        self.sink
+            .record(make_audit_event(name, &user, &host, &result));
         result
     }
     async fn is_writable(&self, name: &str) -> bool {

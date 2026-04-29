@@ -439,11 +439,9 @@ pub async fn run_tcp_listener(
                         // completes TCP but stalls during ClientHello
                         // would otherwise hold a connection slot until
                         // OS keepalive reaps it (~30s).
-                        let hs = tokio::time::timeout(
-                            tls_handshake_timeout(),
-                            acceptor.accept(stream),
-                        )
-                        .await;
+                        let hs =
+                            tokio::time::timeout(tls_handshake_timeout(), acceptor.accept(stream))
+                                .await;
                         match hs {
                             Err(_) => {
                                 tracing::warn!(peer = %peer,
@@ -826,9 +824,7 @@ async fn dispatch_message<W: AsyncWrite + Unpin + Send + 'static>(
                         claimed_host = %claimed,
                         "CAS_USE_HOST_NAMES: forward-DNS mismatch, ignoring HOST_NAME"
                     );
-                    state
-                        .audit("host_name", "", &claimed, "dns_mismatch")
-                        .await;
+                    state.audit("host_name", "", &claimed, "dns_mismatch").await;
                     // Keep state.hostname as the peer IP fallback set
                     // at accept(); ACL rules continue to evaluate
                     // against the IP rather than the spoofed hostname.

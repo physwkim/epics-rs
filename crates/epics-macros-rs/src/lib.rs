@@ -603,15 +603,13 @@ pub fn derive_nt_scalar(input: TokenStream) -> TokenStream {
             .into();
     };
 
-    let meta_field_names: Vec<String> = meta_fields
-        .iter()
-        .map(|(i, _)| i.to_string())
-        .collect();
+    let meta_field_names: Vec<String> = meta_fields.iter().map(|(i, _)| i.to_string()).collect();
     let meta_field_idents: Vec<&syn::Ident> = meta_fields.iter().map(|(i, _)| i).collect();
     let meta_field_tys: Vec<&syn::Type> = meta_fields.iter().map(|(_, t)| t).collect();
 
     let value_ty_path = quote!(<#value_ty as #krate::nt::TypedNT>::descriptor());
-    let value_to_field = quote!(<#value_ty as #krate::nt::TypedNT>::to_pv_field(&self.#value_ident));
+    let value_to_field =
+        quote!(<#value_ty as #krate::nt::TypedNT>::to_pv_field(&self.#value_ident));
     let value_from_field = quote! {
         <#value_ty as #krate::nt::TypedNT>::from_pv_field(__field)
             .map_err(|e| __rt::wrong_type("value", &e.to_string()))?
@@ -803,7 +801,9 @@ pub fn pva_service(_attr: TokenStream, item: TokenStream) -> TokenStream {
         let mut arg_idents: Vec<syn::Ident> = Vec::new();
         let mut arg_tys: Vec<syn::Type> = Vec::new();
         for arg in iter {
-            let syn::FnArg::Typed(pat_ty) = arg else { continue };
+            let syn::FnArg::Typed(pat_ty) = arg else {
+                continue;
+            };
             let syn::Pat::Ident(pat_ident) = &*pat_ty.pat else {
                 continue;
             };
@@ -922,12 +922,9 @@ pub fn derive_nt_table(input: TokenStream) -> TokenStream {
     let col_names: Vec<String> = col_idents.iter().map(|i| i.to_string()).collect();
 
     if col_idents.is_empty() {
-        return syn::Error::new_spanned(
-            name,
-            "NTTable derive requires at least one column field",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new_spanned(name, "NTTable derive requires at least one column field")
+            .to_compile_error()
+            .into();
     }
 
     // Each column is encoded as Vec<T>; we extract the wire-format

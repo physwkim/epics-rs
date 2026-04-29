@@ -116,9 +116,12 @@ pub struct WriteContext {
 /// reentrant `set` will be silently overwritten by the next
 /// upstream event.
 pub type WriteHook = Arc<
-    dyn Fn(EpicsValue, WriteContext) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), CaError>> + Send>,
-        > + Send
+    dyn Fn(
+            EpicsValue,
+            WriteContext,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), CaError>> + Send>>
+        + Send
         + Sync,
 >;
 

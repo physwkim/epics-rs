@@ -52,10 +52,16 @@ fn nturi_request(args: &[(&str, ScalarValue)]) -> (FieldDesc, PvField) {
     let mut query = PvStructure::new("");
     query.fields = query_fields;
     let mut root = PvStructure::new("epics:nt/NTURI:1.0");
+    root.fields.push((
+        "scheme".into(),
+        PvField::Scalar(ScalarValue::String("pva".into())),
+    ));
+    root.fields.push((
+        "path".into(),
+        PvField::Scalar(ScalarValue::String(String::new())),
+    ));
     root.fields
-        .push(("scheme".into(), PvField::Scalar(ScalarValue::String("pva".into()))));
-    root.fields.push(("path".into(), PvField::Scalar(ScalarValue::String(String::new()))));
-    root.fields.push(("query".into(), PvField::Structure(query)));
+        .push(("query".into(), PvField::Structure(query)));
     let desc = FieldDesc::Structure {
         struct_id: "epics:nt/NTURI:1.0".into(),
         fields: vec![
@@ -76,8 +82,7 @@ fn nturi_request(args: &[(&str, ScalarValue)]) -> (FieldDesc, PvField) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pva_service_dispatch_round_trip() {
     let source = SharedSource::new();
-    let registered =
-        epics_pva_rs::service::add_rpc_service(&source, "counter", Counter::default());
+    let registered = epics_pva_rs::service::add_rpc_service(&source, "counter", Counter::default());
     assert_eq!(registered.len(), 3);
     assert!(registered.contains(&"counter:add".to_string()));
     assert!(registered.contains(&"counter:reset".to_string()));
@@ -171,11 +176,7 @@ fn direct_struct_request(args: &[(&str, ScalarValue)]) -> (FieldDesc, PvField) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pva_service_accepts_direct_struct_request() {
     let source = SharedSource::new();
-    let _ = epics_pva_rs::service::add_rpc_service(
-        &source,
-        "calc",
-        Counter::default(),
-    );
+    let _ = epics_pva_rs::service::add_rpc_service(&source, "calc", Counter::default());
     let server = PvaServer::isolated(Arc::new(source));
     let client = server.client_config();
 

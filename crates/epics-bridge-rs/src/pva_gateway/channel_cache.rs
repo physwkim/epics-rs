@@ -122,9 +122,7 @@ impl UpstreamEntry {
     /// F-G12: raw-frame subscriber. Receives upstream MONITOR DATA
     /// body bytes verbatim. Server uses this to skip its own
     /// `encode_pv_field` step.
-    pub fn subscribe_raw(
-        &self,
-    ) -> broadcast::Receiver<crate::pva_gateway::source::RawEvent> {
+    pub fn subscribe_raw(&self) -> broadcast::Receiver<crate::pva_gateway::source::RawEvent> {
         self.poke();
         self.tx_raw.subscribe()
     }
@@ -397,9 +395,8 @@ impl ChannelCache {
     /// tick eventually evicts the orphan entry.
     fn spawn_upstream_monitor(&self, pv_name: &str) -> Arc<UpstreamEntry> {
         let (tx, _rx0) = broadcast::channel::<PvField>(BROADCAST_CAPACITY);
-        let (tx_raw, _rx0_raw) = broadcast::channel::<
-            crate::pva_gateway::source::RawEvent,
-        >(BROADCAST_CAPACITY);
+        let (tx_raw, _rx0_raw) =
+            broadcast::channel::<crate::pva_gateway::source::RawEvent>(BROADCAST_CAPACITY);
         let first_event = Arc::new(Notify::new());
         let state = Arc::new(RwLock::new(EntryState::default()));
         let pauser_slot: Arc<parking_lot::Mutex<Option<Pauser>>> =
@@ -442,73 +439,71 @@ impl ChannelCache {
                 let pv_clone = pv_name_owned.clone();
                 let _ = tx_inner; // typed broadcast retired in raw path
                 let handle_result = client
-                    .pvmonitor_raw_frames_handle(
-                        &pv_name_owned,
-                        move |desc, body, order| {
-                            let was_first;
-                            let mut type_changed = false;
-                            // Decode first event ONCE so GET / INFO
-                            // callers (which read `state.latest`) see
-                            // a populated snapshot. Subsequent events
-                            // skip the decode — only raw bytes flow
-                            // through the broadcast for fan-out.
-                            // The snapshot becomes "first-value
-                            // sticky" for lookups; this is the same
-                            // semantics pvxs/pva2pva expose since
-                            // GET-against-gateway isn't the hot path.
-                            let needs_decode_for_snapshot = {
-                                let s = state_inner.read();
-                                s.latest.is_none() || s.introspection.as_ref() != Some(desc)
-                            };
-                            if needs_decode_for_snapshot {
-                                // body = [changed bitset | value | overrun bitset];
-                                // decode walks the changed bitset, then the
-                                // value with that bitset, then trailing
-                                // overrun. We only care about the value.
-                                let decoded = (|| -> Option<epics_pva_rs::pvdata::PvField> {
-                                    let mut cur = std::io::Cursor::new(&body[..]);
-                                    let changed =
-                                        epics_pva_rs::proto::BitSet::decode(&mut cur, order).ok()?;
-                                    let v = epics_pva_rs::pvdata::encode::decode_pv_field_with_bitset(
-                                        desc, &changed, 0, &mut cur, order,
-                                    ).ok()?;
-                                    Some(v)
-                                })();
-                                if let Some(v) = decoded {
-                                    let mut s = state_inner.write();
-                                    was_first = s.introspection.is_none();
-                                    if let Some(existing) = &s.introspection {
-                                        if existing != desc {
-                                            type_changed = true;
-                                            s.latest = None;
-                                        }
+                    .pvmonitor_raw_frames_handle(&pv_name_owned, move |desc, body, order| {
+                        let was_first;
+                        let mut type_changed = false;
+                        // Decode first event ONCE so GET / INFO
+                        // callers (which read `state.latest`) see
+                        // a populated snapshot. Subsequent events
+                        // skip the decode — only raw bytes flow
+                        // through the broadcast for fan-out.
+                        // The snapshot becomes "first-value
+                        // sticky" for lookups; this is the same
+                        // semantics pvxs/pva2pva expose since
+                        // GET-against-gateway isn't the hot path.
+                        let needs_decode_for_snapshot = {
+                            let s = state_inner.read();
+                            s.latest.is_none() || s.introspection.as_ref() != Some(desc)
+                        };
+                        if needs_decode_for_snapshot {
+                            // body = [changed bitset | value | overrun bitset];
+                            // decode walks the changed bitset, then the
+                            // value with that bitset, then trailing
+                            // overrun. We only care about the value.
+                            let decoded = (|| -> Option<epics_pva_rs::pvdata::PvField> {
+                                let mut cur = std::io::Cursor::new(&body[..]);
+                                let changed =
+                                    epics_pva_rs::proto::BitSet::decode(&mut cur, order).ok()?;
+                                let v = epics_pva_rs::pvdata::encode::decode_pv_field_with_bitset(
+                                    desc, &changed, 0, &mut cur, order,
+                                )
+                                .ok()?;
+                                Some(v)
+                            })();
+                            if let Some(v) = decoded {
+                                let mut s = state_inner.write();
+                                was_first = s.introspection.is_none();
+                                if let Some(existing) = &s.introspection {
+                                    if existing != desc {
+                                        type_changed = true;
+                                        s.latest = None;
                                     }
-                                    s.introspection = Some(desc.clone());
-                                    s.latest = Some(v);
-                                } else {
-                                    was_first = false;
                                 }
+                                s.introspection = Some(desc.clone());
+                                s.latest = Some(v);
                             } else {
                                 was_first = false;
                             }
-                            if type_changed {
-                                tracing::warn!(
-                                    pv = %pv_clone,
-                                    "pva-gateway: upstream introspection changed — \
-                                     cache descriptor reset"
-                                );
-                            }
-                            if was_first {
-                                first_event_inner.notify_waiters();
-                            }
-                            // Fan out raw body — refcount only, no copy.
-                            use crate::pva_gateway::source::RawEvent;
-                            let _ = tx_raw_inner.send(RawEvent {
-                                body,
-                                byte_order: order,
-                            });
-                        },
-                    )
+                        } else {
+                            was_first = false;
+                        }
+                        if type_changed {
+                            tracing::warn!(
+                                pv = %pv_clone,
+                                "pva-gateway: upstream introspection changed — \
+                                 cache descriptor reset"
+                            );
+                        }
+                        if was_first {
+                            first_event_inner.notify_waiters();
+                        }
+                        // Fan out raw body — refcount only, no copy.
+                        use crate::pva_gateway::source::RawEvent;
+                        let _ = tx_raw_inner.send(RawEvent {
+                            body,
+                            byte_order: order,
+                        });
+                    })
                     .await;
                 // `pvmonitor_raw_frames_handle` returns immediately
                 // with a handle whose internal task drives the
@@ -649,8 +644,7 @@ mod tests {
     async fn entry_subscribe_returns_fresh_receivers() {
         let (tx, rx0) = broadcast::channel::<PvField>(4);
         drop(rx0);
-        let (tx_raw, rx0_raw) =
-            broadcast::channel::<crate::pva_gateway::source::RawEvent>(4);
+        let (tx_raw, rx0_raw) = broadcast::channel::<crate::pva_gateway::source::RawEvent>(4);
         drop(rx0_raw);
         let task = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;

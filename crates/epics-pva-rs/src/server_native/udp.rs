@@ -153,8 +153,7 @@ pub async fn run_udp_responder_with_config(
             sorted.sort();
             sorted.hash(&mut h);
             let cur_hash = h.finish();
-            let topology_changed =
-                cur_hash != last_set_hash && last_set_hash != 0;
+            let topology_changed = cur_hash != last_set_hash && last_set_hash != 0;
             if topology_changed {
                 change_count = change_count.wrapping_add(1);
                 // pvxs doesn't reset to short-burst on topology change,

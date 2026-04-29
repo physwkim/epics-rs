@@ -199,8 +199,7 @@ pub async fn run_tcp_server_on_listener(
                 // so PvaServer::report() can surface it. Removed when
                 // the connection task ends.
                 let tls_in_use = acceptor.is_some();
-                let peer_entry =
-                    crate::server_native::peers::PeerEntry::new(tls_in_use);
+                let peer_entry = crate::server_native::peers::PeerEntry::new(tls_in_use);
                 peers.insert(peer, peer_entry.clone());
                 let peers_for_task = peers.clone();
                 conn_tasks.spawn(async move {
@@ -228,37 +227,36 @@ pub async fn run_tcp_server_on_listener(
                         // that completes TCP but stalls during ClientHello
                         // would otherwise hold a `max_connections` slot
                         // until OS keepalive reaps it (~30s).
-                        Some(a) => match tokio::time::timeout(
-                            cfg.tls_handshake_timeout,
-                            a.accept(stream),
-                        )
-                        .await
-                        {
-                            Ok(Ok(tls_stream)) => {
-                                let (r, w) = tokio::io::split(tls_stream);
-                                handle_connection_io(
-                                    src,
-                                    Box::new(r),
-                                    Box::new(w),
-                                    peer,
-                                    cfg,
-                                    peer_entry.clone(),
-                                )
+                        Some(a) => {
+                            match tokio::time::timeout(cfg.tls_handshake_timeout, a.accept(stream))
                                 .await
+                            {
+                                Ok(Ok(tls_stream)) => {
+                                    let (r, w) = tokio::io::split(tls_stream);
+                                    handle_connection_io(
+                                        src,
+                                        Box::new(r),
+                                        Box::new(w),
+                                        peer,
+                                        cfg,
+                                        peer_entry.clone(),
+                                    )
+                                    .await
+                                }
+                                Ok(Err(e)) => {
+                                    debug!(?peer, "TLS handshake failed: {e}");
+                                    Err(PvaError::Io(e))
+                                }
+                                Err(_) => {
+                                    debug!(
+                                        ?peer,
+                                        timeout = ?cfg.tls_handshake_timeout,
+                                        "TLS handshake timed out"
+                                    );
+                                    Err(PvaError::Protocol("TLS handshake timeout".into()))
+                                }
                             }
-                            Ok(Err(e)) => {
-                                debug!(?peer, "TLS handshake failed: {e}");
-                                Err(PvaError::Io(e))
-                            }
-                            Err(_) => {
-                                debug!(
-                                    ?peer,
-                                    timeout = ?cfg.tls_handshake_timeout,
-                                    "TLS handshake timed out"
-                                );
-                                Err(PvaError::Protocol("TLS handshake timeout".into()))
-                            }
-                        },
+                        }
                         None => {
                             let (r, w) = stream.into_split();
                             handle_connection_io(
@@ -594,9 +592,7 @@ async fn handle_connection_io(
         // Either case → drop connection (decode would be undefined).
         let raw_seg = frame.header.flags.0 & HeaderFlags::SEGMENT_MASK;
         let continuation = raw_seg & HeaderFlags::SEGMENT_LAST != 0;
-        if continuation ^ expect_seg
-            || (continuation && frame.header.command != seg_cmd)
-        {
+        if continuation ^ expect_seg || (continuation && frame.header.command != seg_cmd) {
             return Err(PvaError::Protocol(format!(
                 "PVA segmentation violation: expect_seg={} continuation={} cmd 0x{:02x} vs saved 0x{:02x}",
                 expect_seg, continuation, frame.header.command, seg_cmd
@@ -1357,9 +1353,10 @@ async fn handle_op(
             if is_ack {
                 if let Some(op) = ch.ops.get(&ioid) {
                     let ack_count = cur.get_u32(order).unwrap_or(4);
-                    if let (Some(w), Some(n)) =
-                        (op.monitor_window.as_ref(), op.monitor_window_notify.as_ref())
-                    {
+                    if let (Some(w), Some(n)) = (
+                        op.monitor_window.as_ref(),
+                        op.monitor_window_notify.as_ref(),
+                    ) {
                         let prev = w.fetch_add(ack_count, std::sync::atomic::Ordering::Relaxed);
                         if prev == 0 {
                             n.notify_waiters();
@@ -1398,9 +1395,7 @@ async fn handle_op(
                     // forward. Falls back to the decoded path on
                     // byte-order mismatch or when the source returns
                     // None.
-                    if let Some(mut rx_raw) =
-                        src.subscribe_raw(&pv_name).await
-                    {
+                    if let Some(mut rx_raw) = src.subscribe_raw(&pv_name).await {
                         // Emit initial snapshot via the regular
                         // encode path (no raw bytes for the
                         // first-event seed; the cache may not have
@@ -1436,9 +1431,7 @@ async fn handle_op(
                                 // streams active under mismatch.
                                 continue;
                             }
-                            let payload = build_monitor_payload_raw(
-                                ioid, &ev, order,
-                            );
+                            let payload = build_monitor_payload_raw(ioid, &ev, order);
                             if tx_clone.send(payload).await.is_err() {
                                 return;
                             }

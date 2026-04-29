@@ -72,7 +72,11 @@ impl<T: Send + 'static> PvaOperation<T> {
     pub async fn wait(&mut self, timeout: Option<Duration>) -> PvaResult<T> {
         let rx = match self.result_rx.take() {
             Some(rx) => rx,
-            None => return Err(PvaError::Protocol("Operation result already consumed".into())),
+            None => {
+                return Err(PvaError::Protocol(
+                    "Operation result already consumed".into(),
+                ));
+            }
         };
         if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(PvaError::Protocol("Operation cancelled".into()));

@@ -246,8 +246,7 @@ impl ServerConn {
             // error (or worse — wrong shape silently parsed).
             let mut seg_buf: Vec<u8> = Vec::new();
             let mut seg_cmd: u8 = 0;
-            let mut seg_flags: crate::proto::HeaderFlags =
-                crate::proto::HeaderFlags(0);
+            let mut seg_flags: crate::proto::HeaderFlags = crate::proto::HeaderFlags(0);
             let mut expect_seg = false;
             loop {
                 tokio::select! {
@@ -559,12 +558,9 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
         }
         // Same MAX_MESSAGE_SIZE peek as the streaming reader (P-G8).
         if rx_buf.len() >= crate::proto::PvaHeader::SIZE {
-            if let Ok(hdr) =
-                crate::proto::PvaHeader::decode(&mut std::io::Cursor::new(&rx_buf[..]))
+            if let Ok(hdr) = crate::proto::PvaHeader::decode(&mut std::io::Cursor::new(&rx_buf[..]))
             {
-                if !hdr.flags.is_control()
-                    && hdr.payload_length as usize > MAX_MESSAGE_SIZE
-                {
+                if !hdr.flags.is_control() && hdr.payload_length as usize > MAX_MESSAGE_SIZE {
                     return Err(PvaError::Protocol(format!(
                         "inbound payload {} exceeds MAX_MESSAGE_SIZE {}",
                         hdr.payload_length, MAX_MESSAGE_SIZE

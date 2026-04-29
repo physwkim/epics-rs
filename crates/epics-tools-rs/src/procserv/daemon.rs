@@ -40,9 +40,7 @@ pub fn fork_and_go() -> ProcServResult<()> {
     // First fork.
     // SAFETY: we have not yet started the tokio runtime, so the
     // process is single-threaded; fork is safe per POSIX.
-    match unsafe { fork() }
-        .map_err(|e| ProcServError::Forkpty(format!("first fork: {e}")))?
-    {
+    match unsafe { fork() }.map_err(|e| ProcServError::Forkpty(format!("first fork: {e}")))? {
         ForkResult::Parent { .. } => {
             // Parent exits cleanly.
             std::process::exit(0);
@@ -53,9 +51,7 @@ pub fn fork_and_go() -> ProcServResult<()> {
     setsid().map_err(|e| ProcServError::Forkpty(format!("setsid: {e}")))?;
 
     // Second fork — daemon can never re-acquire a controlling tty.
-    match unsafe { fork() }
-        .map_err(|e| ProcServError::Forkpty(format!("second fork: {e}")))?
-    {
+    match unsafe { fork() }.map_err(|e| ProcServError::Forkpty(format!("second fork: {e}")))? {
         ForkResult::Parent { .. } => {
             std::process::exit(0);
         }

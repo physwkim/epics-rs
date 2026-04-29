@@ -106,10 +106,14 @@ impl Alarm {
 
     pub fn alarm_to_pv_field(&self) -> PvField {
         let mut s = PvStructure::new("alarm_t");
-        s.fields
-            .push(("severity".into(), PvField::Scalar(ScalarValue::Int(self.severity))));
-        s.fields
-            .push(("status".into(), PvField::Scalar(ScalarValue::Int(self.status))));
+        s.fields.push((
+            "severity".into(),
+            PvField::Scalar(ScalarValue::Int(self.severity)),
+        ));
+        s.fields.push((
+            "status".into(),
+            PvField::Scalar(ScalarValue::Int(self.status)),
+        ));
         s.fields.push((
             "message".into(),
             PvField::Scalar(ScalarValue::String(self.message.clone())),
@@ -170,8 +174,10 @@ impl TimeStamp {
             "nanoseconds".into(),
             PvField::Scalar(ScalarValue::Int(self.nanoseconds)),
         ));
-        s.fields
-            .push(("userTag".into(), PvField::Scalar(ScalarValue::Int(self.user_tag))));
+        s.fields.push((
+            "userTag".into(),
+            PvField::Scalar(ScalarValue::Int(self.user_tag)),
+        ));
         PvField::Structure(s)
     }
 
@@ -368,8 +374,10 @@ impl TypedNT for String {
     }
     fn to_pv_field(&self) -> PvField {
         let mut s = PvStructure::new("epics:nt/NTScalar:1.0");
-        s.fields
-            .push(("value".into(), PvField::Scalar(ScalarValue::String(self.clone()))));
+        s.fields.push((
+            "value".into(),
+            PvField::Scalar(ScalarValue::String(self.clone())),
+        ));
         PvField::Structure(s)
     }
     fn from_pv_field(field: &PvField) -> Result<Self, TypedNTError> {
@@ -412,12 +420,9 @@ macro_rules! impl_typed_nt_scalar_array {
             }
             fn to_pv_field(&self) -> PvField {
                 let mut s = PvStructure::new("epics:nt/NTScalarArray:1.0");
-                let items: ::std::vec::Vec<ScalarValue> = self
-                    .iter()
-                    .map(|v| ScalarValue::$sv(v.clone()))
-                    .collect();
-                s.fields
-                    .push(("value".into(), PvField::ScalarArray(items)));
+                let items: ::std::vec::Vec<ScalarValue> =
+                    self.iter().map(|v| ScalarValue::$sv(v.clone())).collect();
+                s.fields.push(("value".into(), PvField::ScalarArray(items)));
                 PvField::Structure(s)
             }
             fn from_pv_field(field: &PvField) -> Result<Self, TypedNTError> {
@@ -447,7 +452,10 @@ macro_rules! impl_typed_nt_scalar_array {
                         other => {
                             return Err(TypedNTError::WrongType {
                                 field: "value[]".into(),
-                                detail: format!("expected {} element, got {other:?}", stringify!($t)),
+                                detail: format!(
+                                    "expected {} element, got {other:?}",
+                                    stringify!($t)
+                                ),
                             });
                         }
                     }
@@ -489,7 +497,10 @@ impl TypedNT for EnumValue {
                 FieldDesc::Structure {
                     struct_id: "enum_t".into(),
                     fields: vec![
-                        ("index".into(), FieldDesc::Scalar(crate::pvdata::ScalarType::Int)),
+                        (
+                            "index".into(),
+                            FieldDesc::Scalar(crate::pvdata::ScalarType::Int),
+                        ),
                         (
                             "choices".into(),
                             FieldDesc::ScalarArray(crate::pvdata::ScalarType::String),
@@ -604,10 +615,8 @@ mod tests {
     #[test]
     fn from_wrong_struct_id_rejected() {
         let mut s = PvStructure::new("epics:nt/NTTable:1.0");
-        s.fields.push((
-            "value".into(),
-            PvField::Scalar(ScalarValue::Double(1.0)),
-        ));
+        s.fields
+            .push(("value".into(), PvField::Scalar(ScalarValue::Double(1.0))));
         let err = f64::from_pv_field(&PvField::Structure(s)).unwrap_err();
         assert!(matches!(err, TypedNTError::WrongStructId { .. }));
     }

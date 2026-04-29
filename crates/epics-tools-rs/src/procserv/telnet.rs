@@ -88,9 +88,7 @@ impl TelnetParser {
                         data_buf.push(0xFF);
                         ParseState::Data
                     }
-                    codes::WILL | codes::WONT | codes::DO | codes::DONT => {
-                        ParseState::Negotiate(b)
-                    }
+                    codes::WILL | codes::WONT | codes::DO | codes::DONT => ParseState::Negotiate(b),
                     codes::SB => ParseState::Subneg,
                     _ => {
                         // Single-byte command (NOP, AYT, EC, EL, …).
@@ -145,8 +143,12 @@ impl TelnetParser {
 /// `clientItem::clientItem`: announce `WILL ECHO` + `DO LINEMODE`.
 pub fn initial_negotiation() -> Vec<u8> {
     vec![
-        codes::IAC, codes::WILL, codes::TELOPT_ECHO,
-        codes::IAC, codes::DO, codes::TELOPT_LINEMODE,
+        codes::IAC,
+        codes::WILL,
+        codes::TELOPT_ECHO,
+        codes::IAC,
+        codes::DO,
+        codes::TELOPT_LINEMODE,
     ]
 }
 
@@ -205,7 +207,13 @@ mod tests {
         let mut p = TelnetParser::new();
         let evs = p.feed(&[
             b'a',
-            codes::IAC, codes::SB, 0x18, 0x01, 0x02, codes::IAC, codes::SE,
+            codes::IAC,
+            codes::SB,
+            0x18,
+            0x01,
+            0x02,
+            codes::IAC,
+            codes::SE,
             b'b',
         ]);
         assert_eq!(evs, vec![TelnetEvent::Data(vec![b'a', b'b'])]);

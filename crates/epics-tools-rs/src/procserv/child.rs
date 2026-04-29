@@ -152,11 +152,7 @@ impl ChildHandle {
 
         let mut written = 0;
         while written < filtered.len() {
-            let mut guard = self
-                .master
-                .writable()
-                .await
-                .map_err(ProcServError::Io)?;
+            let mut guard = self.master.writable().await.map_err(ProcServError::Io)?;
             let raw = self.master.as_ref().as_raw_fd();
             let result = guard.try_io(|_| {
                 let n = unsafe {
@@ -227,10 +223,7 @@ fn in_child_setup_and_exec(spec: &ChildSpec) -> ! {
             }
         };
         if let Err(e) = chdir(c_cwd.as_c_str()) {
-            eprintln!(
-                "procserv child: chdir to {} failed: {e}",
-                cwd.display()
-            );
+            eprintln!("procserv child: chdir to {} failed: {e}", cwd.display());
             std::process::exit(126);
         }
     }
@@ -285,10 +278,7 @@ fn set_nonblocking(fd: &OwnedFd) -> io::Result<()> {
 /// Reader task: pumps PTY-master into [`ChildEvent::Output`]
 /// messages until EOF / EIO (which is what we get when the child
 /// exits and its slave side closes).
-fn spawn_reader(
-    master: Arc<AsyncFd<OwnedFd>>,
-    tx: mpsc::Sender<ChildEvent>,
-) -> JoinHandle<()> {
+fn spawn_reader(master: Arc<AsyncFd<OwnedFd>>, tx: mpsc::Sender<ChildEvent>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         let raw: RawFd = master.as_ref().as_raw_fd();
@@ -301,9 +291,8 @@ fn spawn_reader(
                 }
             };
             match guard.try_io(|_| {
-                let n = unsafe {
-                    libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-                };
+                let n =
+                    unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 if n < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -335,20 +324,14 @@ fn spawn_reader(
 
 /// Reaper task: blocking `waitpid` on a thread; emits the final
 /// [`ChildEvent::Exited`] then closes the channel.
-fn spawn_reaper(
-    pid: Pid,
-    alive: Arc<AtomicBool>,
-    tx: mpsc::Sender<ChildEvent>,
-) -> JoinHandle<()> {
+fn spawn_reaper(pid: Pid, alive: Arc<AtomicBool>, tx: mpsc::Sender<ChildEvent>) -> JoinHandle<()> {
     tokio::task::spawn(async move {
         let res = tokio::task::spawn_blocking(move || waitpid(pid, None))
             .await
             .ok();
         let exit_code = match res {
             Some(Ok(WaitStatus::Exited(_, code))) => Some(make_exit_status(code)),
-            Some(Ok(WaitStatus::Signaled(_, sig, _))) => {
-                Some(make_exit_status(128 + sig as i32))
-            }
+            Some(Ok(WaitStatus::Signaled(_, sig, _))) => Some(make_exit_status(128 + sig as i32)),
             _ => None,
         };
         alive.store(false, Ordering::Release);
@@ -441,6 +424,9 @@ mod tests {
 
         let text = String::from_utf8_lossy(&output);
         assert!(text.contains("abcd"), "filter stripped X's, got: {text:?}");
-        assert!(!text.contains('X'), "X bytes should not appear, got: {text:?}");
+        assert!(
+            !text.contains('X'),
+            "X bytes should not appear, got: {text:?}"
+        );
     }
 }

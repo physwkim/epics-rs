@@ -46,9 +46,8 @@ macro_rules! impl_arg_scalar {
             fn from_pv_field(field: &PvField) -> Result<Self, String> {
                 match field {
                     PvField::Scalar(ScalarValue::$sv(v)) => Ok(*v),
-                    PvField::Scalar(other) => $coerce(other).ok_or_else(|| {
-                        format!("expected {}, got {:?}", stringify!($t), other)
-                    }),
+                    PvField::Scalar(other) => $coerce(other)
+                        .ok_or_else(|| format!("expected {}, got {:?}", stringify!($t), other)),
                     other => Err(format!("expected scalar, got {other:?}")),
                 }
             }
@@ -141,10 +140,8 @@ impl_resp_scalar!(bool, Boolean, Boolean);
 impl IntoServiceResponse for String {
     fn into_service_response(self) -> ServiceResponse {
         let mut s = PvStructure::new("epics:nt/NTScalar:1.0");
-        s.fields.push((
-            "value".into(),
-            PvField::Scalar(ScalarValue::String(self)),
-        ));
+        s.fields
+            .push(("value".into(), PvField::Scalar(ScalarValue::String(self))));
         ServiceResponse {
             descriptor: FieldDesc::Structure {
                 struct_id: "epics:nt/NTScalar:1.0".into(),

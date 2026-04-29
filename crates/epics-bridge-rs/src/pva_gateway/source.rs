@@ -191,7 +191,10 @@ impl ChannelSource for GatewayChannelSource {
             method = %ctx.method,
             "pva-gateway: forwarding PUT with downstream credentials"
         );
-        client.pvput(name, &value_str).await.map_err(|e| e.to_string())
+        client
+            .pvput(name, &value_str)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn is_writable(&self, name: &str) -> bool {
@@ -253,28 +256,21 @@ impl ChannelSource for GatewayChannelSource {
         // `EPICS_PVA_GW_RAW_FRAMES=NO` if they hit a regression and
         // want the legacy decode-then-encode path while issues are
         // diagnosed.
-        if let Some(v) =
-            epics_base_rs::runtime::env::get("EPICS_PVA_GW_RAW_FRAMES")
-        {
-            if v.eq_ignore_ascii_case("NO")
-                || v.eq_ignore_ascii_case("FALSE")
-                || v == "0"
-            {
+        if let Some(v) = epics_base_rs::runtime::env::get("EPICS_PVA_GW_RAW_FRAMES") {
+            if v.eq_ignore_ascii_case("NO") || v.eq_ignore_ascii_case("FALSE") || v == "0" {
                 return None;
             }
         }
         let entry = self.cache.lookup(name, self.connect_timeout).await.ok()?;
         let mut bcast = entry.subscribe_raw();
-        let (mpsc_tx, mpsc_rx) = mpsc::channel::<
-            epics_pva_rs::server_native::RawMonitorEvent,
-        >(self.subscriber_queue);
+        let (mpsc_tx, mpsc_rx) =
+            mpsc::channel::<epics_pva_rs::server_native::RawMonitorEvent>(self.subscriber_queue);
         let counter = self.subscriber_count.clone();
         tokio::spawn(async move {
             struct CounterGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
             impl Drop for CounterGuard {
                 fn drop(&mut self) {
-                    self.0
-                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             let _guard = CounterGuard(counter);

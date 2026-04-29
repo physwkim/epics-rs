@@ -194,11 +194,10 @@ mod app {
         // worker threads don't survive fork(). After fork_and_go
         // returns we're in the grandchild (or directly in foreground
         // mode) and safe to start tokio.
-        if !foreground
-            && let Err(e) = fork_and_go() {
-                eprintln!("procserv-rs: daemonize failed: {e}");
-                return ExitCode::FAILURE;
-            }
+        if !foreground && let Err(e) = fork_and_go() {
+            eprintln!("procserv-rs: daemonize failed: {e}");
+            return ExitCode::FAILURE;
+        }
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
