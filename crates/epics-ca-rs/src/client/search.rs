@@ -460,13 +460,29 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
             pv_name,
             reason,
         } => {
+            // pvxs `poke()` semantic: BeaconAnomaly for an ALREADY-pending
+            // channel must NOT move it to a new bucket. The whole point of
+            // bucket distribution is lost if a mass-anomaly piles every
+            // pending search into bucket=current+1. Just reset its retry
+            // counters and engage fast-tick mode; the search fires within
+            // ~6 s when its existing bucket comes around in fast cadence.
+            if reason == SearchReason::BeaconAnomaly && state.pending.contains_key(&cid) {
+                if let Some(p) = state.pending.get_mut(&cid) {
+                    p.attempt = 0;
+                    p.holdoff_cycles = 0;
+                    p.last_attempt = None;
+                }
+                state.fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
+                return;
+            }
+
             let search_payload = build_search_payload(cid, &pv_name);
 
             // Drop any stale entry before re-scheduling.
             state.remove_channel(cid);
 
             // Bucket assignment by reason:
-            //   Initial / BeaconAnomaly: fire on the very next tick.
+            //   Initial / BeaconAnomaly (new): fire on the very next tick.
             //   Reconnect: spread across the ring by cid hash so a
             //              mass-disconnect event doesn't pile every
             //              channel into the same firing bucket.
@@ -619,15 +635,12 @@ fn handle_udp_response(
                     continue;
                 }
 
-                if state.pending.contains_key(&cid) {
-                    state.remove_channel(cid);
-                    if let Some(p) = state.pending.get(&cid) {
-                        tracing::debug!(pv = %p.pv_name, cid, server = %server_addr,
-                            "PV search resolved");
-                    } else {
-                        tracing::debug!(cid, server = %server_addr,
-                            "PV search resolved");
-                    }
+                if let Some(p) = state.pending.remove(&cid) {
+                    state.buckets[p.bucket].retain(|x| *x != cid);
+                    tracing::debug!(
+                        pv = %p.pv_name, cid, server = %server_addr,
+                        "PV search resolved"
+                    );
                     let _ = response_tx.send(SearchResponse::Found { cid, server_addr });
                 }
             }
@@ -882,6 +895,50 @@ mod tests {
         assert_eq!(p.attempt, 0);
         assert_eq!(p.holdoff_cycles, 0);
         assert_eq!(state.fast_ticks_remaining, N_SEARCH_BUCKETS as u32);
+    }
+
+    #[test]
+    fn beacon_anomaly_for_pending_channel_keeps_bucket() {
+        // pvxs poke() semantic: a BeaconAnomaly Schedule for an
+        // already-pending channel must NOT move it to a new bucket.
+        // Otherwise a mass-anomaly piles every pending search into
+        // bucket=current+1 and defeats bucket distribution.
+        let mut state = SearchEngineState::new();
+        // Use Reconnect so it's placed into a non-current+1 bucket.
+        handle_request(
+            &mut state,
+            SearchRequest::Schedule {
+                cid: 7,
+                pv_name: "PV:7".into(),
+                reason: SearchReason::Reconnect,
+            },
+        );
+        let original_bucket = state.pending.get(&7).unwrap().bucket;
+        // Pretend prior attempts happened.
+        if let Some(p) = state.pending.get_mut(&7) {
+            p.attempt = 4;
+            p.holdoff_cycles = 8;
+        }
+        // Now apply a BeaconAnomaly poke for cid=7.
+        handle_request(
+            &mut state,
+            SearchRequest::Schedule {
+                cid: 7,
+                pv_name: "PV:7".into(),
+                reason: SearchReason::BeaconAnomaly,
+            },
+        );
+        let p = state.pending.get(&7).unwrap();
+        assert_eq!(p.bucket, original_bucket, "poke must not relocate bucket");
+        assert_eq!(p.attempt, 0);
+        assert_eq!(p.holdoff_cycles, 0);
+        assert_eq!(state.fast_ticks_remaining, N_SEARCH_BUCKETS as u32);
+        // And the bucket vector still has the cid exactly once.
+        let count = state.buckets[original_bucket]
+            .iter()
+            .filter(|x| **x == 7)
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]
