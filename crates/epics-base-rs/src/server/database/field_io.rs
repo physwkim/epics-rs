@@ -74,6 +74,16 @@ impl PvDatabase {
                     .map(|f| f.dbf_type);
                 if let Some(target) = target_type {
                     if value.dbr_type() != target {
+                        // C EPICS dbPut (12cfd41): nRequest=0 into a scalar
+                        // field must NOT silently coerce. `convert_to` on an
+                        // empty array calls `to_f64().unwrap_or(0.0)` and
+                        // would produce a scalar zero — the same garbage-
+                        // value bug the C fix raised LINK_ALARM for.
+                        if value.is_empty_array() {
+                            return Err(CaError::InvalidValue(format!(
+                                "empty array cannot be coerced to scalar field {field}"
+                            )));
+                        }
                         value.convert_to(target)
                     } else {
                         value
@@ -195,6 +205,13 @@ impl PvDatabase {
                     .map(|f| f.dbf_type);
                 if let Some(target) = target_type {
                     if value.dbr_type() != target {
+                        // C EPICS dbPut (12cfd41): empty-array → scalar
+                        // coercion would produce silent zero; reject.
+                        if value.is_empty_array() {
+                            return Err(CaError::InvalidValue(format!(
+                                "empty array cannot be coerced to scalar field {field}"
+                            )));
+                        }
                         value.convert_to(target)
                     } else {
                         value
@@ -357,6 +374,14 @@ impl PvDatabase {
                     .map(|f| f.dbf_type);
                 if let Some(target) = target_type {
                     if value.dbr_type() != target {
+                        // C EPICS dbPut (12cfd41): empty-array → scalar
+                        // coercion would produce silent zero; reject.
+                        if value.is_empty_array() {
+                            instance.common.putf = false;
+                            return Err(CaError::InvalidValue(format!(
+                                "empty array cannot be coerced to scalar field {field}"
+                            )));
+                        }
                         value.convert_to(target)
                     } else {
                         value

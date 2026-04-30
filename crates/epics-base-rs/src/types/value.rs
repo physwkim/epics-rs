@@ -408,6 +408,36 @@ impl EpicsValue {
         }
     }
 
+    /// True iff this value is an array variant with zero elements.
+    /// Mirrors the C-EPICS dbPut/dbCa/dbDbGetValue empty-array guard
+    /// (commits 12cfd41 / 0a1fb25 / 39c8d56): empty arrays must NOT
+    /// silently coerce into scalar zero — callers should treat this
+    /// as a LINK_ALARM-class condition and reject the put/get.
+    pub fn is_empty_array(&self) -> bool {
+        matches!(
+            self,
+            Self::ShortArray(arr) if arr.is_empty()
+        ) || matches!(
+            self,
+            Self::FloatArray(arr) if arr.is_empty()
+        ) || matches!(
+            self,
+            Self::EnumArray(arr) if arr.is_empty()
+        ) || matches!(
+            self,
+            Self::DoubleArray(arr) if arr.is_empty()
+        ) || matches!(
+            self,
+            Self::LongArray(arr) if arr.is_empty()
+        ) || matches!(
+            self,
+            Self::CharArray(arr) if arr.is_empty()
+        ) || matches!(
+            self,
+            Self::StringArray(arr) if arr.is_empty()
+        )
+    }
+
     /// Truncate an array value to at most `max` elements. Scalars are unchanged.
     pub fn truncate(&mut self, max: usize) {
         match self {
@@ -490,8 +520,19 @@ impl EpicsValue {
             Self::Long(v) => Some(*v as f64),
             Self::Short(v) => Some(*v as f64),
             Self::Enum(v) => Some(*v as f64),
-            Self::Char(v) => Some(*v as f64),
-            Self::String(s) => s.parse().ok(),
+            // DBF_CHAR is epicsInt8 (signed) per epics-base c5012d9f73:
+            // reinterpret the storage byte as i8 before widening so 0xFF → -1.0,
+            // not 255.0. The CharArray storage stays u8 because that matches the
+            // CA wire byte pattern; the sign only matters when promoting to f64.
+            Self::Char(v) => Some((*v as i8) as f64),
+            // C EPICS dbConvert (88bfd6f, 2025-11-05): string-to-integer
+            // conversion auto-detects hex/octal prefixes by default
+            // (`dbConvertBase = 0`). Plain `s.parse::<f64>()` handles
+            // decimal floats only — `"0x1A"` and `"017"` would silently
+            // parse as `0.0`. Try integer auto-detect first so CA puts of
+            // `"0x1A"` to a DBF_LONG field produce `26`, then fall back to
+            // decimal float parse for normal numeric strings.
+            Self::String(s) => parse_string_to_f64(s),
             _ => None,
         }
     }
@@ -633,4 +674,35 @@ impl EpicsValue {
                 .map_err(|e| CaError::InvalidValue(e.to_string()))
         }
     }
+}
+
+/// Convert a string value to f64 with C-style hex/octal auto-detection.
+///
+/// Mirrors C EPICS dbConvert (88bfd6f, 2025-11-05) where the default
+/// `dbConvertBase = 0` lets `epicsParseInt*` auto-detect base 10/16/8 by
+/// prefix. A signed `0x`/`0X` prefix means hex; a leading `0` followed by
+/// digits means octal; everything else is parsed as a decimal float so
+/// `"1.5"`, `"1e6"`, `"-3.14"` continue to work.
+fn parse_string_to_f64(s: &str) -> Option<f64> {
+    let trimmed = s.trim();
+    // Handle optional leading sign for hex/octal: e.g. "-0x1A" -> -26.
+    let (sign, body) = match trimmed.strip_prefix('-') {
+        Some(rest) => (-1.0f64, rest),
+        None => (1.0f64, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        if let Ok(v) = u64::from_str_radix(hex, 16) {
+            return Some(sign * v as f64);
+        }
+    } else if body.len() > 1
+        && body.starts_with('0')
+        && body.bytes().skip(1).all(|b| b.is_ascii_digit())
+        && !body.contains('.')
+        && !body.contains(['e', 'E'])
+    {
+        if let Ok(v) = u64::from_str_radix(&body[1..], 8) {
+            return Some(sign * v as f64);
+        }
+    }
+    trimmed.parse::<f64>().ok()
 }
