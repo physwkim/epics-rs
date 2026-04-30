@@ -10,9 +10,10 @@ struct Args {
     #[arg(short = 'c', long = "callback")]
     callback: bool,
 
-    /// CA timeout in seconds (default: 1.0)
-    #[arg(short = 'w', long = "timeout", default_value = "1.0")]
-    timeout: f64,
+    /// CA timeout in seconds (default: $EPICS_CLI_TIMEOUT or 1.0).
+    /// C ref: modules/ca/src/tools/tool_lib.c:use_ca_timeout_env (commit 1d056c6).
+    #[arg(short = 'w', long = "timeout")]
+    timeout: Option<f64>,
 
     /// PV name to write to
     pv_name: String,
@@ -26,7 +27,8 @@ struct Args {
 async fn main() {
     let args = Args::parse();
     let client = CaClient::new().await.expect("failed to create CA client");
-    let timeout = Duration::from_secs_f64(args.timeout);
+    let timeout =
+        Duration::from_secs_f64(args.timeout.unwrap_or_else(epics_ca_rs::cli::env_default_timeout));
 
     let ch = client.create_channel(&args.pv_name);
     if let Err(e) = ch.wait_connected(timeout).await {

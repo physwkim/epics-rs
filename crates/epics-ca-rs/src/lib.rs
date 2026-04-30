@@ -18,6 +18,7 @@ pub mod audit;
 pub mod cap_token;
 pub(crate) mod channel;
 pub mod chaos;
+pub mod cli;
 pub mod client;
 pub mod discovery;
 pub mod observability;

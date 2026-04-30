@@ -8,9 +8,10 @@ use std::time::Duration;
     about = "Show EPICS PV channel information and client diagnostics"
 )]
 struct Args {
-    /// CA timeout in seconds (default: 1.0)
-    #[arg(short = 'w', long = "wait", default_value_t = 1.0)]
-    timeout: f64,
+    /// CA timeout in seconds (default: $EPICS_CLI_TIMEOUT or 1.0).
+    /// C ref: modules/ca/src/tools/tool_lib.c:use_ca_timeout_env (commit 1d056c6).
+    #[arg(short = 'w', long = "wait")]
+    timeout: Option<f64>,
 
     /// PV names to query (omit for diagnostics only)
     pv_names: Vec<String>,
@@ -24,7 +25,8 @@ struct Args {
 async fn main() {
     let args = Args::parse();
     let client = CaClient::new().await.expect("failed to create CA client");
-    let timeout = Duration::from_secs_f64(args.timeout);
+    let timeout =
+        Duration::from_secs_f64(args.timeout.unwrap_or_else(epics_ca_rs::cli::env_default_timeout));
 
     let mut failed = false;
     for pv_name in &args.pv_names {

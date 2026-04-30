@@ -6,9 +6,10 @@ use std::time::Duration;
 #[derive(Parser)]
 #[command(name = "caget", about = "Read EPICS PV values")]
 struct Args {
-    /// CA timeout in seconds (default: 1.0)
-    #[arg(short = 'w', long = "wait", default_value_t = 1.0)]
-    timeout: f64,
+    /// CA timeout in seconds (default: $EPICS_CLI_TIMEOUT or 1.0).
+    /// C ref: modules/ca/src/tools/tool_lib.c:use_ca_timeout_env (commit 1d056c6).
+    #[arg(short = 'w', long = "wait")]
+    timeout: Option<f64>,
 
     /// PV names to read
     #[arg(required = true)]
@@ -19,7 +20,8 @@ struct Args {
 async fn main() {
     let args = Args::parse();
     let client = CaClient::new().await.expect("failed to create CA client");
-    let timeout = Duration::from_secs_f64(args.timeout);
+    let timeout =
+        Duration::from_secs_f64(args.timeout.unwrap_or_else(epics_ca_rs::cli::env_default_timeout));
 
     // Create all channels first (C: ca_create_channel for all PVs)
     let channels: Vec<_> = args

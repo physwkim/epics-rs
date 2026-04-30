@@ -13,9 +13,10 @@ struct Args {
     #[arg(required = true)]
     pv_names: Vec<String>,
 
-    /// Wait time for initial connections (seconds)
-    #[arg(short = 'w', long = "wait", default_value_t = 1.0)]
-    timeout: f64,
+    /// Wait time for initial connections (seconds; default: $EPICS_CLI_TIMEOUT or 1.0).
+    /// C ref: modules/ca/src/tools/tool_lib.c:use_ca_timeout_env (commit 1d056c6).
+    #[arg(short = 'w', long = "wait")]
+    timeout: Option<f64>,
 }
 
 #[tokio::main]
@@ -42,7 +43,10 @@ async fn main() {
     }
 
     // Initial connection wait (C: ca_pend_event(caTimeout))
-    tokio::time::sleep(Duration::from_secs_f64(args.timeout)).await;
+    let timeout_secs = args
+        .timeout
+        .unwrap_or_else(epics_ca_rs::cli::env_default_timeout);
+    tokio::time::sleep(Duration::from_secs_f64(timeout_secs)).await;
 
     // Print NOT CONNECTED for PVs that didn't connect
     for (i, pv_name) in args.pv_names.iter().enumerate() {
