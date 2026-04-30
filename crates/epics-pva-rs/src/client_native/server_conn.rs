@@ -34,8 +34,8 @@ use tracing::{debug, warn};
 
 use crate::error::{PvaError, PvaResult};
 use crate::proto::{
-    ByteOrder, Command, ControlCommand, HeaderFlags, PvaHeader, Status, WriteExt,
-    encode_string_into,
+    ByteOrder, Command, ControlCommand, HeaderFlags, MessageType, PvaHeader, ReadExt, Status,
+    WriteExt, decode_string, encode_string_into,
 };
 
 use super::decode::{
@@ -83,6 +83,28 @@ struct Router {
     by_ioid: HashMap<u32, FrameTx>,
     /// Routes for CREATE_CHANNEL responses by cid.
     by_cid: HashMap<u32, oneshot::Sender<Frame>>,
+    /// Per-SID server-initiated `CMD_DESTROY_CHANNEL` signals
+    /// (pvxs e668038 "client track opByIOID per channel"). When the
+    /// server administratively destroys a channel — e.g. SharedPV
+    /// close, max-channel limit eviction — pva-rs would otherwise
+    /// silently drop the frame and the channel's monitor would hang
+    /// forever waiting for data that won't come. Each `Channel`
+    /// registers a `(flag, notify)` pair on the Active transition;
+    /// route_frame fires both when DESTROY_CHANNEL targets the SID,
+    /// causing `Channel::is_active` to return false and waking
+    /// `wait_until_inactive` so the next ensure_active re-searches.
+    by_sid_close: HashMap<u32, (Arc<AtomicBool>, Arc<tokio::sync::Notify>)>,
+    /// Reverse map ioid → sid populated by `register_ioid_stream`.
+    /// On `CMD_DESTROY_CHANNEL` route_frame uses it to drop every
+    /// in-flight op's `FrameTx` entry that belongs to the destroyed
+    /// SID — the consumer's `stream.recv()` then returns `None` and
+    /// the op surfaces as `ConnectionLost`, which the monitor /
+    /// op_get / op_put loops already handle by re-driving
+    /// `ensure_active`. Without this, signalling the channel-level
+    /// `server_destroyed` flag/notify alone left every blocked op
+    /// hanging on the unrelated `by_ioid` channel until the whole
+    /// `ServerConn` died.
+    ioid_to_sid: HashMap<u32, u32>,
 }
 
 /// A persistent server connection.
@@ -386,10 +408,17 @@ impl ServerConn {
             // Drain the router — drops all per-ioid senders so any
             // outstanding `stream.recv().await` (e.g. monitor loops)
             // wakes with `None` and can react to the disconnect.
+            // Also clear `by_sid_close` and `ioid_to_sid`: the conn
+            // is dying, so no further DESTROY_CHANNEL frames will
+            // fire those signals — leaving the entries pinned would
+            // be a small leak the next reconnect would have to
+            // recover via stale-sid detection in is_active().
             {
                 let mut guard = router_reader.lock();
                 guard.by_ioid.clear();
                 guard.by_cid.clear();
+                guard.by_sid_close.clear();
+                guard.ioid_to_sid.clear();
             }
         });
 
@@ -499,14 +528,35 @@ impl ServerConn {
     /// reader) bounds each payload, and the parent connection's
     /// `op_timeout` / `idle_timeout` machinery eventually tears down
     /// truly pathological peers.
-    pub fn register_ioid_stream(&self, ioid: u32) -> mpsc::UnboundedReceiver<Frame> {
+    pub fn register_ioid_stream(&self, sid: u32, ioid: u32) -> mpsc::UnboundedReceiver<Frame> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.router.lock().by_ioid.insert(ioid, tx);
+        let mut g = self.router.lock();
+        g.by_ioid.insert(ioid, tx);
+        g.ioid_to_sid.insert(ioid, sid);
         rx
     }
 
     pub fn unregister_ioid(&self, ioid: u32) {
-        self.router.lock().by_ioid.remove(&ioid);
+        let mut g = self.router.lock();
+        g.by_ioid.remove(&ioid);
+        g.ioid_to_sid.remove(&ioid);
+    }
+
+    /// Register a (flag, notify) pair for server-initiated CMD_DESTROY_CHANNEL
+    /// notification on `sid`. When the server destroys our channel, the flag
+    /// is set to `true` and the notify wakes any `wait_until_inactive`
+    /// waiter so the channel can re-search.
+    pub fn register_sid_close(
+        &self,
+        sid: u32,
+        flag: Arc<AtomicBool>,
+        notify: Arc<tokio::sync::Notify>,
+    ) {
+        self.router.lock().by_sid_close.insert(sid, (flag, notify));
+    }
+
+    pub fn unregister_sid_close(&self, sid: u32) {
+        self.router.lock().by_sid_close.remove(&sid);
     }
 
     /// Wait for the connection to terminate (returns when reader/writer/heartbeat
@@ -639,11 +689,95 @@ async fn handle_control_frame(frame: &Frame, writer_tx: &mpsc::Sender<Vec<u8>>, 
 
 fn route_frame(frame: Frame, router: &Arc<Mutex<Router>>) {
     let cmd = frame.header.command;
+    let order = frame.header.flags.byte_order();
+
+    // CMD_MESSAGE (server → client log message for an in-progress op).
+    // Mirrors pvxs `Connection::handle_MESSAGE` (clientconn.cpp added in
+    // pvxs 0eea8fd1c7 "fix CMD_MESSAGE handling"). Decode + log here
+    // instead of routing by IOID — the per-op stream loop reads
+    // `payload[4]` as `subcmd` and would misinterpret `mtype`:
+    //   • mtype=0 (Info)    → subcmd=0  → falls into the data path,
+    //     decodes the rest of the payload as monitor delta, corrupting
+    //     the stream.
+    //   • mtype=1,2 (Warn,Err) → subcmd!=0 and `subcmd & 0x10 == 0` →
+    //     silently dropped, swallowing the diagnostic.
+    if cmd == Command::Message.code() {
+        log_server_message(&frame.payload, order);
+        return;
+    }
+
+    // CMD_DESTROY_CHANNEL from server (pvxs e668038 "client track
+    // opByIOID per channel"). Server is administratively closing a
+    // channel — fire the per-SID close signal so the owning Channel
+    // transitions out of Active and re-searches via its existing
+    // ensure_active path. Without this, server-side SharedPV close
+    // leaves the client's monitor stream hanging silently because
+    // no further frames arrive on the dead SID.
+    if cmd == Command::DestroyChannel.code() {
+        if let Some(sid) = peek_u32(&frame.payload, 0, order) {
+            // Drop every in-flight op's FrameTx entry that maps to
+            // this destroyed SID so each blocked consumer's
+            // `stream.recv().await` returns None → op surfaces as
+            // ConnectionLost → the monitor / op_get / op_put loops
+            // re-drive ensure_active, which now observes the
+            // server_destroyed flag set below and re-searches.
+            // Without this, signalling the channel-level
+            // (flag, notify) alone left every blocked op hanging on
+            // the by_ioid channel until the whole ServerConn died
+            // (pvxs e668038 "client track opByIOID per channel").
+            //
+            // CRITICAL: `flag.store + notify_waiters()` MUST run
+            // while we still hold the router lock. The flag is a
+            // shared `Arc<AtomicBool>` owned by `Channel` and reused
+            // across re-registrations (set_state(Active) clears it
+            // and re-inserts a new (sid, (flag, notify))). If we
+            // dropped the lock before storing, a concurrent
+            // `set_state(Active{new_sid})` could clear the flag and
+            // register a fresh entry — and our deferred store would
+            // then taint the healthy new SID, forcing an unnecessary
+            // re-search. Holding the lock guarantees set_state
+            // serialises after our destroy critical section.
+            let mut dropped_ioids = 0usize;
+            {
+                let mut g = router.lock();
+                let entry = g.by_sid_close.remove(&sid);
+                let matching: Vec<u32> = g
+                    .ioid_to_sid
+                    .iter()
+                    .filter(|(_, s)| **s == sid)
+                    .map(|(i, _)| *i)
+                    .collect();
+                for ioid in &matching {
+                    g.ioid_to_sid.remove(ioid);
+                    g.by_ioid.remove(ioid);
+                    dropped_ioids += 1;
+                }
+                if let Some((flag, notify)) = entry {
+                    flag.store(true, Ordering::Relaxed);
+                    // notify_waiters is non-blocking (marks waiters
+                    // ready, runtime polls them later) — safe to
+                    // call under the router lock.
+                    notify.notify_waiters();
+                    drop(g);
+                    tracing::warn!(
+                        sid,
+                        dropped_ioids,
+                        "server destroyed channel — triggering re-search"
+                    );
+                } else {
+                    drop(g);
+                    tracing::debug!(sid, "server destroyed unknown channel (already torn down?)");
+                }
+            }
+        }
+        return;
+    }
+
     let mut router_guard = router.lock();
 
     // CREATE_CHANNEL responses route by CID.
     if cmd == Command::CreateChannel.code() {
-        if let Some(cid) = peek_u32(&frame.payload, 0, frame.header.flags.byte_order()) {
+        if let Some(cid) = peek_u32(&frame.payload, 0, order) {
             if let Some(tx) = router_guard.by_cid.remove(&cid) {
                 let _ = tx.send(frame);
                 return;
@@ -652,7 +786,7 @@ fn route_frame(frame: Frame, router: &Arc<Mutex<Router>>) {
     }
 
     // Application op responses (GET/PUT/MONITOR/RPC/GET_FIELD) route by IOID.
-    let ioid = peek_u32(&frame.payload, 0, frame.header.flags.byte_order());
+    let ioid = peek_u32(&frame.payload, 0, order);
     if let Some(ioid) = ioid {
         if let Some(tx) = router_guard.by_ioid.get(&ioid).cloned() {
             drop(router_guard);
@@ -661,6 +795,32 @@ fn route_frame(frame: Frame, router: &Arc<Mutex<Router>>) {
     }
     // Otherwise: drop silently. (Beacons/SearchResponse are handled
     // out-of-band by the search engine, not here.)
+}
+
+/// Log a server-side CMD_MESSAGE at the level matching its mtype.
+/// Payload layout: `ioid:u32 + mtype:u8 + message:PVA-string`.
+fn log_server_message(payload: &[u8], order: ByteOrder) {
+    let mut cur = std::io::Cursor::new(payload);
+    let Ok(ioid) = cur.get_u32(order) else { return };
+    let Ok(mtype) = cur.get_u8() else { return };
+    let msg = decode_string(&mut cur, order)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    match mtype {
+        x if x == MessageType::Info as u8 => {
+            tracing::info!(ioid, msg, "server MESSAGE")
+        }
+        x if x == MessageType::Warning as u8 => {
+            tracing::warn!(ioid, msg, "server MESSAGE")
+        }
+        x if x == MessageType::Error as u8 || x == MessageType::Fatal as u8 => {
+            tracing::error!(ioid, msg, "server MESSAGE")
+        }
+        other => {
+            tracing::warn!(ioid, mtype = other, msg, "server MESSAGE (unknown type)")
+        }
+    }
 }
 
 fn peek_u32(payload: &[u8], offset: usize, order: ByteOrder) -> Option<u32> {
@@ -744,7 +904,172 @@ fn build_client_connection_validation(
 }
 
 #[allow(unused_imports)]
-use crate::proto::{decode_size, decode_string};
+use crate::proto::decode_size;
 
 #[allow(dead_code)]
 fn _suppress(_: HeaderFlags, _: Status) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_message_payload(order: ByteOrder, ioid: u32, mtype: u8, msg: &str) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.put_u32(ioid, order);
+        p.put_u8(mtype);
+        encode_string_into(msg, order, &mut p);
+        p
+    }
+
+    #[test]
+    fn log_server_message_does_not_panic_on_well_formed_payloads() {
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            for mtype in [
+                MessageType::Info as u8,
+                MessageType::Warning as u8,
+                MessageType::Error as u8,
+                MessageType::Fatal as u8,
+                99, // unknown
+            ] {
+                let payload = build_message_payload(order, 0xCAFEBABE, mtype, "hello world");
+                log_server_message(&payload, order);
+            }
+        }
+    }
+
+    #[test]
+    fn log_server_message_handles_truncated_payload() {
+        // Empty / too-short / no string body — must not panic.
+        log_server_message(&[], ByteOrder::Little);
+        log_server_message(&[0x01], ByteOrder::Little);
+        log_server_message(&[0u8; 4], ByteOrder::Little); // ioid only, no mtype
+        log_server_message(&[0u8; 5], ByteOrder::Little); // ioid + mtype but no string
+    }
+
+    #[test]
+    fn destroy_channel_fires_registered_close_signal() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtoOrd};
+        // Build a router with a registered (flag, notify) pair.
+        let router: Arc<Mutex<Router>> = Arc::new(Mutex::new(Router::default()));
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let sid = 0xDEADBEEFu32;
+        router
+            .lock()
+            .by_sid_close
+            .insert(sid, (flag.clone(), notify.clone()));
+
+        // Build a CMD_DESTROY_CHANNEL frame: payload = sid (u32 LE).
+        let order = ByteOrder::Little;
+        let mut payload = Vec::new();
+        payload.put_u32(sid, order);
+        let header = PvaHeader::application(
+            true,
+            order,
+            Command::DestroyChannel.code(),
+            payload.len() as u32,
+        );
+        let frame = Frame {
+            header,
+            payload,
+        };
+
+        // route_frame should fire the notify and set the flag.
+        route_frame(frame, &router);
+        assert!(flag.load(AtoOrd::Relaxed));
+        // Entry is consumed after firing.
+        assert!(!router.lock().by_sid_close.contains_key(&sid));
+    }
+
+    /// `flag.store(true)` for the destroyed sid must run BEFORE we
+    /// drop the router lock, so a concurrent `set_state(Active{new_sid})`
+    /// can't sneak in, clear the (shared `Arc`) flag, and then have
+    /// our deferred store taint the healthy new SID. This test
+    /// verifies the lock-held ordering at the unit level: the
+    /// `by_sid_close` removal and the `flag.store` are observable
+    /// as a single critical section by anyone holding the same
+    /// router lock.
+    #[test]
+    fn destroy_critical_section_holds_lock_through_flag_store() {
+        use std::sync::atomic::AtomicBool;
+        let router: Arc<Mutex<Router>> = Arc::new(Mutex::new(Router::default()));
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let sid = 7u32;
+        router
+            .lock()
+            .by_sid_close
+            .insert(sid, (flag.clone(), notify.clone()));
+        let mut payload = Vec::new();
+        payload.put_u32(sid, ByteOrder::Little);
+        let header = PvaHeader::application(
+            true,
+            ByteOrder::Little,
+            Command::DestroyChannel.code(),
+            payload.len() as u32,
+        );
+        // The lock-holding race-window check is structural: if
+        // route_frame returns and the flag is set, the entry must
+        // also be gone. (If the order were reversed and a concurrent
+        // re-register snuck in, we could observe entry-present +
+        // flag-set, indicating a torn critical section.)
+        route_frame(Frame { header, payload }, &router);
+        let g = router.lock();
+        assert!(!g.by_sid_close.contains_key(&sid));
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// route_frame on `CMD_DESTROY_CHANNEL` must also drop every
+    /// in-flight op's FrameTx whose ioid maps to the destroyed sid.
+    /// Without this, blocked `stream.recv().await` calls hang
+    /// forever and the server_destroyed flag/notify alone don't
+    /// surface to the op consumer (review HIGH #1).
+    #[test]
+    fn destroy_channel_drops_associated_ioid_streams() {
+        use std::sync::atomic::AtomicBool;
+        let router: Arc<Mutex<Router>> = Arc::new(Mutex::new(Router::default()));
+        let sid = 42u32;
+        let other_sid = 99u32;
+        // Register two ioids on the destroyed sid + one on a
+        // different sid that must NOT be dropped.
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel::<Frame>();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel::<Frame>();
+        let (tx_c, mut rx_c) = mpsc::unbounded_channel::<Frame>();
+        {
+            let mut g = router.lock();
+            g.by_ioid.insert(1001, tx_a);
+            g.ioid_to_sid.insert(1001, sid);
+            g.by_ioid.insert(1002, tx_b);
+            g.ioid_to_sid.insert(1002, sid);
+            g.by_ioid.insert(1003, tx_c);
+            g.ioid_to_sid.insert(1003, other_sid);
+            g.by_sid_close.insert(
+                sid,
+                (Arc::new(AtomicBool::new(false)), Arc::new(tokio::sync::Notify::new())),
+            );
+        }
+        let mut payload = Vec::new();
+        payload.put_u32(sid, ByteOrder::Little);
+        let header = PvaHeader::application(
+            true,
+            ByteOrder::Little,
+            Command::DestroyChannel.code(),
+            payload.len() as u32,
+        );
+        route_frame(Frame { header, payload }, &router);
+        // Streams on the destroyed sid must report None (sender dropped).
+        assert!(rx_a.try_recv().is_err(), "ioid 1001 stream should be closed");
+        assert!(rx_b.try_recv().is_err(), "ioid 1002 stream should be closed");
+        // Stream on other sid must still be open.
+        assert!(matches!(
+            rx_c.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let g = router.lock();
+        assert!(!g.by_ioid.contains_key(&1001));
+        assert!(!g.by_ioid.contains_key(&1002));
+        assert!(g.by_ioid.contains_key(&1003));
+        assert!(!g.ioid_to_sid.contains_key(&1001));
+        assert!(g.ioid_to_sid.contains_key(&1003));
+    }
+}

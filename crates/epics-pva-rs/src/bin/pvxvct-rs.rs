@@ -40,6 +40,12 @@ struct Args {
     #[arg(short = 'H', long = "host")]
     hosts: Vec<IpAddr>,
 
+    /// Filter SEARCH frames by PV name. Repeatable; a frame is shown if any
+    /// of its names matches any `-P` value. pvxs `pvxvct` parity (commit
+    /// bb53bb8 "fix pvxvct: actually apply PV name and host/network filters").
+    #[arg(short = 'P', long = "pv")]
+    pvnames: Vec<String>,
+
     /// UDP port to bind. Defaults to EPICS_PVA_BROADCAST_PORT or 5076.
     #[arg(short = 'p', long = "port")]
     port: Option<u16>,
@@ -178,6 +184,19 @@ async fn main() {
                     if let Ok(Some(name)) = decode_string(&mut cur, order) {
                         names.push(name);
                     }
+                }
+                // -P filter: if any -P values were given, only print
+                // frames whose name set overlaps the filter set.
+                // Empty `names` means a discover SEARCH (channel
+                // count = 0 in pvxs `tickSearch(SearchKind::
+                // discover)`); always show those — `-P` is for
+                // narrowing per-PV searches, not for hiding the
+                // network's discover heartbeat.
+                if !args.pvnames.is_empty()
+                    && !names.is_empty()
+                    && !names.iter().any(|n| args.pvnames.iter().any(|p| p == n))
+                {
+                    continue;
                 }
                 println!(
                     "{} SEARCH   peer={peer:21} seq={seq} reply={resp_ip}:{resp_port} pvs={names:?}",

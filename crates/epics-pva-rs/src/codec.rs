@@ -96,6 +96,38 @@ impl PvaCodec {
         self.frame(false, CMD_SEARCH, p)
     }
 
+    /// Build a discover-style empty SEARCH packet — flags carry the
+    /// `MustReply` bit (0x01), the protocol list is empty, and the
+    /// channel list is empty. Mirrors pvxs `tickSearch(SearchKind::
+    /// discover)` (client.cpp:1054-1074): every reachable PVA server
+    /// answers with a SEARCH_RESPONSE that the engine routes back into
+    /// its `Discovered` event stream. The previous regular
+    /// `build_search(..., "", ...)` packet had the wrong shape (count=1
+    /// with empty name + protocol="tcp" + flags=0) and most pvxs
+    /// servers ignored it as malformed search — `ping_all` /
+    /// `discover()` were therefore silent on the wire.
+    pub fn build_discover_search(&self, sequence_id: u32, response_port: u16) -> Vec<u8> {
+        let order = self.order();
+
+        let mut p = Vec::new();
+        p.put_u32(sequence_id, order);
+        p.put_u8(0x01); // flags = MustReply
+        p.extend_from_slice(&[0u8; 3]); // reserved
+        // pvxs `tickSearch(SearchKind::discover)` writes IN6ADDR_ANY_INIT
+        // (16 raw zero bytes — `::`). Don't run it through `ip_to_bytes`
+        // which would emit the IPv4-mapped form (`::ffff:0.0.0.0`); some
+        // pvxs versions only accept the raw-zero shape on this code
+        // path and the discover packet is wire-compatibility critical.
+        p.extend_from_slice(&[0u8; 16]);
+        p.put_u16(response_port, order);
+        // Empty protocol list (size_t(0)).
+        encode_size_into(0, order, &mut p);
+        // Channel count = 0 (no PV names).
+        p.put_u16(0, order);
+
+        self.frame(false, CMD_SEARCH, p)
+    }
+
     // ─── Connection validation response ──────────────────────────────────
 
     pub fn build_connection_validated(&self) -> Vec<u8> {
@@ -210,7 +242,14 @@ impl PvaCodec {
     // ─── DESTROY_REQUEST ─────────────────────────────────────────────────
 
     pub fn build_destroy_request(&self, server_channel_id: u32, ioid: u32) -> Vec<u8> {
-        let p = Self::op_payload(server_channel_id, ioid, 0x00, &[], self.order());
+        // DESTROY_REQUEST payload is `sid:u32 + ioid:u32` only — no subcmd
+        // byte (pvxs `Connection::sendDestroyRequest`, fixed in 1f91eb9e).
+        // Don't reuse `op_payload`, which appends the subcmd that GET / PUT /
+        // MONITOR / RPC frames carry.
+        let order = self.order();
+        let mut p = Vec::with_capacity(8);
+        p.put_u32(server_channel_id, order);
+        p.put_u32(ioid, order);
         self.frame(false, CMD_DESTROY_REQUEST, p)
     }
 }
@@ -249,9 +288,36 @@ mod tests {
         let bytes = codec(false).build_destroy_request(99, 17);
         assert_eq!(bytes[3], CMD_DESTROY_REQUEST);
         let payload = &bytes[8..];
-        // sid (u32) + ioid (u32) + subcmd (u8)
+        // pvxs spec: payload is `sid:u32 + ioid:u32` only — no subcmd byte.
+        assert_eq!(payload.len(), 8);
         assert_eq!(&payload[..4], &[99, 0, 0, 0]);
         assert_eq!(&payload[4..8], &[17, 0, 0, 0]);
-        assert_eq!(payload[8], 0x00);
+    }
+
+    /// Discover packet wire format (pvxs `tickSearch(SearchKind::
+    /// discover)`): `MustReply` flag, empty protocol list, empty
+    /// channel list. Ensures `pingAll` actually solicits replies
+    /// instead of being silently dropped by servers as malformed.
+    #[test]
+    fn discover_search_payload_layout() {
+        let bytes = codec(false).build_discover_search(0xCAFE, 5076);
+        assert_eq!(bytes[3], CMD_SEARCH);
+        let payload = &bytes[8..];
+        // sequence (u32 LE)
+        assert_eq!(&payload[0..4], &[0xFE, 0xCA, 0x00, 0x00]);
+        // flags = MustReply (0x01)
+        assert_eq!(payload[4], 0x01, "MustReply flag must be set");
+        // reserved 3 bytes
+        assert_eq!(&payload[5..8], &[0u8; 3]);
+        // 16-byte response addr (UNSPECIFIED)
+        assert_eq!(&payload[8..24], &[0u8; 16]);
+        // response_port (u16 LE)
+        assert_eq!(&payload[24..26], &5076u16.to_le_bytes());
+        // protocol count = 0 (single byte size_t encoding)
+        assert_eq!(payload[26], 0x00, "protocol list must be empty");
+        // channel count (u16 LE) = 0
+        assert_eq!(&payload[27..29], &0u16.to_le_bytes());
+        // No more bytes
+        assert_eq!(payload.len(), 29);
     }
 }

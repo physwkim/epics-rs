@@ -92,6 +92,29 @@ pub struct Channel {
     /// search yields no candidates. Empty for direct-mode and for
     /// channels created without name-server config.
     name_servers: Vec<std::net::SocketAddr>,
+    /// Set to true by `ServerConn::route_frame` when a server-initiated
+    /// `CMD_DESTROY_CHANNEL` arrives for this channel's current SID.
+    /// `is_active` consults the flag so the next `ensure_active` falls
+    /// through to a fresh search even though the cached
+    /// `ChannelState::Active` says otherwise. Reset on every successful
+    /// Active transition. pvxs e668038 "client track opByIOID per
+    /// channel" parity — without it monitor streams silently hang
+    /// after a server-side SharedPV close.
+    server_destroyed: Arc<std::sync::atomic::AtomicBool>,
+    /// Pulsed alongside `server_destroyed` to wake `wait_until_inactive`
+    /// even when no other state transition has occurred.
+    server_destroyed_notify: Arc<Notify>,
+    /// `(sid, server)` we last registered with `ServerConn::register_sid_close`.
+    /// Used to unregister on transitions out of Active so the router map
+    /// doesn't accumulate stale (flag, notify) pairs.
+    last_close_registration: parking_lot::Mutex<Option<(u32, Arc<ServerConn>)>>,
+    /// Latched on the first successful Active transition. Distinguishes
+    /// a fresh `find()` from a reconnect re-search so the search engine
+    /// can pick `SearchReason::Initial` (immediate broadcast for fast
+    /// single-channel latency) vs `SearchReason::Reconnect` (sid-hashed
+    /// bucket spread so a mass-disconnect cascade doesn't burst the
+    /// network in one tick). pvxs / ca-rs parity.
+    has_been_active: std::sync::atomic::AtomicBool,
 }
 
 /// How a channel resolves its PV name to a server address.
@@ -241,6 +264,10 @@ impl Channel {
             holdoff_until: parking_lot::Mutex::new(None),
             connect_fail_count: std::sync::atomic::AtomicU32::new(0),
             name_servers,
+            server_destroyed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            server_destroyed_notify: Arc::new(Notify::new()),
+            last_close_registration: parking_lot::Mutex::new(None),
+            has_been_active: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -268,6 +295,10 @@ impl Channel {
             holdoff_until: parking_lot::Mutex::new(None),
             connect_fail_count: std::sync::atomic::AtomicU32::new(0),
             name_servers: Vec::new(),
+            server_destroyed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            server_destroyed_notify: Arc::new(Notify::new()),
+            last_close_registration: parking_lot::Mutex::new(None),
+            has_been_active: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -276,13 +307,30 @@ impl Channel {
     }
 
     pub fn is_active(&self) -> bool {
+        if self
+            .server_destroyed
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
         matches!(*self.state.read(), ChannelState::Active { ref server, .. } if server.is_alive())
     }
 
+    /// Notify pulsed by `route_frame` on server-initiated
+    /// `CMD_DESTROY_CHANNEL`. External watchers (e.g. the
+    /// `connect()` on-connect callback driver) await this alongside
+    /// `state_changed` so they observe destroy events even when no
+    /// other state transition fires.
+    pub fn server_destroyed_notify(&self) -> &Notify {
+        &self.server_destroyed_notify
+    }
+
     pub fn close(&self) {
-        let mut s = self.state.write();
-        *s = ChannelState::Closed;
-        self.state_changed.notify_waiters();
+        // Route through `set_state` so the SID-close registration in
+        // `ServerConn::router.by_sid_close` is unregistered as part
+        // of leaving Active. A direct `state.write()` bypasses that
+        // and would leak the entry until the connection itself dies.
+        self.set_state(ChannelState::Closed);
     }
 
     /// Ensure the channel is in `Active` state, transitioning through
@@ -294,6 +342,13 @@ impl Channel {
         // for its address. If beacons report a different GUID at the
         // same address, the upstream server was replaced — drop the
         // cached state and fall through to a fresh search.
+        // Server-initiated CMD_DESTROY_CHANNEL (pvxs e668038): the
+        // route_frame handler sets `server_destroyed = true` when the
+        // server tears down our SID; without this check the quick
+        // path here would happily hand the dead SID back to the next
+        // op, which the server then rejects with "unknown channel
+        // sid" — the whole point of the destroyed-flag plumbing was
+        // to avoid that round-trip.
         let mut force_research = false;
         {
             let s = self.state.read();
@@ -303,7 +358,10 @@ impl Channel {
                 expected_guid,
             } = &*s
             {
-                if server.is_alive() {
+                let destroyed = self
+                    .server_destroyed
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if !destroyed && server.is_alive() {
                     let mismatched = match (
                         expected_guid.as_ref(),
                         self.resolver.last_guid_for(server.addr),
@@ -321,6 +379,13 @@ impl Channel {
                     } else {
                         return Ok((server.clone(), *sid));
                     }
+                } else if destroyed {
+                    tracing::debug!(
+                        sid = *sid,
+                        addr = %server.addr,
+                        "channel destroyed by server — re-searching"
+                    );
+                    force_research = true;
                 }
             }
             if let ChannelState::Closed = &*s {
@@ -368,7 +433,10 @@ impl Channel {
         {
             let s = self.state.read();
             if let ChannelState::Active { server, sid, .. } = &*s {
-                if server.is_alive() {
+                let destroyed = self
+                    .server_destroyed
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if !destroyed && server.is_alive() {
                     return Ok((server.clone(), *sid));
                 }
             }
@@ -393,10 +461,23 @@ impl Channel {
             Some(list) => list,
             None => {
                 self.set_state(ChannelState::Searching);
+                // Pick `Reconnect` once we've ever been Active so a
+                // mass-disconnect cascade gets sid-hashed bucket
+                // spread; otherwise this is a fresh resolve and
+                // `Initial` earns the immediate broadcast.
+                let reason = if self
+                    .has_been_active
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    super::search_engine::SearchReason::Reconnect
+                } else {
+                    super::search_engine::SearchReason::Initial
+                };
                 match &self.resolver {
-                    Resolver::Search(engine) => {
-                        engine.find_all(&self.pv_name).await.unwrap_or_default()
-                    }
+                    Resolver::Search(engine) => engine
+                        .find_all(&self.pv_name, reason)
+                        .await
+                        .unwrap_or_default(),
                     Resolver::Direct(addr) => vec![*addr],
                 }
             }
@@ -478,6 +559,34 @@ impl Channel {
     }
 
     fn set_state(&self, new_state: ChannelState) {
+        // Tear down any previous SID-close registration (server-side
+        // CMD_DESTROY_CHANNEL hook). Always do this on state change so a
+        // stale `(sid, server)` entry can't fire spuriously after we've
+        // moved past the old SID.
+        let prev_reg = self.last_close_registration.lock().take();
+        if let Some((old_sid, old_server)) = prev_reg {
+            old_server.unregister_sid_close(old_sid);
+        }
+
+        // Entering Active: clear the destroyed flag for the fresh SID and
+        // register a new (flag, notify) pair with the new server.
+        // Also latch `has_been_active = true` so subsequent re-searches
+        // (after a Server disconnect / DESTROY_CHANNEL) tell the search
+        // engine to use `SearchReason::Reconnect` bucket spreading
+        // instead of the immediate-fire `Initial` path.
+        if let ChannelState::Active { ref server, sid, .. } = new_state {
+            self.server_destroyed
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            server.register_sid_close(
+                sid,
+                Arc::clone(&self.server_destroyed),
+                Arc::clone(&self.server_destroyed_notify),
+            );
+            *self.last_close_registration.lock() = Some((sid, server.clone()));
+            self.has_been_active
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
         *self.state.write() = new_state;
         self.state_changed.notify_waiters();
     }
@@ -510,21 +619,27 @@ impl Channel {
     }
 
     /// Wait until the channel transitions out of its current `Active` state
-    /// (i.e. the `ServerConn` died). Used by monitor loops to drive
-    /// reconnect.
+    /// (i.e. the `ServerConn` died OR the server sent CMD_DESTROY_CHANNEL
+    /// for our SID). Used by monitor loops to drive reconnect.
     pub async fn wait_until_inactive(&self) {
         loop {
-            let notify = self.state_changed.notified();
-            tokio::pin!(notify);
+            let state_n = self.state_changed.notified();
+            let destroyed_n = self.server_destroyed_notify.notified();
+            tokio::pin!(state_n);
+            tokio::pin!(destroyed_n);
             // enable() registers the waiter eagerly, so a notify_waiters
             // that fires between the recheck and the await is captured.
             // Without it, a state transition firing in that window
             // leaves this loop blocked until the next transition.
-            notify.as_mut().enable();
+            state_n.as_mut().enable();
+            destroyed_n.as_mut().enable();
             if !self.is_active() {
                 return;
             }
-            notify.await;
+            tokio::select! {
+                _ = state_n => {}
+                _ = destroyed_n => {}
+            }
         }
     }
 }
@@ -536,5 +651,62 @@ impl Channel {
             Resolver::Search(engine) => Some(engine.beacons.clone()),
             Resolver::Direct(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_channel() -> Channel {
+        let pool = ConnectionPool::new();
+        let addr: std::net::SocketAddr = "127.0.0.1:5075".parse().unwrap();
+        Channel::new_direct(
+            "TEST:PV".into(),
+            "u".into(),
+            "h".into(),
+            std::time::Duration::from_secs(1),
+            pool,
+            addr,
+        )
+    }
+
+    /// `close()` must route through `set_state` so the SID-close
+    /// hook (`ServerConn::router.by_sid_close`) is unregistered when
+    /// leaving Active. A direct `state.write()` would leak the entry
+    /// until the connection itself dies (review finding #5).
+    #[test]
+    fn close_transitions_to_closed_via_set_state() {
+        let ch = make_channel();
+        assert!(matches!(*ch.state.read(), ChannelState::Idle));
+        ch.close();
+        assert!(matches!(*ch.state.read(), ChannelState::Closed));
+        // ensure_active should now error.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let res = rt.block_on(ch.ensure_active());
+        assert!(matches!(
+            res,
+            Err(PvaError::Protocol(ref m)) if m.contains("closed")
+        ));
+    }
+
+    /// `is_active()` must return `false` whenever `server_destroyed`
+    /// is set, regardless of the cached `ChannelState::Active` —
+    /// otherwise the quick path in `ensure_active` hands stale
+    /// (server, sid) pairs back to the next op (review finding #1).
+    #[test]
+    fn is_active_observes_server_destroyed_flag() {
+        let ch = make_channel();
+        // Idle → not active regardless of flag.
+        assert!(!ch.is_active());
+        ch.server_destroyed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(!ch.is_active(), "destroyed flag must keep is_active false");
+        ch.server_destroyed
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!ch.is_active(), "still Idle, still not active");
     }
 }

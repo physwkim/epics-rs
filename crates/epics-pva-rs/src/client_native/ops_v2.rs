@@ -153,7 +153,7 @@ async fn op_get_inner(
         None => build_pv_request_fields(fields, big_endian),
     };
 
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
     let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
@@ -228,7 +228,7 @@ pub async fn op_get_field(
     let big_endian = matches!(order, ByteOrder::Big);
     let codec = PvaCodec { big_endian };
     let ioid = alloc_ioid();
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
     let _ioid_guard = IoidGuard::new(server.clone(), ioid);
 
     let req = codec.build_get_field(sid, ioid, subfield);
@@ -305,7 +305,7 @@ pub async fn op_put_field(
     } else {
         build_pv_request_fields(&[field_path], big_endian)
     };
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
     let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
@@ -394,7 +394,7 @@ pub async fn op_put_value(
     let ioid = alloc_ioid();
 
     let pv_req = build_pv_request_value_only(big_endian);
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
     let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
@@ -472,7 +472,7 @@ async fn op_put_inner(
         Some(b) => b.to_vec(),
         None => build_pv_request_value_only(big_endian),
     };
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
     let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
     let cache = server.type_cache();
 
@@ -986,7 +986,7 @@ where
         let refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
         build_pv_request_fields(&refs, big_endian)
     };
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
     let init_req = codec.build_monitor_init(sid, ioid, &pv_req);
     server
         .send(init_req)
@@ -1392,7 +1392,7 @@ where
         }
     };
 
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
 
     // INIT
     let init_req = codec.build_monitor_init(sid, ioid, &pv_req);
@@ -1543,7 +1543,7 @@ pub async fn op_rpc(
     let mut pv_req = Vec::new();
     encode_type_desc(request_desc, order, &mut pv_req);
 
-    let mut stream = server.register_ioid_stream(ioid);
+    let mut stream = server.register_ioid_stream(sid, ioid);
     let mut ioid_guard = IoidGuard::new(server.clone(), ioid);
 
     // INIT

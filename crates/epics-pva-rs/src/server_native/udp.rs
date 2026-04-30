@@ -21,16 +21,39 @@ use crate::proto::{
 use super::source::DynSource;
 
 /// Generate a 12-byte server GUID.
+///
+/// Prefers `/dev/urandom` (Unix) so two servers started at the same
+/// nanosecond on different machines get distinct GUIDs and clients
+/// can't predict a server's GUID from start time + PID — pvxs
+/// `Server::Pvt::randomGUID` parity (commit ca594f40 "server: randomize
+/// UUID"). Falls back to the previous time + PID layout on platforms
+/// without `/dev/urandom` so non-Unix builds still get a unique-enough
+/// GUID per process.
 pub fn random_guid() -> [u8; 12] {
     let mut buf = [0u8; 12];
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    buf[..8].copy_from_slice(&now.to_le_bytes());
-    let pid = std::process::id().to_le_bytes();
-    buf[8..12].copy_from_slice(&pid);
+    if !try_fill_secure(&mut buf) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        buf[..8].copy_from_slice(&now.to_le_bytes());
+        let pid = std::process::id().to_le_bytes();
+        buf[8..12].copy_from_slice(&pid);
+    }
     buf
+}
+
+#[cfg(unix)]
+fn try_fill_secure(buf: &mut [u8]) -> bool {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .is_ok()
+}
+
+#[cfg(not(unix))]
+fn try_fill_secure(_buf: &mut [u8]) -> bool {
+    false
 }
 
 fn bind_udp(port: u16) -> PvaResult<AsyncUdpV4> {

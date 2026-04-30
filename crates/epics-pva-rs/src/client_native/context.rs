@@ -903,8 +903,22 @@ impl PvaClient {
         let mut connecting = 0usize;
         let mut closed = 0usize;
         for ch in channels.values() {
+            // Use `is_active()` so server-destroyed channels (whose
+            // raw state is still `Active` until the next
+            // ensure_active runs) don't get counted as live. The
+            // raw-state pattern matches in the rest of the branches
+            // are only reached when is_active() is false.
+            if ch.is_active() {
+                active += 1;
+                continue;
+            }
             match ch.current_state() {
-                super::channel::ChannelState::Active { .. } => active += 1,
+                super::channel::ChannelState::Active { .. } => {
+                    // is_active() returned false → conn dead OR
+                    // destroyed. Treat as searching for reporting:
+                    // the next ensure_active will move it for real.
+                    searching += 1;
+                }
                 super::channel::ChannelState::Searching => searching += 1,
                 super::channel::ChannelState::Connecting => connecting += 1,
                 super::channel::ChannelState::Closed => closed += 1,
@@ -1036,10 +1050,15 @@ impl<'a> ConnectBuilder<'a> {
         let task = tokio::spawn(async move {
             let mut was_active = false;
             loop {
-                let active_now = matches!(
-                    ch.current_state(),
-                    super::channel::ChannelState::Active { .. }
-                );
+                // Use `is_active()` (not the raw `ChannelState::Active`
+                // pattern) so a server-initiated CMD_DESTROY_CHANNEL
+                // — which sets `server_destroyed` without firing
+                // `state_changed` — flips us to `active_now = false`
+                // and lets `on_disconnect` run. Without this the
+                // watcher kept reporting Active until the next
+                // ensure_active(), so user-installed disconnect
+                // callbacks missed the destroy event entirely.
+                let active_now = ch.is_active();
                 if active_now && !was_active {
                     if let Some(cb) = &on_connect {
                         cb();
@@ -1053,6 +1072,11 @@ impl<'a> ConnectBuilder<'a> {
 
                 tokio::select! {
                     _ = ch.state_changed.notified() => {}
+                    // server_destroyed_notify is the explicit DESTROY
+                    // signal; without this arm the watcher stays
+                    // blocked on state_changed even after the flag
+                    // flips.
+                    _ = ch.server_destroyed_notify().notified() => {}
                     _ = cancel_task.cancelled() => break,
                 }
             }

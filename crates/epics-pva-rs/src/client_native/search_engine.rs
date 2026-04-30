@@ -42,12 +42,33 @@ pub const BACKOFF_SECS: &[u64] = &[1, 1, 2, 5, 10, 15, 30, 60, 120, 210];
 pub const DEFAULT_BROADCAST_PORT: u16 = 5076;
 
 /// Command sent into the engine.
+/// Why a search is being initiated — controls bucket placement and
+/// whether the first SEARCH packet fires immediately.
+///
+/// Mirrors ca-rs `SearchReason`: an `Initial` find is a single fresh
+/// resolve and earns an immediate broadcast for low first-attempt
+/// latency. A `Reconnect` find is one of potentially many concurrent
+/// re-searches (e.g. a 5000-channel TCP-close cascade) and therefore
+/// goes into a sid-hashed bucket without immediate fire so the burst
+/// is spread across the bucket revolution instead of pummelling the
+/// network in a single tick. pvxs `client.cpp::tickSearch` parity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchReason {
+    /// Brand-new resolve; channel has never been Active.
+    Initial,
+    /// Channel was Active and the underlying ServerConn died (or the
+    /// server sent CMD_DESTROY_CHANNEL). Distribute the retransmit so
+    /// mass-disconnects don't collapse into a single-tick burst.
+    Reconnect,
+}
+
 pub enum SearchCommand {
     /// Resolve `pv_name` → first server address. Reply via `responder`
     /// once a SEARCH_RESPONSE comes in.
     Find {
         pv_name: String,
         responder: oneshot::Sender<SocketAddr>,
+        reason: SearchReason,
     },
     /// Resolve `pv_name` and collect *all* responses received within
     /// the next [`MULTI_SERVER_WINDOW`]. The reply contains every
@@ -55,6 +76,7 @@ pub enum SearchCommand {
     FindAll {
         pv_name: String,
         responder: oneshot::Sender<Vec<SocketAddr>>,
+        reason: SearchReason,
     },
     /// Cancel an outstanding search (channel was dropped or closed).
     Cancel { pv_name: String },
@@ -185,13 +207,16 @@ impl SearchEngine {
     }
 
     /// Issue a search for `pv_name`. Future resolves to the server address
-    /// once a response arrives.
-    pub async fn find(&self, pv_name: &str) -> PvaResult<SocketAddr> {
+    /// once a response arrives. `reason` controls whether the first
+    /// SEARCH packet fires immediately (`Initial`) or is bucket-spread
+    /// (`Reconnect`).
+    pub async fn find(&self, pv_name: &str, reason: SearchReason) -> PvaResult<SocketAddr> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SearchCommand::Find {
                 pv_name: pv_name.to_string(),
                 responder: tx,
+                reason,
             })
             .await
             .map_err(|_| PvaError::Protocol("search engine closed".into()))?;
@@ -202,12 +227,17 @@ impl SearchEngine {
     /// Collect every SEARCH_RESPONSE for `pv_name` within
     /// [`MULTI_SERVER_WINDOW`]. Returns a ranked list — first is the
     /// fastest responder. Empty list means the search timed out.
-    pub async fn find_all(&self, pv_name: &str) -> PvaResult<Vec<SocketAddr>> {
+    pub async fn find_all(
+        &self,
+        pv_name: &str,
+        reason: SearchReason,
+    ) -> PvaResult<Vec<SocketAddr>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SearchCommand::FindAll {
                 pv_name: pv_name.to_string(),
                 responder: tx,
+                reason,
             })
             .await
             .map_err(|_| PvaError::Protocol("search engine closed".into()))?;
@@ -466,7 +496,7 @@ async fn run_engine(
 
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
-                Some(SearchCommand::Find { pv_name, responder }) => {
+                Some(SearchCommand::Find { pv_name, responder, reason }) => {
                     // P-G27: drop any prior pending search for the
                     // same name so a tight retry loop doesn't grow
                     // pending / search_buckets without bound. The
@@ -478,10 +508,21 @@ async fn run_engine(
                         }
                     }
                     let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
-                    // Place new searches one bucket ahead of the cursor
-                    // so they don't fire in the same tick they were
-                    // submitted (pvxs initialSearchDelay).
-                    let bucket = (current_bucket + 1) % N_SEARCH_BUCKETS;
+                    // Reason-aware bucket placement (ca-rs / pvxs
+                    // parity). Initial: place one bucket ahead so it
+                    // fires on the very next tick AND immediately
+                    // broadcast for low single-channel latency.
+                    // Reconnect: hash sid across all 30 buckets so a
+                    // mass-disconnect cascade doesn't collapse into a
+                    // single-tick burst, and skip the immediate fire
+                    // so the bucket scheduler controls the cadence.
+                    let bucket = match reason {
+                        SearchReason::Initial => (current_bucket + 1) % N_SEARCH_BUCKETS,
+                        SearchReason::Reconnect => {
+                            let offset = (sid as usize) % N_SEARCH_BUCKETS;
+                            (current_bucket + 1 + offset) % N_SEARCH_BUCKETS
+                        }
+                    };
                     search_buckets[bucket].push(sid);
                     let p = Pending {
                         pv_name: pv_name.clone(),
@@ -493,12 +534,22 @@ async fn run_engine(
                     };
                     by_name.insert(pv_name, sid);
                     pending.insert(sid, p);
-                    if let Some(p) = pending.get(&sid) {
-                        let pkt = codec.build_search(0, sid, &p.pv_name, [0,0,0,0], response_port, false);
-                        broadcast(&search_socket, &pkt, &extra_targets).await;
+                    if reason == SearchReason::Initial {
+                        if let Some(p) = pending.get_mut(&sid) {
+                            // Mark this as an attempt so the bucket-fire
+                            // path doesn't later re-anchor the Multi
+                            // responder's deadline (it would only do that
+                            // when `attempt == 0`, i.e. the bucket is
+                            // firing the FIRST broadcast — true for
+                            // Reconnect, false for Initial).
+                            p.attempt = 1;
+                            p.last_attempt = Instant::now();
+                            let pkt = codec.build_search(0, sid, &p.pv_name, [0,0,0,0], response_port, false);
+                            broadcast(&search_socket, &pkt, &extra_targets).await;
+                        }
                     }
                 }
-                Some(SearchCommand::FindAll { pv_name, responder }) => {
+                Some(SearchCommand::FindAll { pv_name, responder, reason }) => {
                     // P-G27: same dedup as Find — drop any prior
                     // pending search for the same name.
                     if let Some(old_sid) = by_name.remove(&pv_name) {
@@ -507,7 +558,13 @@ async fn run_engine(
                         }
                     }
                     let sid = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
-                    let bucket = (current_bucket + 1) % N_SEARCH_BUCKETS;
+                    let bucket = match reason {
+                        SearchReason::Initial => (current_bucket + 1) % N_SEARCH_BUCKETS,
+                        SearchReason::Reconnect => {
+                            let offset = (sid as usize) % N_SEARCH_BUCKETS;
+                            (current_bucket + 1 + offset) % N_SEARCH_BUCKETS
+                        }
+                    };
                     search_buckets[bucket].push(sid);
                     let p = Pending {
                         pv_name: pv_name.clone(),
@@ -523,9 +580,13 @@ async fn run_engine(
                     };
                     by_name.insert(pv_name, sid);
                     pending.insert(sid, p);
-                    if let Some(p) = pending.get(&sid) {
-                        let pkt = codec.build_search(0, sid, &p.pv_name, [0,0,0,0], response_port, false);
-                        broadcast(&search_socket, &pkt, &extra_targets).await;
+                    if reason == SearchReason::Initial {
+                        if let Some(p) = pending.get_mut(&sid) {
+                            p.attempt = 1;
+                            p.last_attempt = Instant::now();
+                            let pkt = codec.build_search(0, sid, &p.pv_name, [0,0,0,0], response_port, false);
+                            broadcast(&search_socket, &pkt, &extra_targets).await;
+                        }
                     }
                 }
                 Some(SearchCommand::Cancel { pv_name }) => {
@@ -629,17 +690,17 @@ async fn run_engine(
                     }
                 }
                 Some(SearchCommand::DiscoverPing) => {
-                    // pvxs DiscoverBuilder::pingAll: send an empty
-                    // SEARCH (no PV names) to broadcast targets. Any
-                    // reachable server replies with a SEARCH_RESPONSE
-                    // we'll route through handle_search_response, and
-                    // its beacon-equivalent (server, guid) will fall
-                    // out via the announced set on the next beacon
-                    // round-trip. The empty SEARCH itself triggers
-                    // server-side DISCOVER reply per pvxs convention.
+                    // pvxs DiscoverBuilder::pingAll wire format
+                    // (client.cpp:1054-1074): empty SEARCH with
+                    // `MustReply` flag, zero protocols, zero channels.
+                    // Every reachable PVA server replies regardless
+                    // of whether it claims any specific PV name. The
+                    // earlier `build_search("")` call produced a
+                    // single-channel SEARCH with empty name, which
+                    // most servers correctly ignored as malformed —
+                    // `ping_all()` was effectively a silent op.
                     let probe_id = NEXT_SEARCH_ID.fetch_add(1, Ordering::Relaxed);
-                    let pkt =
-                        codec.build_search(0, probe_id, "", [0, 0, 0, 0], response_port, false);
+                    let pkt = codec.build_discover_search(probe_id, response_port);
                     broadcast(&search_socket, &pkt, &extra_targets).await;
                 }
                 None => break,
@@ -704,23 +765,62 @@ async fn run_engine(
             _ = tick.tick() => {
                 let now = Instant::now();
 
-                // 1. Flush any FindAll multi-window responders whose deadline
-                //    has passed (delivers accumulated list, removes entry).
-                let mut to_flush = Vec::new();
+                // 1. Flush expired FindAll multi-window responders.
+                //    Always flush at deadline regardless of whether
+                //    `accumulated` is empty — without this, a missing
+                //    PV (no server claims the name) leaves the
+                //    oneshot Sender alive forever, hanging the caller's
+                //    `find_all().await` and so any user-set
+                //    `PvaClient::timeout` on the outer op never gets
+                //    a chance to apply (the inner ensure_active never
+                //    returns control). pvxs returns from
+                //    Operation::wait on the user timeout regardless of
+                //    whether a search succeeded; the analogous
+                //    behaviour in pva-rs is "deliver Vec::new() at
+                //    deadline so the caller can decide whether to
+                //    error or retry".
+                //
+                //    Also detect closed Single responders (caller
+                //    dropped the find() future via outer timeout /
+                //    abort) so the pending entry doesn't leak.
+                let mut to_flush_multi = Vec::new();
+                let mut to_drop_single = Vec::new();
                 for (sid, p) in pending.iter() {
-                    if let Responder::Multi { deadline, accumulated, .. } = &p.responder {
-                        if now >= *deadline && !accumulated.is_empty() {
-                            to_flush.push(*sid);
+                    match &p.responder {
+                        Responder::Multi { deadline, responder, .. } => {
+                            if responder.is_closed() {
+                                to_drop_single.push(*sid);
+                            } else if now >= *deadline && p.attempt > 0 {
+                                // attempt > 0 ensures the first
+                                // broadcast actually went out; without
+                                // this, Reconnect entries that haven't
+                                // had their bucket fire yet would
+                                // flush prematurely with no responses.
+                                to_flush_multi.push(*sid);
+                            }
+                        }
+                        Responder::Single(tx) => {
+                            if tx.is_closed() {
+                                to_drop_single.push(*sid);
+                            }
                         }
                     }
                 }
-                for sid in to_flush {
+                for sid in to_flush_multi {
                     if let Some(p) = pending.remove(&sid) {
                         by_name.remove(&p.pv_name);
                         search_buckets[p.bucket].retain(|x| *x != sid);
                         if let Responder::Multi { responder, accumulated, .. } = p.responder {
                             let _ = responder.send(accumulated);
                         }
+                    }
+                }
+                for sid in to_drop_single {
+                    if let Some(p) = pending.remove(&sid) {
+                        by_name.remove(&p.pv_name);
+                        search_buckets[p.bucket].retain(|x| *x != sid);
+                        // Sender drops at end of scope; that's the
+                        // signal to the caller (already-cancelled).
                     }
                 }
 
@@ -783,6 +883,24 @@ async fn run_engine(
                         continue;
                     }
                     let pkt_opt = pending.get_mut(&sid).map(|p| {
+                        // First-broadcast bookkeeping for `Reconnect`
+                        // find_all callers: the deadline was set to
+                        // `find_all_call_time + MULTI_SERVER_WINDOW`
+                        // assuming an immediate broadcast. With the
+                        // bucket-spread Reconnect path that broadcast
+                        // can land 0-30 s later; without re-anchoring,
+                        // the multi-server accumulation window has
+                        // already expired by the time the first SEARCH
+                        // actually goes out, so subsequent responses
+                        // beyond the very first one are dropped.
+                        // Re-arm the deadline relative to NOW on the
+                        // first attempt so the full MULTI_SERVER_WINDOW
+                        // is preserved end-to-end.
+                        if p.attempt == 0 {
+                            if let Responder::Multi { ref mut deadline, .. } = p.responder {
+                                *deadline = now + MULTI_SERVER_WINDOW;
+                            }
+                        }
                         p.last_attempt = now;
                         p.attempt = p.attempt.saturating_add(1);
                         // Re-place in next-tick's slot (one full
@@ -1047,5 +1165,78 @@ mod tests {
         let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5075);
         let r = rewrite_loopback(a);
         assert_eq!(r.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    /// `Reconnect` reason must spread across many buckets when a mass
+    /// disconnect cascade hands the engine a contiguous block of fresh
+    /// sids — replicate the bucket-placement formula and assert we
+    /// touch ≥ N_SEARCH_BUCKETS / 2 distinct slots over a 5_000-sid
+    /// window. `Initial` (current_bucket+1 always) deliberately does
+    /// not get this spread.
+    #[test]
+    fn reconnect_bucket_spread_across_ring() {
+        let current_bucket = 7usize;
+        let sids: Vec<u32> = (1_000..6_000).collect();
+        let mut hit = vec![false; N_SEARCH_BUCKETS];
+        for sid in sids {
+            let offset = (sid as usize) % N_SEARCH_BUCKETS;
+            let bucket = (current_bucket + 1 + offset) % N_SEARCH_BUCKETS;
+            hit[bucket] = true;
+        }
+        let distinct = hit.iter().filter(|h| **h).count();
+        assert_eq!(
+            distinct, N_SEARCH_BUCKETS,
+            "Reconnect should land in every bucket given a wide sid block; got {distinct}"
+        );
+    }
+
+    #[test]
+    fn initial_bucket_is_next_tick() {
+        let current_bucket = 13usize;
+        let bucket = (current_bucket + 1) % N_SEARCH_BUCKETS;
+        assert_eq!(bucket, 14);
+    }
+
+    /// `find_all` must NOT hang indefinitely when no server claims the
+    /// PV — review finding #3. With the fix, the tick handler flushes
+    /// the Multi responder at deadline even with empty `accumulated`,
+    /// so the user-visible future resolves to `Vec::new()` and any
+    /// outer `PvaClient::timeout` gets a chance to apply.
+    #[tokio::test(flavor = "current_thread")]
+    async fn find_all_returns_empty_when_no_responder() {
+        // Suppress UDP fan-out — we don't want the engine bound to
+        // 5076 in CI / racing with a real PVA server.
+        //
+        // SAFETY: env vars are process-global; this test is annotated
+        // current_thread so other tokio tests don't see a partial
+        // state. The variables aren't read by any production path
+        // running in the same process.
+        unsafe {
+            std::env::set_var("EPICS_PVA_AUTO_ADDR_LIST", "NO");
+            std::env::set_var("EPICS_PVA_ADDR_LIST", "");
+        }
+
+        let engine = SearchEngine::spawn(Vec::new())
+            .await
+            .expect("spawn engine");
+
+        let started = std::time::Instant::now();
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            engine.find_all("MISSING:PV", SearchReason::Initial),
+        )
+        .await
+        .expect("find_all must complete (not hang) — review finding #3")
+        .expect("find_all should not error");
+        let elapsed = started.elapsed();
+
+        // With Initial: immediate broadcast, deadline at find_all
+        // time + MULTI_SERVER_WINDOW (200 ms). The next 1-s tick
+        // boundary after deadline triggers the empty-flush path.
+        assert!(res.is_empty(), "no servers should be discovered");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "must flush within a few ticks; took {elapsed:?}"
+        );
     }
 }

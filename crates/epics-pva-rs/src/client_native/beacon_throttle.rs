@@ -11,10 +11,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use parking_lot::RwLock;
 
 /// 5-minute window for the anomaly throttle.
 const ANOMALY_WINDOW: Duration = Duration::from_secs(300);
+
+/// Hard cap on tracked (server, guid) entries. Mirrors pvxs
+/// `beaconTrackLimit` (client.cpp commit 3f3e394 "Limit beaconTrack by
+/// size as well as time"). Without it, an attacker spoofing beacons
+/// with arbitrary GUIDs can grow the map unbounded; with it, the new
+/// entry is dropped once the cap is reached. Stale entries are still
+/// reaped by `prune_stale`.
+const BEACON_TRACK_LIMIT: usize = 20_000;
 
 #[derive(Debug, Clone)]
 struct ServerEntry {
@@ -29,6 +39,11 @@ struct ServerEntry {
 #[derive(Default)]
 pub struct BeaconTracker {
     inner: RwLock<HashMap<SocketAddr, ServerEntry>>,
+    /// One-shot latch: warn loudly the first time the cap-and-drop
+    /// path rejects a brand-new server. Repeated cap hits would
+    /// otherwise spam the log without adding info — the operator
+    /// only needs to learn the cap was reached once.
+    warned_at_cap: AtomicBool,
 }
 
 impl BeaconTracker {
@@ -46,6 +61,26 @@ impl BeaconTracker {
         let now = Instant::now();
         match map.get_mut(&server) {
             None => {
+                // Cap-and-drop: if we'd exceed the limit, refuse the new
+                // entry rather than evict an existing one. Returning
+                // `false` suppresses the would-be reconnect; the next
+                // `prune_stale` cycle frees space as old beacons age out.
+                if map.len() >= BEACON_TRACK_LIMIT {
+                    if !self.warned_at_cap.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            cap = BEACON_TRACK_LIMIT,
+                            "beacon tracker cap reached — new servers temporarily \
+                             ignored until existing entries age out (180s). Further \
+                             cap hits will log at debug only."
+                        );
+                    } else {
+                        tracing::debug!(
+                            server = %server,
+                            "beacon tracker cap-drop"
+                        );
+                    }
+                    return false;
+                }
                 map.insert(
                     server,
                     ServerEntry {
@@ -186,5 +221,24 @@ mod tests {
         assert_eq!(pruned[0].1, [9u8; 12]);
         // Idempotent: a second call with no entries left returns empty.
         assert!(t.prune_stale(Duration::from_secs(0)).is_empty());
+    }
+
+    #[test]
+    fn cap_drops_new_entries_after_limit() {
+        let t = BeaconTracker::new();
+        // Fill the tracker up to the cap with distinct (server, guid) pairs.
+        for i in 0..BEACON_TRACK_LIMIT as u32 {
+            let octets = i.to_be_bytes();
+            let sa: SocketAddr = SocketAddr::new(
+                std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]).into(),
+                5075,
+            );
+            assert!(t.observe(sa, [0u8; 12]));
+        }
+        // Next insertion is refused — function returns false and the
+        // map size stays at the cap.
+        let extra: SocketAddr = SocketAddr::new(std::net::Ipv4Addr::new(255, 255, 255, 254).into(), 5075);
+        assert!(!t.observe(extra, [1u8; 12]));
+        assert_eq!(t.inner.read().len(), BEACON_TRACK_LIMIT);
     }
 }
