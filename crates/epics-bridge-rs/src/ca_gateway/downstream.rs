@@ -86,6 +86,15 @@ impl DownstreamServer {
         guard.as_mut().map(|s| s.connection_events())
     }
 
+    /// Snapshot the beacon-anomaly Notify handle so the gateway can
+    /// fire `generateBeaconAnomaly`-style pulses after [`run`] has
+    /// consumed the inner CaServer. Must be called BEFORE `run`;
+    /// returns None afterwards.
+    pub async fn beacon_anomaly_handle(&self) -> Option<Arc<tokio::sync::Notify>> {
+        let guard = self.server.lock().await;
+        guard.as_ref().map(|s| s.beacon_anomaly_handle())
+    }
+
     /// Run the CA server (blocks until shutdown).
     ///
     /// Spawn this in a tokio task — it accepts incoming TCP connections

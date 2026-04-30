@@ -170,6 +170,11 @@ impl GatewayServer {
         // so every per-PV WriteHookEnv captures it (B-G9: the
         // forwarding task fires `request()` on upstream reconnect to
         // tell other gateway-aware downstream clients to re-search).
+        // The pulse handle (CaServer beacon-reset Notify) is wired in
+        // below once the downstream server has been constructed, so
+        // honored `request()` calls actually emit a beacon — without
+        // this the throttle just tracked timestamps and
+        // `generateBeaconAnomaly` was silent on the wire.
         let beacon_anomaly = Arc::new(BeaconAnomaly::new());
 
         // Upstream manager — receives the full WriteHook environment so
@@ -210,6 +215,14 @@ impl GatewayServer {
                 DownstreamServer::new(shadow_db.clone(), config.server_port)
             }
         });
+
+        // Now that the downstream CaServer is built, snapshot its
+        // beacon-reset handle and install it on the throttle so honored
+        // `request()` calls actually emit a beacon. Captured BEFORE
+        // `downstream.run()` consumes the inner CaServer.
+        if let Some(pulse) = downstream.beacon_anomaly_handle().await {
+            beacon_anomaly.install_pulse(pulse);
+        }
 
         let server = Self {
             config,

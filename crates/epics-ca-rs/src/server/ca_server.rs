@@ -268,6 +268,7 @@ impl CaServerBuilder {
             drain_grace_secs: self.drain_grace_secs,
             #[cfg(feature = "cap-tokens")]
             cap_token_verifier: self.cap_token_verifier,
+            beacon_reset: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -385,12 +386,39 @@ pub struct CaServer {
     /// resolve to a verified subject before ACF lookup.
     #[cfg(feature = "cap-tokens")]
     cap_token_verifier: Option<Arc<crate::cap_token::TokenVerifier>>,
+    /// Pulse-able beacon-reset signal. The beacon emitter task awaits
+    /// this Notify alongside its periodic timer; firing it interrupts
+    /// the next scheduled period and emits a beacon immediately
+    /// (mirrors RSRV's `generateBeaconAnomaly`). Held on the struct
+    /// (rather than constructed locally in `run()`) so external code
+    /// — most importantly the bridge ca_gateway when it discovers a
+    /// new upstream PV — can trigger an immediate beacon by calling
+    /// [`Self::trigger_beacon_anomaly`].
+    beacon_reset: Arc<tokio::sync::Notify>,
 }
 
 impl CaServer {
     /// Create a builder for configuring the server.
     pub fn builder() -> CaServerBuilder {
         CaServerBuilder::new()
+    }
+
+    /// Pulse the beacon emitter so it sends a beacon immediately
+    /// (interrupting the periodic timer) — mirrors RSRV's
+    /// `generateBeaconAnomaly`. Used by the bridge ca_gateway when a
+    /// new upstream PV is registered so other gateway-aware clients
+    /// re-search and pick the gateway as the source for that PV.
+    pub fn trigger_beacon_anomaly(&self) {
+        self.beacon_reset.notify_one();
+    }
+
+    /// Clone of the beacon-reset signal. Lets external coordinators
+    /// (e.g. ca-gateway) hold a long-lived handle without a back-ref
+    /// to the CaServer itself — important because `run()` consumes
+    /// the server, after which there's no `&CaServer` to call
+    /// `trigger_beacon_anomaly` on.
+    pub fn beacon_anomaly_handle(&self) -> Arc<tokio::sync::Notify> {
+        self.beacon_reset.clone()
     }
 
     /// Construct a CaServer from pre-populated parts.
@@ -433,6 +461,7 @@ impl CaServer {
             drain_grace_secs: drain_grace_from_env(),
             #[cfg(feature = "cap-tokens")]
             cap_token_verifier: None,
+            beacon_reset: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -737,7 +766,11 @@ impl CaServer {
         };
 
         let (tcp_tx, tcp_rx) = tokio::sync::oneshot::channel();
-        let beacon_reset = std::sync::Arc::new(tokio::sync::Notify::new());
+        // Use the externally-pulse-able handle held on the struct.
+        // Bridge ca_gateway captures `beacon_anomaly_handle()` BEFORE
+        // calling run() (which consumes self) and pulses it on
+        // upstream PV discovery to fire a beacon immediately.
+        let beacon_reset = self.beacon_reset.clone();
         let beacon_reset_tcp = beacon_reset.clone();
 
         let conn_events = self.conn_events.clone();
