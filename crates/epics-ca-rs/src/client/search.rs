@@ -250,11 +250,23 @@ pub(crate) async fn run_search_engine(
         tokio::select! {
             req = request_rx.recv() => {
                 let Some(req) = req else { return };
-                handle_request_or_addr(&mut state, &mut addr_list, req);
+                let mut immediate: Vec<u32> = Vec::new();
+                if let Some(cid) = handle_request_or_addr(&mut state, &mut addr_list, req) {
+                    immediate.push(cid);
+                }
                 // Drain any additional queued requests so a burst of
                 // Schedule messages all land before the next tick.
                 while let Ok(req) = request_rx.try_recv() {
-                    handle_request_or_addr(&mut state, &mut addr_list, req);
+                    if let Some(cid) = handle_request_or_addr(&mut state, &mut addr_list, req) {
+                        immediate.push(cid);
+                    }
+                }
+                // pvxs `clientdiscover.cpp` parity: send the first SEARCH
+                // packet right now instead of waiting up to one tick for
+                // the bucket to come around. The bucket placement still
+                // governs all subsequent retries.
+                if !immediate.is_empty() {
+                    fire_searches(&mut state, &immediate, &addr_list, &socket, &nameserver_send_txs).await;
                 }
             }
 
@@ -437,23 +449,36 @@ fn handle_request_or_addr(
     state: &mut SearchEngineState,
     addr_list: &mut Vec<SocketAddr>,
     req: SearchRequest,
-) {
+) -> Option<u32> {
     match req {
         SearchRequest::AddAddress(addr) => {
             if !addr_list.contains(&addr) {
                 addr_list.push(addr);
                 tracing::info!(?addr, "ca-rs: addr_list += (programmatic)");
             }
+            None
         }
         SearchRequest::SetAddressList(list) => {
             tracing::info!(count = list.len(), "ca-rs: addr_list replaced");
             *addr_list = list;
+            None
         }
         other => handle_request(state, other),
     }
 }
 
-fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
+/// Process a search request. Returns `Some(cid)` when the new entry
+/// needs an immediate first-attempt SEARCH packet sent (matches pvxs
+/// `clientdiscover.cpp` immediate-broadcast on Find). The bucket
+/// scheduler controls only retries; without immediate fire the first
+/// attempt waits up to one full tick, which is the gap that made
+/// ca-rs single-channel reconnect feel slower than pva-rs.
+///
+/// `None` means no immediate fire — either the request didn't add a
+/// new pending entry (Cancel / ConnectResult) or it was a BeaconAnomaly
+/// poke for an already-pending channel (counters reset only; fast-tick
+/// mode handles the retransmit).
+fn handle_request(state: &mut SearchEngineState, req: SearchRequest) -> Option<u32> {
     match req {
         SearchRequest::Schedule {
             cid,
@@ -473,7 +498,7 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
                     p.last_attempt = None;
                 }
                 state.fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
-                return;
+                return None;
             }
 
             let search_payload = build_search_payload(cid, &pv_name);
@@ -512,10 +537,13 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
             if reason == SearchReason::BeaconAnomaly {
                 state.poke();
             }
+
+            Some(cid)
         }
 
         SearchRequest::Cancel { cid } => {
             state.remove_channel(cid);
+            None
         }
 
         SearchRequest::ConnectResult {
@@ -543,12 +571,13 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
                     .increment(1);
                 }
             }
+            None
         }
         // Address-list variants are intercepted by
         // `handle_request_or_addr` before they reach this match.
         // Defensive no-op so adding new variants doesn't crash if
         // future code paths plumb them straight to handle_request.
-        SearchRequest::AddAddress(_) | SearchRequest::SetAddressList(_) => {}
+        SearchRequest::AddAddress(_) | SearchRequest::SetAddressList(_) => None,
     }
 }
 
@@ -724,10 +753,23 @@ async fn process_bucket(
         return;
     }
 
-    // VERSION header — one per datagram. Embed sequence number in the
-    // CID field (with sequenceNoIsValid flag in data_type) so we can
-    // reject stale responses from previous search rounds (matches C
-    // EPICS dgSeqNoAtTimerExpire).
+    fire_searches(state, &to_send, addr_list, socket, nameserver_txs).await;
+}
+
+/// Build batched UDP SEARCH datagrams for `cids` and send via every
+/// destination + nameserver channel. One VERSION header per datagram
+/// carries the rolling sequence number so stale responses are
+/// rejected (matches C EPICS dgSeqNoAtTimerExpire). Used both by the
+/// per-tick bucket processor and by the immediate-fire path that
+/// runs right after handle_request to avoid the up-to-1-tick wait
+/// on the first attempt.
+async fn fire_searches(
+    state: &mut SearchEngineState,
+    cids: &[u32],
+    addr_list: &[SocketAddr],
+    socket: &AsyncUdpV4,
+    nameserver_txs: &[mpsc::UnboundedSender<Vec<u8>>],
+) {
     state.dgram_seq = state.dgram_seq.wrapping_add(1);
     let version_hdr = {
         let mut h = CaHeader::new(CA_PROTO_VERSION);
@@ -738,14 +780,13 @@ async fn process_bucket(
     };
 
     // Build batched UDP datagrams (multi-search per packet, MTU-bounded).
-    // Per-bucket cap on outgoing datagrams = `pending.len() / N_SEARCH_BUCKETS`,
-    // so no AIMD throttling needed: the bucket distribution naturally
-    // bounds per-tick load.
+    // Bucket distribution caps per-tick load at ~pending/N_SEARCH_BUCKETS,
+    // so no AIMD throttling is needed.
     let mut current_frame = Vec::with_capacity(MAX_UDP_SEND);
     current_frame.extend_from_slice(&version_hdr);
 
-    for sid in to_send {
-        let Some(p) = state.pending.get(&sid) else {
+    for sid in cids {
+        let Some(p) = state.pending.get(sid) else {
             continue;
         };
         let payload = p.search_payload.clone();
