@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.12.0 — 2026-04-30
+
+PVA/CA stability sweep. A cold-eye cross-review across pva-rs / ca-rs
+/ bridge-rs surfaced dead-letter disconnect paths and silent
+beacon-anomaly handling that unit tests had missed; pvxs git-history
+archaeology (1220 commits triaged) ported the remaining
+protocol-level gaps.
+
+### Breaking
+- `SearchEngine::find` / `find_all` gain a `reason: SearchReason`
+  argument so mass-reconnect cascades spread across the bucket ring
+  instead of bursting in a single tick.
+
+### epics-pva-rs
+- Server-initiated `CMD_DESTROY_CHANNEL` now cancels every in-flight
+  op for the destroyed SID; monitor streams previously hung silently
+  until the whole TCP connection died.
+- `CMD_MESSAGE` from server is decoded and logged at the level
+  matching its `mtype` — previously corrupted the monitor data
+  stream (mtype=0) or was silently dropped (Warn/Err).
+- `DESTROY_REQUEST` payload corrected to `sid + ioid` (no spurious
+  subcmd byte) for pvxs interop.
+- `DiscoverPing` uses the spec wire format (`MustReply` flag, empty
+  protocol/channel list, raw `::`); old packet shape was silently
+  ignored by pvxs servers.
+- `random_guid()` seeds from `/dev/urandom`; `BeaconTracker` caps
+  at 20 000 entries with warn-once on cap (DoS / poison-feed
+  defence).
+- Reason-aware search: `Reconnect` is sid-hashed across all 30
+  buckets with no immediate fire; `Initial` keeps the immediate
+  broadcast for fast single-channel latency.
+- `find_all` flushes `Vec::new()` at deadline + drops closed
+  responders so missing PVs no longer hang past the caller's
+  timeout.
+
+### epics-ca-rs
+- `CMD_SERVER_DISCONN` wakes blocked `caget` / `caput` waiters with
+  `CaError::Disconnected` (was leaving them parked until the
+  caller's outer timeout).
+- Reason-aware search scheduler matches the pva-rs split.
+- Beacon stale-prune (180 s) replaces the every-beacon soft-poke
+  that trapped multi-IOC networks in 200 ms fast-tick mode.
+- Multi-NIC duplicate-beacon detection (same `cid`) + 50 ms
+  period-collapse floor.
+- Nameserver TCP read task no longer leaks on client shutdown.
+
+### epics-bridge-rs
+- `BeaconAnomaly::request()` from `ca_gateway` now actually emits a
+  beacon via the new `CaServer::beacon_anomaly_handle` pulse —
+  previously silent on the wire.
+
+### Tooling / docs
+- `archaeology/pvxs/` — full pvxs 1220-commit cross-check with
+  per-batch verdicts.
+
 ## v0.11.1 — 2026-04-29
 
 Patch release. v0.11.0 shipped a regression in which default
