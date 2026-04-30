@@ -818,16 +818,7 @@ impl PvDatabase {
         }
 
         // 6. CP link targets -- process records that have CP input links from this record
-        {
-            let cp_targets = self.get_cp_targets(name).await;
-            for target in cp_targets {
-                if !visited.contains(&target) {
-                    let _ = self
-                        .process_record_with_links(&target, visited, depth + 1)
-                        .await;
-                }
-            }
-        }
+        self.dispatch_cp_targets(name, visited, depth).await;
 
         // 7. RPRO: if reprocess requested, clear flag and reprocess
         {
@@ -1292,18 +1283,56 @@ impl PvDatabase {
         }
 
         // CP link targets
-        {
-            let cp_targets = self.get_cp_targets(name).await;
-            for target in cp_targets {
-                if !visited.contains(&target) {
-                    let _ = self
-                        .process_record_with_links(&target, visited, depth + 1)
-                        .await;
-                }
-            }
-        }
+        self.dispatch_cp_targets(name, visited, depth).await;
 
         Ok(())
+    }
+
+    /// Dispatch CP-link targets that take a CP/CPP input link from `name`.
+    ///
+    /// C parity (a4bc0db): the CP-driven dispatch is the moral equivalent of
+    /// dbCaTask's CA_DBPROCESS handler invoking `db_process(prec)`. Before
+    /// processing each target, set PUTF=true; if the target is already
+    /// processing (async record mid-flight), set RPRO=true instead so the
+    /// in-flight pass reprocesses on completion. Already-visited targets
+    /// (current process chain) are skipped via the `visited` cycle guard.
+    async fn dispatch_cp_targets(
+        &self,
+        name: &str,
+        visited: &mut std::collections::HashSet<String>,
+        depth: usize,
+    ) {
+        let cp_targets = self.get_cp_targets(name).await;
+        for target in cp_targets {
+            if visited.contains(&target) {
+                continue;
+            }
+            let target_rec = {
+                let records = self.inner.records.read().await;
+                records.get(&target).cloned()
+            };
+            let already_active = if let Some(ref t) = target_rec {
+                let mut tg = t.write().await;
+                if tg
+                    .processing
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    tg.common.rpro = true;
+                    true
+                } else {
+                    tg.common.putf = true;
+                    false
+                }
+            } else {
+                false
+            };
+            if already_active {
+                continue;
+            }
+            let _ = self
+                .process_record_with_links(&target, visited, depth + 1)
+                .await;
+        }
     }
 
     /// Check simulation mode for a record. Returns Some(Ok(())) if simulation handled processing,
