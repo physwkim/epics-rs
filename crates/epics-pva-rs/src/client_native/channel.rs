@@ -574,7 +574,10 @@ impl Channel {
         // (after a Server disconnect / DESTROY_CHANNEL) tell the search
         // engine to use `SearchReason::Reconnect` bucket spreading
         // instead of the immediate-fire `Initial` path.
-        if let ChannelState::Active { ref server, sid, .. } = new_state {
+        if let ChannelState::Active {
+            ref server, sid, ..
+        } = new_state
+        {
             self.server_destroyed
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             server.register_sid_close(

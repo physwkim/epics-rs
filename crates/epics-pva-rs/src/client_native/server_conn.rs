@@ -969,10 +969,7 @@ mod tests {
             Command::DestroyChannel.code(),
             payload.len() as u32,
         );
-        let frame = Frame {
-            header,
-            payload,
-        };
+        let frame = Frame { header, payload };
 
         // route_frame should fire the notify and set the flag.
         route_frame(frame, &router);
@@ -1045,7 +1042,10 @@ mod tests {
             g.ioid_to_sid.insert(1003, other_sid);
             g.by_sid_close.insert(
                 sid,
-                (Arc::new(AtomicBool::new(false)), Arc::new(tokio::sync::Notify::new())),
+                (
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(tokio::sync::Notify::new()),
+                ),
             );
         }
         let mut payload = Vec::new();
@@ -1058,8 +1058,14 @@ mod tests {
         );
         route_frame(Frame { header, payload }, &router);
         // Streams on the destroyed sid must report None (sender dropped).
-        assert!(rx_a.try_recv().is_err(), "ioid 1001 stream should be closed");
-        assert!(rx_b.try_recv().is_err(), "ioid 1002 stream should be closed");
+        assert!(
+            rx_a.try_recv().is_err(),
+            "ioid 1001 stream should be closed"
+        );
+        assert!(
+            rx_b.try_recv().is_err(),
+            "ioid 1002 stream should be closed"
+        );
         // Stream on other sid must still be open.
         assert!(matches!(
             rx_c.try_recv(),

@@ -2215,14 +2215,8 @@ mod waiter_drain_tests {
         // cid=42 waiters: ioids removed from maps + Senders fired with Disconnected.
         assert!(!read_waiters.contains_key(&1001));
         assert!(!write_waiters.contains_key(&1002));
-        assert!(matches!(
-            rrx_42.await,
-            Ok(Err(CaError::Disconnected))
-        ));
-        assert!(matches!(
-            wrx_42.await,
-            Ok(Err(CaError::Disconnected))
-        ));
+        assert!(matches!(rrx_42.await, Ok(Err(CaError::Disconnected))));
+        assert!(matches!(wrx_42.await, Ok(Err(CaError::Disconnected))));
 
         // cid=99 waiters: untouched.
         assert!(read_waiters.contains_key(&2001));

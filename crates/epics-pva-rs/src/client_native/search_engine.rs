@@ -1216,9 +1216,7 @@ mod tests {
             std::env::set_var("EPICS_PVA_ADDR_LIST", "");
         }
 
-        let engine = SearchEngine::spawn(Vec::new())
-            .await
-            .expect("spawn engine");
+        let engine = SearchEngine::spawn(Vec::new()).await.expect("spawn engine");
 
         let started = std::time::Instant::now();
         let res = tokio::time::timeout(

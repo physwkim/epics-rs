@@ -298,6 +298,12 @@ fn handle_beacon(
     // soft-poke-on-every-beacon (removed earlier this round) this
     // misclassification was masked by the throttle; the prune-only
     // design surfaces it.
+    //
+    // We deliberately do NOT refresh `last_seen` here: a server stuck
+    // emitting only same-id duplicates (frozen / wedged) will be
+    // pruned at `BEACON_STALE_THRESHOLD` and its next real (fresh-id)
+    // beacon will land on the `first_sighting = true` path — the
+    // desired anomaly behaviour for a recovered server.
     if !first_sighting && beacon_id == entry.last_id {
         return;
     }
@@ -436,7 +442,10 @@ mod tests {
 
         // First beacon — first sighting → anomaly fires.
         handle_beacon(hdr, &mut servers, &tx);
-        assert!(matches!(rx.try_recv(), Ok(CoordRequest::ForceRescanServer { .. })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(CoordRequest::ForceRescanServer { .. })
+        ));
         // Drain any further send (none expected).
         assert!(rx.try_recv().is_err());
 
@@ -446,6 +455,67 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "duplicate same-cid beacon must not fire ForceRescanServer"
+        );
+    }
+
+    /// A real IOC restart resets the beacon sequence to a fresh value.
+    /// Even if the inter-beacon interval is sub-50 ms (faster than
+    /// `MIN_PERIOD_COLLAPSE_INTERVAL`), the `beacon_id != expected_next_id`
+    /// branch must still classify it as anomaly — the floor only protects
+    /// the period-collapse branch from misfiring on duplicates.
+    #[test]
+    fn sub_50ms_restart_via_id_mismatch_still_fires_anomaly() {
+        let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<CoordRequest>();
+
+        let mut hdr = CaHeader::new(CA_PROTO_RSRV_IS_UP);
+        hdr.count = 5064;
+        hdr.cid = 100;
+        hdr.available = u32::from_be_bytes([127, 0, 0, 1]);
+        // First sighting — anomaly fires.
+        handle_beacon(hdr, &mut servers, &tx);
+        assert!(rx.try_recv().is_ok());
+
+        // Sub-50ms later, IOC restarts: id resets to 1 (not the
+        // expected id=101). period_estimate is 15s default; even
+        // though actual_interval < 50ms now, the id-mismatch branch
+        // must catch the restart.
+        hdr.cid = 1;
+        handle_beacon(hdr, &mut servers, &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(CoordRequest::ForceRescanServer { .. })),
+            "id-mismatch restart must fire anomaly even when interval < 50ms"
+        );
+    }
+
+    /// Legitimate fast-beacon (e.g. 200 ms cadence) with monotonically
+    /// increasing ids must NOT trip the period-collapse branch — only
+    /// the `first_sighting = true` path on the very first beacon. This
+    /// tests that the 50 ms floor doesn't fire spurious anomalies on
+    /// healthy fast cadences.
+    #[test]
+    fn fast_cadence_monotonic_ids_does_not_fire_spurious_anomaly() {
+        let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<CoordRequest>();
+
+        let mut hdr = CaHeader::new(CA_PROTO_RSRV_IS_UP);
+        hdr.count = 5064;
+        hdr.available = u32::from_be_bytes([127, 0, 0, 1]);
+
+        // Five monotonically increasing beacons (ids 100..105). First
+        // is first_sighting → anomaly. Rest must not fire.
+        for id in 100..105 {
+            hdr.cid = id;
+            handle_beacon(hdr, &mut servers, &tx);
+        }
+        // Drain whatever fired (just the first_sighting anomaly).
+        let mut anomalies = 0;
+        while rx.try_recv().is_ok() {
+            anomalies += 1;
+        }
+        assert_eq!(
+            anomalies, 1,
+            "monotonic fast-cadence beacons must fire anomaly only on first sighting"
         );
     }
 
@@ -475,7 +545,13 @@ mod tests {
         );
         // The prune logic in handle_beacon: same retain expression.
         servers.retain(|_, s| now.duration_since(s.last_seen) < BEACON_STALE_THRESHOLD);
-        assert!(servers.contains_key(&fresh), "fresh entry must survive prune");
-        assert!(!servers.contains_key(&stale), "180-s-idle entry must be pruned");
+        assert!(
+            servers.contains_key(&fresh),
+            "fresh entry must survive prune"
+        );
+        assert!(
+            !servers.contains_key(&stale),
+            "180-s-idle entry must be pruned"
+        );
     }
 }

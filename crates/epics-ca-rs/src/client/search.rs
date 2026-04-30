@@ -1107,7 +1107,11 @@ mod tests {
                 reason: SearchReason::Initial,
             },
         );
-        assert_eq!(cid_initial, Some(100), "Initial must return Some for immediate fire");
+        assert_eq!(
+            cid_initial,
+            Some(100),
+            "Initial must return Some for immediate fire"
+        );
         // Reconnect → None (bucket-spread, no burst)
         let cid_reconnect = handle_request(
             &mut state,
@@ -1127,7 +1131,10 @@ mod tests {
                 reason: SearchReason::BeaconAnomaly,
             },
         );
-        assert_eq!(cid_anomaly, None, "BeaconAnomaly NEW must NOT immediately fire");
+        assert_eq!(
+            cid_anomaly, None,
+            "BeaconAnomaly NEW must NOT immediately fire"
+        );
     }
 
     /// `Reconnect` schedules must spread across the bucket ring by

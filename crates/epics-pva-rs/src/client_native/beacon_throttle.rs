@@ -237,7 +237,8 @@ mod tests {
         }
         // Next insertion is refused — function returns false and the
         // map size stays at the cap.
-        let extra: SocketAddr = SocketAddr::new(std::net::Ipv4Addr::new(255, 255, 255, 254).into(), 5075);
+        let extra: SocketAddr =
+            SocketAddr::new(std::net::Ipv4Addr::new(255, 255, 255, 254).into(), 5075);
         assert!(!t.observe(extra, [1u8; 12]));
         assert_eq!(t.inner.read().len(), BEACON_TRACK_LIMIT);
     }
