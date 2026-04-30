@@ -64,8 +64,37 @@ impl RepeaterClient {
 /// Run the CA repeater daemon.
 /// Binds to UDP 5065, accepts client registrations, and fans out beacons.
 pub async fn run_repeater() -> io::Result<()> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    // libcom commits 19146a5 + 5064931 + 65ef6e9: SO_REUSEADDR is POSIX-only
+    // (Windows lets any process hijack the port). On Linux datagram fanout
+    // (e.g. another repeater, or a CA server sharing 5065 in dev setups)
+    // needs BOTH SO_REUSEADDR and SO_REUSEPORT; BSD/macOS need SO_REUSEPORT.
+    #[cfg(not(windows))]
+    {
+        let _ = sock.set_reuse_address(true);
+        #[cfg(unix)]
+        let _ = sock.set_reuse_port(true);
+    }
+    // libcom commit 51191e6: Linux defaults IP_MULTICAST_ALL=1, which would
+    // give the repeater multicast traffic for groups it never joined.
+    // No-op on non-Linux.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = sock.set_multicast_all_v4(false);
+    }
+    sock.set_nonblocking(true)?;
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, CA_REPEATER_PORT);
-    let socket = UdpSocket::bind(bind_addr).await?;
+    sock.bind(&bind_addr.into())?;
+
+    // ca commit 97bf917: join every multicast (224.0.0.0/4) beacon address
+    // from EPICS_CAS_BEACON_ADDR_LIST (or EPICS_CA_ADDR_LIST as fallback) so
+    // multicast-configured sites actually receive the beacons they fan out.
+    // Errors are logged but non-fatal — broadcast/unicast beacons still work.
+    join_beacon_multicast_groups(&sock);
+
+    let std_sock: StdUdpSocket = sock.into();
+    let socket = UdpSocket::from_std(std_sock)?;
 
     let mut clients: HashMap<u16, RepeaterClient> = HashMap::new();
     let mut buf = [0u8; 4096];
@@ -129,6 +158,32 @@ pub async fn run_repeater() -> io::Result<()> {
                     clients.remove(&p);
                 }
             }
+        }
+    }
+}
+
+/// Parse `EPICS_CAS_BEACON_ADDR_LIST` (or fall back to `EPICS_CA_ADDR_LIST`)
+/// and join every multicast group (224.0.0.0/4) on `INADDR_ANY`. Any address
+/// that isn't multicast is silently skipped. Logs warnings for join failures
+/// but never aborts: the repeater keeps running for unicast/broadcast beacons.
+fn join_beacon_multicast_groups(sock: &socket2::Socket) {
+    let list = epics_base_rs::runtime::env::get("EPICS_CAS_BEACON_ADDR_LIST")
+        .or_else(|| epics_base_rs::runtime::env::get("EPICS_CA_ADDR_LIST"));
+    let Some(list) = list else {
+        return;
+    };
+    for token in list.split_whitespace() {
+        // Strip optional :port suffix; we only care about the address.
+        let host = token.rsplit_once(':').map(|(h, _)| h).unwrap_or(token);
+        let Ok(addr) = host.parse::<Ipv4Addr>() else {
+            continue;
+        };
+        if !addr.is_multicast() {
+            continue;
+        }
+        if let Err(e) = sock.join_multicast_v4(&addr, &Ipv4Addr::UNSPECIFIED) {
+            tracing::warn!(group = %addr, error = %e,
+                "ca-repeater: IP_ADD_MEMBERSHIP failed");
         }
     }
 }

@@ -168,6 +168,12 @@ pub fn discover_broadcast_addrs() -> Vec<Ipv4Addr> {
         };
         if let if_addrs::IfAddr::V4(v4) = iface.addr {
             if let Some(b) = v4.broadcast {
+                // Skip degenerate 0.0.0.0 broadcasts (matches libca
+                // osdNetIfAddrs.c osiSockDiscoverBroadcastAddresses, which
+                // discards interfaces whose broadcast is INADDR_ANY).
+                if b.is_unspecified() {
+                    continue;
+                }
                 if !out.contains(&b) {
                     out.push(b);
                 }

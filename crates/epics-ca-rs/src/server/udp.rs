@@ -66,9 +66,26 @@ async fn run_single_responder(
     ignore_addrs: Vec<Ipv4Addr>,
 ) -> CaResult<()> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    sock.set_reuse_address(true)?;
-    #[cfg(target_os = "macos")]
-    sock.set_reuse_port(true)?;
+    // libcom commits 19146a5 + 5064931 + 65ef6e9: SO_REUSEADDR has dangerous
+    // hijack semantics on Windows (any process can rebind), so it's POSIX-only.
+    // For UDP datagram fanout (caRepeater + CA server sharing a port) Linux
+    // requires BOTH SO_REUSEADDR and SO_REUSEPORT (different reuse classes
+    // don't share); BSD/macOS need SO_REUSEPORT. Mirror libcom
+    // epicsSocketEnableAddressUseForDatagramFanout and set both on Unix.
+    #[cfg(not(windows))]
+    {
+        sock.set_reuse_address(true)?;
+        #[cfg(unix)]
+        sock.set_reuse_port(true)?;
+    }
+    // libcom commit 51191e6: Linux defaults IP_MULTICAST_ALL=1, which makes
+    // a socket bound to 0.0.0.0 receive multicast for groups joined on ANY
+    // socket on this host. Clear it so per-NIC search responders don't see
+    // foreign multicast traffic. No-op on non-Linux.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = sock.set_multicast_all_v4(false);
+    }
     sock.set_nonblocking(true)?;
     sock.bind(&std::net::SocketAddrV4::new(bind_ip, port).into())?;
     let socket = UdpSocket::from_std(sock.into())?;
