@@ -1756,10 +1756,7 @@ mod tests {
         bs.set(0); // leaf bit set
 
         let merged = fill_unmarked_from_prior(&desc, &bs, 0, decoded, &prior);
-        assert!(matches!(
-            merged,
-            PvField::Scalar(ScalarValue::Int(42))
-        ));
+        assert!(matches!(merged, PvField::Scalar(ScalarValue::Int(42))));
     }
 
     #[test]
@@ -1770,9 +1767,6 @@ mod tests {
         let bs = crate::proto::BitSet::new(); // no bits set
 
         let merged = fill_unmarked_from_prior(&desc, &bs, 0, decoded, &prior);
-        assert!(matches!(
-            merged,
-            PvField::Scalar(ScalarValue::Int(99))
-        ));
+        assert!(matches!(merged, PvField::Scalar(ScalarValue::Int(99))));
     }
 }

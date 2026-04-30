@@ -321,8 +321,7 @@ async fn register_with_repeater(socket: &AsyncUdpV4) -> Result<(), ()> {
     let mut hdr = CaHeader::new(CA_PROTO_REPEATER_REGISTER);
     hdr.available = u32::from_be_bytes(local_ip.octets());
 
-    let repeater_addr =
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, CA_REPEATER_PORT));
+    let repeater_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, CA_REPEATER_PORT));
     socket
         .send_to(&hdr.to_bytes(), repeater_addr)
         .await

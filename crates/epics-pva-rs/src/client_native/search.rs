@@ -115,11 +115,7 @@ fn bind_broadcast_socket() -> PvaResult<AsyncUdpV4> {
 /// received before the deadline, returns the discovered server address.
 pub async fn search(pv_name: &str, total_timeout: Duration) -> PvaResult<SocketAddr> {
     let socket = bind_broadcast_socket()?;
-    let response_port = socket
-        .local_addrs()
-        .first()
-        .map(|a| a.port())
-        .unwrap_or(0);
+    let response_port = socket.local_addrs().first().map(|a| a.port()).unwrap_or(0);
 
     let codec = PvaCodec { big_endian: false };
     let targets = build_search_targets(&[]);

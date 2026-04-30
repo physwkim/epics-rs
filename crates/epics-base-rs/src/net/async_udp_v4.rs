@@ -98,9 +98,11 @@ impl std::fmt::Debug for NicSocket {
             .field("rx_only_bcast", &self.rx_only_bcast)
             .field(
                 "local_addr",
-                &self.sock.local_addr().ok().unwrap_or_else(|| {
-                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
-                }),
+                &self
+                    .sock
+                    .local_addr()
+                    .ok()
+                    .unwrap_or_else(|| SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))),
             )
             .finish()
     }
@@ -203,10 +205,7 @@ impl AsyncUdpV4 {
 
     /// Like [`Self::bind_ephemeral_same_port`] but reuses a caller-
     /// provided [`IfaceMap`].
-    pub fn bind_ephemeral_same_port_with_map(
-        map: &IfaceMap,
-        broadcast: bool,
-    ) -> io::Result<Self> {
+    pub fn bind_ephemeral_same_port_with_map(map: &IfaceMap, broadcast: bool) -> io::Result<Self> {
         let ifaces = map.all();
         let mut up_first: Vec<IfaceInfo> = Vec::with_capacity(ifaces.len());
         // Order matters: pick the port from a non-loopback NIC if one
@@ -626,7 +625,9 @@ fn subnet_contains(ip: Ipv4Addr, mask: Ipv4Addr, candidate: Ipv4Addr) -> bool {
 
 /// Hand-rolled `select_all` for owned, pinned futures. Avoids pulling
 /// `futures-util` into `epics-base-rs` for a single use site.
-async fn select_all_owned<F, T>(mut futures: Vec<std::pin::Pin<Box<F>>>) -> (T, usize, Vec<std::pin::Pin<Box<F>>>)
+async fn select_all_owned<F, T>(
+    mut futures: Vec<std::pin::Pin<Box<F>>>,
+) -> (T, usize, Vec<std::pin::Pin<Box<F>>>)
 where
     F: std::future::Future<Output = T> + ?Sized,
 {
@@ -663,10 +664,7 @@ mod tests {
             .expect("loopback NIC must exist");
 
         let payload = b"libca-fanout";
-        let _n = sender
-            .send_to(payload, lo_addr)
-            .await
-            .expect("send to lo");
+        let _n = sender.send_to(payload, lo_addr).await.expect("send to lo");
 
         let mut buf = [0u8; 64];
         let meta = tokio::time::timeout(
@@ -678,7 +676,11 @@ mod tests {
         .expect("recv ok");
         assert_eq!(meta.n, payload.len());
         assert_eq!(&buf[..meta.n], payload);
-        assert!(meta.iface_ip.is_loopback(), "expected loopback iface_ip, got {:?}", meta.iface_ip);
+        assert!(
+            meta.iface_ip.is_loopback(),
+            "expected loopback iface_ip, got {:?}",
+            meta.iface_ip
+        );
     }
 
     #[tokio::test]
@@ -699,10 +701,7 @@ mod tests {
             .map(|n| n.sock.local_addr().unwrap())
             .unwrap();
 
-        let n = sock
-            .send_via(b"x", dest, lo_iface)
-            .await
-            .expect("send_via");
+        let n = sock.send_via(b"x", dest, lo_iface).await.expect("send_via");
         assert_eq!(n, 1);
     }
 

@@ -1313,10 +1313,7 @@ impl PvDatabase {
             };
             let already_active = if let Some(ref t) = target_rec {
                 let mut tg = t.write().await;
-                if tg
-                    .processing
-                    .load(std::sync::atomic::Ordering::Acquire)
-                {
+                if tg.processing.load(std::sync::atomic::Ordering::Acquire) {
                     tg.common.rpro = true;
                     true
                 } else {

@@ -27,8 +27,10 @@ struct Args {
 async fn main() {
     let args = Args::parse();
     let client = CaClient::new().await.expect("failed to create CA client");
-    let timeout =
-        Duration::from_secs_f64(args.timeout.unwrap_or_else(epics_ca_rs::cli::env_default_timeout));
+    let timeout = Duration::from_secs_f64(
+        args.timeout
+            .unwrap_or_else(epics_ca_rs::cli::env_default_timeout),
+    );
 
     let ch = client.create_channel(&args.pv_name);
     if let Err(e) = ch.wait_connected(timeout).await {
