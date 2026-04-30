@@ -139,9 +139,17 @@ pub fn parse_link_v2(s: &str) -> ParsedLink {
         return ParsedLink::Constant(link_part.to_string());
     }
 
-    // Quoted string constant
+    // Quoted string constant.
+    // C parity (3b484f5): an empty quoted string `""` is equivalent to an
+    // unset link — dbConstLoadScalar/Array reject `""` the same as NULL with
+    // S_db_badField. Treat it as None here so callers don't see a meaningless
+    // empty Constant.
     if link_part.starts_with('"') && link_part.ends_with('"') && link_part.len() >= 2 {
-        return ParsedLink::Constant(link_part[1..link_part.len() - 1].to_string());
+        let inner = &link_part[1..link_part.len() - 1];
+        if inner.is_empty() {
+            return ParsedLink::None;
+        }
+        return ParsedLink::Constant(inner.to_string());
     }
 
     // DB link: try rsplit on '.', validate field part is uppercase alpha 1-4 chars

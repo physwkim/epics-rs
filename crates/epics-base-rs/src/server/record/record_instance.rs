@@ -741,6 +741,20 @@ impl RecordInstance {
             }
             "OUT" => {
                 if let EpicsValue::String(s) = value {
+                    // C parity (acd1aef): CP/CPP modifiers on output links are
+                    // meaningless (they request "process on change" semantics
+                    // that only apply to input links). dbParseLink in C strips
+                    // them and emits an errlogPrintf warning naming the source
+                    // record and field. Mirror the diagnostic here.
+                    let trimmed = s.trim_end();
+                    if trimmed.ends_with(" CP") || trimmed.ends_with(" CPP") {
+                        tracing::warn!(
+                            target: "epics_base_rs::record",
+                            record = %name,
+                            field = "OUT",
+                            "CP/CPP modifier ignored on output link"
+                        );
+                    }
                     self.common.out = s;
                     self.parsed_out = parse_link_v2(&self.common.out);
                 }

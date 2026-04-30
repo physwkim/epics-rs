@@ -109,22 +109,31 @@ impl IocShell {
     }
 
     /// Execute a script file line by line, echoing each line like C++ iocsh.
+    ///
+    /// C parity (144f975): errors from individual commands are reported but
+    /// do not abort execution. The final return value is `Err` if any command
+    /// failed — the equivalent of `iocshSetError` propagating a non-zero exit
+    /// status to startup-script callers (e.g., automated IOC verification).
     pub fn execute_script(&self, path: &str) -> Result<(), String> {
         let content =
             std::fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {}", path, e))?;
 
+        let mut last_err: Option<String> = None;
         for (line_num, line) in content.lines().enumerate() {
             // Echo each line (C++ iocsh behavior)
             println!("{line}");
             match self.execute_line(line) {
                 Ok(CommandOutcome::Continue) => {}
-                Ok(CommandOutcome::Exit) => return Ok(()),
+                Ok(CommandOutcome::Exit) => {
+                    return last_err.map(Err).unwrap_or(Ok(()));
+                }
                 Err(e) => {
                     eprintln!("{}:{}: Error: {}", path, line_num + 1, e);
+                    last_err = Some(format!("{}:{}: {}", path, line_num + 1, e));
                 }
             }
         }
-        Ok(())
+        last_err.map(Err).unwrap_or(Ok(()))
     }
 
     /// Run the interactive REPL. Blocks until exit or EOF.
