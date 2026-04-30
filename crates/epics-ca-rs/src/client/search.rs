@@ -1145,7 +1145,7 @@ mod tests {
     fn reconnect_bucket_spread() {
         let mut state = SearchEngineState::new();
         state.current_bucket = 0;
-        let mut hit = vec![false; N_SEARCH_BUCKETS];
+        let mut hit = [false; N_SEARCH_BUCKETS];
         for cid in 1_000u32..(1_000 + N_SEARCH_BUCKETS as u32) {
             handle_request(
                 &mut state,

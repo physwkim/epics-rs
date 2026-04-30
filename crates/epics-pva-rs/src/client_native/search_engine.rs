@@ -1177,7 +1177,7 @@ mod tests {
     fn reconnect_bucket_spread_across_ring() {
         let current_bucket = 7usize;
         let sids: Vec<u32> = (1_000..6_000).collect();
-        let mut hit = vec![false; N_SEARCH_BUCKETS];
+        let mut hit = [false; N_SEARCH_BUCKETS];
         for sid in sids {
             let offset = (sid as usize) % N_SEARCH_BUCKETS;
             let bucket = (current_bucket + 1 + offset) % N_SEARCH_BUCKETS;
