@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
@@ -12,15 +12,42 @@ use tokio::sync::broadcast;
 /// Mirrors the client-side cap in `client/transport.rs`.
 const MAX_ACCUMULATED: usize = 1024 * 1024; // 1 MB
 
-/// Maximum idle time before forcibly closing a TCP client.
-/// OS-level TCP keepalive (~30s) handles half-open detection; this is
-/// a belt-and-suspenders cap for environments where keepalive is unreliable.
-/// 600s default; configurable via EPICS_CAS_INACTIVITY_TMO.
-fn inactivity_timeout() -> Duration {
+/// Optional application-level idle timeout before forcibly closing a TCP
+/// client. Disabled by default — OS-level TCP keepalive (set in `accept_loop`,
+/// 15s idle + 5s probes) is the primary half-open detector and matches C
+/// epics-base rsrv (`caservertask.c:1456` sets only `SO_KEEPALIVE`, with no
+/// application-level idle timeout).
+///
+/// A C client receiving a continuous monitor stream may never send
+/// `CA_PROTO_ECHO` (libca resets its echo timer on every received frame from
+/// the server), so an inactivity timeout based purely on incoming reads
+/// produces false-positive disconnects on healthy connections — the bug
+/// archaeology REVIEW for this is in `archaeology/REVIEWS/`. Operators who
+/// want a defensive cap (e.g., NAT environments where TCP keepalive is
+/// unreliable) can set `EPICS_CAS_INACTIVITY_TMO` to a positive value;
+/// values < 30 are clamped to 30 to avoid pathological short timeouts.
+fn inactivity_timeout() -> Option<Duration> {
     epics_base_rs::runtime::env::get("EPICS_CAS_INACTIVITY_TMO")
         .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
         .map(|v| Duration::from_secs_f64(v.max(30.0)))
-        .unwrap_or(Duration::from_secs(600))
+}
+
+/// Read into `buf` with an optional idle cap. If `cap` is `None`, the read
+/// is unbounded (matches C `recv()` blocking semantics in `camsgtask.c`);
+/// if `cap` is `Some(d)`, returns `Err(d)` after `d` of inactivity.
+async fn read_with_optional_timeout<R: tokio::io::AsyncReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut [u8],
+    cap: Option<Duration>,
+) -> Result<std::io::Result<usize>, Duration> {
+    match cap {
+        None => Ok(reader.read(buf).await),
+        Some(d) => match tokio::time::timeout(d, reader.read(buf)).await {
+            Ok(r) => Ok(r),
+            Err(_) => Err(d),
+        },
+    }
 }
 
 /// Maximum simultaneous channels per CA client (EPICS_CAS_MAX_CHANNELS).
@@ -623,15 +650,19 @@ where
                     }
                 }
             }
-            read = tokio::time::timeout(inactivity, reader.read(&mut buf)) => {
+            read = read_with_optional_timeout(&mut reader, &mut buf, inactivity) => {
                 match read {
                     Ok(Ok(n)) => n,
                     Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => {
+                    Err(idle) => {
                         // Inactivity timeout — close the connection.
-                        eprintln!(
-                            "CA server: client idle for {}s, closing",
-                            inactivity.as_secs()
+                        // Disabled by default (matches C rsrv); fires only
+                        // when EPICS_CAS_INACTIVITY_TMO is set explicitly.
+                        tracing::warn!(
+                            target: "epics_ca_rs::server",
+                            peer = %state.peer,
+                            idle_secs = idle.as_secs(),
+                            "CA server: client idle, closing"
                         );
                         break;
                     }
