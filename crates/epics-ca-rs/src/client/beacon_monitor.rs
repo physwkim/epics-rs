@@ -19,19 +19,19 @@ struct BeaconState {
     /// Estimated period between beacons (exponential moving average).
     period_estimate: Duration,
     count: u64,
-    /// Last time we sent a `ForceRescanServer` to the coordinator for
-    /// this server. Throttles soft pokes (every-beacon → every-5s) so
-    /// many concurrent searching channels don't generate a search
-    /// storm under normal beacon traffic. pvxs equivalent: `poke()`
-    /// in `client.cpp:713`, gated by `first_announce` of (server,
-    /// guid). CA has no GUID, so we use a wall-clock cap instead.
-    last_poke_at: Option<Instant>,
 }
 
-/// Minimum interval between soft (non-anomaly) pokes for the same
-/// server. Bounds the search-side amplification of beacon traffic to
-/// at most one channel-rescan burst per server every 5 s.
-const MIN_POKE_INTERVAL: Duration = Duration::from_secs(5);
+/// Idle threshold after which a tracked server is forgotten. Mirrors
+/// pvxs `beaconCleanInterval` (`client.cpp` 2 × 180 s default). When a
+/// long-silent server resumes beacons, the next sighting becomes
+/// `first_sighting = true` and naturally takes the anomaly path —
+/// without this prune, in-sequence beacons after long silence would
+/// keep `first_sighting = false` and miss the rescan kick. This
+/// replaces the previous "soft poke on every beacon" mechanism, which
+/// caused steady-state amplification (multi-IOC networks beaconing
+/// within ~6 s aggregate kept the search engine in 200 ms fast-tick
+/// mode indefinitely).
+const BEACON_STALE_THRESHOLD: Duration = Duration::from_secs(180);
 
 // ---------------------------------------------------------------------------
 // Beacon monitor task
@@ -263,6 +263,13 @@ fn handle_beacon(
     let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
     let now = Instant::now();
 
+    // Drop entries idle past `BEACON_STALE_THRESHOLD` so a long-silent
+    // server's revival lands on the `first_sighting = true` path and
+    // triggers the anomaly poke naturally (pvxs `tickBeaconClean`
+    // parity). This is what protects the search engine from staying in
+    // 200 ms fast-tick mode forever in a steady-state network.
+    servers.retain(|_, s| now.duration_since(s.last_seen) < BEACON_STALE_THRESHOLD);
+
     // G1: cap the per-server BeaconState map. With
     // EPICS_CA_BEACON_REQUIRE_SIGNED=NO an attacker can spoof
     // beacons with arbitrary `available`/`count` to grow the map.
@@ -278,11 +285,22 @@ fn handle_beacon(
         last_seen: now,
         period_estimate: Duration::from_secs(15),
         count: 0,
-        last_poke_at: None,
     });
 
     let actual_interval = now.duration_since(entry.last_seen);
     let expected_next_id = entry.last_id.wrapping_add(1);
+
+    // Multi-NIC / repeater duplicate detection: the SAME beacon (same
+    // id, arriving microseconds apart through different paths) used to
+    // trip the period-collapse branch below and fire a spurious
+    // anomaly on every duplicate. Drop the second copy outright so
+    // the search engine isn't woken twice for one beacon. Without
+    // soft-poke-on-every-beacon (removed earlier this round) this
+    // misclassification was masked by the throttle; the prune-only
+    // design surfaces it.
+    if !first_sighting && beacon_id == entry.last_id {
+        return;
+    }
 
     // Anomaly: beacon_id not monotonically increasing (IOC restarted
     // with a fresh sequence), OR period suddenly dropped below 1/3 of
@@ -291,9 +309,20 @@ fn handle_beacon(
     // server — libca treats unknown-server beacons as a hint to
     // re-search immediately so channels still in `Searching` wake up
     // on the new IOC instead of waiting their full bucket cycle.
+    //
+    // Floor the period-collapse check at 50 ms — multi-NIC duplicate
+    // beacons that happen to use the next sequence id (rare but
+    // possible if the network reorders) would otherwise still
+    // satisfy `actual_interval < period_estimate / 3` for any
+    // nonzero period. 50 ms safely separates "duplicate" from
+    // "legitimate fast-beacon initial phase" (real IOCs send
+    // every 100-500 ms during startup).
+    const MIN_PERIOD_COLLAPSE_INTERVAL: Duration = Duration::from_millis(50);
     let is_anomaly = first_sighting
         || beacon_id != expected_next_id
-        || (entry.count > 3 && actual_interval < entry.period_estimate / 3);
+        || (entry.count > 3
+            && actual_interval > MIN_PERIOD_COLLAPSE_INTERVAL
+            && actual_interval < entry.period_estimate / 3);
 
     // Update state.
     entry.last_id = beacon_id;
@@ -309,30 +338,16 @@ fn handle_beacon(
         entry.period_estimate = new_estimate;
     }
 
-    // Anomaly path: log + diag counter, always poke.
-    // Soft path (pvxs `poke()` parity, ca-rs adaptation): poke on every
-    // beacon — without this, a server that has been silent for a long
-    // time but resumes beacons in-sequence (e.g. IOC daemon resumed
-    // after an OS scheduler stall, or NAT/firewall recovery) would not
-    // trigger a rescan, and pending searches would stay capped at the
-    // far-back lane (up to `EPICS_CA_MAX_SEARCH_PERIOD`, default 300 s).
-    // Throttled per-server via `last_poke_at` so the amplification factor
-    // is bounded.
+    // pvxs `onBeacon` poke semantic: only fire on first sighting of a
+    // (server, GUID) — i.e. a real anomaly (new server / IOC restart /
+    // beacon-period collapse). Steady-state beacons just refresh
+    // `last_seen` so the entry stays out of the prune set above; they
+    // intentionally do NOT poke the coordinator. The earlier "soft
+    // poke on every beacon" code amplified normal beacon traffic into
+    // a permanent fast-tick search storm whenever multiple IOCs
+    // beaconed within the engine's revolution window.
     if is_anomaly {
-        let _ = coord_tx.send(CoordRequest::ForceRescanServer {
-            server_addr,
-            anomaly: true,
-        });
-        entry.last_poke_at = Some(now);
-    } else if entry
-        .last_poke_at
-        .is_none_or(|t| now.duration_since(t) >= MIN_POKE_INTERVAL)
-    {
-        let _ = coord_tx.send(CoordRequest::ForceRescanServer {
-            server_addr,
-            anomaly: false,
-        });
-        entry.last_poke_at = Some(now);
+        let _ = coord_tx.send(CoordRequest::ForceRescanServer { server_addr });
     }
 }
 
@@ -381,5 +396,86 @@ async fn register_with_repeater(socket: &AsyncUdpV4) -> Result<(), ()> {
     match result {
         Ok(Ok(())) => Ok(()),
         _ => Err(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// `BEACON_STALE_THRESHOLD` is exactly 180 s (mirrors pvxs
+    /// `tickBeaconClean` 2 × beaconCleanInterval / 2 default), and
+    /// the prune sweep retains entries seen within the window while
+    /// dropping older ones. The prune is what makes long-silent
+    /// servers' revival hit the `first_sighting = true` anomaly
+    /// path — without it, an in-sequence beacon after long silence
+    /// wouldn't kick the search engine out of slow-cadence retry.
+    #[test]
+    fn beacon_stale_threshold_is_180s() {
+        assert_eq!(BEACON_STALE_THRESHOLD, Duration::from_secs(180));
+    }
+
+    /// Multi-NIC / repeater duplicate detection: same beacon arriving
+    /// twice in quick succession (same `cid`) must NOT fire a second
+    /// anomaly request to the coordinator. Without the duplicate
+    /// guard, the second copy hit the period-collapse branch
+    /// (actual_interval ≈ 0 < period_estimate/3) and rescheduled
+    /// every pending search a second time. With soft-poke removed
+    /// earlier this round, the misclassification surfaces as a
+    /// permanent fast-tick spam in dual-NIC environments.
+    #[test]
+    fn duplicate_beacon_does_not_double_fire_anomaly() {
+        let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<CoordRequest>();
+
+        let mut hdr = CaHeader::new(CA_PROTO_RSRV_IS_UP);
+        hdr.count = 5064;
+        hdr.cid = 100;
+        hdr.available = u32::from_be_bytes([127, 0, 0, 1]);
+
+        // First beacon — first sighting → anomaly fires.
+        handle_beacon(hdr, &mut servers, &tx);
+        assert!(matches!(rx.try_recv(), Ok(CoordRequest::ForceRescanServer { .. })));
+        // Drain any further send (none expected).
+        assert!(rx.try_recv().is_err());
+
+        // Second beacon with the SAME cid (true duplicate from another
+        // NIC / repeater coalesce) — must be silently dropped.
+        handle_beacon(hdr, &mut servers, &tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate same-cid beacon must not fire ForceRescanServer"
+        );
+    }
+
+    #[test]
+    fn stale_prune_drops_idle_entries_only() {
+        let now = Instant::now();
+        let mut servers: HashMap<SocketAddr, BeaconState> = HashMap::new();
+        let fresh: SocketAddr = "127.0.0.1:5064".parse().unwrap();
+        let stale: SocketAddr = "127.0.0.1:5065".parse().unwrap();
+        servers.insert(
+            fresh,
+            BeaconState {
+                last_id: 0,
+                last_seen: now - Duration::from_secs(10),
+                period_estimate: Duration::from_secs(15),
+                count: 5,
+            },
+        );
+        servers.insert(
+            stale,
+            BeaconState {
+                last_id: 0,
+                last_seen: now - Duration::from_secs(300),
+                period_estimate: Duration::from_secs(15),
+                count: 5,
+            },
+        );
+        // The prune logic in handle_beacon: same retain expression.
+        servers.retain(|_, s| now.duration_since(s.last_seen) < BEACON_STALE_THRESHOLD);
+        assert!(servers.contains_key(&fresh), "fresh entry must survive prune");
+        assert!(!servers.contains_key(&stale), "180-s-idle entry must be pruned");
     }
 }

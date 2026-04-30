@@ -404,13 +404,22 @@ async fn run_nameserver_connection(
         // Pipe outgoing search frames to the TCP writer until the reader
         // task ends or the channel closes.
         let mut writer_failed = false;
-        loop {
+        // Closed outgoing channel = client shutdown. Track it so we
+        // fall through to read_task cleanup, then exit the outer
+        // reconnect loop. Earlier code `return`-ed directly which
+        // skipped the cleanup and leaked the read task per
+        // nameserver on every shutdown.
+        let mut shutdown = false;
+        'pump: loop {
             tokio::select! {
                 msg = outgoing_rx.recv() => {
-                    let Some(bytes) = msg else { return };
+                    let Some(bytes) = msg else {
+                        shutdown = true;
+                        break 'pump;
+                    };
                     if writer.write_all(&bytes).await.is_err() {
                         writer_failed = true;
-                        break;
+                        break 'pump;
                     }
                 }
                 _ = epics_base_rs::runtime::task::sleep(Duration::from_secs(60)) => {
@@ -418,16 +427,22 @@ async fn run_nameserver_connection(
                     let echo = CaHeader::new(CA_PROTO_ECHO);
                     if writer.write_all(&echo.to_bytes()).await.is_err() {
                         writer_failed = true;
-                        break;
+                        break 'pump;
                     }
                 }
             }
             if read_task.is_finished() {
-                break;
+                break 'pump;
             }
         }
         read_task.abort();
         let _ = read_task.await;
+
+        if shutdown {
+            // Outgoing channel closed → no more senders ever → don't
+            // reconnect; exit the per-nameserver task.
+            return;
+        }
 
         if writer_failed {
             // Brief pause before reconnect to avoid a spin loop when the
@@ -538,7 +553,20 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) -> Option<u
                 state.poke();
             }
 
-            Some(cid)
+            // Immediate first-attempt SEARCH only on `Initial` (typical
+            // single-channel `find()`). Skipping it for `Reconnect` is the
+            // whole point of the cid-hashed bucket spread above — without
+            // this gate a TCP-close affecting N channels would batch N
+            // immediate sends from the main loop's `try_recv` drain
+            // (`fire_searches` at the top of `run`), defeating the spread
+            // and producing the very burst the bucket scheduler exists to
+            // avoid. `BeaconAnomaly` for a NEW cid likewise relies on
+            // fast-tick mode (`poke()` above) to retransmit within ~6 s
+            // instead of firing right away.
+            match reason {
+                SearchReason::Initial => Some(cid),
+                SearchReason::Reconnect | SearchReason::BeaconAnomaly => None,
+            }
         }
 
         SearchRequest::Cancel { cid } => {
@@ -1060,5 +1088,71 @@ mod tests {
         let revolution = FAST_TICK * N_SEARCH_BUCKETS as u32;
         assert!(revolution >= Duration::from_secs(5));
         assert!(revolution <= Duration::from_secs(7));
+    }
+
+    /// `Initial` is the only reason that earns the immediate-fire
+    /// `Some(cid)` return — `Reconnect` and `BeaconAnomaly` must
+    /// return `None` so the main loop's `try_recv` drain doesn't
+    /// batch a 5000-channel disconnect cascade into a single-tick
+    /// burst (review finding HIGH#1).
+    #[test]
+    fn reconnect_and_beacon_anomaly_skip_immediate_fire() {
+        let mut state = SearchEngineState::new();
+        // Initial → Some(cid)
+        let cid_initial = handle_request(
+            &mut state,
+            SearchRequest::Schedule {
+                cid: 100,
+                pv_name: "PV:Initial".into(),
+                reason: SearchReason::Initial,
+            },
+        );
+        assert_eq!(cid_initial, Some(100), "Initial must return Some for immediate fire");
+        // Reconnect → None (bucket-spread, no burst)
+        let cid_reconnect = handle_request(
+            &mut state,
+            SearchRequest::Schedule {
+                cid: 101,
+                pv_name: "PV:Reconnect".into(),
+                reason: SearchReason::Reconnect,
+            },
+        );
+        assert_eq!(cid_reconnect, None, "Reconnect must NOT immediately fire");
+        // BeaconAnomaly (NEW cid) → None (fast-tick handles retransmit)
+        let cid_anomaly = handle_request(
+            &mut state,
+            SearchRequest::Schedule {
+                cid: 102,
+                pv_name: "PV:Anomaly".into(),
+                reason: SearchReason::BeaconAnomaly,
+            },
+        );
+        assert_eq!(cid_anomaly, None, "BeaconAnomaly NEW must NOT immediately fire");
+    }
+
+    /// `Reconnect` schedules must spread across the bucket ring by
+    /// cid hash, not collapse into `current+1` like `Initial` does.
+    /// Replicates the bucket-placement formula and asserts a
+    /// contiguous block of cids touches every bucket.
+    #[test]
+    fn reconnect_bucket_spread() {
+        let mut state = SearchEngineState::new();
+        state.current_bucket = 0;
+        let mut hit = vec![false; N_SEARCH_BUCKETS];
+        for cid in 1_000u32..(1_000 + N_SEARCH_BUCKETS as u32) {
+            handle_request(
+                &mut state,
+                SearchRequest::Schedule {
+                    cid,
+                    pv_name: format!("PV:{cid}"),
+                    reason: SearchReason::Reconnect,
+                },
+            );
+            hit[state.pending.get(&cid).unwrap().bucket] = true;
+        }
+        assert!(
+            hit.iter().all(|h| *h),
+            "Reconnect cids must hit every bucket in the ring"
+        );
     }
 }

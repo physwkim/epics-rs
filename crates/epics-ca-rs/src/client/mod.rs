@@ -255,20 +255,15 @@ enum CoordRequest {
         value: EpicsValue,
         reply: oneshot::Sender<CaResult<()>>,
     },
-    /// Beacon arrived for `server_addr` — rescan all
-    /// disconnected/searching channels and (if currently operational)
-    /// send an immediate echo probe.
-    ///
-    /// `anomaly = true` indicates a confirmed beacon anomaly
-    /// (first sighting / sequence reset / period drop) and triggers
-    /// a warn-level log + diag counter. `anomaly = false` is the
-    /// soft-poke path (every-beacon, throttled per-server in the
-    /// monitor) used to wake stuck searches when the server has
-    /// been silent for long enough that lanes drifted to the cap
-    /// but no anomaly fired (e.g. IOC paused then resumed cleanly).
+    /// Beacon anomaly detected for `server_addr` (first sighting /
+    /// sequence reset / period collapse). Coordinator rescans all
+    /// disconnected/searching channels and sends an immediate echo
+    /// probe to any operational channel on this server. Steady-state
+    /// beacons no longer reach this branch — `beacon_monitor.rs`
+    /// only fires on the anomaly path now (see comment there for
+    /// rationale).
     ForceRescanServer {
         server_addr: SocketAddr,
-        anomaly: bool,
     },
     /// Time since this channel's circuit last received any frame.
     /// `None` if the channel isn't operational. Mirrors libca
@@ -1497,29 +1492,19 @@ async fn run_coordinator(
                         let _ = reply.send(());
                         return; // Exit coordinator loop
                     }
-                    CoordRequest::ForceRescanServer {
-                        server_addr,
-                        anomaly,
-                    } => {
-                        if anomaly {
-                            diag.beacon_anomalies.fetch_add(1, Ordering::Relaxed);
-                            diag.record(DiagEvent::BeaconAnomaly { server: server_addr });
-                            tracing::warn!(server = %server_addr, "beacon anomaly detected — IOC may have restarted");
-                            metrics::counter!("ca_client_beacon_anomalies_total", "server" => server_addr.to_string()).increment(1);
-                        } else {
-                            // Soft poke: pvxs `poke()` parity. Don't pollute
-                            // the warn log or anomaly counter — operators
-                            // tracking real anomalies should not see a
-                            // counter increment for every healthy beacon.
-                            tracing::trace!(server = %server_addr, "beacon poke — re-firing pending searches");
-                            metrics::counter!("ca_client_beacon_pokes_total", "server" => server_addr.to_string()).increment(1);
-                        }
-                        // Rescan ALL disconnected/searching channels.  The
-                        // beacon address may use INADDR_ANY and won't match
-                        // our stored server_addr, so a per-server lookup is
-                        // unreliable. Echo probes (operational state) are
-                        // only sent on real anomalies — a soft poke for an
-                        // up-and-running server adds no information.
+                    CoordRequest::ForceRescanServer { server_addr } => {
+                        diag.beacon_anomalies.fetch_add(1, Ordering::Relaxed);
+                        diag.record(DiagEvent::BeaconAnomaly { server: server_addr });
+                        tracing::warn!(server = %server_addr, "beacon anomaly detected — IOC may have restarted");
+                        metrics::counter!("ca_client_beacon_anomalies_total", "server" => server_addr.to_string()).increment(1);
+
+                        // Rescan ALL disconnected/searching channels. The
+                        // beacon address may use INADDR_ANY and won't
+                        // match our stored server_addr, so a per-server
+                        // lookup is unreliable. Operational channels on
+                        // this server also get an immediate echo probe so
+                        // a dead TCP circuit is detected faster (matches
+                        // libca `beaconAnomaly` watchdog flag).
                         let mut probed_servers = HashSet::new();
                         for ch in channels.values() {
                             if ch.state == ChannelState::Disconnected
@@ -1530,10 +1515,7 @@ async fn run_coordinator(
                                     pv_name: ch.pv_name.clone(),
                                     reason: SearchReason::BeaconAnomaly,
                                 });
-                            } else if anomaly && ch.state.is_operational() {
-                                // Beacon anomaly on a connected server: send
-                                // immediate echo probe to detect dead TCP faster
-                                // (matches C EPICS beaconAnomaly watchdog flag).
+                            } else if ch.state.is_operational() {
                                 if let Some(addr) = ch.server_addr {
                                     if probed_servers.insert(addr) {
                                         let _ = transport_tx.send(
@@ -1758,7 +1740,18 @@ async fn run_coordinator(
                         handle_disconnect(&mut channels, &mut subscriptions, &mut server_channels, &search_tx, server_addr, &diag, &mut read_waiters, &mut write_waiters);
                     }
                     TransportEvent::ServerDisconnect { cid, server_addr } => {
-                        // Single channel disconnect (CA_PROTO_SERVER_DISCONN)
+                        // Single channel disconnect (CA_PROTO_SERVER_DISCONN).
+                        // Server is telling us this specific cid is gone —
+                        // wake any in-flight read/write waiters tied to it
+                        // so blocked `caget`/`caput` futures fail with
+                        // `Disconnected` instead of stalling until their
+                        // own outer timeout fires. Mirrors the bulk
+                        // `handle_disconnect` wake path used for
+                        // `TcpClosed` (mod.rs ~1877). Without this,
+                        // SERVER_DISCONN was structurally dead-letter:
+                        // we re-searched but never released callers who
+                        // were waiting on a response that the server
+                        // had just told us would never come.
                         if let Some(ch) = channels.get_mut(&cid) {
                             if ch.server_addr == Some(server_addr) {
                                 ch.state = ChannelState::Disconnected;
@@ -1774,6 +1767,15 @@ async fn run_coordinator(
                                         &transport_tx,
                                     );
                                 }
+
+                                // Drain blocked read/write waiters for this cid.
+                                let mut affected = HashSet::with_capacity(1);
+                                affected.insert(cid);
+                                drain_waiters_for_cids(
+                                    &affected,
+                                    &mut read_waiters,
+                                    &mut write_waiters,
+                                );
 
                                 // Re-search
                                 let _ = search_tx.send(SearchRequest::Schedule {
@@ -1892,9 +1894,23 @@ fn handle_disconnect(
     // Fail pending read/write waiters for affected channels so callers
     // don't hang forever waiting for a response that will never arrive.
     let affected: HashSet<u32> = affected_cids.into_iter().collect();
+    drain_waiters_for_cids(&affected, read_waiters, write_waiters);
+}
+
+/// Drop every entry in `read_waiters` / `write_waiters` whose cid is in
+/// `cids` and signal each Sender with `Err(CaError::Disconnected)`. Used
+/// by both bulk-disconnect (TcpClosed → handle_disconnect) and the
+/// per-cid SERVER_DISCONN path so blocked `caget` / `caput` futures
+/// surface as disconnect errors instead of stalling on the caller's
+/// outer timeout.
+pub(crate) fn drain_waiters_for_cids(
+    cids: &HashSet<u32>,
+    read_waiters: &mut HashMap<u32, (u32, oneshot::Sender<CaResult<(u16, u32, Vec<u8>)>>)>,
+    write_waiters: &mut HashMap<u32, (u32, oneshot::Sender<CaResult<()>>)>,
+) {
     let stale_reads: Vec<u32> = read_waiters
         .iter()
-        .filter(|(_, (cid, _))| affected.contains(cid))
+        .filter(|(_, (cid, _))| cids.contains(cid))
         .map(|(ioid, _)| *ioid)
         .collect();
     for ioid in stale_reads {
@@ -1904,7 +1920,7 @@ fn handle_disconnect(
     }
     let stale_writes: Vec<u32> = write_waiters
         .iter()
-        .filter(|(_, (cid, _))| affected.contains(cid))
+        .filter(|(_, (cid, _))| cids.contains(cid))
         .map(|(ioid, _)| *ioid)
         .collect();
     for ioid in stale_writes {
@@ -2160,5 +2176,83 @@ mod tls_sni_config_tests {
         assert!(cfg.tls_server_name.is_none(), "default must be None");
         cfg.tls_server_name = Some("ioc.example.com".into());
         assert_eq!(cfg.tls_server_name.as_deref(), Some("ioc.example.com"));
+    }
+}
+
+#[cfg(test)]
+mod waiter_drain_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use tokio::sync::oneshot;
+
+    /// `drain_waiters_for_cids` must wake every blocked read/write
+    /// future whose cid is in the provided set with
+    /// `Err(CaError::Disconnected)`. This is the wake path that
+    /// SERVER_DISCONN (cmd 27) and bulk TcpClosed both rely on so a
+    /// blocked `caget`/`caput` future surfaces the disconnect
+    /// instead of stalling on its outer timeout.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_wakes_matching_cid_only() {
+        let mut read_waiters: HashMap<u32, (u32, oneshot::Sender<CaResult<(u16, u32, Vec<u8>)>>)> =
+            HashMap::new();
+        let mut write_waiters: HashMap<u32, (u32, oneshot::Sender<CaResult<()>>)> = HashMap::new();
+
+        // ioid 1001 / 1002 belong to cid=42 (will be disconnected).
+        // ioid 2001 / 2002 belong to cid=99 (must survive).
+        let (rtx_42, rrx_42) = oneshot::channel();
+        let (rtx_99, rrx_99) = oneshot::channel();
+        let (wtx_42, wrx_42) = oneshot::channel();
+        let (wtx_99, wrx_99) = oneshot::channel();
+        read_waiters.insert(1001, (42, rtx_42));
+        read_waiters.insert(2001, (99, rtx_99));
+        write_waiters.insert(1002, (42, wtx_42));
+        write_waiters.insert(2002, (99, wtx_99));
+
+        let mut affected = HashSet::new();
+        affected.insert(42u32);
+        drain_waiters_for_cids(&affected, &mut read_waiters, &mut write_waiters);
+
+        // cid=42 waiters: ioids removed from maps + Senders fired with Disconnected.
+        assert!(!read_waiters.contains_key(&1001));
+        assert!(!write_waiters.contains_key(&1002));
+        assert!(matches!(
+            rrx_42.await,
+            Ok(Err(CaError::Disconnected))
+        ));
+        assert!(matches!(
+            wrx_42.await,
+            Ok(Err(CaError::Disconnected))
+        ));
+
+        // cid=99 waiters: untouched.
+        assert!(read_waiters.contains_key(&2001));
+        assert!(write_waiters.contains_key(&2002));
+        // Receivers still not resolved (drop the senders to unblock the test).
+        drop(read_waiters);
+        drop(write_waiters);
+        assert!(rrx_99.await.is_err()); // sender dropped
+        assert!(wrx_99.await.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_with_empty_cid_set_is_noop() {
+        let mut read_waiters: HashMap<u32, (u32, oneshot::Sender<CaResult<(u16, u32, Vec<u8>)>>)> =
+            HashMap::new();
+        let mut write_waiters: HashMap<u32, (u32, oneshot::Sender<CaResult<()>>)> = HashMap::new();
+        let (rtx, rrx) = oneshot::channel();
+        let (wtx, wrx) = oneshot::channel();
+        read_waiters.insert(10, (1, rtx));
+        write_waiters.insert(20, (2, wtx));
+
+        let affected: HashSet<u32> = HashSet::new();
+        drain_waiters_for_cids(&affected, &mut read_waiters, &mut write_waiters);
+
+        assert!(read_waiters.contains_key(&10));
+        assert!(write_waiters.contains_key(&20));
+        // Drop maps to release Senders so the rx awaits don't hang in CI.
+        drop(read_waiters);
+        drop(write_waiters);
+        assert!(rrx.await.is_err());
+        assert!(wrx.await.is_err());
     }
 }
