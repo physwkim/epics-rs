@@ -19,7 +19,19 @@ struct BeaconState {
     /// Estimated period between beacons (exponential moving average).
     period_estimate: Duration,
     count: u64,
+    /// Last time we sent a `ForceRescanServer` to the coordinator for
+    /// this server. Throttles soft pokes (every-beacon → every-5s) so
+    /// many concurrent searching channels don't generate a search
+    /// storm under normal beacon traffic. pvxs equivalent: `poke()`
+    /// in `client.cpp:713`, gated by `first_announce` of (server,
+    /// guid). CA has no GUID, so we use a wall-clock cap instead.
+    last_poke_at: Option<Instant>,
 }
+
+/// Minimum interval between soft (non-anomaly) pokes for the same
+/// server. Bounds the search-side amplification of beacon traffic to
+/// at most one channel-rescan burst per server every 5 s.
+const MIN_POKE_INTERVAL: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Beacon monitor task
@@ -266,6 +278,7 @@ fn handle_beacon(
         last_seen: now,
         period_estimate: Duration::from_secs(15),
         count: 0,
+        last_poke_at: None,
     });
 
     let actual_interval = now.duration_since(entry.last_seen);
@@ -296,8 +309,30 @@ fn handle_beacon(
         entry.period_estimate = new_estimate;
     }
 
+    // Anomaly path: log + diag counter, always poke.
+    // Soft path (pvxs `poke()` parity, ca-rs adaptation): poke on every
+    // beacon — without this, a server that has been silent for a long
+    // time but resumes beacons in-sequence (e.g. IOC daemon resumed
+    // after an OS scheduler stall, or NAT/firewall recovery) would not
+    // trigger a rescan, and pending searches would stay capped at the
+    // far-back lane (up to `EPICS_CA_MAX_SEARCH_PERIOD`, default 300 s).
+    // Throttled per-server via `last_poke_at` so the amplification factor
+    // is bounded.
     if is_anomaly {
-        let _ = coord_tx.send(CoordRequest::ForceRescanServer { server_addr });
+        let _ = coord_tx.send(CoordRequest::ForceRescanServer {
+            server_addr,
+            anomaly: true,
+        });
+        entry.last_poke_at = Some(now);
+    } else if entry
+        .last_poke_at
+        .is_none_or(|t| now.duration_since(t) >= MIN_POKE_INTERVAL)
+    {
+        let _ = coord_tx.send(CoordRequest::ForceRescanServer {
+            server_addr,
+            anomaly: false,
+        });
+        entry.last_poke_at = Some(now);
     }
 }
 

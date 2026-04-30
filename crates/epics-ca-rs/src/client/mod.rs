@@ -255,9 +255,20 @@ enum CoordRequest {
         value: EpicsValue,
         reply: oneshot::Sender<CaResult<()>>,
     },
-    /// Beacon anomaly detected — rescan channels for this server.
+    /// Beacon arrived for `server_addr` — rescan all
+    /// disconnected/searching channels and (if currently operational)
+    /// send an immediate echo probe.
+    ///
+    /// `anomaly = true` indicates a confirmed beacon anomaly
+    /// (first sighting / sequence reset / period drop) and triggers
+    /// a warn-level log + diag counter. `anomaly = false` is the
+    /// soft-poke path (every-beacon, throttled per-server in the
+    /// monitor) used to wake stuck searches when the server has
+    /// been silent for long enough that lanes drifted to the cap
+    /// but no anomaly fired (e.g. IOC paused then resumed cleanly).
     ForceRescanServer {
         server_addr: SocketAddr,
+        anomaly: bool,
     },
     /// Time since this channel's circuit last received any frame.
     /// `None` if the channel isn't operational. Mirrors libca
@@ -1487,15 +1498,29 @@ async fn run_coordinator(
                         let _ = reply.send(());
                         return; // Exit coordinator loop
                     }
-                    CoordRequest::ForceRescanServer { server_addr } => {
-                        diag.beacon_anomalies.fetch_add(1, Ordering::Relaxed);
-                        diag.record(DiagEvent::BeaconAnomaly { server: server_addr });
-                        tracing::warn!(server = %server_addr, "beacon anomaly detected — IOC may have restarted");
-                        metrics::counter!("ca_client_beacon_anomalies_total", "server" => server_addr.to_string()).increment(1);
-                        // Like the C CA client (libca), rescan ALL disconnected/
-                        // searching channels on any beacon anomaly.  The beacon
-                        // address may use INADDR_ANY and won't match our stored
-                        // server_addr, so a per-server lookup is unreliable.
+                    CoordRequest::ForceRescanServer {
+                        server_addr,
+                        anomaly,
+                    } => {
+                        if anomaly {
+                            diag.beacon_anomalies.fetch_add(1, Ordering::Relaxed);
+                            diag.record(DiagEvent::BeaconAnomaly { server: server_addr });
+                            tracing::warn!(server = %server_addr, "beacon anomaly detected — IOC may have restarted");
+                            metrics::counter!("ca_client_beacon_anomalies_total", "server" => server_addr.to_string()).increment(1);
+                        } else {
+                            // Soft poke: pvxs `poke()` parity. Don't pollute
+                            // the warn log or anomaly counter — operators
+                            // tracking real anomalies should not see a
+                            // counter increment for every healthy beacon.
+                            tracing::trace!(server = %server_addr, "beacon poke — re-firing pending searches");
+                            metrics::counter!("ca_client_beacon_pokes_total", "server" => server_addr.to_string()).increment(1);
+                        }
+                        // Rescan ALL disconnected/searching channels.  The
+                        // beacon address may use INADDR_ANY and won't match
+                        // our stored server_addr, so a per-server lookup is
+                        // unreliable. Echo probes (operational state) are
+                        // only sent on real anomalies — a soft poke for an
+                        // up-and-running server adds no information.
                         let mut probed_servers = HashSet::new();
                         for ch in channels.values() {
                             if ch.state == ChannelState::Disconnected
@@ -1507,7 +1532,7 @@ async fn run_coordinator(
                                     reason: SearchReason::BeaconAnomaly,
                                     initial_lane: 0,
                                 });
-                            } else if ch.state.is_operational() {
+                            } else if anomaly && ch.state.is_operational() {
                                 // Beacon anomaly on a connected server: send
                                 // immediate echo probe to detect dead TCP faster
                                 // (matches C EPICS beaconAnomaly watchdog flag).
