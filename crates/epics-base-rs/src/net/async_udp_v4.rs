@@ -66,7 +66,10 @@ pub struct RecvMeta {
 /// One bound per-NIC socket plus its NIC metadata.
 pub struct NicSocket {
     pub sock: Arc<UdpSocket>,
-    /// IP that this socket is bound to.
+    /// NIC's unicast IPv4 address (used for routing replies and
+    /// per-NIC sends). For an [`Self::rx_only_bcast`] socket this is
+    /// still the underlying NIC's unicast IP, NOT the broadcast it's
+    /// bound to.
     pub iface_ip: Ipv4Addr,
     /// Kernel interface index (0 = unknown, treat as sentinel).
     pub ifindex: u32,
@@ -76,6 +79,12 @@ pub struct NicSocket {
     pub broadcast: Option<Ipv4Addr>,
     /// Whether this is the loopback NIC.
     pub is_loopback: bool,
+    /// True for an auxiliary socket bound to the NIC's broadcast
+    /// address solely to receive subnet broadcasts (BSD/macOS oddity:
+    /// a socket bound to the NIC's unicast IP does NOT receive
+    /// packets sent to the subnet broadcast address — see EPICS-base
+    /// `rsrv/caservertask.c:670-708`). Send paths skip these sockets.
+    pub rx_only_bcast: bool,
 }
 
 impl std::fmt::Debug for NicSocket {
@@ -86,6 +95,7 @@ impl std::fmt::Debug for NicSocket {
             .field("netmask", &self.netmask)
             .field("broadcast", &self.broadcast)
             .field("is_loopback", &self.is_loopback)
+            .field("rx_only_bcast", &self.rx_only_bcast)
             .field(
                 "local_addr",
                 &self.sock.local_addr().ok().unwrap_or_else(|| {
@@ -120,7 +130,7 @@ impl AsyncUdpV4 {
     /// useful when callers maintain a long-lived shared map.
     pub fn bind_with_map(map: &IfaceMap, port: u16, broadcast: bool) -> io::Result<Self> {
         let ifaces = map.all();
-        let mut sockets = Vec::with_capacity(ifaces.len());
+        let mut sockets = Vec::with_capacity(ifaces.len() * 2);
         for info in ifaces {
             match bind_one(&info, port, broadcast) {
                 Ok(nic) => sockets.push(nic),
@@ -132,6 +142,37 @@ impl AsyncUdpV4 {
                         error = %e,
                         "skipping NIC: bind failed"
                     );
+                }
+            }
+            // BSD-family oddity (macOS, *BSD): a UDP socket bound to a
+            // specific NIC unicast IP receives only unicasts to that
+            // IP — packets sent to the subnet broadcast address are
+            // delivered ONLY to a socket bound to either the broadcast
+            // address itself or to INADDR_ANY. Mirror EPICS-base rsrv
+            // (`caservertask.c:670-708`) and bind a second RX-only
+            // socket to each NIC's broadcast address so PVA/CA SEARCH
+            // bursts sent to e.g. `192.168.1.255:5076` reach the
+            // responder. Windows: Winsock delivers subnet broadcasts
+            // to the unicast-bound socket, so the extra bind is
+            // unnecessary and skipped. Loopback has no broadcast.
+            // Per-NIC failures are logged at debug; the unicast
+            // socket above is the load-bearing one.
+            #[cfg(not(target_os = "windows"))]
+            if let Some(bcast) = info.broadcast {
+                if !info.ip.is_loopback() && !bcast.is_unspecified() {
+                    match bind_one_at(&info, bcast, port, broadcast, true) {
+                        Ok(nic) => sockets.push(nic),
+                        Err(e) => {
+                            tracing::debug!(
+                                target: "epics_base_rs::net",
+                                iface = %info.ip,
+                                bcast = %bcast,
+                                port,
+                                error = %e,
+                                "skipping NIC bcast bind"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -283,7 +324,7 @@ impl AsyncUdpV4 {
         let nic = self
             .sockets
             .iter()
-            .find(|n| n.iface_ip == iface_ip)
+            .find(|n| n.iface_ip == iface_ip && !n.rx_only_bcast)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
@@ -308,7 +349,7 @@ impl AsyncUdpV4 {
         let nic = self
             .sockets
             .iter()
-            .find(|n| n.ifindex == ifindex && n.ifindex != 0)
+            .find(|n| n.ifindex == ifindex && n.ifindex != 0 && !n.rx_only_bcast)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
@@ -327,7 +368,7 @@ impl AsyncUdpV4 {
         let mut ok_count = 0usize;
         let mut last_err: Option<io::Error> = None;
         for nic in &self.sockets {
-            if nic.is_loopback {
+            if nic.is_loopback || nic.rx_only_bcast {
                 continue;
             }
             match nic.sock.send_to(buf, dest).await {
@@ -403,30 +444,32 @@ impl AsyncUdpV4 {
     /// rules. Public for callers (e.g. SEARCH engine) that want to
     /// preview the routing decision before sending.
     pub fn pick_nic(&self, dest: Ipv4Addr) -> io::Result<&NicSocket> {
+        // RX-only broadcast sockets must never be used for sending.
+        let send_eligible = || self.sockets.iter().filter(|n| !n.rx_only_bcast);
         // (1) Subnet match.
-        for nic in &self.sockets {
+        for nic in send_eligible() {
             if subnet_contains(nic.iface_ip, nic.netmask, dest) {
                 return Ok(nic);
             }
         }
         // (2) Per-subnet broadcast match.
-        for nic in &self.sockets {
+        for nic in send_eligible() {
             if Some(dest) == nic.broadcast {
                 return Ok(nic);
             }
         }
         // (3) Loopback.
         if dest.is_loopback() {
-            if let Some(nic) = self.sockets.iter().find(|n| n.is_loopback) {
+            if let Some(nic) = send_eligible().find(|n| n.is_loopback) {
                 return Ok(nic);
             }
         }
         // (4) First non-loopback NIC.
-        if let Some(nic) = self.sockets.iter().find(|n| !n.is_loopback) {
+        if let Some(nic) = send_eligible().find(|n| !n.is_loopback) {
             return Ok(nic);
         }
-        // Last resort: first NIC at all.
-        self.sockets.first().ok_or_else(|| {
+        // Last resort: first send-eligible NIC.
+        send_eligible().next().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
                 "AsyncUdpV4: no NIC sockets",
@@ -476,7 +519,7 @@ impl AsyncUdpV4 {
         let mut ok = 0usize;
         let mut last_err: Option<io::Error> = None;
         for nic in &self.sockets {
-            if nic.is_loopback {
+            if nic.is_loopback || nic.rx_only_bcast {
                 continue;
             }
             match nic.sock.join_multicast_v4(group, nic.iface_ip) {
@@ -515,8 +558,39 @@ fn socket_ref(sock: &UdpSocket) -> socket2::SockRef<'_> {
 }
 
 fn bind_one(info: &IfaceInfo, port: u16, broadcast: bool) -> io::Result<NicSocket> {
+    bind_one_at(info, info.ip, port, broadcast, false)
+}
+
+/// Bind to an arbitrary IPv4 address while keeping the NIC metadata
+/// from `info`. Used by [`bind_with_map`] to create both the
+/// primary unicast socket (`bind_ip = info.ip`) and an auxiliary
+/// broadcast-RX socket (`bind_ip = info.broadcast`).
+fn bind_one_at(
+    info: &IfaceInfo,
+    bind_ip: Ipv4Addr,
+    port: u16,
+    broadcast: bool,
+    rx_only_bcast: bool,
+) -> io::Result<NicSocket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    // Mirror EPICS-base `epicsSocketEnableAddressUseForDatagramFanout`
+    // (libcom/src/osi/os/default/osdSockAddrReuse.cpp): on Unix, both
+    // SO_REUSEADDR and SO_REUSEPORT are needed so a PVA server and
+    // client (or two PVA processes) on the same host can co-bind the
+    // same per-NIC (IP, 5076). Without this, the second process gets
+    // EADDRINUSE on every NIC except loopback, search packets never
+    // reach the server, and reconnect after IOC restart silently
+    // fails.
+    //
+    // libcom commit 19146a5: Windows SO_REUSEADDR has dangerous
+    // socket-hijack semantics (any process can rebind), and Windows
+    // releases ports immediately on close anyway, so the flag is
+    // skipped on Windows. The Windows-idiomatic alternative is
+    // SO_EXCLUSIVEADDRUSE, but plain bind() already prevents reuse.
+    #[cfg(not(windows))]
     sock.set_reuse_address(true)?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)?;
     if broadcast {
         sock.set_broadcast(true)?;
     }
@@ -527,7 +601,7 @@ fn bind_one(info: &IfaceInfo, port: u16, broadcast: bool) -> io::Result<NicSocke
         let _ = sock.set_multicast_all_v4(false);
     }
     sock.set_nonblocking(true)?;
-    let bind_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(info.ip, port));
+    let bind_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(bind_ip, port));
     sock.bind(&bind_addr.into())?;
     let std_sock: std::net::UdpSocket = sock.into();
     let tokio_sock = UdpSocket::from_std(std_sock)?;
@@ -538,6 +612,7 @@ fn bind_one(info: &IfaceInfo, port: u16, broadcast: bool) -> io::Result<NicSocke
         netmask: info.netmask,
         broadcast: info.broadcast,
         is_loopback: info.ip.is_loopback(),
+        rx_only_bcast,
     })
 }
 
