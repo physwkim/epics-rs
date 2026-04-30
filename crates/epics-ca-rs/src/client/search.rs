@@ -26,6 +26,7 @@ async fn send_with_fanout(
     buf: &[u8],
     addr: SocketAddr,
     site: &'static str,
+    send_errors: &mut HashMap<SocketAddr, std::io::ErrorKind>,
 ) {
     let needs_fanout = match addr {
         SocketAddr::V4(v4) => v4.ip().is_broadcast() || v4.ip().is_multicast(),
@@ -36,19 +37,35 @@ async fn send_with_fanout(
     } else {
         socket.send_to(buf, addr).await.map(|_| ())
     };
-    if let Err(e) = result {
-        // P-7: surface routing/permission failures at debug level
-        // rather than swallowing them silently. libca cae597d21 added
-        // similar visibility for udpiiu — EHOSTUNREACH / EPERM
-        // (firewall) etc. otherwise turn into "no responses, retried
-        // forever".
-        tracing::debug!(
-            target: "epics_ca_rs::search",
-            %addr,
-            site,
-            error = %e,
-            "send_to failed"
-        );
+    match result {
+        Ok(()) => {
+            // libca cae597d: log once-on-recovery so operators know
+            // when a broken destination came back.
+            if let Some(prev) = send_errors.remove(&addr) {
+                tracing::info!(
+                    target: "epics_ca_rs::search",
+                    %addr, site, prev_error = ?prev,
+                    "search send_to: recovered"
+                );
+            }
+        }
+        Err(e) => {
+            // P-7 + libca cae597d (`udpiiu::SearchDestUDP::_lastError`):
+            // log on first occurrence and on error-kind change; suppress
+            // repeated identical errors so a persistent EHOSTUNREACH
+            // doesn't flood the log at search rate.
+            let kind = e.kind();
+            let prev = send_errors.insert(addr, kind);
+            if prev != Some(kind) {
+                tracing::warn!(
+                    target: "epics_ca_rs::search",
+                    %addr,
+                    site,
+                    error = %e,
+                    "search send_to failed"
+                );
+            }
+        }
     }
 }
 
@@ -220,6 +237,12 @@ struct SearchEngineState {
     dgram_seq: u32,
     /// Last validated sequence number from a VERSION response.
     last_valid_seq: Option<u32>,
+    /// Per-destination last UDP send-error kind. Mirrors libca cae597d
+    /// (`udpiiu::SearchDestUDP::_lastError`): a persistent sendto()
+    /// failure (e.g. firewall, unreachable broadcast) repeats at search
+    /// rate (~30 ms) and would otherwise spam logs. We log on first
+    /// occurrence, on errno change, and on recovery; suppress repeats.
+    send_errors: HashMap<SocketAddr, std::io::ErrorKind>,
 }
 
 impl SearchEngineState {
@@ -234,6 +257,7 @@ impl SearchEngineState {
             max_search_period: parse_max_search_period(),
             dgram_seq: 0,
             last_valid_seq: None,
+            send_errors: HashMap::new(),
         }
     }
 
@@ -797,7 +821,14 @@ async fn send_due_searches(
         {
             if frames_sent < frames_per_try {
                 for addr in addr_list {
-                    send_with_fanout(socket, &current_frame, *addr, "broadcast burst").await;
+                    send_with_fanout(
+                        socket,
+                        &current_frame,
+                        *addr,
+                        "broadcast burst",
+                        &mut state.send_errors,
+                    )
+                    .await;
                 }
                 for ns_tx in nameserver_txs {
                     let _ = ns_tx.send(current_frame.clone());
@@ -820,7 +851,7 @@ async fn send_due_searches(
             solo.extend_from_slice(&version_hdr);
             solo.extend_from_slice(payload);
             for addr in addr_list {
-                send_with_fanout(socket, &solo, *addr, "solo").await;
+                send_with_fanout(socket, &solo, *addr, "solo", &mut state.send_errors).await;
             }
             for ns_tx in nameserver_txs {
                 let _ = ns_tx.send(solo.clone());
@@ -837,7 +868,14 @@ async fn send_due_searches(
     // Flush remaining frame.
     if current_frame.len() > CaHeader::SIZE && frames_sent < frames_per_try {
         for addr in addr_list {
-            send_with_fanout(socket, &current_frame, *addr, "flush").await;
+            send_with_fanout(
+                socket,
+                &current_frame,
+                *addr,
+                "flush",
+                &mut state.send_errors,
+            )
+            .await;
         }
         for ns_tx in nameserver_txs {
             let _ = ns_tx.send(current_frame.clone());

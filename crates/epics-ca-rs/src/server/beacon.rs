@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +62,14 @@ pub async fn run_beacon_emitter(
     let max_interval = max_period.max(initial_interval);
     let mut interval = initial_interval;
 
+    // Per-destination last-error dedup. Mirrors rsrv c23012d
+    // (`rsrv_online_notify_task` `lastError[]`): a persistently
+    // unreachable beacon address emits a sendto() failure every
+    // beacon period (~15 s steady-state, faster during ramp-up). We
+    // log on first occurrence and on errno change, then once on
+    // recovery — repeats are silent.
+    let mut send_errors: HashMap<SocketAddr, std::io::ErrorKind> = HashMap::new();
+
     if beacon_addrs.is_empty() {
         // Nothing to send to — quietly idle but still consume reset
         // notifications so the channel doesn't fill up.
@@ -79,7 +88,27 @@ pub async fn run_beacon_emitter(
         let bytes = hdr.to_bytes();
 
         for addr in &beacon_addrs {
-            let _ = socket.send_to(&bytes, addr).await;
+            match socket.send_to(&bytes, addr).await {
+                Ok(_) => {
+                    if let Some(prev) = send_errors.remove(addr) {
+                        tracing::info!(
+                            target: "epics_ca_rs::beacon",
+                            %addr, prev_error = ?prev,
+                            "CA beacon send recovered"
+                        );
+                    }
+                }
+                Err(e) => {
+                    let kind = e.kind();
+                    if send_errors.insert(*addr, kind) != Some(kind) {
+                        tracing::warn!(
+                            target: "epics_ca_rs::beacon",
+                            %addr, error = %e,
+                            "CA beacon send failed"
+                        );
+                    }
+                }
+            }
         }
 
         // Signed-beacon companion: send a separate Ed25519-signed
