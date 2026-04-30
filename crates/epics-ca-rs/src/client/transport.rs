@@ -704,6 +704,10 @@ async fn read_loop<R: AsyncRead + Unpin + Send + 'static>(
             match hdr.cmmd {
                 CA_PROTO_VERSION => {
                     server_minor_version = hdr.count;
+                    let _ = event_tx.send(TransportEvent::ServerVersion {
+                        server_addr,
+                        minor_version: hdr.count,
+                    });
                 }
                 CA_PROTO_ACCESS_RIGHTS => {
                     let _ = event_tx.send(TransportEvent::AccessRightsChanged {
@@ -778,7 +782,17 @@ async fn read_loop<R: AsyncRead + Unpin + Send + 'static>(
                     } else {
                         String::new()
                     };
-                    eprintln!("CA server error: cmd={:?} msg={}", orig_cmd, msg);
+                    // C ref: modules/ca/src/client/udpiiu.cpp:exceptionRespAction —
+                    // commit a352865 routes the error prefix through ERL_ERROR
+                    // (ANSI-colored "Error:" on TTYs). The Rust equivalent is
+                    // tracing::error! which honors the configured subscriber's
+                    // formatting (color, prefix, structured fields).
+                    tracing::error!(
+                        server = %server_addr,
+                        cmd = ?orig_cmd,
+                        msg = %msg,
+                        "CA server error",
+                    );
                     let _ = event_tx.send(TransportEvent::ServerError {
                         _original_request: orig_cmd,
                         _message: msg,

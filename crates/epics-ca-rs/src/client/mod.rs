@@ -271,6 +271,13 @@ enum CoordRequest {
     GetIocConnectionCount {
         reply: oneshot::Sender<usize>,
     },
+    /// Server's CA minor protocol version for the channel's circuit.
+    /// `None` if disconnected or no VERSION reply yet. Mirrors libca
+    /// `ca_host_minor_protocol` (BUG_ARCHAEOLOGY d763541).
+    GetHostMinorProtocol {
+        cid: u32,
+        reply: oneshot::Sender<Option<u16>>,
+    },
     /// Graceful shutdown: clear all channels on their servers before exiting.
     Shutdown {
         reply: oneshot::Sender<()>,
@@ -1097,6 +1104,21 @@ impl CaChannel {
         Ok(info.server_addr.to_string())
     }
 
+    /// Server's CA minor protocol version, parsed from the
+    /// `CA_PROTO_VERSION` reply on the TCP virtual circuit.
+    /// Returns `None` when the channel isn't operational or no
+    /// VERSION reply has been processed yet. Mirrors libca
+    /// `ca_host_minor_protocol(chid)` (oldChannelNotify.cpp,
+    /// BUG_ARCHAEOLOGY d763541).
+    pub async fn host_minor_protocol(&self) -> Option<u16> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self.coord_tx.send(CoordRequest::GetHostMinorProtocol {
+            cid: self.cid,
+            reply: reply_tx,
+        });
+        reply_rx.await.ok().flatten()
+    }
+
     /// Time since the underlying TCP virtual circuit last received
     /// any message from the server. Mirrors libca
     /// `ca_receive_watchdog_delay(chid)` (oldChannelNotify.cpp:703) —
@@ -1212,6 +1234,9 @@ async fn run_coordinator(
     // implies a frame arrived from that circuit. Used to answer
     // `ca_receive_watchdog_delay`.
     let mut last_rx_at: HashMap<SocketAddr, std::time::Instant> = HashMap::new();
+    // Per-server CA minor protocol version, populated from
+    // CA_PROTO_VERSION on TCP handshake. Powers `host_minor_protocol`.
+    let mut server_minor_version: HashMap<SocketAddr, u16> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -1422,6 +1447,16 @@ async fn run_coordinator(
                         });
                         let _ = reply.send(delay);
                     }
+                    CoordRequest::GetHostMinorProtocol { cid, reply } => {
+                        let v = channels.get(&cid).and_then(|ch| {
+                            if !ch.state.is_operational() {
+                                return None;
+                            }
+                            let addr = ch.server_addr?;
+                            server_minor_version.get(&addr).copied()
+                        });
+                        let _ = reply.send(v);
+                    }
                     CoordRequest::GetIocConnectionCount { reply } => {
                         // Count distinct servers with at least one
                         // operational channel — mirrors libca which
@@ -1526,7 +1561,8 @@ async fn run_coordinator(
                 let rx_addr: Option<SocketAddr> = match &evt {
                     TransportEvent::ChannelCreated { server_addr, .. }
                     | TransportEvent::ServerDisconnect { server_addr, .. }
-                    | TransportEvent::CircuitResponsive { server_addr } => Some(*server_addr),
+                    | TransportEvent::CircuitResponsive { server_addr }
+                    | TransportEvent::ServerVersion { server_addr, .. } => Some(*server_addr),
                     TransportEvent::AccessRightsChanged { cid, .. }
                     | TransportEvent::ChannelCreateFailed { cid } => {
                         channels.get(cid).and_then(|ch| ch.server_addr)
@@ -1696,6 +1732,7 @@ async fn run_coordinator(
                         metrics::counter!("ca_client_tcp_closed_total", "server" => server_addr.to_string()).increment(1);
                         flow_control.remove(&server_addr);
                         last_rx_at.remove(&server_addr);
+                        server_minor_version.remove(&server_addr);
                         handle_disconnect(&mut channels, &mut subscriptions, &mut server_channels, &search_tx, server_addr, &diag, &mut read_waiters, &mut write_waiters);
                     }
                     TransportEvent::ServerDisconnect { cid, server_addr } => {
@@ -1751,6 +1788,14 @@ async fn run_coordinator(
                                 let _ = ch.conn_tx.send(ConnectionEvent::Connected);
                             }
                         }
+                    }
+                    TransportEvent::ServerVersion { server_addr, minor_version } => {
+                        // libca exposes this via `ca_host_minor_protocol`
+                        // (BUG_ARCHAEOLOGY d763541): used by gateways /
+                        // nameservers to report the connected server's
+                        // CA wire version. Read from CA_PROTO_VERSION
+                        // during TCP handshake; cleared on TcpClosed.
+                        server_minor_version.insert(server_addr, minor_version);
                     }
                 }
             }

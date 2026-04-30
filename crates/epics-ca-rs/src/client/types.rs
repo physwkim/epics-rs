@@ -169,4 +169,11 @@ pub(crate) enum TransportEvent {
     CircuitResponsive {
         server_addr: SocketAddr,
     },
+    /// Server's CA minor protocol version, parsed from CA_PROTO_VERSION
+    /// during TCP handshake. Mirrors libca `tcpiiu::minorProtocolVersion`
+    /// (BUG_ARCHAEOLOGY d763541 / `ca_host_minor_protocol`).
+    ServerVersion {
+        server_addr: SocketAddr,
+        minor_version: u16,
+    },
 }
