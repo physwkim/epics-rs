@@ -576,7 +576,6 @@ impl CaClient {
             cid,
             pv_name: pv_name.clone(),
             reason: SearchReason::Initial,
-            initial_lane: 0,
         });
 
         let lifecycle = Arc::new(ChannelLifecycle {
@@ -1530,7 +1529,6 @@ async fn run_coordinator(
                                     cid: ch.cid,
                                     pv_name: ch.pv_name.clone(),
                                     reason: SearchReason::BeaconAnomaly,
-                                    initial_lane: 0,
                                 });
                             } else if anomaly && ch.state.is_operational() {
                                 // Beacon anomaly on a connected server: send
@@ -1733,7 +1731,6 @@ async fn run_coordinator(
                                 cid,
                                 pv_name: ch.pv_name.clone(),
                                 reason: SearchReason::Reconnect,
-                                initial_lane: 0,
                             });
                             // Notify search engine of failed connect (penalty box).
                             if let Some(addr) = server_addr {
@@ -1783,7 +1780,6 @@ async fn run_coordinator(
                                     cid,
                                     pv_name: ch.pv_name.clone(),
                                     reason: SearchReason::Reconnect,
-                                    initial_lane: 0,
                                 });
                             }
                         }
@@ -1862,16 +1858,14 @@ fn handle_disconnect(
             } else {
                 ch.reconnect_count = ch.reconnect_count.saturating_add(1);
             }
-            // Minimum lane 1 for bulk disconnects so the search engine
-            // applies jitter and prevents a reconnection storm (similar
-            // to C EPICS disconnectGovernorTimer batching).
-            let initial_lane = ch.reconnect_count.clamp(1, 8);
-
+            // Bucket scheduler distributes Reconnect searches by cid hash
+            // across all 30 buckets — naturally prevents the reconnection
+            // storm the legacy lane scheduler had to dampen by setting
+            // `initial_lane = reconnect_count.clamp(1, 8)`.
             let _ = search_tx.send(SearchRequest::Schedule {
                 cid: ch.cid,
                 pv_name: ch.pv_name.clone(),
                 reason: SearchReason::Reconnect,
-                initial_lane,
             });
         }
     }

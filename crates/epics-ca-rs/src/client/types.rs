@@ -4,7 +4,13 @@ use crate::channel::AccessRights;
 
 // --- Search Engine messages ---
 
-/// Why a search is being initiated — affects initial lane assignment.
+/// Why a search is being initiated — affects bucket assignment.
+///
+/// pvxs-style bucket scheduler dispatches new searches into a 30-bucket
+/// ring. `Initial` and `BeaconAnomaly` searches go into the immediately
+/// next bucket (fire within 1 tick); `Reconnect` searches are hashed by
+/// cid across all buckets so a server-side event disconnecting N channels
+/// doesn't materialize as one burst of N searches per tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchReason {
     /// Fresh channel creation.
@@ -21,8 +27,6 @@ pub(crate) enum SearchRequest {
         cid: u32,
         pv_name: String,
         reason: SearchReason,
-        /// Starting lane for exponential backoff (0 = immediate, higher = longer delay).
-        initial_lane: u32,
     },
     /// Cancel searching for a PV (channel dropped or connected).
     Cancel { cid: u32 },

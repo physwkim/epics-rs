@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -6,6 +6,7 @@ use epics_base_rs::net::AsyncUdpV4;
 use epics_base_rs::runtime::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::interval;
 
 use crate::protocol::*;
 
@@ -73,137 +74,53 @@ async fn send_with_fanout(
 // Configuration constants
 // ---------------------------------------------------------------------------
 
-/// Minimum RTT floor (matches libca minRoundTripEstimate).
-const MIN_RTT: Duration = Duration::from_millis(32);
+/// pvxs `client.cpp::nBuckets`. 30 buckets at 1 s normal interval gives
+/// each pending search a 30-second slot rotation — cooperative tick
+/// caps UDP search traffic at roughly `pending.len() / 30` packets per
+/// second instead of letting every channel fire on its own backoff.
+const N_SEARCH_BUCKETS: usize = 30;
 
-/// Default base RTTE when no RTT samples have been collected yet.
-const DEFAULT_BASE_RTTE: Duration = Duration::from_millis(100);
+/// Bucket distance to push a re-search after the first retry. Mirrors
+/// pvxs `Channel::disconnect` holdoff = 10 buckets to keep failed
+/// connect attempts from looping faster than the 30s schedule.
+const RETRY_HOLDOFF_CYCLES: u32 = 10;
 
-/// Default maximum search period (EPICS_CA_MAX_SEARCH_PERIOD).
-const DEFAULT_MAX_SEARCH_PERIOD: Duration = Duration::from_secs(300);
+/// Normal tick cadence (1 search bucket per second).
+const NORMAL_TICK: Duration = Duration::from_secs(1);
 
-/// Lower limit for max search period.
-const MIN_MAX_SEARCH_PERIOD: Duration = Duration::from_secs(60);
+/// Fast-mode tick cadence after a beacon poke. One full bucket
+/// revolution fits in `N_SEARCH_BUCKETS * FAST_TICK = 6 s`.
+const FAST_TICK: Duration = Duration::from_millis(200);
 
-/// Conservative UDP datagram size limit to avoid fragmentation.
+/// Maximum bytes per outbound UDP datagram.
 const MAX_UDP_SEND: usize = 1024;
 
-/// How long a server stays in the penalty box after a TCP connect failure.
+/// Penalty hold-off after a failed connect to a server.
 const PENALTY_DURATION: Duration = Duration::from_secs(30);
-
-/// Maximum frames_per_try (cap for AIMD additive increase).
-const MAX_FRAMES_PER_TRY: u32 = 50;
-
-/// AIMD evaluation window duration.
-const AIMD_WINDOW: Duration = Duration::from_secs(1);
-
-/// After beacon anomaly, keep the channel in a fast rescan mode briefly.
-const BEACON_FAST_RESCAN_WINDOW: Duration = Duration::from_secs(5);
-
-/// Retry period cap during the fast rescan window.
-const BEACON_FAST_RESCAN_PERIOD: Duration = Duration::from_secs(5);
-
-// ---------------------------------------------------------------------------
-// RTT Estimator — Jacobson/Karels (RFC 6298)
-// ---------------------------------------------------------------------------
-
-struct RttEstimator {
-    srtt: f64,
-    mdev: f64,
-    initialized: bool,
-}
-
-impl RttEstimator {
-    fn new() -> Self {
-        Self {
-            srtt: 0.0,
-            mdev: 0.0,
-            initialized: false,
-        }
-    }
-
-    fn update(&mut self, sample_secs: f64) {
-        let sample = sample_secs.max(MIN_RTT.as_secs_f64());
-        if !self.initialized {
-            self.srtt = sample;
-            self.mdev = sample / 2.0;
-            self.initialized = true;
-        } else {
-            let err = sample - self.srtt;
-            self.srtt += 0.125 * err;
-            self.mdev += 0.25 * (err.abs() - self.mdev);
-        }
-    }
-
-    fn rto(&self) -> Duration {
-        if !self.initialized {
-            return DEFAULT_BASE_RTTE;
-        }
-        let rto_secs = (self.srtt + 4.0 * self.mdev).max(MIN_RTT.as_secs_f64());
-        Duration::from_secs_f64(rto_secs)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Per-channel search state
 // ---------------------------------------------------------------------------
 
-struct ChannelSearchState {
+struct PendingSearch {
     #[allow(dead_code)]
     cid: u32,
     #[allow(dead_code)]
     pv_name: String,
     /// Pre-built payload: SEARCH header + padded PV name (no VERSION prefix).
     search_payload: Vec<u8>,
-    /// Current lane index (0 = fastest retry, increases on timeout).
-    lane_index: u32,
-    /// When this channel's next search packet is due.
-    next_deadline: Instant,
-    /// When the last search packet was sent (for RTT measurement).
-    last_sent_at: Option<Instant>,
-    /// Temporary fast-rescan window after beacon anomaly.
-    fast_rescan_until: Option<Instant>,
-}
-
-// ---------------------------------------------------------------------------
-// AIMD congestion control
-// ---------------------------------------------------------------------------
-
-struct SendBudget {
-    frames_per_try: u32,
-    sent_this_window: u32,
-    responded_this_window: u32,
-    window_start: Instant,
-}
-
-impl SendBudget {
-    fn new() -> Self {
-        Self {
-            frames_per_try: MAX_FRAMES_PER_TRY,
-            sent_this_window: 0,
-            responded_this_window: 0,
-            window_start: Instant::now(),
-        }
-    }
-
-    /// Evaluate the AIMD window: additive increase on good response rate,
-    /// multiplicative decrease on loss.
-    fn evaluate(&mut self, now: Instant) {
-        if now.duration_since(self.window_start) < AIMD_WINDOW {
-            return;
-        }
-        if self.sent_this_window > 0 {
-            let rate = self.responded_this_window as f64 / self.sent_this_window as f64;
-            if rate > 0.5 {
-                self.frames_per_try = (self.frames_per_try + 1).min(MAX_FRAMES_PER_TRY);
-            } else if rate < 0.1 && self.frames_per_try > 1 {
-                self.frames_per_try = 1;
-            }
-        }
-        self.responded_this_window = 0;
-        self.sent_this_window = 0;
-        self.window_start = now;
-    }
+    /// Which bucket this search currently lives in.
+    bucket: usize,
+    /// Number of attempts so far (for retry holdoff).
+    attempt: u32,
+    /// Tick-decremented hold-off counter: when > 0 at the bucket's
+    /// firing tick, the search is NOT transmitted (re-placed into the
+    /// next bucket so the counter decrements each cycle). Set to
+    /// `RETRY_HOLDOFF_CYCLES` on first retry to space out re-attempts
+    /// against a slow IOC. pvxs `Channel::disconnect` holdoff parity.
+    holdoff_cycles: u32,
+    #[allow(dead_code)]
+    last_attempt: Option<Instant>,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,18 +136,18 @@ struct PenaltyEntry {
 // ---------------------------------------------------------------------------
 
 struct SearchEngineState {
-    channels: HashMap<u32, ChannelSearchState>,
-    /// (deadline, cid) — BTreeSet gives O(log n) first/insert/remove.
-    deadline_set: BTreeSet<(Instant, u32)>,
-    rtt_per_path: HashMap<SocketAddr, RttEstimator>,
-    budget: SendBudget,
+    pending: HashMap<u32, PendingSearch>,
+    buckets: Vec<Vec<u32>>,
+    current_bucket: usize,
+    /// After a beacon poke we run one full revolution at FAST_TICK
+    /// cadence so all pending searches retry within ~6 s.
+    fast_ticks_remaining: u32,
     penalty: HashMap<SocketAddr, PenaltyEntry>,
     /// Per-server failure-pattern tracker. Sits on top of the single-shot
     /// `penalty` box: when failures repeat within a window, the breaker
     /// trips OPEN with an exponentially-doubled cooldown so we don't
     /// hammer a flapping server.
     breakers: CircuitBreakerRegistry,
-    max_search_period: Duration,
     /// Sequence number for datagram validation (matches C EPICS
     /// lastReceivedSeqNo).  Embedded in VERSION header CID field;
     /// servers echo it back, letting us reject stale responses.
@@ -248,53 +165,38 @@ struct SearchEngineState {
 impl SearchEngineState {
     fn new() -> Self {
         Self {
-            channels: HashMap::new(),
-            deadline_set: BTreeSet::new(),
-            rtt_per_path: HashMap::new(),
-            budget: SendBudget::new(),
+            pending: HashMap::new(),
+            buckets: (0..N_SEARCH_BUCKETS).map(|_| Vec::new()).collect(),
+            current_bucket: 0,
+            fast_ticks_remaining: 0,
             penalty: HashMap::new(),
             breakers: CircuitBreakerRegistry::new(),
-            max_search_period: parse_max_search_period(),
             dgram_seq: 0,
             last_valid_seq: None,
             send_errors: HashMap::new(),
         }
     }
 
-    /// Worst-case RTO across all destination paths.
-    fn base_rtte(&self) -> Duration {
-        self.rtt_per_path
-            .values()
-            .map(|e| e.rto())
-            .max()
-            .unwrap_or(DEFAULT_BASE_RTTE)
-    }
-
-    /// Insert or re-insert a channel into the deadline set.
-    #[allow(dead_code)]
-    fn schedule_channel(&mut self, cid: u32, deadline: Instant) {
-        if let Some(ch) = self.channels.get_mut(&cid) {
-            // Remove old deadline entry if present.
-            self.deadline_set.remove(&(ch.next_deadline, cid));
-            ch.next_deadline = deadline;
-            self.deadline_set.insert((deadline, cid));
-        }
-    }
-
     /// Remove a channel entirely.
     fn remove_channel(&mut self, cid: u32) {
-        if let Some(ch) = self.channels.remove(&cid) {
-            self.deadline_set.remove(&(ch.next_deadline, cid));
+        if let Some(p) = self.pending.remove(&cid) {
+            self.buckets[p.bucket].retain(|x| *x != cid);
         }
     }
-}
 
-/// Compute the retry period for a given lane index.
-fn lane_period(lane_index: u32, base_rtte: Duration, max_period: Duration) -> Duration {
-    let multiplier = 1u64.checked_shl(lane_index).unwrap_or(u64::MAX);
-    let period_nanos = (base_rtte.as_nanos() as u64).saturating_mul(multiplier);
-    let period = Duration::from_nanos(period_nanos);
-    period.min(max_period)
+    /// pvxs `client.cpp:713 poke()` parity: reset every pending
+    /// search's attempt + holdoff counters and start the engine's
+    /// fast-tick revolution. Searches stay in their assigned buckets;
+    /// fast-tick (200 ms) covers the full ring in 6 s so each pending
+    /// search retries once within that window.
+    fn poke(&mut self) {
+        for p in self.pending.values_mut() {
+            p.attempt = 0;
+            p.holdoff_cycles = 0;
+            p.last_attempt = None;
+        }
+        self.fast_ticks_remaining = N_SEARCH_BUCKETS as u32;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,35 +239,28 @@ pub(crate) async fn run_search_engine(
     let mut state = SearchEngineState::new();
     let mut recv_buf = [0u8; 65536];
 
+    // pvxs `client.cpp::tickSearch`: a single steady tick advances the
+    // bucket cursor. fast_tick is engaged after a beacon poke for one
+    // full revolution, then we revert to NORMAL_TICK.
+    let mut tick = interval(NORMAL_TICK);
+    tick.tick().await; // skip immediate fire
+    let mut tick_is_fast = false;
+
     loop {
-        let next_deadline = state
-            .deadline_set
-            .iter()
-            .next()
-            .map(|(d, _)| *d)
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
-
-        let sleep = epics_base_rs::runtime::task::sleep_until(next_deadline);
-
         tokio::select! {
             req = request_rx.recv() => {
                 let Some(req) = req else { return };
                 handle_request_or_addr(&mut state, &mut addr_list, req);
-                // Drain any additional queued requests before sending,
-                // so a burst of Schedule messages gets batched together.
+                // Drain any additional queued requests so a burst of
+                // Schedule messages all land before the next tick.
                 while let Ok(req) = request_rx.try_recv() {
                     handle_request_or_addr(&mut state, &mut addr_list, req);
                 }
-                send_due_searches(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
             }
 
             result = socket.recv_from(&mut recv_buf) => {
                 let Ok((len, src)) = result else { continue };
                 handle_udp_response(&mut state, &recv_buf[..len], src, &response_tx);
-                // Also send any due searches after processing responses.
-                // Without this, budget-limited channels stuck at deadline=now
-                // starve when recv_from keeps winning the select! race.
-                send_due_searches(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
             }
 
             tcp_dgram = tcp_response_rx.recv() => {
@@ -373,9 +268,26 @@ pub(crate) async fn run_search_engine(
                 handle_udp_response(&mut state, &bytes, src, &response_tx);
             }
 
-            _ = sleep => {
-                send_due_searches(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
+            _ = tick.tick() => {
+                process_bucket(&mut state, &addr_list, &socket, &nameserver_send_txs).await;
+                if state.fast_ticks_remaining > 0 {
+                    state.fast_ticks_remaining -= 1;
+                }
             }
+        }
+
+        // Tick-cadence transitions are evaluated outside the select! arm so
+        // every event path (Schedule, response, tick) gets the same chance
+        // to flip the engine in/out of fast mode based on the current
+        // `fast_ticks_remaining`.
+        if state.fast_ticks_remaining > 0 && !tick_is_fast {
+            tick = interval(FAST_TICK);
+            tick.tick().await; // skip immediate fire
+            tick_is_fast = true;
+        } else if state.fast_ticks_remaining == 0 && tick_is_fast {
+            tick = interval(NORMAL_TICK);
+            tick.tick().await; // skip immediate fire
+            tick_is_fast = false;
         }
     }
 }
@@ -547,45 +459,43 @@ fn handle_request(state: &mut SearchEngineState, req: SearchRequest) {
             cid,
             pv_name,
             reason,
-            initial_lane,
         } => {
             let search_payload = build_search_payload(cid, &pv_name);
-            let now = Instant::now();
-            let fast_rescan_until = match reason {
-                SearchReason::BeaconAnomaly => Some(now + BEACON_FAST_RESCAN_WINDOW),
-                SearchReason::Initial | SearchReason::Reconnect => None,
-            };
 
-            // Apply initial backoff lane for reconnection damping.
-            // Jitter: 0-50% of lane period to spread out burst reconnects.
-            let deadline = if initial_lane > 0 {
-                let period = lane_period(initial_lane, state.base_rtte(), state.max_search_period);
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos();
-                let jitter_frac = (nanos % 1000) as f64 / 2000.0; // 0.0 to 0.5
-                let jitter = Duration::from_nanos((period.as_nanos() as f64 * jitter_frac) as u64);
-                now + period + jitter
-            } else {
-                now
-            };
-
-            // Remove old entry if re-scheduling (e.g., reconnect).
+            // Drop any stale entry before re-scheduling.
             state.remove_channel(cid);
 
-            let ch = ChannelSearchState {
+            // Bucket assignment by reason:
+            //   Initial / BeaconAnomaly: fire on the very next tick.
+            //   Reconnect: spread across the ring by cid hash so a
+            //              mass-disconnect event doesn't pile every
+            //              channel into the same firing bucket.
+            // For a beacon poke we additionally engage fast-tick mode
+            // (200 ms) so every pending search retries within ~6 s.
+            let bucket = match reason {
+                SearchReason::Initial | SearchReason::BeaconAnomaly => {
+                    (state.current_bucket + 1) % N_SEARCH_BUCKETS
+                }
+                SearchReason::Reconnect => {
+                    let offset = (cid as usize) % N_SEARCH_BUCKETS;
+                    (state.current_bucket + 1 + offset) % N_SEARCH_BUCKETS
+                }
+            };
+            let p = PendingSearch {
                 cid,
                 pv_name,
                 search_payload,
-                lane_index: initial_lane,
-                next_deadline: deadline,
-                last_sent_at: None,
-                fast_rescan_until,
+                bucket,
+                attempt: 0,
+                holdoff_cycles: 0,
+                last_attempt: None,
             };
+            state.buckets[bucket].push(cid);
+            state.pending.insert(cid, p);
 
-            state.deadline_set.insert((deadline, cid));
-            state.channels.insert(cid, ch);
+            if reason == SearchReason::BeaconAnomaly {
+                state.poke();
+            }
         }
 
         SearchRequest::Cancel { cid } => {
@@ -709,45 +619,22 @@ fn handle_udp_response(
                     continue;
                 }
 
-                if let Some(ch) = state.channels.remove(&cid) {
-                    state.deadline_set.remove(&(ch.next_deadline, cid));
-
-                    // RTT measurement.
-                    if let Some(sent_at) = ch.last_sent_at {
-                        let sample = recv_time.duration_since(sent_at).as_secs_f64();
-                        state
-                            .rtt_per_path
-                            .entry(server_addr)
-                            .or_insert_with(RttEstimator::new)
-                            .update(sample);
-                        metrics::histogram!("ca_client_search_rtt_seconds",
-                            "server" => server_addr.to_string())
-                        .record(sample);
+                if state.pending.contains_key(&cid) {
+                    state.remove_channel(cid);
+                    if let Some(p) = state.pending.get(&cid) {
+                        tracing::debug!(pv = %p.pv_name, cid, server = %server_addr,
+                            "PV search resolved");
+                    } else {
+                        tracing::debug!(cid, server = %server_addr,
+                            "PV search resolved");
                     }
-
-                    state.budget.responded_this_window += 1;
-
-                    tracing::debug!(pv = %ch.pv_name, cid, server = %server_addr, "PV search resolved");
                     let _ = response_tx.send(SearchResponse::Found { cid, server_addr });
                 }
             }
             CA_PROTO_NOT_FOUND => {
                 // Server explicitly told us the PV is not on it. We don't
                 // remove the channel — another server in the addr list may
-                // still answer Found. Just count it toward the AIMD budget
-                // so the rate limiter recognizes the response and update
-                // RTT for this path.
-                state.budget.responded_this_window += 1;
-                if let Some(ch) = state.channels.get(&hdr.available) {
-                    if let Some(sent_at) = ch.last_sent_at {
-                        let sample = recv_time.duration_since(sent_at).as_secs_f64();
-                        state
-                            .rtt_per_path
-                            .entry(src)
-                            .or_insert_with(RttEstimator::new)
-                            .update(sample);
-                    }
-                }
+                // still answer Found.
             }
             _ => {}
         }
@@ -757,10 +644,21 @@ fn handle_udp_response(
 }
 
 // ---------------------------------------------------------------------------
-// Batched send with AIMD congestion control
+// Per-tick bucket processing
 // ---------------------------------------------------------------------------
 
-async fn send_due_searches(
+/// Process exactly one search bucket. Pending searches in this bucket
+/// either get a UDP retransmit (then re-armed into the same bucket so
+/// they fire again after one full N-tick revolution) or, if a retry
+/// holdoff is in effect, get pushed forward one bucket and the
+/// holdoff counter decrements.
+///
+/// Steady-state UDP search load = O(1) datagrams per tick regardless
+/// of how many channels are pending — the bucket distributes load
+/// across the ring. The previous lane-based scheduler had every channel
+/// fire on its own deadline and relied on AIMD to dampen storms after
+/// the fact; the bucket scheduler prevents storms by construction.
+async fn process_bucket(
     state: &mut SearchEngineState,
     addr_list: &[SocketAddr],
     socket: &AsyncUdpV4,
@@ -768,105 +666,115 @@ async fn send_due_searches(
 ) {
     let now = Instant::now();
 
-    // AIMD window evaluation.
-    state.budget.evaluate(now);
-
     // Expire old penalties.
     state.penalty.retain(|_, entry| entry.until > now);
 
-    // Collect due channels.
-    let mut due_cids: Vec<u32> = Vec::new();
-    while let Some(&(deadline, cid)) = state.deadline_set.iter().next() {
-        if deadline > now {
-            break;
+    let bucket_idx = state.current_bucket;
+    let bucket_ids = std::mem::take(&mut state.buckets[bucket_idx]);
+
+    // Walk bucket: skip-on-holdoff or queue for sending.
+    let mut to_send: Vec<u32> = Vec::new();
+    for sid in bucket_ids {
+        let Some(p) = state.pending.get_mut(&sid) else {
+            continue;
+        };
+        if p.holdoff_cycles > 0 {
+            p.holdoff_cycles -= 1;
+            // Re-push to NEXT tick's bucket so the holdoff counter
+            // decrements once per tick (matching pvxs intent that
+            // RETRY_HOLDOFF_CYCLES is a per-tick countdown, not a
+            // per-revolution count).
+            let next = (state.current_bucket + 1) % N_SEARCH_BUCKETS;
+            p.bucket = next;
+            state.buckets[next].push(sid);
+            continue;
         }
-        state.deadline_set.remove(&(deadline, cid));
-        due_cids.push(cid);
+
+        // Queue for transmission. Re-place in the same bucket — a
+        // full revolution (30 ticks at 1 s = 30 s normal cadence) is
+        // the steady-state retry interval. Subsequent retries (attempt
+        // > 1) get an extra RETRY_HOLDOFF_CYCLES of skip-cycles before
+        // they actually transmit again.
+        p.last_attempt = Some(now);
+        p.attempt = p.attempt.saturating_add(1);
+        if p.attempt > 1 {
+            p.holdoff_cycles = RETRY_HOLDOFF_CYCLES;
+        }
+        p.bucket = state.current_bucket;
+        state.buckets[state.current_bucket].push(sid);
+        to_send.push(sid);
     }
 
-    if due_cids.is_empty() {
+    state.current_bucket = (state.current_bucket + 1) % N_SEARCH_BUCKETS;
+
+    if to_send.is_empty() {
         return;
     }
 
-    // VERSION header — one per datagram.  Embed sequence number in CID
-    // field (with sequenceNoIsValid flag in data_type) so we can reject
-    // stale responses from previous search rounds (matches C EPICS
-    // dgSeqNoAtTimerExpire).
+    // VERSION header — one per datagram. Embed sequence number in the
+    // CID field (with sequenceNoIsValid flag in data_type) so we can
+    // reject stale responses from previous search rounds (matches C
+    // EPICS dgSeqNoAtTimerExpire).
     state.dgram_seq = state.dgram_seq.wrapping_add(1);
     let version_hdr = {
         let mut h = CaHeader::new(CA_PROTO_VERSION);
         h.count = CA_MINOR_VERSION;
-        h.data_type = 0x8000; // sequenceNoIsValid flag
+        h.data_type = 0x8000;
         h.cid = state.dgram_seq;
         h.to_bytes()
     };
 
-    // Build and send batched datagrams.
-    let frames_per_try = state.budget.frames_per_try;
+    // Build batched UDP datagrams (multi-search per packet, MTU-bounded).
+    // Per-bucket cap on outgoing datagrams = `pending.len() / N_SEARCH_BUCKETS`,
+    // so no AIMD throttling needed: the bucket distribution naturally
+    // bounds per-tick load.
     let mut current_frame = Vec::with_capacity(MAX_UDP_SEND);
     current_frame.extend_from_slice(&version_hdr);
-    let mut frames_sent: u32 = 0;
-    let mut current_frame_cids: Vec<u32> = Vec::new();
-    let mut sent_cids: Vec<u32> = Vec::new();
 
-    for &cid in &due_cids {
-        let Some(ch) = state.channels.get(&cid) else {
+    for sid in to_send {
+        let Some(p) = state.pending.get(&sid) else {
             continue;
         };
-        let payload = &ch.search_payload;
+        let payload = p.search_payload.clone();
 
-        // If adding this payload would exceed MAX_UDP_SEND, flush.
         if current_frame.len() + payload.len() > MAX_UDP_SEND
             && current_frame.len() > CaHeader::SIZE
         {
-            if frames_sent < frames_per_try {
-                for addr in addr_list {
-                    send_with_fanout(
-                        socket,
-                        &current_frame,
-                        *addr,
-                        "broadcast burst",
-                        &mut state.send_errors,
-                    )
-                    .await;
-                }
-                for ns_tx in nameserver_txs {
-                    let _ = ns_tx.send(current_frame.clone());
-                }
-                state.budget.sent_this_window += 1;
-                frames_sent += 1;
-                sent_cids.append(&mut current_frame_cids);
+            for addr in addr_list {
+                send_with_fanout(
+                    socket,
+                    &current_frame,
+                    *addr,
+                    "bucket",
+                    &mut state.send_errors,
+                )
+                .await;
+            }
+            for ns_tx in nameserver_txs {
+                let _ = ns_tx.send(current_frame.clone());
             }
             current_frame.clear();
             current_frame.extend_from_slice(&version_hdr);
-            current_frame_cids.clear();
         }
 
-        // If a single payload exceeds MAX_UDP_SEND - header, send alone.
         if CaHeader::SIZE + payload.len() > MAX_UDP_SEND {
-            if frames_sent >= frames_per_try {
-                break;
-            }
+            // Single payload exceeds MTU — solo send.
             let mut solo = Vec::with_capacity(CaHeader::SIZE + payload.len());
             solo.extend_from_slice(&version_hdr);
-            solo.extend_from_slice(payload);
+            solo.extend_from_slice(&payload);
             for addr in addr_list {
                 send_with_fanout(socket, &solo, *addr, "solo", &mut state.send_errors).await;
             }
             for ns_tx in nameserver_txs {
                 let _ = ns_tx.send(solo.clone());
             }
-            state.budget.sent_this_window += 1;
-            frames_sent += 1;
-            sent_cids.push(cid);
         } else {
-            current_frame.extend_from_slice(payload);
-            current_frame_cids.push(cid);
+            current_frame.extend_from_slice(&payload);
         }
     }
 
-    // Flush remaining frame.
-    if current_frame.len() > CaHeader::SIZE && frames_sent < frames_per_try {
+    // Flush the final frame.
+    if current_frame.len() > CaHeader::SIZE {
         for addr in addr_list {
             send_with_fanout(
                 socket,
@@ -880,11 +788,7 @@ async fn send_due_searches(
         for ns_tx in nameserver_txs {
             let _ = ns_tx.send(current_frame.clone());
         }
-        state.budget.sent_this_window += 1;
-        sent_cids.append(&mut current_frame_cids);
     }
-
-    finalize_due_searches(state, &due_cids, &sent_cids, now);
 }
 
 // ---------------------------------------------------------------------------
@@ -909,51 +813,6 @@ fn build_search_payload(cid: u32, pv_name: &str) -> Vec<u8> {
     payload
 }
 
-/// Parse EPICS_CA_MAX_SEARCH_PERIOD environment variable.
-fn parse_max_search_period() -> Duration {
-    let secs = epics_base_rs::runtime::env::get("EPICS_CA_MAX_SEARCH_PERIOD")
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(DEFAULT_MAX_SEARCH_PERIOD.as_secs_f64())
-        .max(MIN_MAX_SEARCH_PERIOD.as_secs_f64());
-    Duration::from_secs_f64(secs)
-}
-
-fn finalize_due_searches(
-    state: &mut SearchEngineState,
-    due_cids: &[u32],
-    sent_cids: &[u32],
-    now: Instant,
-) {
-    // Record send time and advance lanes only for channels that were actually
-    // sent in this cycle. Budget-limited channels remain due immediately.
-    let base_rtte = state.base_rtte();
-    let max_period = state.max_search_period;
-    for &cid in sent_cids {
-        if let Some(ch) = state.channels.get_mut(&cid) {
-            ch.last_sent_at = Some(now);
-            ch.lane_index += 1;
-            let mut period = lane_period(ch.lane_index, base_rtte, max_period);
-            if ch.fast_rescan_until.is_some_and(|until| now < until) {
-                period = period.min(BEACON_FAST_RESCAN_PERIOD);
-            } else {
-                ch.fast_rescan_until = None;
-            }
-            ch.next_deadline = now + period;
-            state.deadline_set.insert((ch.next_deadline, cid));
-        }
-    }
-
-    for &cid in due_cids {
-        if sent_cids.contains(&cid) {
-            continue;
-        }
-        if let Some(ch) = state.channels.get_mut(&cid) {
-            ch.next_deadline = now;
-            state.deadline_set.insert((ch.next_deadline, cid));
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -962,72 +821,15 @@ fn finalize_due_searches(
 mod tests {
     use super::*;
 
-    #[test]
-    fn rtt_estimator_initial_sample() {
-        let mut est = RttEstimator::new();
-        est.update(0.050);
-        assert!(est.initialized);
-        assert!((est.srtt - 0.050).abs() < 0.001);
-        // rto = srtt + 4*mdev = 0.050 + 4*0.025 = 0.150
-        assert!((est.rto().as_secs_f64() - 0.150).abs() < 0.01);
-    }
-
-    #[test]
-    fn rtt_estimator_converges() {
-        let mut est = RttEstimator::new();
-        for _ in 0..100 {
-            est.update(0.010); // 10ms, but clamped to MIN_RTT (32ms)
-        }
-        // Converges to MIN_RTT floor since 10ms < 32ms.
-        assert!((est.srtt - MIN_RTT.as_secs_f64()).abs() < 0.001);
-        assert!(est.rto() >= MIN_RTT);
-    }
-
-    #[test]
-    fn rtt_estimator_min_floor() {
-        let mut est = RttEstimator::new();
-        est.update(0.001); // below MIN_RTT
-        assert!(est.srtt >= MIN_RTT.as_secs_f64());
-    }
-
-    #[test]
-    fn lane_period_exponential() {
-        let max = DEFAULT_MAX_SEARCH_PERIOD;
-        let base = Duration::from_millis(100);
-        let p0 = lane_period(0, base, max);
-        let p1 = lane_period(1, base, max);
-        let p2 = lane_period(2, base, max);
-        assert_eq!(p0, Duration::from_millis(100));
-        assert_eq!(p1, Duration::from_millis(200));
-        assert_eq!(p2, Duration::from_millis(400));
-    }
-
-    #[test]
-    fn lane_period_clamped_at_max() {
-        let max = Duration::from_secs(60);
-        let base = Duration::from_millis(100);
-        let p30 = lane_period(30, base, max);
-        assert_eq!(p30, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn lane_period_overflow_safe() {
-        let max = DEFAULT_MAX_SEARCH_PERIOD;
-        let base = Duration::from_millis(100);
-        // lane_index = 64 overflows 1u64 << 64
-        let p = lane_period(64, base, max);
-        assert_eq!(p, max);
-    }
-
-    #[test]
-    fn deadline_set_eager_removal() {
-        let mut set = BTreeSet::new();
-        let now = Instant::now();
-        set.insert((now, 1u32));
-        set.insert((now + Duration::from_secs(1), 2u32));
-        assert!(set.remove(&(now, 1)));
-        assert_eq!(set.len(), 1);
-        assert_eq!(set.iter().next().unwrap().1, 2);
+    fn schedule_initial(state: &mut SearchEngineState, cid: u32, pv_name: &str) {
+        handle_request(
+            state,
+            SearchRequest::Schedule {
+                cid,
+                pv_name: pv_name.to_string(),
+                reason: SearchReason::Initial,
+            },
+        );
     }
 
     #[test]
@@ -1046,123 +848,119 @@ mod tests {
     }
 
     #[test]
-    fn parse_max_search_period_default() {
-        // Without env var, should return 300s.
-        // We can't easily clear env in tests, but verify the floor works.
-        let secs = 30.0f64.max(MIN_MAX_SEARCH_PERIOD.as_secs_f64());
-        assert_eq!(secs, 60.0);
-    }
-
-    #[test]
-    fn aimd_additive_increase() {
-        let mut budget = SendBudget::new();
-        budget.frames_per_try = 1;
-        budget.sent_this_window = 10;
-        budget.responded_this_window = 8; // 80% > 50%
-        budget.window_start = Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
-        budget.evaluate(Instant::now());
-        assert_eq!(budget.frames_per_try, 2);
-    }
-
-    #[test]
-    fn aimd_multiplicative_decrease() {
-        let mut budget = SendBudget::new();
-        budget.frames_per_try = 5;
-        budget.sent_this_window = 10;
-        budget.responded_this_window = 0; // 0% < 10%
-        budget.window_start = Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
-        budget.evaluate(Instant::now());
-        assert_eq!(budget.frames_per_try, 1);
-    }
-
-    #[test]
-    fn aimd_hold_steady() {
-        let mut budget = SendBudget::new();
-        budget.frames_per_try = 3;
-        budget.sent_this_window = 10;
-        budget.responded_this_window = 3; // 30% — between 10% and 50%
-        budget.window_start = Instant::now() - AIMD_WINDOW - Duration::from_millis(1);
-        budget.evaluate(Instant::now());
-        assert_eq!(budget.frames_per_try, 3);
-    }
-
-    #[test]
-    fn budget_limited_channels_remain_due() {
-        let now = Instant::now();
+    fn schedule_places_into_next_bucket() {
         let mut state = SearchEngineState::new();
+        state.current_bucket = 5;
+        schedule_initial(&mut state, 1, "PV:1");
+        let p = state.pending.get(&1).unwrap();
+        assert_eq!(p.bucket, 6);
+        assert_eq!(state.buckets[6], vec![1]);
+        assert_eq!(state.buckets[5], Vec::<u32>::new());
+    }
 
-        for cid in 1..=3 {
-            let ch = ChannelSearchState {
-                cid,
-                pv_name: format!("PV:{cid}"),
-                search_payload: build_search_payload(cid, &format!("PV:{cid}")),
-                lane_index: 0,
-                next_deadline: now,
-                last_sent_at: None,
-                fast_rescan_until: None,
-            };
-            state.channels.insert(cid, ch);
-            state.deadline_set.insert((now, cid));
+    #[test]
+    fn cancel_removes_from_bucket() {
+        let mut state = SearchEngineState::new();
+        schedule_initial(&mut state, 1, "PV:1");
+        let bucket = state.pending.get(&1).unwrap().bucket;
+        handle_request(&mut state, SearchRequest::Cancel { cid: 1 });
+        assert!(state.pending.is_empty());
+        assert!(state.buckets[bucket].is_empty());
+    }
+
+    #[test]
+    fn poke_resets_attempts_and_engages_fast_mode() {
+        let mut state = SearchEngineState::new();
+        schedule_initial(&mut state, 1, "PV:1");
+        // Simulate one prior attempt with active holdoff.
+        if let Some(p) = state.pending.get_mut(&1) {
+            p.attempt = 3;
+            p.holdoff_cycles = 7;
         }
-
-        finalize_due_searches(&mut state, &[1, 2, 3], &[1], now);
-
-        let sent = state
-            .channels
-            .values()
-            .filter(|ch| ch.last_sent_at.is_some())
-            .count();
-        let unsent_due_now = state
-            .channels
-            .values()
-            .filter(|ch| ch.last_sent_at.is_none() && ch.next_deadline == now)
-            .count();
-
-        assert_eq!(sent, 1);
-        assert_eq!(unsent_due_now, 2);
+        state.poke();
+        let p = state.pending.get(&1).unwrap();
+        assert_eq!(p.attempt, 0);
+        assert_eq!(p.holdoff_cycles, 0);
+        assert_eq!(state.fast_ticks_remaining, N_SEARCH_BUCKETS as u32);
     }
 
     #[test]
-    fn beacon_anomaly_enables_fast_rescan_window() {
+    fn beacon_anomaly_schedule_pokes_engine() {
         let mut state = SearchEngineState::new();
-
+        schedule_initial(&mut state, 1, "PV:1");
+        // Pretend channel #1 had multiple prior failures.
+        if let Some(p) = state.pending.get_mut(&1) {
+            p.attempt = 2;
+            p.holdoff_cycles = 5;
+        }
         handle_request(
             &mut state,
             SearchRequest::Schedule {
-                cid: 42,
-                pv_name: "TEST:PV".into(),
+                cid: 2,
+                pv_name: "PV:2".into(),
                 reason: SearchReason::BeaconAnomaly,
-                initial_lane: 0,
             },
         );
-
-        let ch = state.channels.get(&42).unwrap();
-        assert_eq!(ch.lane_index, 0);
-        assert!(ch.fast_rescan_until.is_some());
+        // Both channels should now be at attempt=0 and the engine in fast mode.
+        assert_eq!(state.pending.get(&1).unwrap().attempt, 0);
+        assert_eq!(state.pending.get(&2).unwrap().attempt, 0);
+        assert_eq!(state.fast_ticks_remaining, N_SEARCH_BUCKETS as u32);
     }
 
     #[test]
-    fn fast_rescan_clamps_retry_period() {
-        let now = Instant::now();
+    fn connect_success_clears_pending_and_penalty() {
         let mut state = SearchEngineState::new();
-        state.max_search_period = Duration::from_secs(300);
-
-        state.channels.insert(
-            7,
-            ChannelSearchState {
-                cid: 7,
-                pv_name: "TEST:PV".into(),
-                search_payload: build_search_payload(7, "TEST:PV"),
-                lane_index: 8,
-                next_deadline: now,
-                last_sent_at: None,
-                fast_rescan_until: Some(now + Duration::from_secs(1)),
+        let server: SocketAddr = "127.0.0.1:5064".parse().unwrap();
+        schedule_initial(&mut state, 1, "PV:1");
+        state.penalty.insert(
+            server,
+            PenaltyEntry {
+                until: Instant::now() + Duration::from_secs(60),
             },
         );
+        handle_request(
+            &mut state,
+            SearchRequest::ConnectResult {
+                cid: 1,
+                success: true,
+                server_addr: server,
+            },
+        );
+        assert!(state.pending.is_empty());
+        assert!(!state.penalty.contains_key(&server));
+    }
 
-        finalize_due_searches(&mut state, &[7], &[7], now);
+    #[test]
+    fn connect_failure_inserts_penalty() {
+        let mut state = SearchEngineState::new();
+        let server: SocketAddr = "127.0.0.1:5064".parse().unwrap();
+        schedule_initial(&mut state, 1, "PV:1");
+        handle_request(
+            &mut state,
+            SearchRequest::ConnectResult {
+                cid: 1,
+                success: false,
+                server_addr: server,
+            },
+        );
+        // Pending entry stays — channel still searching for another server.
+        assert!(state.pending.contains_key(&1));
+        assert!(state.penalty.contains_key(&server));
+    }
 
-        let ch = state.channels.get(&7).unwrap();
-        assert!(ch.next_deadline <= now + BEACON_FAST_RESCAN_PERIOD);
+    #[test]
+    fn n_search_buckets_is_30() {
+        // Sanity: pvxs uses 30, our bucket vector must match.
+        let state = SearchEngineState::new();
+        assert_eq!(state.buckets.len(), N_SEARCH_BUCKETS);
+        assert_eq!(N_SEARCH_BUCKETS, 30);
+    }
+
+    #[test]
+    fn fast_tick_revolution_covers_full_ring() {
+        // FAST_TICK * N_SEARCH_BUCKETS should be ~6 s (matches pvxs poke cadence).
+        let revolution = FAST_TICK * N_SEARCH_BUCKETS as u32;
+        assert!(revolution >= Duration::from_secs(5));
+        assert!(revolution <= Duration::from_secs(7));
     }
 }
